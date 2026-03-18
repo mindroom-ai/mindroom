@@ -1791,11 +1791,12 @@ def test_get_teams_empty(test_client: TestClient) -> None:
     assert len(teams) == 0
 
 
-def test_team_eligibility_endpoint_uses_backend_policy(test_client: TestClient) -> None:
-    """Draft team eligibility should come from the backend delegation/private policy."""
+def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) -> None:
+    """Draft agent policies should come from the backend delegation/private policy."""
     response = test_client.post(
-        "/api/config/team-eligibility",
+        "/api/config/agent-policies",
         json={
+            "defaults": {},
             "agents": {
                 "helper": {
                     "display_name": "Helper",
@@ -1825,10 +1826,43 @@ def test_team_eligibility_endpoint_uses_backend_policy(test_client: TestClient) 
     )
     assert response.status_code == 200
     assert response.json() == {
-        "team_eligibility": {
-            "helper": None,
-            "leader": "Delegates to private agent 'mind', so it cannot participate in teams yet.",
-            "mind": "Private agents cannot participate in teams yet.",
+        "agent_policies": {
+            "helper": {
+                "agent_name": "helper",
+                "is_private": False,
+                "effective_execution_scope": None,
+                "scope_label": "unscoped",
+                "scope_source": "unscoped",
+                "dashboard_credentials_supported": True,
+                "team_eligibility_reason": None,
+                "private_knowledge_base_id": None,
+                "request_scoped_workspace_enabled": False,
+                "request_scoped_knowledge_enabled": False,
+            },
+            "leader": {
+                "agent_name": "leader",
+                "is_private": False,
+                "effective_execution_scope": None,
+                "scope_label": "unscoped",
+                "scope_source": "unscoped",
+                "dashboard_credentials_supported": True,
+                "team_eligibility_reason": "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+                "private_knowledge_base_id": None,
+                "request_scoped_workspace_enabled": False,
+                "request_scoped_knowledge_enabled": False,
+            },
+            "mind": {
+                "agent_name": "mind",
+                "is_private": True,
+                "effective_execution_scope": "user",
+                "scope_label": "private.per=user",
+                "scope_source": "private.per",
+                "dashboard_credentials_supported": False,
+                "team_eligibility_reason": "Private agents cannot participate in teams yet.",
+                "private_knowledge_base_id": None,
+                "request_scoped_workspace_enabled": True,
+                "request_scoped_knowledge_enabled": False,
+            },
         },
     }
 

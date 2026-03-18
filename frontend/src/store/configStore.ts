@@ -2,17 +2,19 @@ import { create } from 'zustand';
 import {
   Config,
   Agent,
+  AgentPoliciesByAgent,
   Team,
   Room,
   ModelConfig,
   KnowledgeBaseConfig,
   Culture,
-  TeamEligibilityByAgent,
   getDefaultPrivateConfig,
   normalizeAgentUpdates,
 } from '@/types/config';
 import * as configService from '@/services/configService';
 import type { ConfigDiagnostic } from '@/lib/configValidation';
+
+const AGENT_POLICIES_ERROR_MESSAGE = 'Failed to derive agent policies';
 
 function unassignAgentsFromOtherCultures(
   cultures: Culture[],
@@ -43,19 +45,32 @@ function normalizeAgentDelegates(delegateTo: string[] | undefined): string {
   return [...new Set(delegateTo ?? [])].sort().join('\0');
 }
 
-function teamEligibilityChanged(
-  currentAgent: Pick<Agent, 'private' | 'delegate_to'>,
-  nextAgent: Pick<Agent, 'private' | 'delegate_to'>
-): boolean {
-  return (
-    (currentAgent.private != null) !== (nextAgent.private != null) ||
-    normalizeAgentDelegates(currentAgent.delegate_to) !==
-      normalizeAgentDelegates(nextAgent.delegate_to)
-  );
+function normalizeAgentPolicyKey(
+  agent: Pick<Agent, 'private' | 'delegate_to' | 'worker_scope'>
+): string {
+  return [
+    agent.worker_scope ?? '',
+    agent.private != null ? 'private' : '',
+    agent.private?.per ?? '',
+    agent.private?.knowledge?.enabled === false ? 'disabled' : 'enabled',
+    agent.private?.knowledge?.path ?? '',
+    normalizeAgentDelegates(agent.delegate_to),
+  ].join('\0');
 }
 
-function agentCanAffectTeamEligibility(agent: Pick<Agent, 'private' | 'delegate_to'>): boolean {
-  return agent.private != null || normalizeAgentDelegates(agent.delegate_to).length > 0;
+function agentPolicyChanged(
+  currentAgent: Pick<Agent, 'private' | 'delegate_to' | 'worker_scope'>,
+  nextAgent: Pick<Agent, 'private' | 'delegate_to' | 'worker_scope'>
+): boolean {
+  return normalizeAgentPolicyKey(currentAgent) !== normalizeAgentPolicyKey(nextAgent);
+}
+
+function agentPoliciesDiagnostic(blocking: boolean): ConfigDiagnostic {
+  return {
+    kind: 'global',
+    message: AGENT_POLICIES_ERROR_MESSAGE,
+    blocking,
+  };
 }
 
 type MemoryEmbedderUpdate = {
@@ -75,8 +90,9 @@ interface ConfigState {
   teams: Team[];
   cultures: Culture[];
   rooms: Room[];
-  teamEligibilityByAgent: TeamEligibilityByAgent;
-  teamEligibilityRequestId: number;
+  agentPoliciesByAgent: AgentPoliciesByAgent;
+  agentPoliciesStale: boolean;
+  agentPoliciesRequestId: number;
   selectedAgentId: string | null;
   selectedTeamId: string | null;
   selectedCultureId: string | null;
@@ -92,7 +108,7 @@ interface ConfigState {
   // Actions
   loadConfig: () => Promise<void>;
   saveConfig: () => Promise<void>;
-  refreshTeamEligibility: (agents: Agent[]) => Promise<void>;
+  refreshAgentPolicies: (agents: Agent[]) => Promise<void>;
   selectAgent: (agentId: string | null) => void;
   updateAgent: (agentId: string, updates: Partial<Agent>) => void;
   setAgentPrivateEnabled: (agentId: string, enabled: boolean) => void;
@@ -129,8 +145,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   teams: [],
   cultures: [],
   rooms: [],
-  teamEligibilityByAgent: {},
-  teamEligibilityRequestId: 0,
+  agentPoliciesByAgent: {},
+  agentPoliciesStale: false,
+  agentPoliciesRequestId: 0,
   selectedAgentId: null,
   selectedTeamId: null,
   selectedCultureId: null,
@@ -196,16 +213,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           model: roomModel,
         };
       });
-      let teamEligibilityByAgent: TeamEligibilityByAgent = {};
-      const diagnostics: ConfigDiagnostic[] = [];
+      let agentPoliciesByAgent: AgentPoliciesByAgent = {};
+      let diagnostics: ConfigDiagnostic[] = [];
+      let agentPoliciesStale = false;
       try {
-        teamEligibilityByAgent = await configService.getTeamEligibility(agents);
-      } catch (error) {
-        diagnostics.push({
-          kind: 'global',
-          message: error instanceof Error ? error.message : 'Failed to derive team eligibility',
-          blocking: false,
-        });
+        agentPoliciesByAgent = await configService.getAgentPolicies(normalizedConfig, agents);
+      } catch {
+        diagnostics = [agentPoliciesDiagnostic(false)];
+        agentPoliciesStale = true;
       }
 
       set({
@@ -214,7 +229,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         teams,
         cultures,
         rooms,
-        teamEligibilityByAgent,
+        agentPoliciesByAgent,
+        agentPoliciesStale,
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
@@ -236,31 +252,38 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     }
   },
 
-  refreshTeamEligibility: async agents => {
-    const teamEligibilityRequestId = get().teamEligibilityRequestId + 1;
-    set({ teamEligibilityRequestId });
+  refreshAgentPolicies: async agents => {
+    const { config } = get();
+    if (config == null) {
+      return;
+    }
+    const agentPoliciesRequestId = get().agentPoliciesRequestId + 1;
+    set({
+      agentPoliciesRequestId,
+      agentPoliciesByAgent: {},
+      agentPoliciesStale: true,
+      diagnostics: get().diagnostics.filter(diagnostic => diagnostic.kind === 'validation'),
+    });
     try {
-      const teamEligibilityByAgent = await configService.getTeamEligibility(agents);
-      if (get().teamEligibilityRequestId != teamEligibilityRequestId) {
+      const agentPoliciesByAgent = await configService.getAgentPolicies(config, agents);
+      if (get().agentPoliciesRequestId != agentPoliciesRequestId) {
         return;
       }
       set({
-        teamEligibilityByAgent,
+        agentPoliciesByAgent,
+        agentPoliciesStale: false,
         diagnostics: get().diagnostics.filter(diagnostic => diagnostic.kind !== 'global'),
       });
-    } catch (error) {
-      if (get().teamEligibilityRequestId != teamEligibilityRequestId) {
+    } catch {
+      if (get().agentPoliciesRequestId != agentPoliciesRequestId) {
         return;
       }
       set({
-        teamEligibilityByAgent: {},
+        agentPoliciesByAgent: {},
+        agentPoliciesStale: true,
         diagnostics: [
           ...get().diagnostics.filter(diagnostic => diagnostic.kind === 'validation'),
-          {
-            kind: 'global',
-            message: error instanceof Error ? error.message : 'Failed to derive team eligibility',
-            blocking: false,
-          },
+          agentPoliciesDiagnostic(false),
         ],
       });
     }
@@ -268,7 +291,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Save configuration to backend
   saveConfig: async () => {
-    const { config, agents, teams, cultures, rooms } = get();
+    const { config, agents, teams, cultures, rooms, agentPoliciesStale } = get();
     if (!config) return;
 
     set({
@@ -321,12 +344,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       await configService.saveConfig(updatedConfig);
       set({
+        config: updatedConfig,
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
         diagnostics: [],
         privateWorkerScopeBackups: {},
       });
+      if (agentPoliciesStale) {
+        void get().refreshAgentPolicies(agents);
+      }
     } catch (error) {
       if (error instanceof configService.ConfigValidationError) {
         set({
@@ -368,7 +395,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Update an existing agent
   updateAgent: (agentId, updates) => {
     let nextAgents: Agent[] = [];
-    let shouldRefreshTeamEligibility = false;
+    let shouldRefreshAgentPolicies = false;
     set(state => {
       const currentAgent = state.agents.find(agent => agent.id === agentId);
       if (!currentAgent) {
@@ -380,7 +407,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         agent.id === agentId ? { ...agent, ...normalizedUpdates } : agent
       );
       const nextAgent = nextAgents.find(agent => agent.id === agentId) ?? currentAgent;
-      shouldRefreshTeamEligibility = teamEligibilityChanged(currentAgent, nextAgent);
+      shouldRefreshAgentPolicies = agentPolicyChanged(currentAgent, nextAgent);
 
       return {
         agents: nextAgents,
@@ -388,14 +415,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         diagnostics: [],
       };
     });
-    if (shouldRefreshTeamEligibility && get().config != null) {
-      void get().refreshTeamEligibility(nextAgents);
+    if (shouldRefreshAgentPolicies && get().config != null) {
+      void get().refreshAgentPolicies(nextAgents);
     }
   },
 
   setAgentPrivateEnabled: (agentId, enabled) => {
     let nextAgents: Agent[] = [];
-    let shouldRefreshTeamEligibility = false;
+    let shouldRefreshAgentPolicies = false;
     set(state => {
       const currentAgent = state.agents.find(agent => agent.id === agentId);
       if (!currentAgent) {
@@ -423,7 +450,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         agent.id === agentId ? { ...agent, ...normalizedUpdates } : agent
       );
       const nextAgent = nextAgents.find(agent => agent.id === agentId) ?? currentAgent;
-      shouldRefreshTeamEligibility = teamEligibilityChanged(currentAgent, nextAgent);
+      shouldRefreshAgentPolicies = agentPolicyChanged(currentAgent, nextAgent);
 
       return {
         agents: nextAgents,
@@ -432,8 +459,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         privateWorkerScopeBackups: nextBackups,
       };
     });
-    if (shouldRefreshTeamEligibility && get().config != null) {
-      void get().refreshTeamEligibility(nextAgents);
+    if (shouldRefreshAgentPolicies && get().config != null) {
+      void get().refreshAgentPolicies(nextAgents);
     }
   },
 
@@ -456,8 +483,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       isDirty: true,
       diagnostics: [],
     }));
-    if (get().config != null && agentCanAffectTeamEligibility(newAgent)) {
-      void get().refreshTeamEligibility([...get().agents]);
+    if (get().config != null) {
+      void get().refreshAgentPolicies([...get().agents]);
     }
   },
 
@@ -476,8 +503,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           delegate_to: agent.delegate_to.filter(id => id !== agentId),
         };
       });
-    const nextTeamEligibilityByAgent = Object.fromEntries(
-      Object.entries(state.teamEligibilityByAgent).filter(([id]) => id !== agentId)
+    const nextAgentPoliciesByAgent = Object.fromEntries(
+      Object.entries(state.agentPoliciesByAgent).filter(([id]) => id !== agentId)
     );
     const { [agentId]: _removedBackup, ...remainingBackups } = state.privateWorkerScopeBackups;
     set({
@@ -487,18 +514,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...culture,
         agents: culture.agents.filter(id => id !== agentId),
       })),
-      teamEligibilityByAgent: nextTeamEligibilityByAgent,
+      agentPoliciesByAgent: nextAgentPoliciesByAgent,
       privateWorkerScopeBackups: remainingBackups,
       selectedAgentId: state.selectedAgentId === agentId ? null : state.selectedAgentId,
       isDirty: true,
       diagnostics: [],
     });
-    const shouldRefreshTeamEligibility =
-      deletedAgent != null &&
-      (agentCanAffectTeamEligibility(deletedAgent) ||
-        state.agents.some(agent => agent.id !== agentId && agent.delegate_to?.includes(agentId)));
-    if (get().config != null && shouldRefreshTeamEligibility) {
-      void get().refreshTeamEligibility(nextAgents);
+    if (get().config != null && deletedAgent != null) {
+      void get().refreshAgentPolicies(nextAgents);
     }
   },
 
