@@ -99,6 +99,20 @@ agents:
       - gmail
 ```
 
+## Implied Tools
+
+Some tools automatically include companion tools via the `IMPLIED_TOOLS` mapping.
+When `matrix_message` is in an agent's tool list, `attachments` is automatically added.
+This happens during tool name expansion — the effective tool set includes both the explicitly listed tools and any implied tools.
+
+Currently the only implied mapping is:
+
+| Tool | Implies |
+|------|---------|
+| `matrix_message` | `attachments` |
+
+This is why the `openclaw_compat` preset includes `attachments` in its effective tool set even though the preset definition only lists `matrix_message`.
+
 ## Automatic Dependency Installation
 
 Each tool declares its Python dependencies as an optional extra in `pyproject.toml`.

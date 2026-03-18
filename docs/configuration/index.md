@@ -30,7 +30,7 @@ mindroom config validate --path /path/to/config.yaml
 |----------|-------------|---------|
 | `MINDROOM_CONFIG_PATH` | Path to `config.yaml` | `./config.yaml` → `~/.mindroom/config.yaml` |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | `mindroom_data/` next to config |
-| `MINDROOM_CONFIG_TEMPLATE` | Template to seed config from (for containers) | Same as config path |
+| `MINDROOM_CONFIG_TEMPLATE` | Path to a config template. When set and `config.yaml` does not exist, MindRoom copies this template to the config path. Used in Docker containers to seed config from bundled templates | Same as config path |
 | `LOG_LEVEL` | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 
 ### Matrix
@@ -64,9 +64,9 @@ Set the API key for each provider you use in `config.yaml`:
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
 | `MINDROOM_PORT` | Port for the bundled dashboard/API server | `8765` |
 | `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests | _(auto-generated)_ |
-| `MINDROOM_ENABLE_AI_CACHE` | Enable the AI response cache | `true` |
+| `MINDROOM_ENABLE_AI_CACHE` | Enable the AI response cache (caches model responses keyed by model, messages, and tools — useful during development to avoid repeated API calls) | `true` |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(disabled)_ |
-| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip) | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner` or `kubernetes`) | `static_runner` |
 
 ### Provisioning / Pairing
@@ -115,9 +115,22 @@ Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICA
 | `OPENAI_BASE_URL` | Global base URL for all OpenAI-provider models | _(provider default)_ |
 | `MINDROOM_API_KEY` | API key to protect the dashboard API (standalone mode) | _(open access)_ |
 
-### Sandbox Proxy
+### Worker / Sandbox
 
-See [Sandbox Proxy](../deployment/sandbox-proxy.md) for the full list of `MINDROOM_SANDBOX_*` variables.
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_SANDBOX_RUNNER_URL` | Static runner endpoint URL | _(none)_ |
+| `MINDROOM_SANDBOX_RUNNER_AUTH_TOKEN` | Auth token for the static runner | _(none)_ |
+| `VOICE_PREFIX` | Prefix prepended to voice transcription messages | _(none)_ |
+
+See [Sandbox Proxy](../deployment/sandbox-proxy.md) for the full list of `MINDROOM_SANDBOX_*` variables, including Kubernetes backend variables (`MINDROOM_SANDBOX_KUBERNETES_*`).
+
+### SaaS-Only
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CUSTOMER_ID` | Tenant identity for worker key derivation (SaaS platform only) | _(none)_ |
+| `ACCOUNT_ID` | Account identity for worker key derivation (SaaS platform only) | _(none)_ |
 
 ## Basic Structure
 

@@ -258,6 +258,24 @@ Credentials support scoping via query parameters:
 | GET | `/api/workers` | List active sandbox workers |
 | POST | `/api/workers/cleanup` | Clean up idle sandbox workers |
 
+### Health & Readiness
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/health` | Always returns `{"status": "healthy"}` — confirms the HTTP server is running |
+| GET | `/api/ready` | Returns `{"status": "ready"}` when the orchestrator has finished startup. Returns `503` with `{"status": "<phase>", "detail": "..."}` otherwise |
+
+MindRoom tracks runtime phases internally:
+
+| Phase | Meaning |
+|-------|---------|
+| `idle` | Process not started |
+| `starting` | Startup in progress (detail message available) |
+| `ready` | Orchestrator booted, serving requests |
+| `failed` | Startup or runtime failure (detail message available) |
+
+Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators.
+
 ### Tools & Matrix
 
 | Method | Endpoint | Description |

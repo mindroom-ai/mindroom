@@ -59,7 +59,7 @@ The backend uses pytest with FastAPI's TestClient for API testing.
 
 **Test Files:**
 - `tests/api/test_api.py` - Comprehensive API endpoint tests
-- `tests/test_file_watcher.py` - File watching functionality tests
+- `tests/api/test_file_watcher.py` - File watching functionality tests
 - `tests/conftest.py` - Pytest fixtures and configuration
 
 ### Running Backend Tests

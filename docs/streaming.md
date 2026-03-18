@@ -100,7 +100,7 @@ The agent still shows typing activity during hidden tool calls.
 
 ## Cancellation and Errors
 
-Users can cancel an in-progress response (via the stop button or `!stop` command).
+Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](chat-commands.md#stop-button)).
 When cancelled, the streamed message is finalized with:
 
 ```

@@ -211,6 +211,19 @@ Run a user-invocable skill by name.
 
 See [Skills](skills.md) for skill configuration details.
 
+## Stop Button
+
+MindRoom supports cancelling in-progress responses via a reaction-based stop button, not a chat command.
+
+When `defaults.show_stop_button` is `true` (the default), MindRoom adds a 🛑 reaction to the agent's message while it is generating.
+React with 🛑 on the message to cancel the response.
+The agent finalizes the partial text with `[Response cancelled by user]`.
+
+The stop button only works on messages currently being generated.
+Only non-agent users can trigger cancellation — agent reactions are ignored.
+
+See [Streaming — Cancellation](streaming.md#cancellation-and-errors) for details on how cancelled responses are finalized.
+
 ## Unknown Commands
 
 Any message starting with `!` that does not match a known command returns an error message suggesting `!help`.

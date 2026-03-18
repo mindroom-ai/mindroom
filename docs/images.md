@@ -74,8 +74,17 @@ Both unencrypted and E2E encrypted images are supported. Encrypted images are de
 
 AI response caching is automatically skipped when images are present, since image payloads are large and unlikely to repeat.
 
+## Media Fallback
+
+If a model rejects inline media (images, audio, video, or documents), MindRoom automatically retries the request without the inline media.
+The retried prompt includes `[Inline media unavailable for this model]` to inform the agent that attachments were dropped.
+Agents can still reference the files via attachment IDs and tools.
+
+This fallback is transparent — no user action is required.
+It detects provider-specific error patterns such as unsupported media type, base64 field validation failures, and capability rejections.
+
 ## Limitations
 
 - **Routing in multi-agent rooms** -- in multi-agent rooms without an `@mention`, the router selects the best agent based on the image caption.
 - **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
-- **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error.
+- **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error. If the model rejects the image entirely, the [media fallback](#media-fallback) retries without the inline image.
