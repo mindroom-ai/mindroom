@@ -99,6 +99,22 @@ These are set automatically by `mindroom connect` and stored in `.env`:
 | `GOOGLE_CLOUD_LOCATION` | Google Cloud region |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to Google service account JSON |
 
+### Vertex AI Claude
+
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_VERTEX_PROJECT_ID` | GCP project ID for Vertex AI Claude |
+| `CLOUD_ML_REGION` | GCP region (e.g., `us-central1`) |
+
+Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS`.
+
+### Other
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OPENAI_BASE_URL` | Global base URL for all OpenAI-provider models | _(provider default)_ |
+| `MINDROOM_API_KEY` | API key to protect the dashboard API (standalone mode) | _(open access)_ |
+
 ### Sandbox Proxy
 
 See [Sandbox Proxy](../deployment/sandbox-proxy.md) for the full list of `MINDROOM_SANDBOX_*` variables.
@@ -159,6 +175,7 @@ models:
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
+    context_window: null           # Optional: Context window in tokens (enables auto history trimming)
 
 # Team configurations (optional)
 teams:
@@ -206,6 +223,7 @@ defaults:
 # Memory system configuration (optional)
 memory:
   backend: mem0                    # Global default backend (mem0 or file); agents can override with memory_backend
+  team_reads_member_memory: false  # Default: false (let team reads access member agent memories)
   embedder:
     provider: openai               # Default: openai (openai, ollama, or sentence_transformers)
     config:
@@ -216,6 +234,13 @@ memory:
   llm:                             # Optional: LLM for memory operations
     provider: ollama
     config: {}
+  file:                            # File-backed memory settings (when backend: file)
+    path: null                     # Optional: fallback root for file memory paths
+    max_entrypoint_lines: 200      # Default: 200 (max lines preloaded from MEMORY.md)
+  auto_flush:                      # Background memory auto-flush (file backend only)
+    enabled: false                 # Default: false (enable background flush worker)
+    flush_interval_seconds: 1800   # Default: 1800 (loop interval)
+    idle_seconds: 120              # Default: 120 (idle time before flush eligibility)
 #
 # Set memory.embedder.provider: sentence_transformers to run embeddings in-process.
 # MindRoom auto-installs that optional extra on first use.
@@ -225,6 +250,8 @@ knowledge_bases:
   docs:
     path: ./knowledge_docs/default # Folder containing documents for this base
     watch: true                    # Reindex automatically when files change
+    chunk_size: 5000               # Default: 5000 (max characters per indexed chunk)
+    chunk_overlap: 0               # Default: 0 (overlapping characters between chunks)
     git:                           # Optional: Sync this folder from a Git repository
       repo_url: https://github.com/pipefunc/pipefunc
       branch: main
@@ -264,6 +291,7 @@ authorization:
   global_users: []                 # Users with access to all rooms
   room_permissions: {}             # Keys: room ID (!id), full alias (#alias:domain), or managed room key (alias)
   default_room_access: false       # Default: false
+  aliases: {}                      # Map canonical Matrix user IDs to bridge aliases (see authorization docs)
   agent_reply_permissions: {}      # Per-agent/team/router (or '*') reply allowlists; supports globs like '*:example.com'
 
 # Room-specific model overrides (optional)
@@ -320,6 +348,7 @@ timezone: America/Los_Angeles      # Default: UTC
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
+- `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](../authorization.md))
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
 - `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
 - In `multi_user` mode, MindRoom sets managed room join rules and directory visibility from config
