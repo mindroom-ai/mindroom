@@ -715,7 +715,6 @@ def _evaluate_team_members(
         is_room_visible = room_visible_ids is None or agent_id.full_id in room_visible_ids
         is_sender_visible = sender_visible_ids is None or agent_id.full_id in sender_visible_ids
         is_materializable = materializable_agent_names is None or agent_name in materializable_agent_names
-        can_respond = is_room_visible and is_sender_visible and is_materializable
         if not is_room_visible:
             status = TeamMemberStatus.NOT_IN_ROOM
         elif not is_sender_visible:
@@ -731,7 +730,7 @@ def _evaluate_team_members(
                 agent=agent_id,
                 name=agent_name,
                 status=status,
-                can_respond=can_respond,
+                can_respond=status is TeamMemberStatus.ELIGIBLE,
                 private_targets=private_targets,
             ),
         )
@@ -800,6 +799,14 @@ def _team_resolution_reason(
     reason_prefix: str,
 ) -> str:
     """Return one shared user-facing explanation for a rejected team request."""
+    rejection_statuses = {member.status for member in rejected_members}
+    if len(rejection_statuses) > 1:
+        return _mixed_team_resolution_reason(
+            rejected_members,
+            config,
+            reason_prefix=reason_prefix,
+        )
+
     unsupported_members = [
         member for member in rejected_members if member.status is TeamMemberStatus.UNSUPPORTED_FOR_TEAM
     ]
@@ -830,13 +837,59 @@ def _team_resolution_reason(
         return _room_unavailable_team_agents_message(room_unavailable_members, prefix=reason_prefix)
     if hidden_members and not room_unavailable_members and len(hidden_members) == len(rejected_members):
         return _sender_unavailable_team_agents_message(hidden_members, prefix=reason_prefix)
-    if room_unavailable_members or hidden_members:
-        return _mixed_unavailable_team_agents_message(
-            [member.name for member in rejected_members],
-            prefix=reason_prefix,
-        )
-
     return _mixed_unavailable_team_agents_message([member.name for member in rejected_members], prefix=reason_prefix)
+
+
+def _mixed_team_resolution_reason(
+    rejected_members: list[TeamResolutionMember],
+    config: Config | None,
+    *,
+    reason_prefix: str,
+) -> str:
+    """Return a per-member explanation when one reject has mixed failure causes."""
+    details = [_team_resolution_member_detail(member, config) for member in rejected_members]
+    return f"{reason_prefix} cannot be satisfied: " + "; ".join(details)
+
+
+def _unsupported_team_member_detail(
+    member: TeamResolutionMember,
+    config: Config | None,
+) -> str:
+    """Return the unsupported-team explanation for one member."""
+    if config is None:
+        return f"agent '{member.name}' is unsupported for team requests"
+
+    private_targets = member.private_targets
+    if private_targets is None:
+        return f"agent '{member.name}' is unknown"
+    if member.name in private_targets:
+        return f"agent '{member.name}' is private and cannot participate in teams yet"
+    if len(private_targets) != 1:
+        return (
+            f"agent '{member.name}' reaches private agents "
+            f"{', '.join(repr(target) for target in private_targets)} via delegation "
+            "and cannot participate in teams yet"
+        )
+    return (
+        f"agent '{member.name}' reaches private agent '{private_targets[0]}' via delegation "
+        "and cannot participate in teams yet"
+    )
+
+
+def _team_resolution_member_detail(
+    member: TeamResolutionMember,
+    config: Config | None,
+) -> str:
+    """Return a member-specific reason fragment for mixed team-request rejects."""
+    if member.status is TeamMemberStatus.UNSUPPORTED_FOR_TEAM:
+        return _unsupported_team_member_detail(member, config)
+    if member.status is TeamMemberStatus.NOT_MATERIALIZABLE:
+        return f"agent '{member.name}' could not be materialized for this request"
+    if member.status is TeamMemberStatus.NOT_IN_ROOM:
+        return f"agent '{member.name}' is not available in this room"
+    if member.status is TeamMemberStatus.HIDDEN_FROM_SENDER:
+        return f"agent '{member.name}' is not available to you in this room"
+    return f"agent '{member.name}' is not available for this request"
 
 
 def resolve_configured_team(

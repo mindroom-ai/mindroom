@@ -1522,7 +1522,7 @@ class AgentBot:
         if form_team.outcome in {TeamOutcome.TEAM, TeamOutcome.INDIVIDUAL}:
             response_owners = form_team.eligible_members
         else:
-            response_owners = [member.agent for member in form_team.member_statuses if member.can_respond]
+            response_owners = form_team.eligible_members
             if not response_owners and form_team.intent is TeamIntent.EXPLICIT_MEMBERS:
                 response_owners = responder_pool
 

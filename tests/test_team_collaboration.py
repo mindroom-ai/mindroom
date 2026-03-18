@@ -977,6 +977,70 @@ class TestRouterTeamFormation:
             "alpha": TeamMemberStatus.UNSUPPORTED_FOR_TEAM,
             "calculator": TeamMemberStatus.ELIGIBLE,
         }
+        assert {member.name: member.can_respond for member in result.member_statuses} == {
+            "alpha": False,
+            "calculator": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_tagged_mixed_reject_causes_report_member_specific_reasons(self) -> None:
+        """Mixed reject causes should explain the actual member failures instead of flattening them."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "alpha": AgentConfig(
+                        display_name="Alpha",
+                        role="Private assistant",
+                        private=AgentPrivateConfig(per="user", root="alpha_data"),
+                    ),
+                    "general": AgentConfig(display_name="General", role="General"),
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["alpha"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["general"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            tagged_agents=[
+                config.get_ids(runtime_paths_for(config))["alpha"],
+                config.get_ids(runtime_paths_for(config))["general"],
+            ],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="alpha and general, help",
+            config=config,
+            room=room,
+            use_ai_decision=False,
+            available_agents_in_room=[
+                config.get_ids(runtime_paths_for(config))["alpha"],
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ],
+            materializable_agent_names={"alpha", "calculator"},
+        )
+
+        assert result.outcome is TeamOutcome.REJECT
+        assert result.reason == (
+            "Team request cannot be satisfied: "
+            "agent 'alpha' is private and cannot participate in teams yet; "
+            "agent 'general' could not be materialized for this request"
+        )
 
     @pytest.mark.asyncio
     async def test_tagged_agents_that_delegate_to_private_reject_the_entire_team_request(
