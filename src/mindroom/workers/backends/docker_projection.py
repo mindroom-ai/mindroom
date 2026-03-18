@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, cast
 
 import yaml
 
+from mindroom.agent_policy import ResolvedAgentPolicy, build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import resolve_config_relative_path
 from mindroom.workers.backend import WorkerBackendError
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import WorkerScope
     from mindroom.workers.backends.docker_config import _DockerWorkerBackendConfig
     from mindroom.workers.backends.local import LocalWorkerStatePaths
 
@@ -45,6 +47,7 @@ _SENSITIVE_CONFIG_KEYS = frozenset(
 )
 _SENSITIVE_CONFIG_KEY_SUFFIXES = ("_api_key", "_password", "_secret", "_token")
 _NON_SECRET_SENSITIVE_SUFFIX_EXCEPTIONS = frozenset({"no_reply_token", "token_uri"})
+_SENSITIVE_HEADER_KEYS = frozenset({"authorization", "proxy_authorization"})
 
 
 def _container_config_dir(config_path: str) -> str:
@@ -110,17 +113,32 @@ def _config_key_is_sensitive(raw_key: str) -> bool:
     return any(normalized_key.endswith(suffix) for suffix in _SENSITIVE_CONFIG_KEY_SUFFIXES)
 
 
-def _redact_sensitive_config_values(value: object) -> object:
+def _config_key_is_header_container(raw_key: str | None) -> bool:
+    if raw_key is None:
+        return False
+    normalized_key = _normalized_config_key(raw_key)
+    return normalized_key == "headers" or normalized_key.endswith("_headers")
+
+
+def _header_key_is_sensitive(raw_key: str) -> bool:
+    normalized_key = _normalized_config_key(raw_key)
+    return normalized_key in _SENSITIVE_HEADER_KEYS or _config_key_is_sensitive(raw_key)
+
+
+def _redact_sensitive_config_values(value: object, *, parent_key: str | None = None) -> object:
     if isinstance(value, dict):
         redacted: dict[object, object] = {}
+        inside_header_mapping = _config_key_is_header_container(parent_key)
         for key, item in value.items():
-            if isinstance(key, str) and _config_key_is_sensitive(key):
+            if isinstance(key, str) and (
+                _header_key_is_sensitive(key) if inside_header_mapping else _config_key_is_sensitive(key)
+            ):
                 redacted[key] = _REDACTED_CONFIG_VALUE
                 continue
-            redacted[key] = _redact_sensitive_config_values(item)
+            redacted[key] = _redact_sensitive_config_values(item, parent_key=key if isinstance(key, str) else None)
         return redacted
     if isinstance(value, list):
-        return [_redact_sensitive_config_values(item) for item in value]
+        return [_redact_sensitive_config_values(item, parent_key=parent_key) for item in value]
     return value
 
 
@@ -258,13 +276,18 @@ class DockerProjectionManager:
             raise WorkerBackendError(msg)
 
         config_data = self._load_host_config_data(host_config_path)
+        resolved_agent_policies = self._resolved_agent_policies(config_data)
         asset_paths_by_host: dict[Path, PurePosixPath] = {}
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path] = {}
         assets: list[_DockerProjectedConfigAsset] = []
-        projected_agent_names = self._projected_agent_names(config_data, worker_key=worker_key)
+        projected_agent_names = self._projected_agent_names(
+            worker_key=worker_key,
+            resolved_agent_policies=resolved_agent_policies,
+        )
         projected_knowledge_base_ids = self._projected_knowledge_base_ids(
             config_data,
             agent_names=projected_agent_names,
+            resolved_agent_policies=resolved_agent_policies,
         )
         self._rewrite_projected_config_paths(
             config_data,
@@ -485,29 +508,40 @@ class DockerProjectionManager:
         config_data.clear()
         config_data.update(cast("dict[str, object]", redacted_data))
 
+    def _resolved_agent_policies(self, config_data: dict[str, object]) -> dict[str, ResolvedAgentPolicy]:
+        raw_agents = config_data.get("agents")
+        if not isinstance(raw_agents, dict):
+            return {}
+
+        agent_mappings = {
+            agent_name: cast("dict[str, object]", raw_agent)
+            for agent_name, raw_agent in raw_agents.items()
+            if isinstance(agent_name, str) and isinstance(raw_agent, dict)
+        }
+        if not agent_mappings:
+            return {}
+
+        seeds = build_agent_policy_seeds(
+            agent_mappings,
+            default_worker_scope=self._default_projected_worker_scope(config_data),
+        )
+        return resolve_agent_policy_index(seeds).policies
+
     def _projected_agent_names(
         self,
-        config_data: dict[str, object],
         *,
         worker_key: str | None,
+        resolved_agent_policies: dict[str, ResolvedAgentPolicy],
     ) -> tuple[str, ...] | None:
         if worker_key is None:
             return None
 
-        raw_agents = config_data.get("agents")
-        if not isinstance(raw_agents, dict):
-            return None
-
-        default_worker_scope = self._default_projected_worker_scope(config_data)
-        agents = cast("dict[object, object]", raw_agents)
-        for agent_name, raw_agent in agents.items():
-            if not isinstance(agent_name, str) or not isinstance(raw_agent, dict):
-                continue
-            worker_scope = self._effective_projected_worker_scope(
-                cast("dict[str, object]", raw_agent),
-                default_worker_scope,
-            )
-            if self._worker_key_targets_agent(worker_key, agent_name=agent_name, worker_scope=worker_scope):
+        for agent_name, policy in resolved_agent_policies.items():
+            if self._worker_key_targets_agent(
+                worker_key,
+                agent_name=agent_name,
+                worker_scope=policy.effective_execution_scope,
+            ):
                 return (agent_name,)
         return None
 
@@ -516,6 +550,7 @@ class DockerProjectionManager:
         config_data: dict[str, object],
         *,
         agent_names: tuple[str, ...] | None,
+        resolved_agent_policies: dict[str, ResolvedAgentPolicy],
     ) -> tuple[str, ...] | None:
         if agent_names is None:
             return None
@@ -536,9 +571,16 @@ class DockerProjectionManager:
             projected_knowledge_base_ids.extend(
                 knowledge_base_id for knowledge_base_id in raw_knowledge_bases if isinstance(knowledge_base_id, str)
             )
+            private_knowledge_base_id = (
+                resolved_agent_policies[agent_name].private_knowledge_base_id
+                if agent_name in resolved_agent_policies
+                else None
+            )
+            if isinstance(private_knowledge_base_id, str):
+                projected_knowledge_base_ids.append(private_knowledge_base_id)
         return _ordered_unique_nonempty_strings(projected_knowledge_base_ids)
 
-    def _default_projected_worker_scope(self, config_data: dict[str, object]) -> str | None:
+    def _default_projected_worker_scope(self, config_data: dict[str, object]) -> WorkerScope | None:
         raw_defaults = config_data.get("defaults")
         if not isinstance(raw_defaults, dict):
             return None
@@ -548,25 +590,15 @@ class DockerProjectionManager:
             "user",
             "user_agent",
         }:
-            return raw_worker_scope
+            return cast("WorkerScope", raw_worker_scope)
         return None
-
-    def _effective_projected_worker_scope(
-        self,
-        raw_agent: dict[str, object],
-        default_worker_scope: str | None,
-    ) -> str | None:
-        raw_worker_scope = raw_agent.get("worker_scope")
-        if raw_worker_scope in {"shared", "user", "user_agent"}:
-            return cast("str", raw_worker_scope)
-        return default_worker_scope
 
     def _worker_key_targets_agent(
         self,
         worker_key: str,
         *,
         agent_name: str,
-        worker_scope: str | None,
+        worker_scope: WorkerScope | None,
     ) -> bool:
         if worker_scope is None:
             return worker_key.endswith(f":unscoped:{agent_name}")
