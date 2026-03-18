@@ -52,13 +52,13 @@ from mindroom.streaming import (
     is_in_progress_message,
     send_streaming_response,
 )
+from mindroom.team_runtime_resolution import resolve_live_shared_agent_names
 from mindroom.teams import (
     TeamIntent,
     TeamMode,
     TeamOutcome,
     TeamResolution,
     decide_team_formation,
-    materializable_orchestrator_agent_names,
     resolve_configured_team,
     select_model_for_team,
     team_response,
@@ -1494,7 +1494,7 @@ class AgentBot:
         """Return live shared agent names that can currently answer."""
         if self.orchestrator is None:
             return None
-        return materializable_orchestrator_agent_names(self.orchestrator, config=self.config)
+        return resolve_live_shared_agent_names(self.orchestrator, config=self.config)
 
     def _filter_materializable_agents(
         self,

@@ -30,6 +30,11 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
+from mindroom.team_runtime_resolution import (
+    ResolvedExactTeamMembers,
+    materialize_exact_requested_team_members,
+    resolve_live_shared_agent_names,
+)
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -75,15 +80,6 @@ class _TeamModeDecision(BaseModel):
         description="coordinate for delegation and synthesis, collaborate for all working on same task",
     )
     reasoning: str = Field(description="Brief explanation of why this mode was chosen")
-
-
-@dataclass(frozen=True)
-class _ResolvedTeamMembers:
-    """One resolved team-member set shared across team execution and rendering."""
-
-    requested_agent_names: list[str]
-    agents: list[Agent]
-    display_names: list[str]
 
 
 def _format_team_header(agent_names: list[str]) -> str:
@@ -953,78 +949,41 @@ def _build_prompt_with_context(
     return message
 
 
-def _get_agents_from_orchestrator(
-    agent_names: list[str],
+def _build_agent_from_orchestrator(
+    agent_name: str,
     orchestrator: MultiAgentOrchestrator,
     execution_identity: ToolExecutionIdentity | None,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
-    *,
-    reason_prefix: str = "Team request",
-) -> list[Agent]:
-    """Get Agent instances from orchestrator for the given agent names."""
+) -> Agent:
+    """Create one exact team member from orchestrator-backed runtime state."""
     assert orchestrator.config is not None
-    agents: list[Agent] = []
-    failed_agent_names: list[str] = []
 
     def _shared_manager(base_id: str) -> KnowledgeManager | None:
         return orchestrator.knowledge_managers.get(base_id)
 
-    def _on_missing_agent_bases(agent_name: str, missing_base_ids: list[str]) -> None:
+    def _on_missing_agent_bases(missing_base_ids: list[str]) -> None:
         logger.warning(
             "Knowledge bases not available for team agent",
             agent_name=agent_name,
             knowledge_bases=missing_base_ids,
         )
 
-    for name in agent_names:
-        try:
-            knowledge = get_agent_knowledge(
-                name,
-                orchestrator.config,
-                orchestrator.runtime_paths,
-                request_knowledge_managers=request_knowledge_managers,
-                shared_manager_lookup=_shared_manager,
-                on_missing_bases=lambda missing_base_ids, agent_name=name: _on_missing_agent_bases(
-                    agent_name,
-                    missing_base_ids,
-                ),
-            )
-            agent = create_agent(
-                name,
-                orchestrator.config,
-                orchestrator.runtime_paths,
-                execution_identity=execution_identity,
-                knowledge=knowledge,
-                include_interactive_questions=False,
-            )
-        except Exception:
-            logger.warning(
-                "Failed to materialize team member from orchestrator",
-                agent_name=name,
-                exc_info=True,
-            )
-            failed_agent_names.append(name)
-            continue
-        agents.append(agent)
-
-    if failed_agent_names:
-        raise ValueError(_not_materializable_team_agents_message(failed_agent_names, prefix=reason_prefix))
-
-    return agents
-
-
-def materializable_orchestrator_agent_names(
-    orchestrator: MultiAgentOrchestrator,
-    *,
-    config: Config | None = None,
-) -> set[str] | None:
-    """Return live shared agent names when runtime availability is known."""
-    active_config = config or orchestrator.config
-    assert active_config is not None
-    orchestrator_agent_bots = orchestrator.agent_bots
-    if not isinstance(orchestrator_agent_bots, dict):
-        return None
-    return {name for name in orchestrator_agent_bots if name != ROUTER_AGENT_NAME and name in active_config.agents}
+    knowledge = get_agent_knowledge(
+        agent_name,
+        orchestrator.config,
+        orchestrator.runtime_paths,
+        request_knowledge_managers=request_knowledge_managers,
+        shared_manager_lookup=_shared_manager,
+        on_missing_bases=_on_missing_agent_bases,
+    )
+    return create_agent(
+        agent_name,
+        orchestrator.config,
+        orchestrator.runtime_paths,
+        execution_identity=execution_identity,
+        knowledge=knowledge,
+        include_interactive_questions=False,
+    )
 
 
 def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
@@ -1039,36 +998,26 @@ def _materialize_team_members(
     *,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     reason_prefix: str = "Team request",
-) -> _ResolvedTeamMembers:
+) -> ResolvedExactTeamMembers:
     """Materialize the exact requested team-member set without silent fallback."""
-    assert orchestrator.config is not None
     requested_agent_names = _requested_team_agent_names(agent_names)
     if not requested_agent_names:
         raise ValueError(_NO_AGENTS_RESPONSE)
-    materializable_agent_names = materializable_orchestrator_agent_names(orchestrator)
-    missing_agent_names = (
-        [name for name in requested_agent_names if name not in materializable_agent_names]
-        if materializable_agent_names is not None
-        else []
-    )
-    if missing_agent_names:
-        raise ValueError(
-            _not_materializable_team_agents_message(missing_agent_names, prefix=reason_prefix),
-        )
-
-    agents = _get_agents_from_orchestrator(
+    team_members = materialize_exact_requested_team_members(
         requested_agent_names,
-        orchestrator,
-        execution_identity,
-        request_knowledge_managers=request_knowledge_managers,
-        reason_prefix=reason_prefix,
+        materializable_agent_names=resolve_live_shared_agent_names(orchestrator),
+        build_member=lambda name: _build_agent_from_orchestrator(
+            name,
+            orchestrator,
+            execution_identity,
+            request_knowledge_managers=request_knowledge_managers,
+        ),
     )
-    display_names = [str(agent.name) for agent in agents if agent.name]
-    return _ResolvedTeamMembers(
-        requested_agent_names=requested_agent_names,
-        agents=agents,
-        display_names=display_names,
-    )
+    if team_members.failed_agent_names:
+        raise ValueError(
+            _not_materializable_team_agents_message(team_members.failed_agent_names, prefix=reason_prefix),
+        )
+    return team_members
 
 
 async def _ensure_request_team_knowledge_managers(
@@ -1262,7 +1211,7 @@ async def team_response(
 
 
 async def _team_response_stream_raw(
-    team_members: _ResolvedTeamMembers,
+    team_members: ResolvedExactTeamMembers,
     mode: TeamMode,
     message: str,
     orchestrator: MultiAgentOrchestrator,
@@ -1340,9 +1289,9 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     arrive so the final shape matches the non-stream style.
     """
     assert orchestrator.config is not None
-    requested_agent_names = [
-        mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids
-    ]
+    requested_agent_names = _requested_team_agent_names(
+        [mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids],
+    )
     orchestrator.config.assert_team_agents_supported(requested_agent_names)
     request_knowledge_managers = await _ensure_request_team_knowledge_managers(
         requested_agent_names,

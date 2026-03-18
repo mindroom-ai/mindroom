@@ -40,6 +40,7 @@ from mindroom.knowledge.manager import initialize_shared_knowledge_managers
 from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
+from mindroom.team_runtime_resolution import materialize_exact_requested_team_members
 from mindroom.teams import TeamMode, TeamOutcome, format_team_response, resolve_configured_team
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 from mindroom.tool_system.worker_routing import (
@@ -1099,31 +1100,23 @@ def _build_team(
     model_name = team_config.model or "default"
     model = get_model_instance(config, runtime_paths, model_name)
 
-    agents: list[Agent] = []
-    materialized_member_names: set[str] = set()
-    for member_name in team_config.agents:
-        if member_name not in config.agents or member_name == ROUTER_AGENT_NAME:
-            logger.warning("Team member not found, skipping", team=team_name, agent=member_name)
-            continue
-        try:
-            agents.append(
-                create_agent(
-                    member_name,
-                    config,
-                    runtime_paths,
-                    execution_identity=execution_identity,
-                    knowledge=get_agent_knowledge(
-                        member_name,
-                        config,
-                        runtime_paths,
-                        on_missing_bases=_log_missing_knowledge_bases(member_name),
-                    ),
-                    include_interactive_questions=False,
-                ),
-            )
-            materialized_member_names.add(member_name)
-        except Exception:
-            logger.warning("Failed to create team member, skipping", team=team_name, agent=member_name, exc_info=True)
+    team_members = materialize_exact_requested_team_members(
+        team_config.agents,
+        materializable_agent_names=None,
+        build_member=lambda member_name: create_agent(
+            member_name,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            knowledge=get_agent_knowledge(
+                member_name,
+                config,
+                runtime_paths,
+                on_missing_bases=_log_missing_knowledge_bases(member_name),
+            ),
+            include_interactive_questions=False,
+        ),
+    )
 
     final_resolution = resolve_configured_team(
         team_name,
@@ -1131,20 +1124,20 @@ def _build_team(
         mode,
         config,
         runtime_paths,
-        materializable_agent_names=materialized_member_names,
+        materializable_agent_names=team_members.materialized_agent_names,
     )
     if final_resolution.outcome is not TeamOutcome.TEAM:
         raise ValueError(final_resolution.reason or f"Team '{team_name}' cannot be materialized")
 
     team = Team(
-        members=agents,  # type: ignore[arg-type]
+        members=team_members.agents,  # type: ignore[arg-type]
         name=f"Team-{team_name}",
         model=model,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
         show_members_responses=True,
         debug_mode=False,
     )
-    return agents, team, mode
+    return team_members.agents, team, mode
 
 
 def _format_team_output(response: TeamRunOutput | RunOutput) -> str:
