@@ -12,7 +12,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.teams import TeamFormationDecision
+from mindroom.teams import TeamResolution
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
@@ -163,7 +163,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
 
         # Mock decide_team_formation to return False (no team formation)
         with patch("mindroom.bot.decide_team_formation") as mock_decide_team_formation:
-            mock_decide_team_formation.return_value = TeamFormationDecision.none()
+            mock_decide_team_formation.return_value = TeamResolution.none()
 
             # Mock the generate_response method to track if it's called
             with patch.object(general_bot, "_generate_response") as mock_generate:

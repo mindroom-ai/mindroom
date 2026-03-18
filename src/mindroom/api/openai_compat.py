@@ -40,7 +40,8 @@ from mindroom.knowledge.manager import initialize_shared_knowledge_managers
 from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
-from mindroom.teams import TeamMode, format_team_response
+from mindroom.team_runtime_resolution import materialize_exact_requested_team_members
+from mindroom.teams import TeamMode, TeamOutcome, format_team_response, resolve_configured_team
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -1087,53 +1088,56 @@ def _build_team(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-) -> tuple[list[Agent], Team | None, TeamMode]:
-    """Create agents and build an agno.Team for the given team config.
+) -> tuple[list[Agent], Team, TeamMode]:
+    """Create member agents and build one agno.Team for a configured team.
 
-    Returns (agents, team, mode). When no agents can be created,
-    returns ([], None, mode) so callers can handle it gracefully.
+    Raises ValueError when the configured team cannot be materialized.
     """
     team_config = config.teams[team_name]
     mode = TeamMode(team_config.mode)
+    config_ids = config.get_ids(runtime_paths)
+    requested_members = [config_ids[member_name] for member_name in team_config.agents]
     model_name = team_config.model or "default"
     model = get_model_instance(config, runtime_paths, model_name)
 
-    agents: list[Agent] = []
-    for member_name in team_config.agents:
-        if member_name not in config.agents or member_name == ROUTER_AGENT_NAME:
-            logger.warning("Team member not found, skipping", team=team_name, agent=member_name)
-            continue
-        try:
-            agents.append(
-                create_agent(
-                    member_name,
-                    config,
-                    runtime_paths,
-                    execution_identity=execution_identity,
-                    knowledge=get_agent_knowledge(
-                        member_name,
-                        config,
-                        runtime_paths,
-                        on_missing_bases=_log_missing_knowledge_bases(member_name),
-                    ),
-                    include_interactive_questions=False,
-                ),
-            )
-        except Exception:
-            logger.warning("Failed to create team member, skipping", team=team_name, agent=member_name, exc_info=True)
+    team_members = materialize_exact_requested_team_members(
+        team_config.agents,
+        materializable_agent_names=None,
+        build_member=lambda member_name: create_agent(
+            member_name,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            knowledge=get_agent_knowledge(
+                member_name,
+                config,
+                runtime_paths,
+                on_missing_bases=_log_missing_knowledge_bases(member_name),
+            ),
+            include_interactive_questions=False,
+        ),
+    )
 
-    if not agents:
-        return [], None, mode
+    final_resolution = resolve_configured_team(
+        team_name,
+        requested_members,
+        mode,
+        config,
+        runtime_paths,
+        materializable_agent_names=team_members.materialized_agent_names,
+    )
+    if final_resolution.outcome is not TeamOutcome.TEAM:
+        raise ValueError(final_resolution.reason or f"Team '{team_name}' cannot be materialized")
 
     team = Team(
-        members=agents,  # type: ignore[arg-type]
+        members=team_members.agents,  # type: ignore[arg-type]
         name=f"Team-{team_name}",
         model=model,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
         show_members_responses=True,
         debug_mode=False,
     )
-    return agents, team, mode
+    return team_members.agents, team, mode
 
 
 def _format_team_output(response: TeamRunOutput | RunOutput) -> str:
@@ -1154,9 +1158,10 @@ async def _non_stream_team_completion(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
-    agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
-    if not agents or team is None:
-        return _error_response(500, "No valid agents found for team", error_type="server_error")
+    try:
+        agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
+    except ValueError as e:
+        return _error_response(500, str(e), error_type="server_error")
 
     logger.info("Team completion request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 
@@ -1201,10 +1206,11 @@ async def _stream_team_completion(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
-    with tool_execution_identity(execution_identity):
-        agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
-    if not agents or team is None:
-        return _error_response(500, "No valid agents found for team", error_type="server_error")
+    try:
+        with tool_execution_identity(execution_identity):
+            agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
+    except ValueError as e:
+        return _error_response(500, str(e), error_type="server_error")
 
     logger.info("Team streaming request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 

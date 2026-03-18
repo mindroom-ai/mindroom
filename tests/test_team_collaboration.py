@@ -14,6 +14,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.teams import TeamIntent, TeamMemberStatus, TeamOutcome
 from mindroom.thread_utils import get_agents_in_thread
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -513,8 +514,9 @@ class TestRouterTeamFormation:
         )
 
         # Should form a team with both agents
-        assert result.kind == "team"
-        agent_names = sorted(_agent_names(result.agents, config))
+        assert result.outcome is TeamOutcome.TEAM
+        assert result.intent is TeamIntent.DM_AUTO_TEAM
+        agent_names = sorted(_agent_names(result.eligible_members, config))
         assert agent_names == ["agent1", "agent2"]
 
         # Test DM room with single agent (should not form team)
@@ -533,7 +535,7 @@ class TestRouterTeamFormation:
         )
 
         # Should not form a team with single agent
-        assert result.kind == "none"
+        assert result.outcome is TeamOutcome.NONE
 
     @pytest.mark.asyncio
     async def test_dm_room_thread_single_agent_no_team(self) -> None:
@@ -583,7 +585,7 @@ class TestRouterTeamFormation:
             use_ai_decision=False,
         )
 
-        assert result.kind == "none"
+        assert result.outcome is TeamOutcome.NONE
 
     @pytest.mark.asyncio
     async def test_dm_room_ignores_private_agents_for_team_formation(self) -> None:
@@ -628,8 +630,9 @@ class TestRouterTeamFormation:
             use_ai_decision=False,
         )
 
-        assert result.kind == "individual"
-        assert _agent_names(result.agents, config) == ["calculator"]
+        assert result.outcome is TeamOutcome.INDIVIDUAL
+        assert result.intent is TeamIntent.DM_AUTO_TEAM
+        assert _agent_names(result.eligible_members, config) == ["calculator"]
 
     @pytest.mark.asyncio
     async def test_thread_history_unavailable_agents_degrade_to_individual(self) -> None:
@@ -672,8 +675,9 @@ class TestRouterTeamFormation:
             use_ai_decision=False,
         )
 
-        assert result.kind == "individual"
-        assert _agent_names(result.agents, config) == ["calculator"]
+        assert result.outcome is TeamOutcome.INDIVIDUAL
+        assert result.intent is TeamIntent.IMPLICIT_THREAD_TEAM
+        assert _agent_names(result.eligible_members, config) == ["calculator"]
 
     @pytest.mark.asyncio
     async def test_previously_mentioned_off_room_agents_degrade_to_individual(self) -> None:
@@ -716,8 +720,9 @@ class TestRouterTeamFormation:
             use_ai_decision=False,
         )
 
-        assert result.kind == "individual"
-        assert _agent_names(result.agents, config) == ["calculator"]
+        assert result.outcome is TeamOutcome.INDIVIDUAL
+        assert result.intent is TeamIntent.IMPLICIT_THREAD_TEAM
+        assert _agent_names(result.eligible_members, config) == ["calculator"]
 
     @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_the_entire_team_request(self) -> None:
@@ -759,9 +764,14 @@ class TestRouterTeamFormation:
             use_ai_decision=False,
         )
 
-        assert result.kind == "reject"
-        assert _agent_names(result.agents, config) == ["calculator"]
-        assert result.rejection_message == ("Team request includes agent 'general' that is not available in this room.")
+        assert result.outcome is TeamOutcome.REJECT
+        assert result.intent is TeamIntent.EXPLICIT_MEMBERS
+        assert _agent_names(result.eligible_members, config) == ["calculator"]
+        assert result.reason == "Team request includes agent 'general' that is not available in this room."
+        assert {member.name: member.status for member in result.member_statuses} == {
+            "calculator": TeamMemberStatus.ELIGIBLE,
+            "general": TeamMemberStatus.NOT_IN_ROOM,
+        }
 
     @pytest.mark.asyncio
     async def test_tagged_agents_reject_when_sender_can_talk_to_zero_agents(self) -> None:
@@ -805,10 +815,62 @@ class TestRouterTeamFormation:
             available_agents_in_room=[],
         )
 
-        assert result.kind == "reject"
-        assert result.agents == []
-        assert result.rejection_message == (
+        assert result.outcome is TeamOutcome.REJECT
+        assert result.eligible_members == []
+        assert result.reason == (
             "Team request includes agents 'calculator', 'general' that are not available to you in this room."
+        )
+
+    @pytest.mark.asyncio
+    async def test_tagged_off_room_agents_reject_without_collapsing_requested_members(self) -> None:
+        """Explicit rejects should preserve the full requested-member failure state."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                    "general": AgentConfig(display_name="General", role="General"),
+                    "research": AgentConfig(display_name="Research", role="Research"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            tagged_agents=[
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["research"],
+            ],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="general and research, help",
+            config=config,
+            room=room,
+            use_ai_decision=False,
+            available_agents_in_room=[config.get_ids(runtime_paths_for(config))["calculator"]],
+            materializable_agent_names={"calculator"},
+        )
+
+        assert result.outcome is TeamOutcome.REJECT
+        assert {member.name: member.status for member in result.member_statuses} == {
+            "general": TeamMemberStatus.NOT_IN_ROOM,
+            "research": TeamMemberStatus.NOT_IN_ROOM,
+        }
+        assert result.reason == (
+            "Team request includes agents 'general', 'research' that are not available in this room."
         )
 
     @pytest.mark.asyncio
@@ -858,7 +920,124 @@ class TestRouterTeamFormation:
             use_ai_decision=False,
         )
 
-        assert result.kind == "reject"
+        assert result.outcome is TeamOutcome.REJECT
+
+    @pytest.mark.asyncio
+    async def test_tagged_unsupported_non_materializable_member_keeps_requested_member_statuses(self) -> None:
+        """Explicit rejects should keep requested-member eligibility separate from delivery ownership."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "alpha": AgentConfig(
+                        display_name="Alpha",
+                        role="Private assistant",
+                        private=AgentPrivateConfig(per="user", root="alpha_data"),
+                    ),
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["alpha"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            tagged_agents=[
+                config.get_ids(runtime_paths_for(config))["alpha"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="alpha and calculator, help",
+            config=config,
+            room=room,
+            use_ai_decision=False,
+            available_agents_in_room=[
+                config.get_ids(runtime_paths_for(config))["alpha"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ],
+            materializable_agent_names={"calculator"},
+        )
+
+        assert result.outcome is TeamOutcome.REJECT
+        assert {member.name: member.status for member in result.member_statuses} == {
+            "alpha": TeamMemberStatus.UNSUPPORTED_FOR_TEAM,
+            "calculator": TeamMemberStatus.ELIGIBLE,
+        }
+        assert result.eligible_members == [config.get_ids(runtime_paths_for(config))["calculator"]]
+
+    @pytest.mark.asyncio
+    async def test_tagged_mixed_reject_causes_report_member_specific_reasons(self) -> None:
+        """Mixed reject causes should explain the actual member failures instead of flattening them."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "alpha": AgentConfig(
+                        display_name="Alpha",
+                        role="Private assistant",
+                        private=AgentPrivateConfig(per="user", root="alpha_data"),
+                    ),
+                    "general": AgentConfig(display_name="General", role="General"),
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["alpha"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["general"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            tagged_agents=[
+                config.get_ids(runtime_paths_for(config))["alpha"],
+                config.get_ids(runtime_paths_for(config))["general"],
+            ],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="alpha and general, help",
+            config=config,
+            room=room,
+            use_ai_decision=False,
+            available_agents_in_room=[
+                config.get_ids(runtime_paths_for(config))["alpha"],
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ],
+            materializable_agent_names={"alpha", "calculator"},
+        )
+
+        assert result.outcome is TeamOutcome.REJECT
+        assert result.reason == (
+            "Team request cannot be satisfied: "
+            "agent 'alpha' is private and cannot participate in teams yet; "
+            "agent 'general' could not be materialized for this request"
+        )
 
     @pytest.mark.asyncio
     async def test_tagged_agents_that_delegate_to_private_reject_the_entire_team_request(
@@ -915,4 +1094,4 @@ class TestRouterTeamFormation:
             use_ai_decision=False,
         )
 
-        assert result.kind == "reject"
+        assert result.outcome is TeamOutcome.REJECT
