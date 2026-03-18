@@ -262,9 +262,15 @@ class _SandboxRunnerContext:
 
 
 @dataclass(frozen=True)
-class _PreparedSandboxExecution:
+class _PreparedSandboxRequestContext:
     request: PreparedSandboxRunnerExecuteRequest
     runtime_paths: RuntimePaths
+    execution_env: dict[str, str]
+    prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None
+
+
+@dataclass(frozen=True)
+class _PreparedSandboxSubprocessContext:
     python_executable: str | None
     subprocess_env: dict[str, str] | None
     subprocess_cwd: str | None
@@ -408,7 +414,7 @@ def _prepare_execute_request(
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
-) -> _PreparedSandboxExecution:
+) -> _PreparedSandboxRequestContext:
     execution_env = sandbox_exec.request_execution_env(request.tool_name, request.execution_env, runtime_paths)
     private_agent_names = _request_private_agent_names(request)
     prepared = sandbox_worker_prep.resolve_prepared_worker_request(
@@ -426,10 +432,6 @@ def _prepare_execute_request(
         runtime_paths,
         execution_env,
     )
-    python_executable, subprocess_env, subprocess_cwd = sandbox_exec.resolve_subprocess_worker_context(
-        prepared.paths if prepared is not None else None,
-    )
-    subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, execution_env)
     prepared_request = PreparedSandboxRunnerExecuteRequest(
         tool_name=request.tool_name,
         function_name=request.function_name,
@@ -447,9 +449,22 @@ def _prepare_execute_request(
             runtime_overrides,
         ),
     )
-    return _PreparedSandboxExecution(
+    return _PreparedSandboxRequestContext(
         request=prepared_request,
         runtime_paths=effective_runtime_paths,
+        execution_env=execution_env,
+        prepared_worker=prepared,
+    )
+
+
+def _prepare_subprocess_context(
+    prepared_request: _PreparedSandboxRequestContext,
+) -> _PreparedSandboxSubprocessContext:
+    python_executable, subprocess_env, subprocess_cwd = sandbox_exec.resolve_subprocess_worker_context(
+        prepared_request.prepared_worker.paths if prepared_request.prepared_worker is not None else None,
+    )
+    subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, prepared_request.execution_env)
+    return _PreparedSandboxSubprocessContext(
         python_executable=python_executable,
         subprocess_env=subprocess_env,
         subprocess_cwd=subprocess_cwd,
@@ -511,7 +526,7 @@ async def _execute_request_inprocess(
     runner_token: str | None = None,
 ) -> SandboxRunnerExecuteResponse:
     try:
-        prepared = _prepare_execute_request(
+        prepared_request = _prepare_execute_request(
             request,
             runtime_paths,
             prepared_worker,
@@ -520,9 +535,13 @@ async def _execute_request_inprocess(
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:
         return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
     effective_config = config
-    if prepared.runtime_paths is not runtime_paths:
-        effective_config = _runtime_config_or_empty(prepared.runtime_paths)
-    return await _execute_prepared_request_inprocess(prepared.request, prepared.runtime_paths, effective_config)
+    if prepared_request.runtime_paths is not runtime_paths:
+        effective_config = _runtime_config_or_empty(prepared_request.runtime_paths)
+    return await _execute_prepared_request_inprocess(
+        prepared_request.request,
+        prepared_request.runtime_paths,
+        effective_config,
+    )
 
 
 def _subprocess_failure_response(
@@ -566,7 +585,7 @@ def _execute_request_subprocess_sync(
     runner_token: str | None = None,
 ) -> SandboxRunnerExecuteResponse:
     try:
-        prepared = _prepare_execute_request(
+        prepared_request = _prepare_execute_request(
             request,
             runtime_paths,
             prepared_worker,
@@ -574,24 +593,25 @@ def _execute_request_subprocess_sync(
         )
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:
         return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+    subprocess_context = _prepare_subprocess_context(prepared_request)
     envelope = sandbox_protocol.serialize_subprocess_envelope(
-        request=prepared.request.model_dump(mode="json"),
-        runtime_paths=constants.serialize_runtime_paths(prepared.runtime_paths),
+        request=prepared_request.request.model_dump(mode="json"),
+        runtime_paths=constants.serialize_runtime_paths(prepared_request.runtime_paths),
     )
 
     try:
         completed = subprocess.run(
             sandbox_exec.subprocess_worker_command(
                 _SUBPROCESS_WORKER_ARG,
-                python_executable=prepared.python_executable,
+                python_executable=subprocess_context.python_executable,
             ),
             input=envelope,
             capture_output=True,
             text=True,
             timeout=sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths),
             check=False,
-            env=prepared.subprocess_env,
-            cwd=prepared.subprocess_cwd,
+            env=subprocess_context.subprocess_env,
+            cwd=subprocess_context.subprocess_cwd,
         )
     except subprocess.TimeoutExpired:
         return _subprocess_failure_response(request, "Sandbox subprocess timed out.", runtime_paths)
