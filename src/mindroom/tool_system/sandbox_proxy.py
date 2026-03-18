@@ -62,6 +62,24 @@ class SandboxProxyConfig:
     credential_policy: dict[str, tuple[str, ...]]
 
 
+def _proxy_http_error_message(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, Mapping):
+        detail = payload.get("detail")
+        if detail:
+            return str(detail)
+        error = payload.get("error")
+        if error:
+            return str(error)
+    body = response.text.strip()
+    if body:
+        return body
+    return f"Sandbox proxy request failed with status {response.status_code}."
+
+
 def _read_proxy_url(runtime_paths: RuntimePaths) -> str | None:
     value = (runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_URL", default="") or "").strip()
     if not value:
@@ -535,7 +553,10 @@ def _call_proxy_sync(  # noqa: C901
                 payload["lease_id"] = lease_id
 
             response = client.post(execute_url, json=payload, headers=headers)
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(_proxy_http_error_message(exc.response)) from exc
             data = response.json()
     except Exception as exc:
         if worker_handle is not None:

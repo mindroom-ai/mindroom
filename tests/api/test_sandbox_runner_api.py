@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 import subprocess
 import sys
 import threading
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -420,6 +422,54 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
 
     assert response.ok is True
     assert response.result == "visible-in-shell"
+
+
+def test_subprocess_worker_consumes_prepared_request_without_repreparing_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Subprocess workers should execute the prepared request without re-running worker prep."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    prepared_request = sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
+        tool_name="calculator",
+        function_name="add",
+        args=[1, 2],
+        kwargs={},
+    )
+    envelope = sandbox_protocol_module.serialize_subprocess_envelope(
+        request=prepared_request.model_dump(mode="json"),
+        runtime_paths=serialize_runtime_paths(runtime_paths),
+    )
+
+    def _forbidden_prepare(*_args: object, **_kwargs: object) -> object:
+        msg = "subprocess child should not re-run worker preparation"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        sandbox_worker_prep_module,
+        "resolve_prepared_worker_request",
+        _forbidden_prepare,
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(envelope))
+
+    exit_code = sandbox_runner_module._run_subprocess_worker()
+
+    assert exit_code == 0
+    response_json = sandbox_protocol_module.extract_response_json(capsys.readouterr().err)
+    assert response_json is not None
+    response = sandbox_runner_module.SandboxRunnerExecuteResponse.model_validate_json(response_json)
+    assert response.ok is True
+    assert '"result": 3' in str(response.result)
 
 
 def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_env(
@@ -1645,6 +1695,76 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
     canonical_file = agent_workspace_root_path(shared_root, "general") / "note.txt"
     assert canonical_file.read_text(encoding="utf-8") == "hello from dedicated worker canonical workspace"
     assert not (worker_root / "workspace" / "note.txt").exists()
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_dedicated_user_agent_worker_shell_uses_private_base_dir(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated user-agent workers should preserve private requester base_dir for shell tools."""
+    _set_sandbox_token(monkeypatch)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="alpha",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+        tenant_id="tenant-123",
+    )
+    worker_key = resolve_worker_key("user_agent", identity, agent_name="alpha")
+    assert worker_key is not None
+
+    shared_root = tmp_path / "shared-storage"
+    worker_root = shared_root / "workers" / worker_dir_name(worker_key)
+    private_workspace = shared_root / "private_instances" / worker_dir_name(worker_key) / "alpha" / "mind_data"
+    private_workspace.mkdir(parents=True, exist_ok=True)
+    (private_workspace / "OWNER.txt").write_text("alice\n", encoding="utf-8")
+
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [
+                [
+                    "python",
+                    "-c",
+                    (
+                        "from pathlib import Path; import json; "
+                        "print(json.dumps({'cwd': str(Path.cwd()), "
+                        "'owner': Path('OWNER.txt').read_text(encoding='utf-8').strip()}))"
+                    ),
+                ],
+            ],
+            "kwargs": {},
+            "worker_key": worker_key,
+            "worker_scope": "user_agent",
+            "routing_agent_name": "alpha",
+            "execution_identity": asdict(identity),
+            "private_agent_names": ["alpha"],
+            "tool_init_overrides": {
+                "base_dir": f"private_instances/{worker_dir_name(worker_key)}/alpha/mind_data",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert json.loads(data["result"]) == {
+        "cwd": str(private_workspace),
+        "owner": "alice",
+    }
 
 
 @REQUIRES_LINUX_LOCAL_WORKER

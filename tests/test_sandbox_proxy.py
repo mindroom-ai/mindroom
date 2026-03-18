@@ -10,6 +10,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
+import httpx
 import pytest
 
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
@@ -978,6 +979,54 @@ def test_scoped_dedicated_worker_payload_preserves_resolved_worker_key(monkeypat
     assert payload["worker_key"] == "v1:default:user:@alice:example.org"
     assert worker_handle is ensured_handle
     assert fake_manager.ensure_calls == ["v1:default:user:@alice:example.org"]
+
+
+def test_proxy_surfaces_runner_http_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proxy should preserve sandbox-runner detail messages on HTTP failures."""
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            request = httpx.Request("POST", "http://sandbox-runner:8765/api/sandbox-runner/execute")
+            response = httpx.Response(
+                400,
+                request=request,
+                json={"detail": "base_dir must stay inside the allowed state roots or worker root"},
+            )
+            message = "bad request"
+            raise httpx.HTTPStatusError(message, request=request, response=response)
+
+        def json(self) -> dict[str, object]:
+            msg = "Success payload should not be parsed for HTTP failures."
+            raise AssertionError(msg)
+
+    class _FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            _ = timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            _ = url, json, headers
+            return _FakeResponse()
+
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="all",
+        credential_policy={},
+    )
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
+
+    tool = get_tool_by_name("calculator", runtime_paths, worker_target=None)
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
+    with pytest.raises(RuntimeError, match="base_dir must stay inside the allowed state roots or worker root"):
+        entrypoint(1, 2)
 
 
 def test_static_sandbox_runner_backend_reuses_worker_handle_identity() -> None:
