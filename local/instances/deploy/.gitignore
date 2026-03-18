@@ -2,6 +2,7 @@
 # Mindroom instance files
 .env.*
 envs/*.env
+envs/*.matrix-hosts.yml
 instances.json
 instance_data/
 *.yaml.backup
