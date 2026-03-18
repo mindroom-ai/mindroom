@@ -277,13 +277,7 @@ class AgentConfig(BaseModel):
     @classmethod
     def validate_unique_knowledge_bases(cls, knowledge_bases: list[str]) -> list[str]:
         """Ensure each knowledge base assignment appears at most once per agent."""
-        seen: set[str] = set()
-        duplicates: list[str] = []
-        for base_id in knowledge_bases:
-            if base_id in seen and base_id not in duplicates:
-                duplicates.append(base_id)
-            seen.add(base_id)
-
+        duplicates = _duplicate_items(knowledge_bases)
         if duplicates:
             msg = f"Duplicate knowledge bases are not allowed: {', '.join(duplicates)}"
             raise ValueError(msg)
@@ -296,15 +290,36 @@ class AgentConfig(BaseModel):
         return [agent_workspace_relative_path(value).as_posix() for value in values]
 
 
+def _duplicate_items(values: list[str]) -> list[str]:
+    """Return duplicate items while preserving first duplicate order."""
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for value in values:
+        if value in seen and value not in duplicates:
+            duplicates.append(value)
+        seen.add(value)
+    return duplicates
+
+
 class TeamConfig(BaseModel):
     """Configuration for a team of agents."""
 
     display_name: str = Field(description="Human-readable name for the team")
     role: str = Field(description="Description of the team's purpose")
-    agents: list[str] = Field(description="List of agent names that compose this team")
+    agents: list[str] = Field(min_length=1, description="List of agent names that compose this team")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
     model: str | None = Field(default="default", description="Default model for this team (optional)")
     mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
+
+    @field_validator("agents")
+    @classmethod
+    def validate_unique_agents(cls, agents: list[str]) -> list[str]:
+        """Ensure each team member appears at most once."""
+        duplicates = _duplicate_items(agents)
+        if duplicates:
+            msg = f"Duplicate agents are not allowed in a team: {', '.join(duplicates)}"
+            raise ValueError(msg)
+        return agents
 
 
 class CultureConfig(BaseModel):
@@ -321,13 +336,7 @@ class CultureConfig(BaseModel):
     @classmethod
     def validate_unique_agents(cls, agents: list[str]) -> list[str]:
         """Ensure each agent is assigned at most once per culture."""
-        seen: set[str] = set()
-        duplicates: list[str] = []
-        for agent_name in agents:
-            if agent_name in seen and agent_name not in duplicates:
-                duplicates.append(agent_name)
-            seen.add(agent_name)
-
+        duplicates = _duplicate_items(agents)
         if duplicates:
             msg = f"Duplicate agents are not allowed in a culture: {', '.join(duplicates)}"
             raise ValueError(msg)

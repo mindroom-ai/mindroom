@@ -663,6 +663,8 @@ class TestRoutingRegression:
         # Set up both bots with the same config
         research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id, config=mock_config)
         news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id, config=mock_config)
+        research_bot.running = True
+        news_bot.running = True
 
         # Create a shared orchestrator with both bots properly configured
         mock_orchestrator = MagicMock()

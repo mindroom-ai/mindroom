@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal
 
 from agno.agent import Agent
 from agno.models.message import Message
@@ -30,6 +30,11 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
+from mindroom.team_runtime_resolution import (
+    ResolvedExactTeamMembers,
+    materialize_exact_requested_team_members,
+    resolve_live_shared_agent_names,
+)
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -58,6 +63,7 @@ logger = get_logger(__name__)
 _MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
 _MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
 _TeamStreamChunk = str | StructuredStreamChunk
+_NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
 
 
 class TeamMode(str, Enum):
@@ -74,16 +80,6 @@ class _TeamModeDecision(BaseModel):
         description="coordinate for delegation and synthesis, collaborate for all working on same task",
     )
     reasoning: str = Field(description="Brief explanation of why this mode was chosen")
-
-
-@dataclass(frozen=True)
-class _ResolvedTeamMembers:
-    """One resolved team-member set shared across team execution and rendering."""
-
-    requested_agent_names: list[str]
-    available_agent_names: list[str]
-    agents: list[Agent]
-    display_names: list[str]
 
 
 def _format_team_header(agent_names: list[str]) -> str:
@@ -244,64 +240,156 @@ def _get_response_content(response: TeamRunOutput | RunOutput) -> str:
     return ""
 
 
-@dataclass(frozen=True)
-class TeamFormationDecision:
-    """Result of decide_team_formation."""
+class TeamIntent(str, Enum):
+    """How one team request was formed."""
 
-    kind: Literal["team", "individual", "none", "reject"]
-    agents: list[MatrixID]
-    mode: TeamMode
-    rejection_message: str | None = None
+    EXPLICIT_MEMBERS = "explicit_members"
+    CONFIGURED_TEAM = "configured_team"
+    IMPLICIT_THREAD_TEAM = "implicit_thread_team"
+    DM_AUTO_TEAM = "dm_auto_team"
+
+
+class TeamMemberStatus(str, Enum):
+    """Eligibility of one requested team member."""
+
+    ELIGIBLE = "eligible"
+    NOT_IN_ROOM = "not_in_room"
+    HIDDEN_FROM_SENDER = "hidden_from_sender"
+    UNSUPPORTED_FOR_TEAM = "unsupported_for_team"
+    NOT_MATERIALIZABLE = "not_materializable"
+
+
+class TeamOutcome(str, Enum):
+    """Final resolution outcome for one team request."""
+
+    TEAM = "team"
+    INDIVIDUAL = "individual"
+    NONE = "none"
+    REJECT = "reject"
+
+
+@dataclass(frozen=True)
+class TeamResolutionMember:
+    """Status of one requested team member."""
+
+    agent: MatrixID
+    name: str
+    status: TeamMemberStatus
+    private_targets: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class TeamResolution:
+    """First-class team resolution result consumed across bot and API flows."""
+
+    intent: TeamIntent | None
+    requested_members: list[MatrixID]
+    member_statuses: list[TeamResolutionMember]
+    eligible_members: list[MatrixID]
+    outcome: TeamOutcome
+    reason: str | None = None
+    mode: TeamMode | None = None
+
+    def __post_init__(self) -> None:
+        """Keep the resolution internally coherent."""
+        if self.outcome is TeamOutcome.TEAM:
+            if self.mode is None:
+                msg = "Team resolutions require a mode."
+                raise ValueError(msg)
+            if not self.eligible_members:
+                msg = "Team resolutions require at least one eligible member."
+                raise ValueError(msg)
+            return
+
+        if self.mode is not None:
+            msg = "Only team resolutions may include a mode."
+            raise ValueError(msg)
+        if self.outcome is TeamOutcome.INDIVIDUAL and len(self.eligible_members) != 1:
+            msg = "Individual resolutions require exactly one eligible member."
+            raise ValueError(msg)
+        if self.outcome is TeamOutcome.NONE and self.eligible_members:
+            msg = "None resolutions cannot include eligible members."
+            raise ValueError(msg)
+        if self.outcome is TeamOutcome.REJECT and self.reason is None:
+            msg = "Reject resolutions require a reason."
+            raise ValueError(msg)
 
     @classmethod
-    def none(cls) -> TeamFormationDecision:
+    def none(cls) -> TeamResolution:
         """Return the no-team outcome."""
-        return cls(kind="none", agents=[], mode=TeamMode.COLLABORATE)
+        return cls(
+            intent=None,
+            requested_members=[],
+            member_statuses=[],
+            eligible_members=[],
+            outcome=TeamOutcome.NONE,
+        )
 
     @classmethod
-    def reject(cls, *, agents: list[MatrixID], reason: str) -> TeamFormationDecision:
-        """Return the explicit-rejection outcome owned by visible responder bots."""
-        return cls(kind="reject", agents=agents, mode=TeamMode.COLLABORATE, rejection_message=reason)
+    def reject(
+        cls,
+        *,
+        intent: TeamIntent,
+        requested_members: list[MatrixID],
+        member_statuses: list[TeamResolutionMember],
+        reason: str,
+    ) -> TeamResolution:
+        """Return an explicit rejection result."""
+        eligible_members = [member.agent for member in member_statuses if member.status is TeamMemberStatus.ELIGIBLE]
+        return cls(
+            intent=intent,
+            requested_members=requested_members,
+            member_statuses=member_statuses,
+            eligible_members=eligible_members,
+            outcome=TeamOutcome.REJECT,
+            reason=reason,
+        )
 
     @classmethod
-    def team(cls, *, agents: list[MatrixID], mode: TeamMode) -> TeamFormationDecision:
-        """Return the successful team-formation outcome."""
-        return cls(kind="team", agents=agents, mode=mode)
+    def team(
+        cls,
+        *,
+        intent: TeamIntent,
+        requested_members: list[MatrixID],
+        member_statuses: list[TeamResolutionMember],
+        eligible_members: list[MatrixID],
+        mode: TeamMode,
+    ) -> TeamResolution:
+        """Return the successful team outcome."""
+        return cls(
+            intent=intent,
+            requested_members=requested_members,
+            member_statuses=member_statuses,
+            eligible_members=eligible_members,
+            outcome=TeamOutcome.TEAM,
+            mode=mode,
+        )
 
     @classmethod
-    def individual(cls, *, agent: MatrixID) -> TeamFormationDecision:
-        """Return the single-agent fallback outcome after ad hoc filtering."""
-        return cls(kind="individual", agents=[agent], mode=TeamMode.COLLABORATE)
-
-
-class _FilteredTeamMembers(NamedTuple):
-    """Filtered team members plus the rejection reason for explicit requests."""
-
-    agents: list[MatrixID]
-    rejection_message: str | None
-
-
-class _TeamCandidateSource(str, Enum):
-    """Origin of one ad hoc team candidate set."""
-
-    EXPLICIT_REQUEST = "explicit_request"
-    THREAD_MENTIONS = "thread_mentions"
-    THREAD_PARTICIPANTS = "thread_participants"
-    DM_FALLBACK = "dm_fallback"
+    def individual(
+        cls,
+        *,
+        intent: TeamIntent,
+        requested_members: list[MatrixID],
+        member_statuses: list[TeamResolutionMember],
+        agent: MatrixID,
+    ) -> TeamResolution:
+        """Return the single-agent degraded outcome."""
+        return cls(
+            intent=intent,
+            requested_members=requested_members,
+            member_statuses=member_statuses,
+            eligible_members=[agent],
+            outcome=TeamOutcome.INDIVIDUAL,
+        )
 
 
 @dataclass(frozen=True)
-class _CandidateTeamMembers:
-    """Candidate team members plus the source semantics that govern filtering."""
+class _SelectedTeamRequest:
+    """Normalized team request selected from one message context."""
 
-    agents: list[MatrixID]
-    source: _TeamCandidateSource
-    rejection_message: str | None = None
-
-    @property
-    def allow_partial(self) -> bool:
-        """Return whether this candidate source may degrade after filtering."""
-        return self.source is not _TeamCandidateSource.EXPLICIT_REQUEST
+    intent: TeamIntent | None
+    requested_members: list[MatrixID]
 
 
 async def _select_team_mode(
@@ -381,7 +469,8 @@ async def decide_team_formation(
     is_dm_room: bool = False,
     is_thread: bool = False,
     available_agents_in_room: list[MatrixID] | None = None,
-) -> TeamFormationDecision:
+    materializable_agent_names: set[str] | None = None,
+) -> TeamResolution:
     """Determine if a team should form and with which mode.
 
     Args:
@@ -397,12 +486,13 @@ async def decide_team_formation(
         is_dm_room: Whether this is a DM room
         is_thread: Whether the current message is in a thread
         available_agents_in_room: Optional pre-filtered room agents for sender-visible availability
+        materializable_agent_names: Optional live agent names that can currently produce a response
 
     Returns:
-        TeamFormationDecision with team formation decision
+        TeamResolution with explicit intent, member statuses, and final outcome
 
     """
-    candidate_team_members = _candidate_team_agents(
+    team_request = _select_team_request(
         tagged_agents,
         all_mentioned_in_thread,
         agents_in_thread,
@@ -413,16 +503,28 @@ async def decide_team_formation(
         is_thread=is_thread,
         available_agents_in_room=available_agents_in_room,
     )
-    team_agents_or_decision = _resolve_candidate_team_agents(
-        candidate_team_members,
-        room,
+    if team_request.intent is None or not team_request.requested_members:
+        return TeamResolution.none()
+
+    member_statuses = _evaluate_team_members(
+        team_request.requested_members,
         config,
         runtime_paths,
-        available_agents_in_room=available_agents_in_room,
+        room=room,
+        sender_visible_agents=available_agents_in_room,
+        materializable_agent_names=materializable_agent_names,
     )
-    if isinstance(team_agents_or_decision, TeamFormationDecision):
-        return team_agents_or_decision
-    team_agents = team_agents_or_decision
+    resolution = _resolve_team_request(
+        intent=team_request.intent,
+        requested_members=team_request.requested_members,
+        member_statuses=member_statuses,
+        config=config,
+        reason_prefix="Team request",
+    )
+    if resolution.outcome is not TeamOutcome.TEAM:
+        return resolution
+
+    team_agents = resolution.eligible_members
 
     is_first_agent = min(team_agents, key=lambda x: x.username) == agent
     # Only do this AI call for the first agent to avoid duplication
@@ -436,91 +538,53 @@ async def decide_team_formation(
         mode = TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE
         logger.info(f"Using hardcoded mode selection: {mode.value}")
 
-    return TeamFormationDecision.team(agents=team_agents, mode=mode)
+    return replace(resolution, mode=mode)
 
 
-def _resolve_candidate_team_agents(
-    candidate_team_members: _CandidateTeamMembers,
-    room: nio.MatrixRoom | None,
+def _team_member_name(
+    agent_id: MatrixID,
     config: Config | None,
     runtime_paths: RuntimePaths,
-    *,
-    available_agents_in_room: list[MatrixID] | None,
-) -> list[MatrixID] | TeamFormationDecision:
-    """Resolve one candidate set into final team members or an immediate outcome."""
-    immediate_decision = _candidate_team_decision(candidate_team_members)
-    if immediate_decision is not None:
-        return immediate_decision
-    team_agents = candidate_team_members.agents
+) -> str:
+    """Return the canonical agent name used throughout team resolution."""
     if config is None:
-        return team_agents
-
-    room_filtered_team_members = _filter_room_available_team_agents(
-        team_agents,
-        room,
-        config,
-        runtime_paths,
-        allow_partial=candidate_team_members.allow_partial,
-        available_agents_in_room=available_agents_in_room,
-    )
-    room_decision = _filtered_team_decision(room_filtered_team_members)
-    if room_decision is not None:
-        return room_decision
-    team_agents = room_filtered_team_members.agents
-
-    filtered_team_members = _filter_supported_team_agents(
-        team_agents,
-        config,
-        runtime_paths,
-        allow_partial=candidate_team_members.allow_partial,
-    )
-    supported_decision = _filtered_team_decision(filtered_team_members)
-    if supported_decision is not None:
-        return supported_decision
-    return _resolved_team_members_or_fallback(
-        filtered_team_members.agents,
-        allow_partial=candidate_team_members.allow_partial,
-    )
+        return agent_id.username
+    return agent_id.agent_name(config, runtime_paths) or agent_id.username
 
 
-def _candidate_team_decision(
-    candidate_team_members: _CandidateTeamMembers,
-) -> TeamFormationDecision | None:
-    """Return an immediate outcome for one candidate set, if any."""
-    if candidate_team_members.rejection_message is None:
-        if not candidate_team_members.agents:
-            return TeamFormationDecision.none()
-        return None
-    return TeamFormationDecision.reject(
-        agents=candidate_team_members.agents,
-        reason=candidate_team_members.rejection_message,
-    )
+def _filter_team_request_members(
+    agent_ids: list[MatrixID],
+    config: Config | None,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
+    """Keep only actual teamable agents while preserving the requested order."""
+    filtered: list[MatrixID] = []
+    for agent_id in agent_ids:
+        if config is not None:
+            agent_name = agent_id.agent_name(config, runtime_paths)
+            if agent_name is None or agent_name == ROUTER_AGENT_NAME or agent_name not in config.agents:
+                continue
+        filtered.append(agent_id)
+    return filtered
 
 
-def _filtered_team_decision(filtered_team_members: _FilteredTeamMembers) -> TeamFormationDecision | None:
-    """Return the rejection implied by one filtered member set, if any."""
-    if filtered_team_members.rejection_message is None:
-        return None
-    return TeamFormationDecision.reject(
-        agents=filtered_team_members.agents,
-        reason=filtered_team_members.rejection_message,
-    )
+def _normalize_team_request_members(
+    agent_ids: list[MatrixID],
+    config: Config | None,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
+    """Deduplicate ad hoc candidates after filtering out non-teamable agents."""
+    normalized: list[MatrixID] = []
+    seen_ids: set[str] = set()
+    for agent_id in _filter_team_request_members(agent_ids, config, runtime_paths):
+        if agent_id.full_id in seen_ids:
+            continue
+        normalized.append(agent_id)
+        seen_ids.add(agent_id.full_id)
+    return normalized
 
 
-def _resolved_team_members_or_fallback(
-    team_agents: list[MatrixID],
-    *,
-    allow_partial: bool,
-) -> list[MatrixID] | TeamFormationDecision:
-    """Return the final team members or one fallback outcome after filtering."""
-    if len(team_agents) >= 2:
-        return team_agents
-    if allow_partial and len(team_agents) == 1:
-        return TeamFormationDecision.individual(agent=team_agents[0])
-    return TeamFormationDecision.none()
-
-
-def _candidate_team_agents(
+def _select_team_request(
     tagged_agents: list[MatrixID],
     all_mentioned_in_thread: list[MatrixID],
     agents_in_thread: list[MatrixID],
@@ -531,196 +595,324 @@ def _candidate_team_agents(
     is_dm_room: bool,
     is_thread: bool,
     available_agents_in_room: list[MatrixID] | None,
-) -> _CandidateTeamMembers:
-    """Return the candidate team members for one response.
+) -> _SelectedTeamRequest:
+    """Return the normalized team request implied by one message context."""
+    normalized_tagged_agents = _normalize_team_request_members(tagged_agents, config, runtime_paths)
+    if len(normalized_tagged_agents) > 1:
+        logger.info(f"Team formation needed for tagged agents: {normalized_tagged_agents}")
+        return _SelectedTeamRequest(TeamIntent.EXPLICIT_MEMBERS, normalized_tagged_agents)
 
-    Explicit tags preserve the raw requested agent set so the policy can reject
-    partially unavailable requests instead of silently collapsing them to a
-    single visible agent. Implicit thread/DM sources are advisory and may
-    degrade after availability or support filtering.
-    """
-    if len(tagged_agents) > 1:
-        logger.info(f"Team formation needed for tagged agents: {tagged_agents}")
-        return _candidate_explicit_team_agents(
-            tagged_agents,
-            room,
-            config,
-            runtime_paths,
-            available_agents_in_room=available_agents_in_room,
-        )
-    if not tagged_agents and len(all_mentioned_in_thread) > 1:
-        logger.info(f"Team formation needed for previously mentioned agents: {all_mentioned_in_thread}")
-        return _CandidateTeamMembers(all_mentioned_in_thread, _TeamCandidateSource.THREAD_MENTIONS)
-    if not tagged_agents and len(agents_in_thread) > 1:
-        logger.info(f"Team formation needed for thread agents: {agents_in_thread}")
-        return _CandidateTeamMembers(agents_in_thread, _TeamCandidateSource.THREAD_PARTICIPANTS)
-    if not (is_dm_room and not is_thread and not tagged_agents and room and config):
-        return _CandidateTeamMembers([], _TeamCandidateSource.DM_FALLBACK)
+    normalized_mentioned_agents = _normalize_team_request_members(all_mentioned_in_thread, config, runtime_paths)
+    if not normalized_tagged_agents and len(normalized_mentioned_agents) > 1:
+        logger.info(f"Team formation needed for previously mentioned agents: {normalized_mentioned_agents}")
+        return _SelectedTeamRequest(TeamIntent.IMPLICIT_THREAD_TEAM, normalized_mentioned_agents)
+
+    normalized_thread_agents = _normalize_team_request_members(agents_in_thread, config, runtime_paths)
+    if not normalized_tagged_agents and len(normalized_thread_agents) > 1:
+        logger.info(f"Team formation needed for thread agents: {normalized_thread_agents}")
+        return _SelectedTeamRequest(TeamIntent.IMPLICIT_THREAD_TEAM, normalized_thread_agents)
+
+    if not (is_dm_room and not is_thread and not normalized_tagged_agents and room and config):
+        return _SelectedTeamRequest(None, [])
 
     available_agents = available_agents_in_room
     if available_agents is None:
         available_agents = get_available_agents_in_room(room, config, runtime_paths)
-    if len(available_agents) <= 1:
-        return _CandidateTeamMembers([], _TeamCandidateSource.DM_FALLBACK)
+    normalized_available_agents = _normalize_team_request_members(available_agents, config, runtime_paths)
+    if len(normalized_available_agents) <= 1:
+        return _SelectedTeamRequest(None, [])
 
-    logger.info(f"Team formation needed for DM room with multiple agents: {available_agents}")
-    return _CandidateTeamMembers(available_agents, _TeamCandidateSource.DM_FALLBACK)
+    logger.info(f"Team formation needed for DM room with multiple agents: {normalized_available_agents}")
+    return _SelectedTeamRequest(TeamIntent.DM_AUTO_TEAM, normalized_available_agents)
 
 
-def _sender_unavailable_team_agents_message(agent_names: list[str]) -> str:
+def _sender_unavailable_team_agents_message(agent_names: list[str], *, prefix: str = "Team request") -> str:
     """Return the rejection message for requested agents hidden from this sender."""
     if len(agent_names) == 1:
-        return f"Team request includes agent '{agent_names[0]}' that is not available to you in this room."
+        return f"{prefix} includes agent '{agent_names[0]}' that is not available to you in this room."
     return (
-        "Team request includes agents "
+        f"{prefix} includes agents "
         + ", ".join(f"'{agent_name}'" for agent_name in agent_names)
         + " that are not available to you in this room."
     )
 
 
-def _mixed_unavailable_team_agents_message(agent_names: list[str]) -> str:
+def _mixed_unavailable_team_agents_message(agent_names: list[str], *, prefix: str = "Team request") -> str:
     """Return the rejection message when requested agents fail multiple availability checks."""
     if len(agent_names) == 1:
-        return f"Team request includes agent '{agent_names[0]}' that is not available for this request."
+        return f"{prefix} includes agent '{agent_names[0]}' that is not available for this request."
     return (
-        "Team request includes agents "
+        f"{prefix} includes agents "
         + ", ".join(f"'{agent_name}'" for agent_name in agent_names)
         + " that are not available for this request."
     )
 
 
-def _explicit_request_sender_available_agents(
-    *,
-    available_agents_in_room: list[MatrixID] | None,
-    room_available_agents: list[MatrixID] | None,
-) -> list[MatrixID] | None:
-    """Return sender-visible agents for one explicit request.
-
-    `None` means the caller did not supply sender-specific visibility and room
-    visibility may be used as a fallback.
-    `[]` means sender-specific visibility was supplied and the sender may talk
-    to zero agents, which must not be collapsed into room visibility.
-    """
-    if available_agents_in_room is not None:
-        return available_agents_in_room
-    return room_available_agents
-
-
-def _candidate_explicit_team_agents(
-    tagged_agents: list[MatrixID],
-    room: nio.MatrixRoom | None,
-    config: Config | None,
-    runtime_paths: RuntimePaths,
-    *,
-    available_agents_in_room: list[MatrixID] | None,
-) -> _CandidateTeamMembers:
-    """Resolve explicit tagged requests without collapsing hidden members away."""
-    if config is None:
-        return _CandidateTeamMembers(tagged_agents, _TeamCandidateSource.EXPLICIT_REQUEST)
-
-    room_available_agents: list[MatrixID] | None = None
-    if room is not None:
-        room_available_agents = get_available_agents_in_room(room, config, runtime_paths)
-    sender_available_agents = _explicit_request_sender_available_agents(
-        available_agents_in_room=available_agents_in_room,
-        room_available_agents=room_available_agents,
-    )
-    if sender_available_agents is None:
-        return _CandidateTeamMembers(tagged_agents, _TeamCandidateSource.EXPLICIT_REQUEST)
-
-    sender_available_ids = {agent_id.full_id for agent_id in sender_available_agents}
-    filtered_agents = [agent_id for agent_id in tagged_agents if agent_id.full_id in sender_available_ids]
-    if len(filtered_agents) == len(tagged_agents):
-        return _CandidateTeamMembers(filtered_agents, _TeamCandidateSource.EXPLICIT_REQUEST)
-
-    room_available_ids = (
-        {agent_id.full_id for agent_id in room_available_agents}
-        if room_available_agents is not None
-        else sender_available_ids
-    )
-    unavailable_in_room: list[str] = []
-    unavailable_for_sender: list[str] = []
-    for agent_id in tagged_agents:
-        if agent_id.full_id in sender_available_ids:
-            continue
-        agent_name = agent_id.agent_name(config, runtime_paths) or agent_id.username
-        if agent_id.full_id not in room_available_ids:
-            unavailable_in_room.append(agent_name)
-        else:
-            unavailable_for_sender.append(agent_name)
-
-    unavailable_names = unavailable_in_room + unavailable_for_sender
-    if unavailable_in_room and not unavailable_for_sender:
-        rejection_message = _room_unavailable_team_agents_message(unavailable_in_room)
-    elif unavailable_for_sender and not unavailable_in_room:
-        rejection_message = _sender_unavailable_team_agents_message(unavailable_for_sender)
-    else:
-        rejection_message = _mixed_unavailable_team_agents_message(unavailable_names)
-    rejection_agents = filtered_agents or sender_available_agents
-    logger.info(
-        "Rejecting explicit team request because requested members are unavailable",
-        unavailable_in_room=sorted(unavailable_in_room),
-        unavailable_for_sender=sorted(unavailable_for_sender),
-    )
-    return _CandidateTeamMembers(
-        rejection_agents,
-        _TeamCandidateSource.EXPLICIT_REQUEST,
-        rejection_message,
-    )
-
-
-def _room_unavailable_team_agents_message(agent_names: list[str]) -> str:
+def _room_unavailable_team_agents_message(agent_names: list[str], *, prefix: str = "Team request") -> str:
     """Return the rejection message for team members that are not available in the room."""
     if len(agent_names) == 1:
-        return f"Team request includes agent '{agent_names[0]}' that is not available in this room."
+        return f"{prefix} includes agent '{agent_names[0]}' that is not available in this room."
     return (
-        "Team request includes agents "
+        f"{prefix} includes agents "
         + ", ".join(f"'{agent_name}'" for agent_name in agent_names)
         + " that are not available in this room."
     )
 
 
-def _filter_room_available_team_agents(
-    agent_ids: list[MatrixID],
+def _not_materializable_team_agents_message(agent_names: list[str], *, prefix: str) -> str:
+    """Return the rejection message for members that could not be materialized."""
+    if len(agent_names) == 1:
+        return f"{prefix} includes agent '{agent_names[0]}' that could not be materialized for this request."
+    return (
+        f"{prefix} includes agents "
+        + ", ".join(f"'{agent_name}'" for agent_name in agent_names)
+        + " that could not be materialized for this request."
+    )
+
+
+def _evaluate_team_members(
+    requested_members: list[MatrixID],
+    config: Config | None,
+    runtime_paths: RuntimePaths,
+    *,
     room: nio.MatrixRoom | None,
+    sender_visible_agents: list[MatrixID] | None,
+    materializable_agent_names: set[str] | None,
+) -> list[TeamResolutionMember]:
+    """Evaluate one status and response capability for each requested member."""
+    room_visible_ids: set[str] | None = None
+    if room is not None and config is not None:
+        room_visible_ids = {
+            agent_id.full_id
+            for agent_id in _normalize_team_request_members(
+                get_available_agents_in_room(room, config, runtime_paths),
+                config,
+                runtime_paths,
+            )
+        }
+    sender_visible_ids: set[str] | None = None
+    if sender_visible_agents is not None:
+        sender_visible_ids = {
+            agent_id.full_id
+            for agent_id in _normalize_team_request_members(sender_visible_agents, config, runtime_paths)
+        }
+
+    unsupported_agents: dict[str, tuple[str, ...] | None] = {}
+    if config is not None:
+        unsupported_agents = config.get_unsupported_team_agents(
+            [_team_member_name(agent_id, config, runtime_paths) for agent_id in requested_members],
+        )
+
+    member_statuses: list[TeamResolutionMember] = []
+    for agent_id in requested_members:
+        agent_name = _team_member_name(agent_id, config, runtime_paths)
+        private_targets = unsupported_agents.get(agent_name)
+        is_room_visible = room_visible_ids is None or agent_id.full_id in room_visible_ids
+        is_sender_visible = sender_visible_ids is None or agent_id.full_id in sender_visible_ids
+        is_materializable = materializable_agent_names is None or agent_name in materializable_agent_names
+        if not is_room_visible:
+            status = TeamMemberStatus.NOT_IN_ROOM
+        elif not is_sender_visible:
+            status = TeamMemberStatus.HIDDEN_FROM_SENDER
+        elif agent_name in unsupported_agents:
+            status = TeamMemberStatus.UNSUPPORTED_FOR_TEAM
+        elif not is_materializable:
+            status = TeamMemberStatus.NOT_MATERIALIZABLE
+        else:
+            status = TeamMemberStatus.ELIGIBLE
+        member_statuses.append(
+            TeamResolutionMember(
+                agent=agent_id,
+                name=agent_name,
+                status=status,
+                private_targets=private_targets,
+            ),
+        )
+    return member_statuses
+
+
+def _resolve_team_request(
+    *,
+    intent: TeamIntent,
+    requested_members: list[MatrixID],
+    member_statuses: list[TeamResolutionMember],
+    config: Config | None,
+    reason_prefix: str,
+    mode: TeamMode | None = None,
+) -> TeamResolution:
+    """Apply one clear outcome policy after intent and member evaluation."""
+    eligible_members = [member.agent for member in member_statuses if member.status is TeamMemberStatus.ELIGIBLE]
+    rejected_members = [member for member in member_statuses if member.status is not TeamMemberStatus.ELIGIBLE]
+
+    if intent in {TeamIntent.EXPLICIT_MEMBERS, TeamIntent.CONFIGURED_TEAM}:
+        if rejected_members:
+            return TeamResolution.reject(
+                intent=intent,
+                requested_members=requested_members,
+                member_statuses=member_statuses,
+                reason=_team_resolution_reason(rejected_members, config, reason_prefix=reason_prefix),
+            )
+        if intent is TeamIntent.CONFIGURED_TEAM or len(eligible_members) >= 2:
+            return TeamResolution.team(
+                intent=intent,
+                requested_members=requested_members,
+                member_statuses=member_statuses,
+                eligible_members=eligible_members,
+                mode=mode or TeamMode.COLLABORATE,
+            )
+        return TeamResolution.none()
+
+    if len(eligible_members) >= 2:
+        return TeamResolution.team(
+            intent=intent,
+            requested_members=requested_members,
+            member_statuses=member_statuses,
+            eligible_members=eligible_members,
+            mode=mode or TeamMode.COLLABORATE,
+        )
+    if len(eligible_members) == 1:
+        return TeamResolution.individual(
+            intent=intent,
+            requested_members=requested_members,
+            member_statuses=member_statuses,
+            agent=eligible_members[0],
+        )
+    return TeamResolution(
+        intent=intent,
+        requested_members=requested_members,
+        member_statuses=member_statuses,
+        eligible_members=[],
+        outcome=TeamOutcome.NONE,
+    )
+
+
+def _team_resolution_reason(
+    rejected_members: list[TeamResolutionMember],
+    config: Config | None,
+    *,
+    reason_prefix: str,
+) -> str:
+    """Return one shared user-facing explanation for a rejected team request."""
+    rejection_statuses = {member.status for member in rejected_members}
+    if len(rejection_statuses) > 1:
+        return _mixed_team_resolution_reason(
+            rejected_members,
+            config,
+            reason_prefix=reason_prefix,
+        )
+
+    unsupported_members = [
+        member for member in rejected_members if member.status is TeamMemberStatus.UNSUPPORTED_FOR_TEAM
+    ]
+    if unsupported_members and len(unsupported_members) == len(rejected_members) and config is not None:
+        first_unsupported_member = unsupported_members[0]
+        return config.unsupported_team_agent_message(
+            first_unsupported_member.name,
+            prefix=reason_prefix,
+            private_targets=first_unsupported_member.private_targets,
+        )
+
+    not_materializable_members = [
+        member for member in rejected_members if member.status is TeamMemberStatus.NOT_MATERIALIZABLE
+    ]
+    if not_materializable_members and len(not_materializable_members) == len(rejected_members):
+        return _not_materializable_team_agents_message(
+            [member.name for member in not_materializable_members],
+            prefix=reason_prefix,
+        )
+
+    room_unavailable_members = [
+        member.name for member in rejected_members if member.status is TeamMemberStatus.NOT_IN_ROOM
+    ]
+    hidden_members = [
+        member.name for member in rejected_members if member.status is TeamMemberStatus.HIDDEN_FROM_SENDER
+    ]
+    if room_unavailable_members and not hidden_members and len(room_unavailable_members) == len(rejected_members):
+        return _room_unavailable_team_agents_message(room_unavailable_members, prefix=reason_prefix)
+    if hidden_members and not room_unavailable_members and len(hidden_members) == len(rejected_members):
+        return _sender_unavailable_team_agents_message(hidden_members, prefix=reason_prefix)
+    return _mixed_unavailable_team_agents_message([member.name for member in rejected_members], prefix=reason_prefix)
+
+
+def _mixed_team_resolution_reason(
+    rejected_members: list[TeamResolutionMember],
+    config: Config | None,
+    *,
+    reason_prefix: str,
+) -> str:
+    """Return a per-member explanation when one reject has mixed failure causes."""
+    details = [_team_resolution_member_detail(member, config) for member in rejected_members]
+    return f"{reason_prefix} cannot be satisfied: " + "; ".join(details)
+
+
+def _unsupported_team_member_detail(
+    member: TeamResolutionMember,
+    config: Config | None,
+) -> str:
+    """Return the unsupported-team explanation for one member."""
+    if config is None:
+        return f"agent '{member.name}' is unsupported for team requests"
+
+    private_targets = member.private_targets
+    if private_targets is None:
+        return f"agent '{member.name}' is unknown"
+    if member.name in private_targets:
+        return f"agent '{member.name}' is private and cannot participate in teams yet"
+    if len(private_targets) != 1:
+        return (
+            f"agent '{member.name}' reaches private agents "
+            f"{', '.join(repr(target) for target in private_targets)} via delegation "
+            "and cannot participate in teams yet"
+        )
+    return (
+        f"agent '{member.name}' reaches private agent '{private_targets[0]}' via delegation "
+        "and cannot participate in teams yet"
+    )
+
+
+def _team_resolution_member_detail(
+    member: TeamResolutionMember,
+    config: Config | None,
+) -> str:
+    """Return a member-specific reason fragment for mixed team-request rejects."""
+    if member.status is TeamMemberStatus.UNSUPPORTED_FOR_TEAM:
+        return _unsupported_team_member_detail(member, config)
+    if member.status is TeamMemberStatus.NOT_MATERIALIZABLE:
+        return f"agent '{member.name}' could not be materialized for this request"
+    if member.status is TeamMemberStatus.NOT_IN_ROOM:
+        return f"agent '{member.name}' is not available in this room"
+    if member.status is TeamMemberStatus.HIDDEN_FROM_SENDER:
+        return f"agent '{member.name}' is not available to you in this room"
+    return f"agent '{member.name}' is not available for this request"
+
+
+def resolve_configured_team(
+    team_name: str,
+    team_members: list[MatrixID],
+    mode: TeamMode,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    allow_partial: bool,
-    available_agents_in_room: list[MatrixID] | None,
-) -> _FilteredTeamMembers:
-    """Return the room-visible team members from one candidate set."""
-    room_available_agents = available_agents_in_room
-    if room_available_agents is None:
-        # Direct team-policy callers do not always have a live room object. Only enforce
-        # room-visible membership when the Matrix room context is actually available.
-        if room is None:
-            return _FilteredTeamMembers(agent_ids, None)
-        room_available_agents = get_available_agents_in_room(room, config, runtime_paths)
-    available_agent_ids = {agent_id.full_id for agent_id in room_available_agents}
-    filtered_agents = [agent_id for agent_id in agent_ids if agent_id.full_id in available_agent_ids]
-    if len(filtered_agents) == len(agent_ids):
-        return _FilteredTeamMembers(filtered_agents, None)
-
-    unavailable_agents = [
-        agent_id.agent_name(config, runtime_paths) or agent_id.username
-        for agent_id in agent_ids
-        if agent_id.full_id not in available_agent_ids
-    ]
-    if allow_partial:
-        logger.info(
-            "Skipping unavailable team members during ad hoc team formation",
-            skipped_agents=sorted(unavailable_agents),
-        )
-        return _FilteredTeamMembers(filtered_agents, None)
-
-    rejection_agents = filtered_agents or room_available_agents
-    rejection_message = _room_unavailable_team_agents_message(unavailable_agents)
-    logger.info(
-        "Rejecting team formation because requested members are not available in the room",
-        unavailable_agents=sorted(unavailable_agents),
+    materializable_agent_names: set[str] | None = None,
+) -> TeamResolution:
+    """Resolve one configured team while preserving the exact configured membership."""
+    requested_members = _filter_team_request_members(team_members, config, runtime_paths)
+    member_statuses = _evaluate_team_members(
+        requested_members,
+        config,
+        runtime_paths,
+        room=None,
+        sender_visible_agents=None,
+        materializable_agent_names=materializable_agent_names,
     )
-    return _FilteredTeamMembers(rejection_agents, rejection_message)
+    return _resolve_team_request(
+        intent=TeamIntent.CONFIGURED_TEAM,
+        requested_members=requested_members,
+        member_statuses=member_statuses,
+        config=config,
+        reason_prefix=f"Team '{team_name}'",
+        mode=mode,
+    )
 
 
 def _build_prompt_with_context(
@@ -755,113 +947,41 @@ def _build_prompt_with_context(
     return message
 
 
-def _filter_supported_team_agents(
-    agent_ids: list[MatrixID],
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    allow_partial: bool,
-) -> _FilteredTeamMembers:
-    """Return the team-eligible agents from one candidate set."""
-    candidate_agents: list[tuple[MatrixID, str]] = []
-    for agent_id in agent_ids:
-        agent_name = agent_id.agent_name(config, runtime_paths) or agent_id.username
-        if agent_name == ROUTER_AGENT_NAME:
-            continue
-        candidate_agents.append((agent_id, agent_name))
-    unsupported_agents = config.get_unsupported_team_agents([name for _, name in candidate_agents])
-    if unsupported_agents and not allow_partial:
-        first_unsupported_agent, private_targets = next(iter(unsupported_agents.items()))
-        rejection_message = config.unsupported_team_agent_message(
-            first_unsupported_agent,
-            prefix="Team request",
-            private_targets=private_targets,
-        )
-        logger.info(
-            "Rejecting team formation because requested members are unsupported",
-            unsupported_agents={
-                agent_name: config.unsupported_team_agent_message(
-                    agent_name,
-                    prefix="Team request",
-                    private_targets=private_targets,
-                )
-                for agent_name, private_targets in unsupported_agents.items()
-            },
-        )
-        return _FilteredTeamMembers([agent_id for agent_id, _ in candidate_agents], rejection_message)
-    if unsupported_agents:
-        logger.info(
-            "Skipping unsupported team members during ad hoc team formation",
-            skipped_agents=sorted(unsupported_agents),
-        )
-    return _FilteredTeamMembers(
-        [agent_id for agent_id, agent_name in candidate_agents if agent_name not in unsupported_agents],
-        None,
-    )
-
-
-def _get_agents_from_orchestrator(
-    agent_names: list[str],
+def _build_agent_from_orchestrator(
+    agent_name: str,
     orchestrator: MultiAgentOrchestrator,
     execution_identity: ToolExecutionIdentity | None,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
-) -> list[Agent]:
-    """Get Agent instances from orchestrator for the given agent names."""
+) -> Agent:
+    """Create one exact team member from orchestrator-backed runtime state."""
     assert orchestrator.config is not None
-    agents: list[Agent] = []
 
     def _shared_manager(base_id: str) -> KnowledgeManager | None:
         return orchestrator.knowledge_managers.get(base_id)
 
-    def _on_missing_agent_bases(agent_name: str, missing_base_ids: list[str]) -> None:
+    def _on_missing_agent_bases(missing_base_ids: list[str]) -> None:
         logger.warning(
             "Knowledge bases not available for team agent",
             agent_name=agent_name,
             knowledge_bases=missing_base_ids,
         )
 
-    for name in agent_names:
-        if name not in orchestrator.agent_bots:
-            logger.warning(f"Agent '{name}' not found in orchestrator - may not be in room")
-            continue
-        knowledge = get_agent_knowledge(
-            name,
-            orchestrator.config,
-            orchestrator.runtime_paths,
-            request_knowledge_managers=request_knowledge_managers,
-            shared_manager_lookup=_shared_manager,
-            on_missing_bases=lambda missing_base_ids, agent_name=name: _on_missing_agent_bases(
-                agent_name,
-                missing_base_ids,
-            ),
-        )
-        agent = create_agent(
-            name,
-            orchestrator.config,
-            orchestrator.runtime_paths,
-            execution_identity=execution_identity,
-            knowledge=knowledge,
-            include_interactive_questions=False,
-        )
-        agents.append(agent)
-
-    return agents
-
-
-def _available_team_agent_names(
-    agent_names: list[str],
-    orchestrator: MultiAgentOrchestrator,
-) -> list[str]:
-    """Return team member names that can be materialized from the orchestrator."""
-    available_agent_names: list[str] = []
-    for name in agent_names:
-        if name == ROUTER_AGENT_NAME:
-            continue
-        if name not in orchestrator.agent_bots:
-            logger.warning(f"Agent '{name}' not found in orchestrator - may not be in room")
-            continue
-        available_agent_names.append(name)
-    return available_agent_names
+    knowledge = get_agent_knowledge(
+        agent_name,
+        orchestrator.config,
+        orchestrator.runtime_paths,
+        request_knowledge_managers=request_knowledge_managers,
+        shared_manager_lookup=_shared_manager,
+        on_missing_bases=_on_missing_agent_bases,
+    )
+    return create_agent(
+        agent_name,
+        orchestrator.config,
+        orchestrator.runtime_paths,
+        execution_identity=execution_identity,
+        knowledge=knowledge,
+        include_interactive_questions=False,
+    )
 
 
 def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
@@ -869,30 +989,33 @@ def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
     return [name for name in agent_names if name != ROUTER_AGENT_NAME]
 
 
-def _resolve_team_members(
+def _materialize_team_members(
     agent_names: list[str],
     orchestrator: MultiAgentOrchestrator,
     execution_identity: ToolExecutionIdentity | None,
+    *,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
-) -> _ResolvedTeamMembers:
-    """Resolve the materialized team-member set for one request."""
-    assert orchestrator.config is not None
+    reason_prefix: str = "Team request",
+) -> ResolvedExactTeamMembers:
+    """Materialize the exact requested team-member set without silent fallback."""
     requested_agent_names = _requested_team_agent_names(agent_names)
-    orchestrator.config.assert_team_agents_supported(requested_agent_names)
-    available_agent_names = _available_team_agent_names(requested_agent_names, orchestrator)
-    agents = _get_agents_from_orchestrator(
-        available_agent_names,
-        orchestrator,
-        execution_identity,
-        request_knowledge_managers=request_knowledge_managers,
+    if not requested_agent_names:
+        raise ValueError(_NO_AGENTS_RESPONSE)
+    team_members = materialize_exact_requested_team_members(
+        requested_agent_names,
+        materializable_agent_names=resolve_live_shared_agent_names(orchestrator),
+        build_member=lambda name: _build_agent_from_orchestrator(
+            name,
+            orchestrator,
+            execution_identity,
+            request_knowledge_managers=request_knowledge_managers,
+        ),
     )
-    display_names = [str(agent.name) for agent in agents if agent.name]
-    return _ResolvedTeamMembers(
-        requested_agent_names=requested_agent_names,
-        available_agent_names=available_agent_names,
-        agents=agents,
-        display_names=display_names,
-    )
+    if team_members.failed_agent_names:
+        raise ValueError(
+            _not_materializable_team_agents_message(team_members.failed_agent_names, prefix=reason_prefix),
+        )
+    return team_members
 
 
 async def _ensure_request_team_knowledge_managers(
@@ -993,9 +1116,6 @@ def select_model_for_team(
     return "default"
 
 
-_NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
-
-
 async def team_response(
     agent_names: list[str],
     mode: TeamMode,
@@ -1007,6 +1127,8 @@ async def team_response(
     media: MediaInputs | None = None,
     session_id: str | None = None,
     user_id: str | None = None,
+    *,
+    reason_prefix: str = "Team request",
 ) -> str:
     """Create a team and execute response."""
     assert orchestrator.config is not None
@@ -1017,19 +1139,21 @@ async def team_response(
         orchestrator,
         execution_identity,
     )
-    team_members = _resolve_team_members(
-        agent_names,
-        orchestrator,
-        execution_identity,
-        request_knowledge_managers=request_knowledge_managers,
-    )
+    try:
+        team_members = _materialize_team_members(
+            agent_names,
+            orchestrator,
+            execution_identity,
+            request_knowledge_managers=request_knowledge_managers,
+            reason_prefix=reason_prefix,
+        )
+    except ValueError as exc:
+        return str(exc)
     agents = team_members.agents
-    if not agents:
-        return _NO_AGENTS_RESPONSE
 
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
-    team = _create_team_instance(agents, team_members.available_agent_names, mode, orchestrator, model_name)
+    team = _create_team_instance(agents, team_members.requested_agent_names, mode, orchestrator, model_name)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
 
@@ -1085,7 +1209,7 @@ async def team_response(
 
 
 async def _team_response_stream_raw(
-    team_members: _ResolvedTeamMembers,
+    team_members: ResolvedExactTeamMembers,
     mode: TeamMode,
     message: str,
     orchestrator: MultiAgentOrchestrator,
@@ -1111,7 +1235,7 @@ async def _team_response_stream_raw(
 
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
-    team = _create_team_instance(agents, team_members.available_agent_names, mode, orchestrator, model_name)
+    team = _create_team_instance(agents, team_members.requested_agent_names, mode, orchestrator, model_name)
     logger.info(f"Created team with {len(agents)} agents in {mode.value} mode")
     for agent in agents:
         logger.debug(f"Team member: {agent.name}")
@@ -1153,6 +1277,8 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     show_tool_calls: bool = True,
     session_id: str | None = None,
     user_id: str | None = None,
+    *,
+    reason_prefix: str = "Team request",
 ) -> AsyncIterator[_TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
 
@@ -1161,20 +1287,26 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     arrive so the final shape matches the non-stream style.
     """
     assert orchestrator.config is not None
-    requested_agent_names = [
-        mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids
-    ]
+    requested_agent_names = _requested_team_agent_names(
+        [mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids],
+    )
+    orchestrator.config.assert_team_agents_supported(requested_agent_names)
     request_knowledge_managers = await _ensure_request_team_knowledge_managers(
         requested_agent_names,
         orchestrator,
         execution_identity,
     )
-    team_members = _resolve_team_members(
-        requested_agent_names,
-        orchestrator,
-        execution_identity,
-        request_knowledge_managers=request_knowledge_managers,
-    )
+    try:
+        team_members = _materialize_team_members(
+            requested_agent_names,
+            orchestrator,
+            execution_identity,
+            request_knowledge_managers=request_knowledge_managers,
+            reason_prefix=reason_prefix,
+        )
+    except ValueError as exc:
+        yield str(exc)
+        return
     agent_names = team_members.display_names
     display_names = team_members.display_names
 

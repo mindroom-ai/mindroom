@@ -21,7 +21,7 @@ from mindroom.constants import (
 )
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.teams import TeamFormationDecision
+from mindroom.teams import TeamResolution
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -197,7 +197,7 @@ async def test_voice_transcription_permissions_use_original_sender(mock_home_bot
         patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide_team,
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
     ):
-        mock_decide_team.return_value = TeamFormationDecision.none()
+        mock_decide_team.return_value = TeamResolution.none()
 
         mock_extract_agent.side_effect = _extract_agent_side_effect
 

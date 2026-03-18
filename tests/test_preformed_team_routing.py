@@ -251,6 +251,59 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
 
 
 @pytest.mark.asyncio
+async def test_preformed_team_rejection_edits_existing_message(config_with_team: Config, tmp_path: Path) -> None:
+    """Configured-team rejection during regeneration should edit the existing response."""
+    config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
+    runtime_paths = runtime_paths_for(config_with_team)
+    ids = config_with_team.get_ids(runtime_paths)
+    domain = config_with_team.get_domain(runtime_paths)
+    team_user = AgentMatrixUser(
+        agent_name="t1",
+        user_id=ids["t1"].full_id,
+        display_name="Team One",
+        password="p",  # noqa: S106
+    )
+    team_matrix_ids = [
+        MatrixID.from_agent("a1", domain, runtime_paths),
+        MatrixID.from_agent("a2", domain, runtime_paths),
+    ]
+    bot = TeamBot(
+        agent_user=team_user,
+        storage_path=tmp_path,
+        config=config_with_team,
+        runtime_paths=runtime_paths,
+        rooms=["!room:localhost"],
+        team_agents=team_matrix_ids,
+        team_mode="coordinate",
+        enable_streaming=False,
+    )
+    bot.client = AsyncMock()
+    bot.orchestrator = MagicMock()
+    bot.orchestrator.agent_bots = {"a1": MagicMock()}
+    bot._edit_message = AsyncMock(return_value=True)
+    bot._send_response = AsyncMock(return_value="$new_response")
+
+    event_id = await bot._generate_response(
+        room_id="!room:localhost",
+        prompt="@t1 please retry",
+        reply_to_event_id="$evt1",
+        thread_id=None,
+        thread_history=[],
+        existing_event_id="$existing_response",
+        user_id="@user:localhost",
+    )
+
+    assert event_id == "$existing_response"
+    bot._edit_message.assert_awaited_once_with(
+        "!room:localhost",
+        "$existing_response",
+        "Team 't1' includes agent 'a2' that could not be materialized for this request.",
+        None,
+    )
+    bot._send_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_team: Config, tmp_path: Path) -> None:
     """TeamBot should continue the resolved thread when mention comes as a plain reply."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)

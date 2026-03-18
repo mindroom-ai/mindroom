@@ -17,6 +17,9 @@ import { useForm, Controller } from 'react-hook-form';
 import { Team } from '@/types/config';
 import { useScopedConfigValidation } from '@/hooks/useScopedConfigValidation';
 
+const AGENT_POLICY_UNAVAILABLE_REASON =
+  'Agent policy preview is unavailable. Save or refresh to validate team eligibility.';
+
 export function TeamEditor() {
   const {
     teams,
@@ -26,7 +29,7 @@ export function TeamEditor() {
     updateTeam,
     deleteTeam,
     saveConfig,
-    teamEligibilityByAgent,
+    agentPoliciesByAgent,
     config,
     isDirty,
     selectTeam,
@@ -241,8 +244,11 @@ export function TeamEditor() {
               control={control}
               render={({ field }) => {
                 const isChecked = field.value.includes(agent.id);
-                const eligibilityReason = teamEligibilityByAgent[agent.id] ?? null;
-                const isSelectable = eligibilityReason == null;
+                const agentPolicy = agentPoliciesByAgent[agent.id];
+                const eligibilityReason =
+                  agentPolicy?.team_eligibility_reason ??
+                  (agentPolicy == null ? AGENT_POLICY_UNAVAILABLE_REASON : null);
+                const isSelectable = agentPolicy != null && eligibilityReason == null;
                 return (
                   <div className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
                     <Checkbox

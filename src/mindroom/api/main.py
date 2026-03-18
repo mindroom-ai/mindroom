@@ -7,17 +7,18 @@ import importlib
 import secrets
 import threading
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, cast
 from urllib.parse import quote, unquote
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom import constants
+from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.api.config_lifecycle import ApiConfigLock
 from mindroom.api.config_lifecycle import load_config_from_file as load_api_config_from_file
 from mindroom.api.config_lifecycle import run_config_write as run_api_config_write
@@ -35,7 +36,6 @@ from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
-from mindroom.config.main import team_eligibility_reasons_for_agents
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.file_watcher import watch_file
 from mindroom.frontend_assets import ensure_frontend_dist_dir
@@ -76,10 +76,49 @@ class _ApiContext:
     auth_state: _ApiAuthState | None = None
 
 
-class TeamEligibilityRequest(BaseModel):
-    """Payload for deriving editor-facing team eligibility from draft agent config."""
+class DraftAgentPolicyDefaultsRequest(BaseModel):
+    """Subset of config defaults required to preview derived agent policy."""
 
-    agents: dict[str, dict[str, Any]]
+    model_config = ConfigDict(extra="ignore")
+
+    worker_scope: Literal["shared", "user", "user_agent"] | None = None
+
+
+class DraftAgentPolicyKnowledgeRequest(BaseModel):
+    """Subset of private knowledge config required to preview derived policy."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool | None = None
+    path: str | None = None
+
+
+class DraftAgentPolicyPrivateRequest(BaseModel):
+    """Subset of private config required to preview derived policy."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    per: Literal["user", "user_agent"] | None = None
+    knowledge: DraftAgentPolicyKnowledgeRequest | None = None
+
+
+class DraftAgentPolicyAgentRequest(BaseModel):
+    """Subset of agent config required to preview derived policy."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    worker_scope: Literal["shared", "user", "user_agent"] | None = None
+    private: DraftAgentPolicyPrivateRequest | None = None
+    delegate_to: list[str] = Field(default_factory=list)
+
+
+class AgentPoliciesRequest(BaseModel):
+    """Payload for deriving draft agent policies from the current editor state."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    defaults: DraftAgentPolicyDefaultsRequest | None = None
+    agents: dict[str, DraftAgentPolicyAgentRequest]
 
 
 def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> float:
@@ -762,13 +801,25 @@ async def save_config(
     return {"success": True}
 
 
-@app.post("/api/config/team-eligibility")
-async def get_team_eligibility(
-    payload: TeamEligibilityRequest,
+@app.post("/api/config/agent-policies")
+async def get_agent_policies(
+    payload: AgentPoliciesRequest,
     _user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, dict[str, str | None]]:
-    """Return backend-derived team-eligibility reasons for the current draft agents."""
-    return {"team_eligibility": team_eligibility_reasons_for_agents(payload.agents)}
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Return backend-derived policies for the current draft agent config."""
+    default_worker_scope = payload.defaults.worker_scope if payload.defaults is not None else None
+    agent_payload = {
+        agent_name: agent_config.model_dump(exclude_none=True) for agent_name, agent_config in payload.agents.items()
+    }
+    policy_index = resolve_agent_policy_index(
+        build_agent_policy_seeds(
+            agent_payload,
+            default_worker_scope=default_worker_scope,
+        ),
+    )
+    return {
+        "agent_policies": {agent_name: asdict(policy) for agent_name, policy in policy_index.policies.items()},
+    }
 
 
 @app.get("/api/config/agents")

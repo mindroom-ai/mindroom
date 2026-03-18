@@ -77,6 +77,7 @@ from .orchestration.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
     from pathlib import Path
+    from types import FrameType
 
     from .constants import RuntimePaths
     from .knowledge.manager import KnowledgeManager
@@ -85,6 +86,20 @@ logger = get_logger(__name__)
 
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
+
+
+class _SignalAwareUvicornServer(uvicorn.Server):
+    """Uvicorn server that marks the shared shutdown event on signal exit."""
+
+    def __init__(self, config: uvicorn.Config, shutdown_requested: asyncio.Event | None) -> None:
+        super().__init__(config)
+        self._shutdown_requested = shutdown_requested
+
+    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+        """Mirror Uvicorn signal handling and surface shutdown to the orchestrator."""
+        if self._shutdown_requested is not None:
+            self._shutdown_requested.set()
+        super().handle_exit(sig, frame)
 
 
 @dataclass
@@ -940,34 +955,44 @@ async def _run_api_server(
     port: int,
     log_level: str,
     runtime_paths: RuntimePaths,
+    shutdown_requested: asyncio.Event | None = None,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api import main as api_main  # noqa: PLC0415
 
     api_main.initialize_api_app(api_main.app, runtime_paths)
     config = uvicorn.Config(api_main.app, host=host, port=port, log_level=log_level.lower())
-    server = uvicorn.Server(config)
+    server = _SignalAwareUvicornServer(config, shutdown_requested)
     await server.serve()
 
 
 async def _run_auxiliary_task_forever(
     task_name: str,
     operation: Callable[[], Awaitable[None]],
+    *,
+    should_restart: Callable[[], bool] | None = None,
 ) -> None:
     """Restart a non-critical background task whenever it exits or crashes."""
+    restart_allowed = (lambda: True) if should_restart is None else should_restart
     restart_count = 0
-    while True:
+    while restart_allowed():
         started_at = time.monotonic()
         try:
             await operation()
+            if not restart_allowed():
+                return
             logger.warning("Auxiliary task exited; restarting", task_name=task_name)
         except asyncio.CancelledError:
             raise
         except Exception:
+            if not restart_allowed():
+                return
             logger.exception(
                 "Auxiliary task crashed; restarting",
                 task_name=task_name,
             )
+        if not restart_allowed():
+            return
         if time.monotonic() - started_at >= _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS:
             restart_count = 0
         restart_count += 1
@@ -1004,6 +1029,7 @@ async def main(
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
     set_runtime_starting()
     auxiliary_tasks: list[asyncio.Task] = []
+    shutdown_requested = asyncio.Event()
 
     try:
         auxiliary_specs = [
@@ -1021,7 +1047,7 @@ async def main(
             auxiliary_specs.append(
                 (
                     "bundled API server",
-                    lambda: _run_api_server(api_host, api_port, log_level, runtime_paths),
+                    lambda: _run_api_server(api_host, api_port, log_level, runtime_paths, shutdown_requested),
                     "api_server_supervisor",
                 ),
             )
@@ -1029,7 +1055,11 @@ async def main(
         for task_name, operation, supervisor_name in auxiliary_specs:
             auxiliary_tasks.append(
                 asyncio.create_task(
-                    _run_auxiliary_task_forever(task_name, operation),
+                    _run_auxiliary_task_forever(
+                        task_name,
+                        operation,
+                        should_restart=lambda: not shutdown_requested.is_set(),
+                    ),
                     name=supervisor_name,
                 ),
             )
@@ -1037,11 +1067,14 @@ async def main(
         await orchestrator.start()
 
     except KeyboardInterrupt:
+        shutdown_requested.set()
         logger.info("Multi-agent bot system stopped by user")
     except Exception:
+        shutdown_requested.set()
         logger.exception("Error in orchestrator")
         raise
     finally:
+        shutdown_requested.set()
         # Cancel auxiliary supervisors before shutting down the orchestrator itself.
         for task in auxiliary_tasks:
             task.cancel()

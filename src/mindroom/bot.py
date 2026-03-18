@@ -52,10 +52,14 @@ from mindroom.streaming import (
     is_in_progress_message,
     send_streaming_response,
 )
+from mindroom.team_runtime_resolution import resolve_live_shared_agent_names
 from mindroom.teams import (
-    TeamFormationDecision,
+    TeamIntent,
     TeamMode,
+    TeamOutcome,
+    TeamResolution,
     decide_team_formation,
+    resolve_configured_team,
     select_model_for_team,
     team_response,
     team_response_stream,
@@ -190,7 +194,7 @@ class _ResponseAction:
     """Result of the shared team-formation / should-respond decision."""
 
     kind: Literal["skip", "team", "individual", "reject"]
-    form_team: TeamFormationDecision | None = None
+    form_team: TeamResolution | None = None
     rejection_message: str | None = None
 
 
@@ -1440,12 +1444,13 @@ class AgentBot:
         """Execute resolved dispatch action and mark the source event responded."""
         if action.kind == "team":
             assert action.form_team is not None
+            assert action.form_team.mode is not None
             response_event_id = await self._generate_team_response_helper(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=dispatch.context.thread_id,
                 payload=payload,
-                team_agents=action.form_team.agents,
+                team_agents=action.form_team.eligible_members,
                 team_mode=action.form_team.mode,
                 thread_history=dispatch.context.thread_history,
                 requester_user_id=dispatch.requester_user_id,
@@ -1485,23 +1490,68 @@ class AgentBot:
         """Return whether this entity may reply to *sender_id*."""
         return is_sender_allowed_for_agent_reply(sender_id, self.agent_name, self.config, self.runtime_paths)
 
-    def _team_response_action(self, form_team: TeamFormationDecision) -> _ResponseAction | None:
-        """Return the action implied by one team-formation decision, if any."""
-        if form_team.kind not in {"team", "individual", "reject"}:
+    def _materializable_agent_names(self) -> set[str] | None:
+        """Return live shared agent names that can currently answer."""
+        if self.orchestrator is None:
             return None
-        if not form_team.agents:
+        return resolve_live_shared_agent_names(self.orchestrator, config=self.config)
+
+    def _filter_materializable_agents(
+        self,
+        agent_ids: list[MatrixID],
+        materializable_agent_names: set[str] | None,
+    ) -> list[MatrixID]:
+        """Keep only agents that can currently be materialized."""
+        if materializable_agent_names is None:
+            return agent_ids
+        return [
+            agent_id
+            for agent_id in agent_ids
+            if (agent_id.agent_name(self.config, self.runtime_paths) or agent_id.username) in materializable_agent_names
+        ]
+
+    def _response_owner_for_team_resolution(
+        self,
+        form_team: TeamResolution,
+        responder_pool: list[MatrixID],
+    ) -> MatrixID | None:
+        """Return the single live bot that should surface this resolution."""
+        if form_team.outcome is TeamOutcome.NONE:
+            return None
+
+        if form_team.outcome in {TeamOutcome.TEAM, TeamOutcome.INDIVIDUAL}:
+            response_owners = form_team.eligible_members
+        else:
+            response_owners = form_team.eligible_members
+            if not response_owners and form_team.intent is TeamIntent.EXPLICIT_MEMBERS:
+                response_owners = responder_pool
+
+        if not response_owners:
+            return None
+        return min(response_owners, key=lambda x: x.full_id)
+
+    def _team_response_action(
+        self,
+        form_team: TeamResolution,
+        responder_pool: list[MatrixID],
+    ) -> _ResponseAction | None:
+        """Return the action implied by one team-formation decision, if any."""
+        if form_team.outcome is TeamOutcome.NONE:
+            return None
+        response_owner = self._response_owner_for_team_resolution(form_team, responder_pool)
+        if response_owner is None:
             return _ResponseAction(kind="skip")
-        first_agent = min(form_team.agents, key=lambda x: x.full_id)
-        if self.matrix_id != first_agent:
+        if self.matrix_id != response_owner:
             return _ResponseAction(kind="skip")
-        if form_team.kind == "team":
+        if form_team.outcome is TeamOutcome.TEAM:
             return _ResponseAction(kind="team", form_team=form_team)
-        if form_team.kind == "individual":
+        if form_team.outcome is TeamOutcome.INDIVIDUAL:
             return _ResponseAction(kind="individual")
+        assert form_team.reason is not None
         return _ResponseAction(
             kind="reject",
             form_team=form_team,
-            rejection_message=form_team.rejection_message,
+            rejection_message=form_team.reason,
         )
 
     async def _handle_router_dispatch(
@@ -1573,6 +1623,17 @@ class AgentBot:
         formation + should-respond decision.
         """
         agents_in_thread = get_agents_in_thread(context.thread_history, self.config, self.runtime_paths)
+        available_agents_in_room = get_available_agents_for_sender(
+            room,
+            requester_user_id,
+            self.config,
+            self.runtime_paths,
+        )
+        materializable_agent_names = self._materializable_agent_names()
+        responder_pool = self._filter_materializable_agents(
+            available_agents_in_room,
+            materializable_agent_names,
+        )
         form_team = await self._decide_team_for_sender(
             agents_in_thread,
             context,
@@ -1580,8 +1641,10 @@ class AgentBot:
             requester_user_id,
             message,
             is_dm,
+            available_agents_in_room=available_agents_in_room,
+            materializable_agent_names=materializable_agent_names,
         )
-        team_action = self._team_response_action(form_team)
+        team_action = self._team_response_action(form_team, responder_pool)
         if team_action is not None:
             return team_action
 
@@ -1609,34 +1672,30 @@ class AgentBot:
         requester_user_id: str,
         message: str,
         is_dm: bool,
-    ) -> TeamFormationDecision:
+        *,
+        available_agents_in_room: list[MatrixID] | None = None,
+        materializable_agent_names: set[str] | None = None,
+    ) -> TeamResolution:
         """Decide team formation using sender-visible candidates without losing explicit intent."""
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(
             context.thread_history,
             self.config,
             self.runtime_paths,
         )
-        available_agents_in_room = get_available_agents_for_sender(
-            room,
-            requester_user_id,
-            self.config,
-            self.runtime_paths,
-        )
+        if available_agents_in_room is None:
+            available_agents_in_room = get_available_agents_for_sender(
+                room,
+                requester_user_id,
+                self.config,
+                self.runtime_paths,
+            )
+        if materializable_agent_names is None:
+            materializable_agent_names = self._materializable_agent_names()
         return await decide_team_formation(
             self.matrix_id,
             context.mentioned_agents,
-            filter_agents_by_sender_permissions(
-                agents_in_thread,
-                requester_user_id,
-                self.config,
-                self.runtime_paths,
-            ),
-            filter_agents_by_sender_permissions(
-                all_mentioned_in_thread,
-                requester_user_id,
-                self.config,
-                self.runtime_paths,
-            ),
+            agents_in_thread,
+            all_mentioned_in_thread,
             room=room,
             message=message,
             config=self.config,
@@ -1644,6 +1703,7 @@ class AgentBot:
             is_dm_room=is_dm,
             is_thread=context.is_thread,
             available_agents_in_room=available_agents_in_room,
+            materializable_agent_names=materializable_agent_names,
         )
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: _DispatchEvent) -> _MessageContext:
@@ -1794,6 +1854,7 @@ class AgentBot:
         existing_event_id: str | None = None,
         *,
         payload: _DispatchPayload,
+        reason_prefix: str = "Team request",
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot).
 
@@ -1872,6 +1933,7 @@ class AgentBot:
                             show_tool_calls=self.show_tool_calls,
                             session_id=session_id,
                             user_id=requester_user_id,
+                            reason_prefix=reason_prefix,
                         )
 
                         event_id, accumulated = await send_streaming_response(
@@ -1917,6 +1979,7 @@ class AgentBot:
                             media=payload.media,
                             session_id=session_id,
                             user_id=requester_user_id,
+                            reason_prefix=reason_prefix,
                         )
 
                 # Either edit the thinking message or send new
@@ -3017,12 +3080,35 @@ class TeamBot(AgentBot):
         user_id: str | None = None,
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
-    ) -> None:
+    ) -> str | None:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
-            return
+            return None
 
         assert self.client is not None
+
+        configured_mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
+        materializable_agent_names = self._materializable_agent_names()
+        team_resolution = resolve_configured_team(
+            self.agent_name,
+            self.team_agents,
+            configured_mode,
+            self.config,
+            self.runtime_paths,
+            materializable_agent_names=materializable_agent_names,
+        )
+        if team_resolution.outcome is not TeamOutcome.TEAM:
+            assert team_resolution.reason is not None
+            if existing_event_id:
+                await self._edit_message(room_id, existing_event_id, team_resolution.reason, thread_id)
+                return existing_event_id
+            return await self._send_response(
+                room_id,
+                reply_to_event_id,
+                team_resolution.reason,
+                thread_id,
+            )
+        assert team_resolution.mode is not None
 
         # Store memory once for the entire team (avoids duplicate LLM processing)
         session_id = create_session_id(room_id, thread_id)
@@ -3034,7 +3120,9 @@ class TeamBot(AgentBot):
             session_id=session_id,
         )
         # Convert MatrixID list to agent names for memory storage
-        agent_names = [mid.agent_name(self.config, self.runtime_paths) or mid.username for mid in self.team_agents]
+        agent_names = [
+            mid.agent_name(self.config, self.runtime_paths) or mid.username for mid in team_resolution.eligible_members
+        ]
         with tool_execution_identity(execution_identity):
             create_background_task(
                 store_conversation_memory(
@@ -3055,7 +3143,7 @@ class TeamBot(AgentBot):
         media_inputs = media or MediaInputs()
 
         # Use the shared team response helper
-        await self._generate_team_response_helper(
+        return await self._generate_team_response_helper(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
@@ -3064,9 +3152,10 @@ class TeamBot(AgentBot):
                 media=media_inputs,
                 attachment_ids=attachment_ids,
             ),
-            team_agents=self.team_agents,
-            team_mode=self.team_mode,
+            team_agents=team_resolution.eligible_members,
+            team_mode=team_resolution.mode.value,
             thread_history=thread_history,
             requester_user_id=user_id or "",
             existing_event_id=existing_event_id,
+            reason_prefix=f"Team '{self.agent_name}'",
         )

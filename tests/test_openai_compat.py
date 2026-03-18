@@ -135,6 +135,32 @@ def test_load_config_requires_runtime_paths() -> None:
         openai_compat._load_config(request)
 
 
+def test_openai_incompatible_agents_is_order_independent_for_cycles() -> None:
+    """Cyclic delegation should not change which /v1 agents are rejected."""
+    config = Config(
+        agents={
+            "a": AgentConfig(
+                display_name="A",
+                role="Private agent",
+                rooms=[],
+                private={"per": "user"},
+                delegate_to=["b"],
+            ),
+            "b": AgentConfig(
+                display_name="B",
+                role="Delegating agent",
+                rooms=[],
+                delegate_to=["a"],
+            ),
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+    )
+
+    assert openai_compat._openai_incompatible_agents(["a", "b"], config) == ["a", "b"]
+    assert openai_compat._openai_incompatible_agents(["b", "a"], config) == ["b", "a"]
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/models
 # ---------------------------------------------------------------------------
@@ -2100,14 +2126,11 @@ class TestTeamCompletion:
         assert full.index("Team started. ") < full.index("Team execution failed.")
         assert lines[-1] == "data: [DONE]"
 
-    def test_team_no_valid_agents_500(self, team_app_client: TestClient) -> None:
-        """Team with no valid agents returns 500."""
-        from mindroom.teams import TeamMode  # noqa: PLC0415
-
-        # _build_team returns None for team when no agents created
+    def test_team_build_failure_returns_500(self, team_app_client: TestClient) -> None:
+        """Team build failures should surface a server error response."""
         with patch(
             "mindroom.api.openai_compat._build_team",
-            return_value=([], None, TeamMode.COORDINATE),
+            side_effect=ValueError("Team 'super_team' cannot be materialized"),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -2118,7 +2141,31 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 500
-        assert "no valid agents" in response.json()["error"]["message"].lower()
+        assert response.json()["error"]["message"] == "Team 'super_team' cannot be materialized"
+
+    def test_team_member_materialization_failure_returns_friendly_500(self, team_app_client: TestClient) -> None:
+        """Configured team failures should surface the user-facing materialization error."""
+        with (
+            patch("mindroom.api.openai_compat.get_model_instance", return_value=MagicMock()),
+            patch("mindroom.api.openai_compat.get_agent_knowledge", return_value=None),
+            patch(
+                "mindroom.api.openai_compat.create_agent",
+                side_effect=[MagicMock(name="GeneralAgent"), RuntimeError("boom")],
+            ),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.json()["error"]["type"] == "server_error"
+        assert response.json()["error"]["message"] == (
+            "Team 'super_team' includes agent 'code' that could not be materialized for this request."
+        )
 
     def test_team_execution_failure_500(self, team_app_client: TestClient) -> None:
         """Team execution exception returns 500."""
