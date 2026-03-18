@@ -1,0 +1,4 @@
+interface:
+  display_name: "Live Test"
+  short_description: "Run local Matrix, UI, and smoke checks"
+  default_prompt: "Use $live-test to boot the local stack, exercise MindRoom live, and verify the UI with Matty and screenshots."
