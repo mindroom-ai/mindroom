@@ -964,13 +964,13 @@ def materializable_orchestrator_agent_names(
     orchestrator: MultiAgentOrchestrator,
     *,
     config: Config | None = None,
-) -> set[str]:
-    """Return live shared agent names that can currently be materialized."""
+) -> set[str] | None:
+    """Return live shared agent names when runtime availability is known."""
     active_config = config or orchestrator.config
     assert active_config is not None
     orchestrator_agent_bots = orchestrator.agent_bots
     if not isinstance(orchestrator_agent_bots, dict):
-        return set()
+        return None
     return {name for name in orchestrator_agent_bots if name != ROUTER_AGENT_NAME and name in active_config.agents}
 
 
@@ -993,7 +993,11 @@ def _materialize_team_members(
     if not requested_agent_names:
         raise ValueError(_NO_AGENTS_RESPONSE)
     materializable_agent_names = materializable_orchestrator_agent_names(orchestrator)
-    missing_agent_names = [name for name in requested_agent_names if name not in materializable_agent_names]
+    missing_agent_names = (
+        [name for name in requested_agent_names if name not in materializable_agent_names]
+        if materializable_agent_names is not None
+        else []
+    )
     if missing_agent_names:
         raise ValueError(
             _not_materializable_team_agents_message(missing_agent_names, prefix=reason_prefix),
