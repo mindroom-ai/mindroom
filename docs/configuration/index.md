@@ -31,6 +31,7 @@ mindroom config validate --path /path/to/config.yaml
 | `MINDROOM_CONFIG_PATH` | Path to `config.yaml` | `./config.yaml` → `~/.mindroom/config.yaml` |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | `mindroom_data/` next to config |
 | `MINDROOM_CONFIG_TEMPLATE` | Template to seed config from (for containers) | Same as config path |
+| `LOG_LEVEL` | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 
 ### Matrix
 
@@ -54,6 +55,49 @@ Set the API key for each provider you use in `config.yaml`:
 | `CEREBRAS_API_KEY` | Cerebras |
 | `GROQ_API_KEY` | Groq |
 | `OLLAMA_HOST` | Ollama (host URL, not a key) |
+| `OPENAI_BASE_URL` | Base URL for OpenAI-compatible APIs (e.g., local inference servers) |
+
+### Operational
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
+| `MINDROOM_PORT` | Port for the bundled dashboard/API server | `8765` |
+| `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests | _(auto-generated)_ |
+| `MINDROOM_ENABLE_AI_CACHE` | Enable the AI response cache | `true` |
+| `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(disabled)_ |
+| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip) | _(wait indefinitely)_ |
+| `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner` or `kubernetes`) | `static_runner` |
+
+### Provisioning / Pairing
+
+These are set automatically by `mindroom connect` and stored in `.env`:
+
+| Variable | Description |
+|----------|-------------|
+| `MINDROOM_PROVISIONING_URL` | Provisioning service URL (e.g., `https://mindroom.chat`) |
+| `MINDROOM_LOCAL_CLIENT_ID` | Client ID from hosted pairing |
+| `MINDROOM_LOCAL_CLIENT_SECRET` | Client secret from hosted pairing |
+
+### Frontend / Development
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_FRONTEND_DIST` | Override path to pre-built frontend assets | _(auto-detected)_ |
+| `MINDROOM_AUTO_BUILD_FRONTEND` | Set to `0` to skip automatic frontend build | _(enabled)_ |
+| `DOCKER_CONTAINER` | Set to `true` when running inside the packaged Docker image | _(unset)_ |
+| `BROWSER_EXECUTABLE_PATH` | Path to browser executable for the browser tool | _(system default)_ |
+
+### Vertex AI
+
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_VERTEX_PROJECT_ID` | Google Cloud project ID for Vertex AI Claude |
+| `ANTHROPIC_VERTEX_BASE_URL` | Custom Vertex AI base URL |
+| `CLOUD_ML_REGION` | Google Cloud region for Vertex AI |
+| `GOOGLE_CLOUD_PROJECT` | Google Cloud project ID |
+| `GOOGLE_CLOUD_LOCATION` | Google Cloud region |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to Google service account JSON |
 
 ### Sandbox Proxy
 
