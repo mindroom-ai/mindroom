@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import ctypes
 import inspect
 import io
 import json
 import os
-import pickle
 import secrets
 import subprocess
 import sys
@@ -44,6 +42,7 @@ from mindroom.runtime_env_policy import (
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.catalog import (
+    SAFE_TOOL_INIT_OVERRIDE_FIELDS,
     TOOL_METADATA,
     ToolConfigOverrideError,
     ToolInitOverrideError,
@@ -120,9 +119,19 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
             env_file_values=startup_runtime_paths.env_file_values,
         )
     process_env.update(sandbox_runner_startup_process_env(os.environ))
+    config_path = (
+        Path(process_env["MINDROOM_CONFIG_PATH"])
+        if process_env.get("MINDROOM_CONFIG_PATH")
+        else startup_runtime_paths.config_path
+    )
+    storage_path = (
+        Path(process_env["MINDROOM_STORAGE_PATH"])
+        if process_env.get("MINDROOM_STORAGE_PATH")
+        else startup_runtime_paths.storage_root
+    )
     resolved_runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=startup_runtime_paths.config_path,
-        storage_path=startup_runtime_paths.storage_root,
+        config_path=config_path,
+        storage_path=storage_path,
         process_env=process_env,
     )
     env_file_values = dict(startup_runtime_paths.env_file_values)
@@ -295,9 +304,28 @@ def _runner_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManag
 
 def _request_private_agent_names(request: SandboxRunnerExecuteRequest) -> frozenset[str] | None:
     """Return the explicit user-agent visibility snapshot carried by one request."""
-    if request.private_agent_names is None:
+    return _freeze_private_agent_names(request.private_agent_names)
+
+
+def _freeze_private_agent_names(private_agent_names: list[str] | None) -> frozenset[str] | None:
+    """Freeze one optional private-agent visibility snapshot."""
+    if private_agent_names is None:
         return None
-    return frozenset(request.private_agent_names)
+    return frozenset(private_agent_names)
+
+
+def _filter_runtime_tool_init_overrides(tool_name: str, runtime_overrides: dict[str, object]) -> dict[str, object]:
+    """Keep only runtime init overrides declared by the target tool."""
+    metadata = TOOL_METADATA.get(tool_name)
+    if metadata is None or not metadata.config_fields:
+        return {}
+    allowed_field_names = {field.name for field in metadata.config_fields}
+    supported_runtime_overrides = {
+        name: value
+        for name, value in runtime_overrides.items()
+        if name in allowed_field_names and name in SAFE_TOOL_INIT_OVERRIDE_FIELDS
+    }
+    return sanitize_tool_init_overrides(tool_name, supported_runtime_overrides) or {}
 
 
 def _request_runtime_overrides(
@@ -398,6 +426,25 @@ class SandboxRunnerExecuteRequest(BaseModel):
     extra_env_passthrough: str | None = None
 
 
+class PreparedSandboxRunnerExecuteRequest(BaseModel):
+    """Prepared sandbox request shared by in-process and subprocess execution."""
+
+    tool_name: str
+    function_name: str
+    args: list[Any] = Field(default_factory=list)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+    worker_key: str | None = None
+    worker_scope: WorkerScope | None = None
+    routing_agent_name: str | None = None
+    execution_identity: dict[str, Any] = Field(default_factory=dict)
+    private_agent_names: list[str] | None = None
+    credential_overrides: dict[str, Any] = Field(default_factory=dict)
+    tool_config_overrides: dict[str, Any] = Field(default_factory=dict)
+    tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
+    runtime_overrides: dict[str, Any] = Field(default_factory=dict)
+    tool_output_workspace_root: str | None = None
+
+
 class SandboxRunnerLeaseRequest(BaseModel):
     """Request for creating a short-lived credential lease."""
 
@@ -459,6 +506,21 @@ class _SandboxRunnerContext:
     config: Config
     tool_metadata: dict[str, Any]
     runner_token: str | None
+
+
+@dataclass(frozen=True)
+class _PreparedSandboxRequestContext:
+    request: PreparedSandboxRunnerExecuteRequest
+    runtime_paths: RuntimePaths
+    execution_env: dict[str, str]
+    prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None
+
+
+@dataclass(frozen=True)
+class _PreparedSandboxSubprocessContext:
+    python_executable: str | None
+    subprocess_env: dict[str, str] | None
+    subprocess_cwd: str | None
 
 
 def _app_context(app: FastAPI) -> _SandboxRunnerContext:
@@ -979,16 +1041,35 @@ def _prepared_shell_execution_env(
     return worker_execution_env
 
 
-async def _execute_request_inprocess(
+def _prepared_tool_init_overrides(
+    tool_name: str,
+    tool_init_overrides: dict[str, object],
+    runtime_overrides: dict[str, object] | None,
+) -> dict[str, object]:
+    """Merge explicit and runtime-derived init overrides for one prepared request."""
+    prepared_tool_init_overrides = dict(tool_init_overrides)
+    serialized_runtime_overrides = to_json_compatible(runtime_overrides)
+    if not isinstance(serialized_runtime_overrides, dict):
+        return prepared_tool_init_overrides
+
+    runtime_override_payload: dict[str, object] = {
+        name: value for name, value in serialized_runtime_overrides.items() if isinstance(name, str)
+    }
+    prepared_tool_init_overrides.update(
+        _filter_runtime_tool_init_overrides(tool_name, runtime_override_payload),
+    )
+    return prepared_tool_init_overrides
+
+
+def _prepare_execute_request(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
-    config: Config,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
     apply_workspace_home_contract: bool = True,
     apply_workspace_env_hook: bool = True,
-) -> SandboxRunnerExecuteResponse:
+) -> _PreparedSandboxRequestContext:
     trusted_child_execution_env = _uses_trusted_child_execution_env(
         request,
         apply_workspace_env_hook=apply_workspace_env_hook,
@@ -1002,22 +1083,16 @@ async def _execute_request_inprocess(
             runtime_paths,
             extra_env_passthrough=request.extra_env_passthrough,
         )
-    try:
-        prepared = sandbox_worker_prep.resolve_prepared_worker_request(
-            worker_key=request.worker_key,
-            tool_init_overrides=request.tool_init_overrides,
-            runtime_paths=runtime_paths,
-            private_agent_names=_request_private_agent_names(request),
-            prepared_worker=prepared_worker,
-            runner_token=runner_token,
-        )
-    except sandbox_worker_prep.WorkerRequestPreparationError as exc:
-        return SandboxRunnerExecuteResponse(
-            ok=False,
-            error=str(exc),
-            failure_kind=("worker" if exc.failure_kind == "worker" else "tool"),
-        )
+    prepared = sandbox_worker_prep.resolve_prepared_worker_request(
+        worker_key=request.worker_key,
+        tool_init_overrides=request.tool_init_overrides,
+        runtime_paths=runtime_paths,
+        private_agent_names=_request_private_agent_names(request),
+        prepared_worker=prepared_worker,
+        runner_token=runner_token,
+    )
     execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared) or execution_env
+    config = _runtime_config_or_empty(runtime_paths)
     _workspace_home, trusted_overlay, env_failure = _build_request_execution_env(
         request,
         prepared,
@@ -1028,7 +1103,10 @@ async def _execute_request_inprocess(
         apply_workspace_env_hook=apply_workspace_env_hook,
     )
     if env_failure is not None:
-        return env_failure
+        raise sandbox_worker_prep.WorkerRequestPreparationError(
+            env_failure.error or "Failed to prepare sandbox execution environment.",
+            failure_kind="request",
+        )
     trusted_env_overlay = (
         _trusted_workspace_overlay_for_runtime_paths(
             request.execution_env,
@@ -1066,50 +1144,112 @@ async def _execute_request_inprocess(
             routing_agent_name=request.routing_agent_name,
             output_path=output_path,
         )
-    with tool_execution_identity(
-        execution_identity,
-    ):
+    serialized_runtime_overrides = to_json_compatible(runtime_overrides)
+    prepared_request = PreparedSandboxRunnerExecuteRequest(
+        tool_name=request.tool_name,
+        function_name=request.function_name,
+        args=list(request.args),
+        kwargs=dict(kwargs),
+        worker_key=request.worker_key,
+        worker_scope=request.worker_scope,
+        routing_agent_name=request.routing_agent_name,
+        execution_identity=dict(request.execution_identity),
+        private_agent_names=list(request.private_agent_names) if request.private_agent_names is not None else None,
+        credential_overrides=dict(request.credential_overrides),
+        tool_config_overrides=dict(request.tool_config_overrides),
+        tool_init_overrides=_prepared_tool_init_overrides(
+            request.tool_name,
+            request.tool_init_overrides,
+            runtime_overrides,
+        ),
+        runtime_overrides=(
+            {name: value for name, value in serialized_runtime_overrides.items() if isinstance(name, str)}
+            if isinstance(serialized_runtime_overrides, dict)
+            else {}
+        ),
+        tool_output_workspace_root=(
+            str(tool_output_workspace_root) if tool_output_workspace_root is not None else None
+        ),
+    )
+    return _PreparedSandboxRequestContext(
+        request=prepared_request,
+        runtime_paths=effective_runtime_paths,
+        execution_env=execution_env,
+        prepared_worker=prepared,
+    )
+
+
+def _prepare_subprocess_context(
+    prepared_request: _PreparedSandboxRequestContext,
+) -> _PreparedSandboxSubprocessContext:
+    python_executable, subprocess_env, subprocess_cwd = sandbox_exec.resolve_subprocess_worker_context(
+        prepared_request.prepared_worker.paths if prepared_request.prepared_worker is not None else None,
+    )
+    subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, prepared_request.execution_env)
+    return _PreparedSandboxSubprocessContext(
+        python_executable=python_executable,
+        subprocess_env=subprocess_env,
+        subprocess_cwd=subprocess_cwd,
+    )
+
+
+async def _execute_prepared_request_inprocess(
+    prepared: PreparedSandboxRunnerExecuteRequest,
+    runtime_paths: RuntimePaths,
+    config: Config,
+) -> SandboxRunnerExecuteResponse:
+    execution_identity: ToolExecutionIdentity | None = None
+    if prepared.execution_identity:
+        execution_identity = ToolExecutionIdentity(**prepared.execution_identity)
+    private_agent_names = _freeze_private_agent_names(prepared.private_agent_names)
+    tool_output_workspace_root = (
+        Path(prepared.tool_output_workspace_root)
+        if prepared.tool_output_workspace_root is not None
+        else None
+    )
+
+    with tool_execution_identity(execution_identity):
         try:
             toolkit, entrypoint = _resolve_entrypoint(
-                runtime_paths=effective_runtime_paths,
+                runtime_paths=runtime_paths,
                 config=config,
-                tool_name=request.tool_name,
-                function_name=request.function_name,
+                tool_name=prepared.tool_name,
+                function_name=prepared.function_name,
                 execution_identity=execution_identity,
-                credential_overrides=request.credential_overrides or None,
-                tool_config_overrides=request.tool_config_overrides or None,
-                tool_init_overrides=request.tool_init_overrides or None,
-                runtime_overrides=runtime_overrides,
+                credential_overrides=prepared.credential_overrides or None,
+                tool_config_overrides=prepared.tool_config_overrides or None,
+                tool_init_overrides=prepared.tool_init_overrides or None,
+                runtime_overrides=prepared.runtime_overrides or None,
                 credentials_manager=_runner_credentials_manager(runtime_paths),
-                worker_scope=request.worker_scope,
-                routing_agent_name=request.routing_agent_name,
-                private_agent_names=_request_private_agent_names(request),
+                worker_scope=prepared.worker_scope,
+                routing_agent_name=prepared.routing_agent_name,
+                private_agent_names=private_agent_names,
                 tool_output_workspace_root=tool_output_workspace_root,
             )
         except OAuthConnectionRequired as exc:
             logger.info(
                 "sandbox_tool_oauth_connection_required",
-                tool_name=request.tool_name,
-                function_name=request.function_name,
+                tool_name=prepared.tool_name,
+                function_name=prepared.function_name,
                 provider_id=exc.provider_id,
             )
             return SandboxRunnerExecuteResponse(ok=True, result=_oauth_connection_required_result(exc))
 
         try:
-            result = await _run_toolkit_entrypoint(toolkit, entrypoint, request.args, kwargs)
+            result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
         except OAuthConnectionRequired as exc:
             logger.info(
                 "sandbox_tool_oauth_connection_required",
-                tool_name=request.tool_name,
-                function_name=request.function_name,
+                tool_name=prepared.tool_name,
+                function_name=prepared.function_name,
                 provider_id=exc.provider_id,
             )
             return SandboxRunnerExecuteResponse(ok=True, result=_oauth_connection_required_result(exc))
         except Exception as exc:
             logger.warning(
                 "sandbox_tool_execution_failed",
-                tool_name=request.tool_name,
-                function_name=request.function_name,
+                tool_name=prepared.tool_name,
+                function_name=prepared.function_name,
                 exc_info=True,
             )
             return SandboxRunnerExecuteResponse(
@@ -1126,8 +1266,35 @@ def _oauth_connection_required_result(exc: OAuthConnectionRequired) -> dict[str,
     return oauth_connection_required_payload(exc)
 
 
-def _subprocess_failure_response(
+async def _execute_request_inprocess(
     request: SandboxRunnerExecuteRequest,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
+    *,
+    runner_token: str | None = None,
+) -> SandboxRunnerExecuteResponse:
+    try:
+        prepared_request = _prepare_execute_request(
+            request,
+            runtime_paths,
+            prepared_worker,
+            runner_token=runner_token,
+        )
+    except sandbox_worker_prep.WorkerRequestPreparationError as exc:
+        return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+    effective_config = config
+    if prepared_request.runtime_paths is not runtime_paths:
+        effective_config = _runtime_config_or_empty(prepared_request.runtime_paths)
+    return await _execute_prepared_request_inprocess(
+        prepared_request.request,
+        prepared_request.runtime_paths,
+        effective_config,
+    )
+
+
+def _subprocess_failure_response(
+    request: SandboxRunnerExecuteRequest | PreparedSandboxRunnerExecuteRequest,
     error: str,
     runtime_paths: RuntimePaths,
 ) -> SandboxRunnerExecuteResponse:
@@ -1136,7 +1303,7 @@ def _subprocess_failure_response(
 
 
 def _parse_subprocess_response(
-    request: SandboxRunnerExecuteRequest,
+    request: SandboxRunnerExecuteRequest | PreparedSandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
     completed: subprocess.CompletedProcess[str],
 ) -> SandboxRunnerExecuteResponse:
@@ -1162,26 +1329,18 @@ def _parse_subprocess_response(
 def _execute_request_subprocess_sync(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
-    config: Config,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
     apply_workspace_env_hook: bool = True,
 ) -> SandboxRunnerExecuteResponse:
-    execution_env = sandbox_exec.request_execution_env(
-        request.tool_name,
-        request.execution_env,
-        runtime_paths,
-        extra_env_passthrough=request.extra_env_passthrough,
-    )
     try:
-        prepared = sandbox_worker_prep.resolve_prepared_worker_request(
-            worker_key=request.worker_key,
-            tool_init_overrides=request.tool_init_overrides,
-            runtime_paths=runtime_paths,
-            private_agent_names=_request_private_agent_names(request),
-            prepared_worker=prepared_worker,
+        prepared_request = _prepare_execute_request(
+            request,
+            runtime_paths,
+            prepared_worker,
             runner_token=runner_token,
+            apply_workspace_env_hook=apply_workspace_env_hook,
         )
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:
         return SandboxRunnerExecuteResponse(
@@ -1190,60 +1349,25 @@ def _execute_request_subprocess_sync(
             failure_kind=("worker" if exc.failure_kind == "worker" else "tool"),
         )
 
-    python_executable, subprocess_env, cwd = sandbox_exec.resolve_subprocess_worker_context(
-        prepared.paths if prepared is not None else None,
-    )
-    workspace_home, trusted_overlay, env_failure = _build_request_execution_env(
-        request,
-        prepared,
-        execution_env,
-        subprocess_env=subprocess_env,
-        runtime_paths=runtime_paths,
-        config=config,
-        apply_workspace_env_hook=apply_workspace_env_hook,
-    )
-    if env_failure is not None:
-        return env_failure
-    subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, execution_env)
-    # python's subprocess inherits this cwd as Path.cwd(); shell sets its own cwd via base_dir.
-    if workspace_home is not None and request.tool_name == "python":
-        workspace_home.mkdir(parents=True, exist_ok=True)
-        cwd = str(workspace_home)
-    effective_runtime_paths = sandbox_exec.tool_runtime_paths_with_request_env(
-        runtime_paths,
-        execution_env,
-        trusted_env_overlay=trusted_overlay,
-        include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
-        include_credentials_encryption_key=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
-    )
-    execution_identity = _request_execution_identity(request)
-    subprocess_request = request.model_copy(
-        update={
-            "execution_env": execution_env,
-            "credential_overrides": _subprocess_credential_overrides(
-                request,
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=execution_identity,
-            ),
-        },
-    )
+    subprocess_context = _prepare_subprocess_context(prepared_request)
     envelope = sandbox_protocol.serialize_subprocess_envelope(
-        request=subprocess_request.model_dump(mode="json"),
-        runtime_paths=constants.serialize_runtime_paths(effective_runtime_paths),
-        committed_config=base64.b64encode(pickle.dumps(config)).decode("ascii"),
+        request=prepared_request.request.model_dump(mode="json"),
+        runtime_paths=constants.serialize_runtime_paths(prepared_request.runtime_paths),
     )
 
     try:
         completed = subprocess.run(
-            sandbox_exec.subprocess_worker_command(_SUBPROCESS_WORKER_ARG, python_executable=python_executable),
+            sandbox_exec.subprocess_worker_command(
+                _SUBPROCESS_WORKER_ARG,
+                python_executable=subprocess_context.python_executable,
+            ),
             input=envelope,
             capture_output=True,
             text=True,
             timeout=sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths),
             check=False,
-            env=subprocess_env,
-            cwd=cwd,
+            env=subprocess_context.subprocess_env,
+            cwd=subprocess_context.subprocess_cwd,
         )
     except subprocess.TimeoutExpired:
         return _subprocess_failure_response(request, "Sandbox subprocess timed out.", runtime_paths)
@@ -1256,7 +1380,6 @@ def _execute_request_subprocess_sync(
 async def _execute_request_subprocess(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
-    config: Config,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
@@ -1266,7 +1389,6 @@ async def _execute_request_subprocess(
         _execute_request_subprocess_sync,
         request,
         runtime_paths,
-        config,
         prepared_worker,
         runner_token=runner_token,
         apply_workspace_env_hook=apply_workspace_env_hook,
@@ -1290,7 +1412,7 @@ def _run_subprocess_worker() -> int:
 
     try:
         envelope = sandbox_protocol.parse_subprocess_envelope(payload)
-        request = SandboxRunnerExecuteRequest.model_validate(envelope.request)
+        request = PreparedSandboxRunnerExecuteRequest.model_validate(envelope.request)
     except ValidationError as exc:
         print(
             sandbox_protocol.response_marker_payload(
@@ -1304,30 +1426,14 @@ def _run_subprocess_worker() -> int:
         )
         return 1
     runtime_paths = constants.deserialize_runtime_paths(envelope.runtime_paths)
-    request.worker_key = sandbox_worker_prep.normalize_request_worker_key(request.worker_key, runtime_paths)
-    # The sandbox subprocess only accepts envelopes serialized by the parent
-    # runner process, so this deserializes a trusted in-process payload.
-    config = pickle.loads(base64.b64decode(envelope.committed_config.encode("ascii")))  # noqa: S301
-    if not isinstance(config, Config):
-        msg = "Sandbox subprocess payload contained an invalid committed config."
-        raise TypeError(msg)
+    config = _runtime_config_or_empty(runtime_paths)
 
     # Redirect stdout/stderr during tool execution so tool output doesn't
     # interfere with the protocol marker we write to stderr afterwards.
     captured_out = io.StringIO()
     captured_err = io.StringIO()
     with redirect_stdout(captured_out), redirect_stderr(captured_err):
-        # The parent runner already sourced .mindroom/worker-env.sh once and
-        # folded the overlay into the subprocess process env.
-        response = asyncio.run(
-            _execute_request_inprocess(
-                request,
-                runtime_paths,
-                config,
-                apply_workspace_home_contract=False,
-                apply_workspace_env_hook=False,
-            ),
-        )
+        response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config))
 
     # Flush captured tool output to real stdout/stderr (informational only).
     tool_stdout = captured_out.getvalue()
@@ -1570,7 +1676,6 @@ async def execute_tool_call(
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
-            config,
             prepared_worker,
             runner_token=runner_token,
         )
@@ -1582,7 +1687,6 @@ async def execute_tool_call(
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
-            config,
             prepared_worker,
             runner_token=runner_token,
         )
@@ -1593,7 +1697,6 @@ async def execute_tool_call(
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
-            config,
             prepared_worker,
             runner_token=runner_token,
         )

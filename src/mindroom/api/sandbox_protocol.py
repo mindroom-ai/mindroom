@@ -21,7 +21,7 @@ def serialize_subprocess_envelope(
     *,
     request: dict[str, Any],
     runtime_paths: dict[str, Any],
-    committed_config: str,
+    committed_config: str = "",
 ) -> str:
     """Serialize the explicit parent-to-child subprocess payload."""
     return SandboxSubprocessEnvelope(
