@@ -977,10 +977,7 @@ class TestRouterTeamFormation:
             "alpha": TeamMemberStatus.UNSUPPORTED_FOR_TEAM,
             "calculator": TeamMemberStatus.ELIGIBLE,
         }
-        assert {member.name: member.can_respond for member in result.member_statuses} == {
-            "alpha": False,
-            "calculator": True,
-        }
+        assert result.eligible_members == [config.get_ids(runtime_paths_for(config))["calculator"]]
 
     @pytest.mark.asyncio
     async def test_tagged_mixed_reject_causes_report_member_specific_reasons(self) -> None:

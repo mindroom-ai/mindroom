@@ -275,7 +275,6 @@ class TeamResolutionMember:
     agent: MatrixID
     name: str
     status: TeamMemberStatus
-    can_respond: bool
     private_targets: tuple[str, ...] | None = None
 
 
@@ -726,7 +725,6 @@ def _evaluate_team_members(
                 agent=agent_id,
                 name=agent_name,
                 status=status,
-                can_respond=status is TeamMemberStatus.ELIGIBLE,
                 private_targets=private_targets,
             ),
         )
