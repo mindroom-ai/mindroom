@@ -221,6 +221,7 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `MINDROOM_SANDBOX_RUNNER_PORT` | Port the sandbox runner listens on | `8766` |
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to indicate runner mode | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Shared auth token (must match primary) | _(required)_ |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess` or `subprocess` | `inprocess` |

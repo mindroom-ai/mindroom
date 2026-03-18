@@ -120,7 +120,7 @@ Do not point Git-backed private knowledge at `.` or `memory/`, and do not use a 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `private.knowledge.enabled` | bool | `true` | Whether requester-local knowledge indexing is active for this agent |
-| `private.knowledge.path` | string | `null` | Private-root-relative folder to index. Required when `private.knowledge.enabled` is `true` |
+| `private.knowledge.path` | string | `null` | Private-root-relative folder to index. When `null`, private knowledge is silently disabled even if `enabled` is `true` |
 | `private.knowledge.watch` | bool | `true` | Whether local filesystem changes should be watched. For isolating scopes, MindRoom refreshes on access instead of keeping a background watcher per requester root. Git sync still runs even when this is `false` |
 | `private.knowledge.chunk_size` | int | `5000` | Maximum characters per indexed chunk |
 | `private.knowledge.chunk_overlap` | int | `0` | Overlap characters between adjacent chunks. Must be smaller than `chunk_size` |

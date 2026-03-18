@@ -42,7 +42,7 @@ Users are automatically created during orchestrator startup and credentials are 
 
 Agents can join existing rooms, create new rooms with AI-generated topics, respond to invites automatically, leave unconfigured rooms, and set room avatars.
 
-Rooms are auto-created via `ensure_room_exists()` and `ensure_all_rooms_exist()`. DM rooms can be detected with `is_dm_room(client, room_id)`.
+Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_rooms_exist()` (public). DM rooms can be detected with `async is_dm_room(client, room_id) -> bool`.
 
 ## Threading (MSC3440)
 

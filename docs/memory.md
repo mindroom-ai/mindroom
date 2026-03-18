@@ -63,6 +63,34 @@ memory:
 
 MindRoom auto-installs the optional `sentence_transformers` extra the first time this provider is used.
 
+Ollama embedder example:
+
+```yaml
+memory:
+  backend: mem0
+  embedder:
+    provider: ollama
+    config:
+      model: nomic-embed-text
+      host: http://localhost:11434
+```
+
+Supported embedder providers: `openai`, `ollama`, `huggingface`, `sentence_transformers`.
+
+### Memory LLM
+
+The memory system uses an LLM for extraction. Configure it with `memory.llm`:
+
+```yaml
+memory:
+  llm:
+    provider: ollama    # ollama, openai, or anthropic
+    config:
+      model: llama3.2
+```
+
+Supported LLM providers: `ollama` (default), `openai`, `anthropic`.
+
 ## Backend: `file`
 
 `file` keeps memory in markdown files and treats files as source-of-truth.
@@ -150,14 +178,16 @@ memory:
     batch:
       max_sessions_per_cycle: 10
       max_sessions_per_agent_per_cycle: 3
+    retry_cooldown_seconds: 30
+    max_retry_cooldown_seconds: 300
     extractor:
       no_reply_token: NO_REPLY
       max_messages_per_flush: 20
       max_chars_per_flush: 12000
       max_extraction_seconds: 30
       include_memory_context:
-        memory_snippets: 5           # Max MEMORY.md snippets for extraction dedupe context
-        snippet_max_chars: 400       # Max characters per included memory snippet
+        memory_snippets: 5
+        snippet_max_chars: 400
 ```
 
 High-level behavior:
@@ -192,4 +222,4 @@ agents:
     tools: [memory]
 ```
 
-This exposes `add_memory`, `search_memory`, `get_all_memories`, and `delete_all_memories`.
+This exposes `add_memory`, `search_memories`, `list_memories`, `get_memory`, `update_memory`, and `delete_memory`.
