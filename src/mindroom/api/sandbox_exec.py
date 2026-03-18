@@ -204,10 +204,15 @@ def subprocess_passthrough_env() -> dict[str, str]:
 def generic_subprocess_env() -> dict[str, str]:
     """Build the baseline subprocess env for non-worker execution."""
     env = subprocess_passthrough_env()
-    for key in ("HOME", "PATH", "PYTHONPATH", "VIRTUAL_ENV"):
+    for key in ("HOME", "PATH", "VIRTUAL_ENV"):
         value = os.environ.get(key)
         if value:
             env[key] = value
+    python_path_parts = [str(project_src_path())]
+    existing_python_path = os.environ.get("PYTHONPATH", "")
+    if existing_python_path:
+        python_path_parts.append(existing_python_path)
+    env["PYTHONPATH"] = os.pathsep.join(python_path_parts)
     return env
 
 
