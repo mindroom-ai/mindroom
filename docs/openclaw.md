@@ -159,7 +159,7 @@ MindRoom includes built-in context controls for OpenClaw-style agents:
 
 ## Skills
 
-For details on skill eligibility gating (`openclaw.os`, `openclaw.requires`, `openclaw.always`) and command dispatch (`command-dispatch`, `command-tool`, `command-arg-mode`), see [Skills](configuration/skills.md).
+For details on skill eligibility gating (`openclaw.os`, `openclaw.requires`, `openclaw.always`) and command dispatch (`command-dispatch`, `command-tool`, `command-arg-mode`), see [Skills](skills.md).
 
 Skills are loaded from `~/.mindroom/skills/<name>/`. To use an OpenClaw skill like `transcribe`, copy the skill directory from your OpenClaw workspace:
 
