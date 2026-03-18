@@ -58,7 +58,7 @@ describe('ComponentName', () => {
 The backend uses pytest with FastAPI's TestClient for API testing.
 
 **Test Files:**
-- `tests/test_api.py` - Comprehensive API endpoint tests
+- `tests/api/test_api.py` - Comprehensive API endpoint tests
 - `tests/test_file_watcher.py` - File watching functionality tests
 - `tests/conftest.py` - Pytest fixtures and configuration
 
@@ -101,12 +101,7 @@ def test_endpoint(test_client: TestClient):
 Use the convenience script to run both frontend and backend tests:
 
 ```bash
-./run-ui-tests.sh
-```
-
-Or with Nix for all dependencies:
-```bash
-./run-ui-tests-nix.sh
+./run-tests.sh
 ```
 
 ## Test Coverage
@@ -133,35 +128,8 @@ Or with Nix for all dependencies:
 
 ## CI/CD Integration
 
-To integrate tests into CI/CD:
-
-```yaml
-# Example GitHub Actions workflow
-name: Tests
-on: [push, pull_request]
-
-jobs:
-  frontend-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
-        with:
-          node-version: '20'
-      - run: cd frontend && bun install --frozen-lockfile
-      - run: cd frontend && bun test
-
-  backend-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      - run: pip install uv
-      - run: uv sync --all-extras
-      - run: python -m pytest tests/api/
-```
+Backend tests run via `.github/workflows/pytest.yml` (Python 3.12).
+There is no dedicated frontend test workflow yet; frontend tests are run locally with `bun run test`.
 
 ## Troubleshooting
 

@@ -1,5 +1,8 @@
 # Security Review: Data Protection & Privacy
 
+> **Audit note (2026-03-18):** GDPR endpoints are live and log sanitization is done, but PII encryption at rest is still marked FAIL.
+> The action plan does not call this out as a blocker — reconcile priority.
+
 **Review Date**: 2025-01-11
 **Updated**: 2025-09-17 (status refresh)
 **Reviewer**: Claude Code Security Audit

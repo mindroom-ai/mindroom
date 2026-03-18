@@ -2,6 +2,10 @@
 
 Last updated: 2026-02-27
 
+**Status: ~70% complete.**
+Core auto-flush exists (`memory/auto_flush.py`, `memory/_file_backend.py`).
+Remaining: stale cleanup, max-dirty-age fallback, optional daily curation pass.
+
 ## Goals
 
 - Keep memory simple and portable by making files the source of truth.
