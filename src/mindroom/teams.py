@@ -920,10 +920,13 @@ def _get_agents_from_orchestrator(
     orchestrator: MultiAgentOrchestrator,
     execution_identity: ToolExecutionIdentity | None,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
+    *,
+    reason_prefix: str = "Team request",
 ) -> list[Agent]:
     """Get Agent instances from orchestrator for the given agent names."""
     assert orchestrator.config is not None
     agents: list[Agent] = []
+    failed_agent_names: list[str] = []
 
     def _shared_manager(base_id: str) -> KnowledgeManager | None:
         return orchestrator.knowledge_managers.get(base_id)
@@ -936,26 +939,38 @@ def _get_agents_from_orchestrator(
         )
 
     for name in agent_names:
-        knowledge = get_agent_knowledge(
-            name,
-            orchestrator.config,
-            orchestrator.runtime_paths,
-            request_knowledge_managers=request_knowledge_managers,
-            shared_manager_lookup=_shared_manager,
-            on_missing_bases=lambda missing_base_ids, agent_name=name: _on_missing_agent_bases(
-                agent_name,
-                missing_base_ids,
-            ),
-        )
-        agent = create_agent(
-            name,
-            orchestrator.config,
-            orchestrator.runtime_paths,
-            execution_identity=execution_identity,
-            knowledge=knowledge,
-            include_interactive_questions=False,
-        )
+        try:
+            knowledge = get_agent_knowledge(
+                name,
+                orchestrator.config,
+                orchestrator.runtime_paths,
+                request_knowledge_managers=request_knowledge_managers,
+                shared_manager_lookup=_shared_manager,
+                on_missing_bases=lambda missing_base_ids, agent_name=name: _on_missing_agent_bases(
+                    agent_name,
+                    missing_base_ids,
+                ),
+            )
+            agent = create_agent(
+                name,
+                orchestrator.config,
+                orchestrator.runtime_paths,
+                execution_identity=execution_identity,
+                knowledge=knowledge,
+                include_interactive_questions=False,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to materialize team member from orchestrator",
+                agent_name=name,
+                exc_info=True,
+            )
+            failed_agent_names.append(name)
+            continue
         agents.append(agent)
+
+    if failed_agent_names:
+        raise ValueError(_not_materializable_team_agents_message(failed_agent_names, prefix=reason_prefix))
 
     return agents
 
@@ -1003,6 +1018,7 @@ def _materialize_team_members(
         orchestrator,
         execution_identity,
         request_knowledge_managers=request_knowledge_managers,
+        reason_prefix=reason_prefix,
     )
     display_names = [str(agent.name) for agent in agents if agent.name]
     return _ResolvedTeamMembers(
@@ -1121,6 +1137,8 @@ async def team_response(
     media: MediaInputs | None = None,
     session_id: str | None = None,
     user_id: str | None = None,
+    *,
+    reason_prefix: str = "Team request",
 ) -> str:
     """Create a team and execute response."""
     assert orchestrator.config is not None
@@ -1137,6 +1155,7 @@ async def team_response(
             orchestrator,
             execution_identity,
             request_knowledge_managers=request_knowledge_managers,
+            reason_prefix=reason_prefix,
         )
     except ValueError as exc:
         return str(exc)
@@ -1268,6 +1287,8 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     show_tool_calls: bool = True,
     session_id: str | None = None,
     user_id: str | None = None,
+    *,
+    reason_prefix: str = "Team request",
 ) -> AsyncIterator[_TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
 
@@ -1291,6 +1312,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             orchestrator,
             execution_identity,
             request_knowledge_managers=request_knowledge_managers,
+            reason_prefix=reason_prefix,
         )
     except ValueError as exc:
         yield str(exc)

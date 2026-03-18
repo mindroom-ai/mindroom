@@ -1795,6 +1795,7 @@ class AgentBot:
         existing_event_id: str | None = None,
         *,
         payload: _DispatchPayload,
+        reason_prefix: str = "Team request",
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot).
 
@@ -1873,6 +1874,7 @@ class AgentBot:
                             show_tool_calls=self.show_tool_calls,
                             session_id=session_id,
                             user_id=requester_user_id,
+                            reason_prefix=reason_prefix,
                         )
 
                         event_id, accumulated = await send_streaming_response(
@@ -1918,6 +1920,7 @@ class AgentBot:
                             media=payload.media,
                             session_id=session_id,
                             user_id=requester_user_id,
+                            reason_prefix=reason_prefix,
                         )
 
                 # Either edit the thinking message or send new
@@ -3100,4 +3103,5 @@ class TeamBot(AgentBot):
             thread_history=thread_history,
             requester_user_id=user_id or "",
             existing_event_id=existing_event_id,
+            reason_prefix=f"Team '{self.agent_name}'",
         )

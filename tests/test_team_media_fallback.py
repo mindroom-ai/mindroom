@@ -154,6 +154,46 @@ async def test_team_response_rejects_missing_materialized_members() -> None:
 
 
 @pytest.mark.asyncio
+async def test_team_response_rejects_request_time_materialization_failure() -> None:
+    """Exact team execution should reject when request-time member construction fails."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["#test:example.org"]),
+                "research": AgentConfig(display_name="ResearchAgent", rooms=["#test:example.org"]),
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(), "research": MagicMock()}
+
+    with (
+        patch(
+            "mindroom.teams.create_agent",
+            side_effect=[MagicMock(name="GeneralAgent"), RuntimeError("boom")],
+        ),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance") as mock_create_team,
+    ):
+        response = await team_response(
+            agent_names=["general", "research"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            reason_prefix="Team 'summary'",
+        )
+
+    assert response == "Team 'summary' includes agent 'research' that could not be materialized for this request."
+    mock_create_team.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_team_stream_rejects_missing_materialized_members() -> None:
     """Streaming team execution should surface exact-materialization failures without shrinking."""
     runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
@@ -188,6 +228,52 @@ async def test_team_stream_rejects_missing_materialized_members() -> None:
         ]
 
     assert chunks == ["Team request includes agent 'research' that could not be materialized for this request."]
+    mock_create_team.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_team_stream_rejects_request_time_materialization_failure() -> None:
+    """Streaming team execution should reject when request-time member construction fails."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["#test:example.org"]),
+                "research": AgentConfig(display_name="ResearchAgent", rooms=["#test:example.org"]),
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(), "research": MagicMock()}
+
+    with (
+        patch(
+            "mindroom.teams.create_agent",
+            side_effect=[MagicMock(name="GeneralAgent"), RuntimeError("boom")],
+        ),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance") as mock_create_team,
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[
+                    config.get_ids(runtime_paths_for(config))["general"],
+                    config.get_ids(runtime_paths_for(config))["research"],
+                ],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                reason_prefix="Team 'summary'",
+            )
+        ]
+
+    assert chunks == ["Team 'summary' includes agent 'research' that could not be materialized for this request."]
     mock_create_team.assert_not_called()
 
 
