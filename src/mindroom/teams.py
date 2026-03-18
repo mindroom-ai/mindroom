@@ -960,17 +960,18 @@ def _get_agents_from_orchestrator(
     return agents
 
 
-def _materializable_orchestrator_agent_names(
+def materializable_orchestrator_agent_names(
     orchestrator: MultiAgentOrchestrator,
+    *,
+    config: Config | None = None,
 ) -> set[str]:
     """Return live shared agent names that can currently be materialized."""
-    assert orchestrator.config is not None
+    active_config = config or orchestrator.config
+    assert active_config is not None
     orchestrator_agent_bots = orchestrator.agent_bots
     if not isinstance(orchestrator_agent_bots, dict):
         return set()
-    return {
-        name for name in orchestrator_agent_bots if name != ROUTER_AGENT_NAME and name in orchestrator.config.agents
-    }
+    return {name for name in orchestrator_agent_bots if name != ROUTER_AGENT_NAME and name in active_config.agents}
 
 
 def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
@@ -991,7 +992,7 @@ def _materialize_team_members(
     requested_agent_names = _requested_team_agent_names(agent_names)
     if not requested_agent_names:
         raise ValueError(_NO_AGENTS_RESPONSE)
-    materializable_agent_names = _materializable_orchestrator_agent_names(orchestrator)
+    materializable_agent_names = materializable_orchestrator_agent_names(orchestrator)
     missing_agent_names = [name for name in requested_agent_names if name not in materializable_agent_names]
     if missing_agent_names:
         raise ValueError(

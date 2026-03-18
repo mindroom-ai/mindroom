@@ -58,6 +58,7 @@ from mindroom.teams import (
     TeamOutcome,
     TeamResolution,
     decide_team_formation,
+    materializable_orchestrator_agent_names,
     resolve_configured_team,
     select_model_for_team,
     team_response,
@@ -1491,10 +1492,9 @@ class AgentBot:
 
     def _materializable_agent_names(self) -> set[str] | None:
         """Return live shared agent names that can currently answer."""
-        orchestrator_agent_bots = self.orchestrator.agent_bots if self.orchestrator is not None else None
-        if not isinstance(orchestrator_agent_bots, dict):
+        if self.orchestrator is None:
             return None
-        return {entity_name for entity_name in orchestrator_agent_bots if entity_name in self.config.agents}
+        return materializable_orchestrator_agent_names(self.orchestrator, config=self.config)
 
     def _filter_materializable_agents(
         self,
