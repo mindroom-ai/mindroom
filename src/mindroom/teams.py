@@ -294,6 +294,7 @@ class TeamResolution:
     outcome: TeamOutcome
     reason: str | None = None
     mode: TeamMode | None = None
+    fallback_response_owners: list[MatrixID] | None = None
 
     def __post_init__(self) -> None:
         """Keep the resolution internally coherent."""
@@ -336,7 +337,10 @@ class TeamResolution:
             return []
         if self.outcome in {TeamOutcome.TEAM, TeamOutcome.INDIVIDUAL}:
             return self.eligible_members
-        return [member.agent for member in self.member_statuses if member.can_respond]
+        response_owners = [member.agent for member in self.member_statuses if member.can_respond]
+        if response_owners:
+            return response_owners
+        return self.fallback_response_owners or []
 
     def response_owner(self) -> MatrixID | None:
         """Return the single deterministic bot that should emit this resolution."""
@@ -353,6 +357,7 @@ class TeamResolution:
         requested_members: list[MatrixID],
         member_statuses: list[TeamResolutionMember],
         reason: str,
+        fallback_response_owners: list[MatrixID] | None = None,
     ) -> TeamResolution:
         """Return an explicit rejection result."""
         eligible_members = [member.agent for member in member_statuses if member.status is TeamMemberStatus.ELIGIBLE]
@@ -363,6 +368,7 @@ class TeamResolution:
             eligible_members=eligible_members,
             outcome=TeamOutcome.REJECT,
             reason=reason,
+            fallback_response_owners=fallback_response_owners,
         )
 
     @classmethod
@@ -534,12 +540,23 @@ async def decide_team_formation(
         sender_visible_agents=available_agents_in_room,
         materializable_agent_names=materializable_agent_names,
     )
+    fallback_response_owners = (
+        _explicit_reject_response_owners(
+            available_agents_in_room,
+            room,
+            config,
+            runtime_paths,
+        )
+        if team_request.intent is TeamIntent.EXPLICIT_MEMBERS
+        else None
+    )
     resolution = _resolve_team_request(
         intent=team_request.intent,
         requested_members=team_request.requested_members,
         member_statuses=member_statuses,
         config=config,
         reason_prefix="Team request",
+        fallback_response_owners=fallback_response_owners,
     )
     if resolution.outcome is not TeamOutcome.TEAM:
         return resolution
@@ -761,6 +778,7 @@ def _resolve_team_request(
     config: Config | None,
     reason_prefix: str,
     mode: TeamMode | None = None,
+    fallback_response_owners: list[MatrixID] | None = None,
 ) -> TeamResolution:
     """Apply one clear outcome policy after intent and member evaluation."""
     eligible_members = [member.agent for member in member_statuses if member.status is TeamMemberStatus.ELIGIBLE]
@@ -773,6 +791,7 @@ def _resolve_team_request(
                 requested_members=requested_members,
                 member_statuses=member_statuses,
                 reason=_team_resolution_reason(rejected_members, config, reason_prefix=reason_prefix),
+                fallback_response_owners=fallback_response_owners,
             )
         if intent is TeamIntent.CONFIGURED_TEAM or len(eligible_members) >= 2:
             return TeamResolution.team(
@@ -880,6 +899,24 @@ def resolve_configured_team(
         config=config,
         reason_prefix=f"Team '{team_name}'",
         mode=mode,
+    )
+
+
+def _explicit_reject_response_owners(
+    available_agents_in_room: list[MatrixID] | None,
+    room: nio.MatrixRoom | None,
+    config: Config | None,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID] | None:
+    """Return the visible bots that may surface an explicit-team rejection."""
+    if available_agents_in_room is not None:
+        return _normalize_team_request_members(available_agents_in_room, config, runtime_paths)
+    if room is None or config is None:
+        return None
+    return _normalize_team_request_members(
+        get_available_agents_in_room(room, config, runtime_paths),
+        config,
+        runtime_paths,
     )
 
 

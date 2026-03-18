@@ -822,6 +822,56 @@ class TestRouterTeamFormation:
         )
 
     @pytest.mark.asyncio
+    async def test_tagged_off_room_agents_use_visible_fallback_owner_for_reject(self) -> None:
+        """Explicit rejects should still be surfaced by one visible live bot."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                    "general": AgentConfig(display_name="General", role="General"),
+                    "research": AgentConfig(display_name="Research", role="Research"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            tagged_agents=[
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["research"],
+            ],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="general and research, help",
+            config=config,
+            room=room,
+            use_ai_decision=False,
+            available_agents_in_room=[config.get_ids(runtime_paths_for(config))["calculator"]],
+            materializable_agent_names={"calculator"},
+        )
+
+        assert result.outcome is TeamOutcome.REJECT
+        assert result.response_owner_candidates() == [config.get_ids(runtime_paths_for(config))["calculator"]]
+        assert result.response_owner() == config.get_ids(runtime_paths_for(config))["calculator"]
+        assert result.reason == (
+            "Team request includes agents 'general', 'research' that are not available in this room."
+        )
+
+    @pytest.mark.asyncio
     async def test_tagged_private_agents_reject_the_entire_team_request(self) -> None:
         """Mixed shared/private mentions should reject the whole ad hoc team request."""
         from unittest.mock import MagicMock  # noqa: PLC0415
