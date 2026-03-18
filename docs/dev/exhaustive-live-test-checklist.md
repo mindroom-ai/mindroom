@@ -45,7 +45,7 @@ Capture log snippets for every failure, retry, hot-reload, scheduling restore, k
 
 ## 1. Core Runtime Boot And Lifecycle
 
-Source anchors: `src/mindroom/orchestrator.py`, `src/mindroom/orchestration/runtime.py`, `src/mindroom/cli/main.py`, `src/mindroom/cli/connect.py`, `src/mindroom/cli/doctor.py`, `src/mindroom/runtime_state.py`.
+Source anchors: `src/mindroom/orchestrator.py`, `src/mindroom/orchestration/runtime.py`, `src/mindroom/cli/main.py`, `src/mindroom/cli/config.py`, `src/mindroom/cli/connect.py`, `src/mindroom/cli/doctor.py`, `src/mindroom/cli/local_stack.py`, `src/mindroom/runtime_state.py`.
 
 - [ ] `CORE-001` Run `mindroom doctor` before booting the runtime.
 Expected outcome: Doctor reports actionable readiness information and fails clearly on broken provider, Matrix, config, or storage prerequisites.
@@ -70,6 +70,12 @@ Expected outcome: Pairing persists the returned local client credentials, update
 
 - [ ] `CORE-008` Run `mindroom avatars generate` and `mindroom avatars sync` after the runtime has initialized at least once.
 Expected outcome: Managed avatar assets are generated for supported entities and sync succeeds through the router account without manual state surgery.
+
+- [ ] `CORE-009` Exercise CLI config setup and inspection flows with `mindroom config init`, `mindroom config show`, `mindroom config edit`, `mindroom config validate`, and `mindroom config path`.
+Expected outcome: Starter configs are generated for the chosen profile, expected companion files are created, the editor flow targets the active config, and validation plus path discovery match the runtime’s effective config location.
+
+- [ ] `CORE-010` Exercise `mindroom local-stack-setup` in a local Matrix development environment.
+Expected outcome: The command prepares the expected local stack artifacts and prints usable next-step guidance instead of requiring undocumented manual repair.
 
 ## 2. Config Loading, Hot Reload, And Reconciliation
 
@@ -152,6 +158,12 @@ Expected outcome: Duplicate-response prevention suppresses repeated agent output
 - [ ] `MSG-010` Edit a recent user message in a conversation that already has agent state.
 Expected outcome: The edit path reprocesses the updated content in the correct conversation context without corrupting thread continuity.
 
+- [ ] `MSG-011` Configure one agent with `thread_mode: room` and exercise a conversation in a managed room.
+Expected outcome: The agent responds with plain room messages, stores room-level continuity, and skips thread-history derivation instead of behaving like the default threaded mode.
+
+- [ ] `MSG-012` Configure `room_thread_modes` so one room uses `room` mode and another uses `thread` mode for the same agent.
+Expected outcome: The effective response mode follows the room-specific override and router handoff respects the target agent’s effective mode in each room.
+
 ## 5. Streaming, Presence, Typing, Stop, And Large Messages
 
 Source anchors: `src/mindroom/streaming.py`, `src/mindroom/matrix/presence.py`, `src/mindroom/matrix/typing.py`, `src/mindroom/stop.py`, `src/mindroom/matrix/large_messages.py`, `src/mindroom/tool_system/events.py`.
@@ -173,6 +185,12 @@ Expected outcome: Inline tool trace markers remain coherent across progressive e
 
 - [ ] `STR-006` Trigger a response that exceeds normal message size limits.
 Expected outcome: Oversized output falls back to sidecar large-message storage while still leaving a valid preview or pointer event in the room.
+
+- [ ] `STR-007` Disable `defaults.enable_streaming` or use an agent or room path where streaming is intentionally disabled.
+Expected outcome: The runtime sends a normal non-streaming response path and does not emit progressive edits or streaming-specific affordances.
+
+- [ ] `STR-008` Disable `defaults.show_stop_button` and then disable `show_tool_calls` for one agent.
+Expected outcome: Stop-button reactions are suppressed when configured off and inline tool traces plus tool metadata are omitted when tool-call visibility is disabled.
 
 ## 6. Teams And Multi-Agent Collaboration
 
@@ -283,9 +301,9 @@ Expected outcome: The runtime returns the documented or implemented fallback beh
 - [ ] `MEDIA-009` Repeat the voice flow with `voice.visible_router_echo` enabled and disabled.
 Expected outcome: Visible router echo behavior matches the configuration without changing the underlying responder selection logic.
 
-## 10. Memory, Knowledge, Workspaces, And Private Roots
+## 10. Memory, Knowledge, Workspaces, Private Roots, And Cultures
 
-Source anchors: `src/mindroom/memory/`, `src/mindroom/memory/auto_flush.py`, `src/mindroom/workspaces.py`, `src/mindroom/knowledge/manager.py`, `src/mindroom/knowledge/utils.py`, `src/mindroom/api/knowledge.py`.
+Source anchors: `src/mindroom/agents.py`, `src/mindroom/memory/`, `src/mindroom/memory/auto_flush.py`, `src/mindroom/workspaces.py`, `src/mindroom/knowledge/manager.py`, `src/mindroom/knowledge/utils.py`, `src/mindroom/api/knowledge.py`.
 
 - [ ] `MEM-001` Use a runtime configured with `memory.backend: mem0`.
 Expected outcome: Agent memory persists across turns and later retrieval reflects the stored semantic memory state.
@@ -316,6 +334,15 @@ Expected outcome: Requester-local roots are created from the template without ov
 
 - [ ] `MEM-010` Configure `private.knowledge` for a private agent and compare chat behavior between the normal runtime and `/v1`.
 Expected outcome: Requester-private knowledge remains isolated to the private runtime path and is not exposed through the shared `/v1` API surface.
+
+- [ ] `MEM-011` Configure cultures in `automatic`, `agentic`, and `manual` modes and run agent conversations that should update shared practice knowledge.
+Expected outcome: Automatic cultures capture and update shared knowledge, agentic cultures expose culture-aware runtime behavior without automatic writes, and manual cultures stay read-only while still injecting the culture description into context.
+
+- [ ] `MEM-012` Assign multiple shared agents to the same culture and use them in separate conversations.
+Expected outcome: The agents share one persisted culture state so later runs observe the same evolving cultural context instead of diverging per agent.
+
+- [ ] `MEM-013` Exercise a private agent that belongs to a culture across two requester scopes.
+Expected outcome: Culture state for private agents is isolated by requester scope and does not leak across different private-instance roots.
 
 ## 11. Skills, Plugins, Tools, Workers, And Runtime Context
 
