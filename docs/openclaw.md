@@ -143,8 +143,8 @@ Recommended for OpenClaw-style setups: `memory_backend: file` with the canonical
 
 MindRoom includes built-in context controls for OpenClaw-style agents:
 
-- **Conversation history** is managed by Agno's session system - previous turns (including tool calls and results) are automatically replayed. Control depth with `num_history_runs` or `num_history_messages` (see [Agents](configuration/agents.md)).
-- **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars`.
+- **Conversation history** is managed by Agno's session system — previous turns (including tool calls and results) are automatically replayed. Control depth with `num_history_runs` or `num_history_messages` (see [Agents](configuration/agents.md)).
+- **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars` (configured in `config.yaml` under `defaults`). When the combined context exceeds this limit, chunks are trimmed from the end and a truncation marker is inserted.
 
 ## Known limitations
 
@@ -158,6 +158,8 @@ MindRoom includes built-in context controls for OpenClaw-style agents:
 - Split into private/public agents and exclude sensitive files from the public agent
 
 ## Skills
+
+For details on skill eligibility gating (`openclaw.os`, `openclaw.requires`, `openclaw.always`) and command dispatch (`command-dispatch`, `command-tool`, `command-arg-mode`), see [Skills](configuration/skills.md).
 
 Skills are loaded from `~/.mindroom/skills/<name>/`. To use an OpenClaw skill like `transcribe`, copy the skill directory from your OpenClaw workspace:
 

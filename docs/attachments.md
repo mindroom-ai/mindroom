@@ -2,29 +2,30 @@
 icon: lucide/paperclip
 ---
 
-# File & Video Attachments
+# Attachments
 
-MindRoom can process files and videos sent to Matrix rooms, passing them to agents for analysis or action.
+MindRoom can process files, images, audio, and videos sent to Matrix rooms, passing them to agents for analysis or action.
+Supported attachment kinds: `audio`, `file`, `image`, `video`.
 
 ## Overview
 
-When a user sends a file or video in a Matrix room:
+When a user sends a file, image, audio message, or video in a Matrix room:
 
 1. The agent determines whether it should respond (via mention, thread participation, or DM)
 2. The media is downloaded and decrypted (if E2E encrypted)
 3. The file is saved locally and registered as a context-scoped attachment
-4. The agent receives the media as an Agno `File` or `Video` object plus an attachment ID it can reference in tool calls
+4. The agent receives the media as an Agno `File`, `Video`, `Audio`, or `Image` object plus an attachment ID it can reference in tool calls
 5. The agent responds with its analysis or takes action on the file
 
-File and video support works automatically for all agents -- no configuration is needed.
+Attachment support works automatically for all agents -- no configuration is needed.
 
 ## How It Works
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ File/Video  │────>│ Download &  │────>│ Register    │────>│ Pass to AI  │
-│ (Matrix)    │     │ Decrypt     │     │ Attachment  │     │ Model       │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+┌──────────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ File/Image/Audio │────>│ Download &  │────>│ Register    │────>│ Pass to AI  │
+│ /Video (Matrix)  │     │ Decrypt     │     │ Attachment  │     │ Model       │
+└──────────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
                                                                   │
                                                                   v
                                                             ┌─────────────┐
@@ -35,13 +36,13 @@ File and video support works automatically for all agents -- no configuration is
 
 ## Usage
 
-Send a file or video in a Matrix room and mention the agent in the caption:
+Send a file, image, audio message, or video in a Matrix room and mention the agent in the caption:
 
 - **With caption**: `@assistant Summarize this document` -- the caption is used as the prompt
-- **Without caption**: The agent receives `[Attached file]` or `[Attached video]` as the prompt
+- **Without caption**: The agent receives `[Attached file]`, `[Attached image]`, `[Attached audio]`, or `[Attached video]` as the prompt
 - **Bare filename**: If the body is just the filename (e.g., `report.pdf`), it is treated the same as no caption
 
-Files and videos work in both direct messages and threads, and with both individual agents and teams.
+Attachments work in both direct messages and threads, and with both individual agents and teams.
 
 ## Attachment IDs
 
@@ -75,7 +76,7 @@ agents:
 
 | Operation | Description |
 |-----------|-------------|
-| `list_attachments(target?)` | List metadata for attachments in the current context (ID, local_path, filename, MIME type, size) |
+| `list_attachments(target?)` | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, created_at) |
 | `get_attachment(attachment_id)` | Return one context attachment record, including its local file path |
 | `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`) |
 
@@ -95,7 +96,7 @@ Encrypted media is decrypted transparently using the key material from the Matri
 
 ## Caching
 
-AI response caching is automatically skipped when files, videos, or audio are present, since media payloads are large and unlikely to repeat.
+AI response caching is automatically skipped when files, images, audio, or videos are present, since media payloads are large and unlikely to repeat.
 
 ## Retention
 

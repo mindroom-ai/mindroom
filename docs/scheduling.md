@@ -29,9 +29,11 @@ Schedule agents to perform tasks at specific times or intervals using natural la
 !schedule Weekly on Friday, @analyst prepare weekly summary
 ```
 
-**Event-Driven Workflows:**
+**Conditional Workflows (polling-based):**
 
-Conditional requests are converted to polling schedules:
+Conditional or event-like requests are converted to recurring cron-based polling schedules.
+The AI picks an appropriate polling frequency based on urgency, and the condition is embedded in the task message so the agent checks it on each poll cycle.
+These are **not** real event subscriptions — they are periodic checks.
 
 ```
 !schedule If I get an email about "urgent", @phone_agent call me
@@ -54,7 +56,9 @@ Edits an existing scheduled task by ID. The task description is re-parsed to upd
 !cancel_schedule all             # Cancel all tasks in room
 ```
 
-Aliases: `!listschedules`, `!list-schedules`, `!cancelschedule`, `!cancel-schedule`, `!editschedule`, `!edit-schedule`
+Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!inspect_schedules`, `!cancelschedule`, `!cancel-schedule`, `!editschedule`, `!edit-schedule`
+
+Use `!help schedule` for detailed inline help on scheduling commands.
 
 ## Agent Mentions
 
@@ -67,6 +71,11 @@ Schedules use the timezone from `config.yaml` (defaults to UTC):
 ```yaml
 timezone: America/Los_Angeles
 ```
+
+## Limitations
+
+- **Schedule type cannot be changed** — editing a one-time task to be recurring (or vice versa) is not supported. Cancel the existing task and create a new one instead.
+- **Conditional workflows are polling** — event-like schedules (`If ...`, `When ...`) are converted to recurring cron polls, not real event subscriptions.
 
 ## Persistence
 
