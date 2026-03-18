@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths, resolve_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -31,6 +31,7 @@ from mindroom.workers.backends.docker_config import (
 )
 from mindroom.workers.backends.docker_projection import _PROJECTED_CONFIGS_DIRNAME, _WORKER_CONFIG_STATE_DIRNAME
 from mindroom.workers.models import WorkerSpec
+from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _ROTATED_AUTH_TOKEN = "rotated-token"  # noqa: S105
@@ -480,6 +481,34 @@ def _backend(
         lambda container: (f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute"),
     )
     return backend, fake_client, sync_calls
+
+
+def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:
+    """Docker backend availability should honor the explicit runtime context."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".env").write_text(
+        (
+            "MINDROOM_WORKER_BACKEND=docker\n"
+            "MINDROOM_DOCKER_WORKER_IMAGE=test-image\n"
+            "MINDROOM_SANDBOX_PROXY_TOKEN=test-token\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+
+    assert primary_worker_backend_name(runtime_paths) == "docker"
+    assert runtime_paths.env_value("MINDROOM_DOCKER_WORKER_IMAGE") == "test-image"
+    assert primary_worker_backend_available(
+        runtime_paths,
+        proxy_url=None,
+        proxy_token=runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_TOKEN"),
+    )
 
 
 def _projection_signature_for_hash_seed(hash_seed: str, workspace_root: Path) -> dict[str, object]:
