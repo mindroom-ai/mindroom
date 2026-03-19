@@ -48,7 +48,7 @@ main() entry
          │
          ▼
 ┌──────────────────────────────────────┐
-│  Concurrent Tasks (asyncio.wait)     │
+│  Concurrent Tasks (asyncio.gather)   │
 │ ─────────────────────────────────────│
 │ • orchestrator_task (sync loops)     │
 │ • watcher_task (config file polling) │

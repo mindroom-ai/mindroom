@@ -178,8 +178,6 @@ memory:
     batch:
       max_sessions_per_cycle: 10
       max_sessions_per_agent_per_cycle: 3
-    retry_cooldown_seconds: 30
-    max_retry_cooldown_seconds: 300
     extractor:
       no_reply_token: NO_REPLY
       max_messages_per_flush: 20
