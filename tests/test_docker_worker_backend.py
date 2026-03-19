@@ -571,6 +571,37 @@ def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path
     )
 
 
+def test_docker_worker_host_config_path_resolves_relative_to_runtime_config_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Relative Docker host-config paths should resolve against the runtime config directory, not cwd."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    host_config_path = config_dir / "docker-host-config.yaml"
+    host_config_path.write_text("agents: {}\n", encoding="utf-8")
+
+    other_cwd = tmp_path / "other"
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH": "./docker-host-config.yaml",
+        },
+    )
+
+    config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert config.host_config_path == host_config_path.resolve()
+
+
 def _projection_signature_for_hash_seed(hash_seed: str, workspace_root: Path) -> dict[str, object]:
     script = (
         textwrap.dedent(
