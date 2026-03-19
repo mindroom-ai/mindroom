@@ -345,8 +345,6 @@ Usage: `!config <operation>` - View and modify MindRoom configuration
 - Agent workflows - mention agents to have them collaborate on scheduled tasks
 - Natural language time parsing - "tomorrow", "in 5 minutes", "every Monday"
 
-Note: All commands only work within threads, not in main room messages.
-
 For detailed help on a command, use: `!help <command>`"""
 
 

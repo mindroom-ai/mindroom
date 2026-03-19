@@ -1,5 +1,9 @@
 # Security Review: Input Validation & Injection Prevention
 
+> **Audit note (2026-03-18):** This review mixes SaaS platform and core MindRoom scope.
+> Core MindRoom injection risks (Matrix message layer, tool/skill injection, sandboxed execution) are not covered.
+> A separate review scoped to the core runtime is recommended.
+
 ## Executive Summary
 
 This report provides a comprehensive security assessment of Input Validation & Injection Prevention for the MindRoom project. The review examined 8 critical areas of injection vulnerabilities across database operations, shell command execution, file operations, YAML/JSON parsing, template rendering, and API input validation.

@@ -101,7 +101,7 @@ With this configuration, each requester's private knowledge path becomes `<their
 | Field                             | Type   | Default | Description                                                                                                                                                                                                      |
 | --------------------------------- | ------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `private.knowledge.enabled`       | bool   | `true`  | Whether requester-local knowledge indexing is active for this agent                                                                                                                                              |
-| `private.knowledge.path`          | string | `null`  | Private-root-relative folder to index. Required when `private.knowledge.enabled` is `true`                                                                                                                       |
+| `private.knowledge.path`          | string | `null`  | Private-root-relative folder to index. Required when `private.knowledge.enabled` is `true`; set `enabled: false` to disable private knowledge                                                                    |
 | `private.knowledge.watch`         | bool   | `true`  | Whether local filesystem changes should be watched. For isolating scopes, MindRoom refreshes on access instead of keeping a background watcher per requester root. Git sync still runs even when this is `false` |
 | `private.knowledge.chunk_size`    | int    | `5000`  | Maximum characters per indexed chunk                                                                                                                                                                             |
 | `private.knowledge.chunk_overlap` | int    | `0`     | Overlap characters between adjacent chunks. Must be smaller than `chunk_size`                                                                                                                                    |
@@ -251,10 +251,11 @@ Knowledge bases use the same embedder configured in the `memory` section:
 ```
 memory:
   embedder:
-    provider: openai        # or "ollama" or "sentence_transformers"
+    provider: openai        # or "ollama", "huggingface", or "sentence_transformers"
     config:
       model: text-embedding-3-small
       host: null             # For self-hosted (Ollama)
+      dimensions: null       # Optional: embedding dimension override (e.g., 256)
 ```
 
 | Provider                | Model Example                            | Notes                                                                     |
@@ -265,7 +266,7 @@ memory:
 
 ## Storage
 
-Knowledge data is stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<base_id>_<hash>`. For requester-private agent knowledge, the effective private-root path is part of that storage key, so each requester-local root gets an isolated index.
+Knowledge data is stored under `<storage_path>/knowledge_db/<sanitized_base_id>_<hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<sanitized_base_id>_<hash>`, where the base ID is sanitized to alphanumerics, hyphens, and underscores only, and the hash is a digest of the resolved knowledge path. For requester-private agent knowledge, the effective private-root path is part of that hash, so each requester-local root gets an isolated index.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 

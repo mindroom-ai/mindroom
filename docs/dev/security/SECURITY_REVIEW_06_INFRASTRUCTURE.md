@@ -1,5 +1,9 @@
 # Infrastructure Security Review
 
+> **Audit note (2026-03-18):** Platform pods still run as root and container image tags use `:latest`.
+> Internal TLS/mTLS decision has been deferred since September 2025.
+> Deployment manifests may not match the current cluster structure — verify against live manifests before acting on recommendations.
+
 **Review Date:** 2025-09-12
 **Scope:** Kubernetes Infrastructure Security
 **Environment:** MindRoom SaaS Platform

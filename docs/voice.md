@@ -97,8 +97,10 @@ If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment
 The intelligence component uses an AI model to analyze transcriptions and format them properly:
 
 1. **Agent mentions** - Converts spoken agent names to `@agent` format
-2. **Command patterns** - Identifies and formats `!command` syntax
-3. **Smart formatting** - Handles speech recognition errors and natural language variations
+2. **Mention sanitization** - Mentions of agents not available in the current room have their `@` stripped so the agent is not falsely targeted
+3. **Command patterns** - Identifies and formats `!command` syntax
+4. **Speculative command rejection** - Commands the AI invents that were not in the original transcription are rejected to prevent false positives
+5. **Smart formatting** - Handles speech recognition errors and natural language variations
 
 ### Intelligence Model
 

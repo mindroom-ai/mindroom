@@ -73,6 +73,8 @@ teams:
 | `rooms`        | No       | `[]`         | List of room names the team responds in           |
 | `model`        | No       | `default`    | Model used for team coordination and synthesis    |
 
+Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
+
 ## When to Use Each Mode
 
 | Mode          | Use Case                                      | Example                                                                                   |

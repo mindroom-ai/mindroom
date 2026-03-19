@@ -171,21 +171,50 @@ All decorator arguments are keyword-only. Required fields:
 - `name`: Tool identifier
 - `display_name`: Human-readable name
 - `description`: Brief description
-- `category`: A `ToolCategory` enum value
+- `category`: A `ToolCategory` enum value (`COMMUNICATION`, `DEVELOPMENT`, `EMAIL`, `ENTERTAINMENT`, `INFORMATION`, `INTEGRATIONS`, `PRODUCTIVITY`, `RESEARCH`, `SHOPPING`, `SMART_HOME`, `SOCIAL`)
 
 Common optional fields:
 
-- `status`: `ToolStatus.AVAILABLE` (default), `COMING_SOON`, or `REQUIRES_CONFIG`
+- `status`: `ToolStatus.AVAILABLE` (default) or `REQUIRES_CONFIG`
 - `setup_type`: `SetupType.NONE` (default), `API_KEY`, `OAUTH`, or `SPECIAL`
-- `config_fields`: List of `ConfigField` objects for configuration
+- `config_fields`: List of `ConfigField` objects (see below)
 - `dependencies`: List of required pip packages
 - `docs_url`: Link to documentation
 - `managed_init_args`: Explicit MindRoom-managed constructor kwargs such as `runtime_paths` or `credentials_manager`
+- `icon`: Icon name for the dashboard (e.g., `"FaGoogle"`, `"Home"`)
+- `icon_color`: Tailwind color class for the icon (e.g., `"text-blue-500"`)
+- `helper_text`: Markdown help text shown in the dashboard
+- `auth_provider`: OAuth provider identifier when using OAuth-based setup
+- `default_execution_target`: `ToolExecutionTarget.PRIMARY` (default) or `WORKER` — controls whether the tool runs on the primary agent or a sandbox worker
 
-If your toolkit constructor expects MindRoom-managed values like `runtime_paths`, `credentials_manager`, `worker_scope`, or `routing_agent_name`, declare them with `managed_init_args`.
+### ConfigField
+
+Each `ConfigField` describes one constructor parameter that can be configured through the dashboard or credentials store.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `name` | string | *required* | Constructor kwarg name (e.g., `"api_key"`) |
+| `label` | string | *required* | Display label shown in the dashboard |
+| `type` | string | `"text"` | Input type: `text`, `password`, `url`, `number`, `boolean`, or `select` |
+| `required` | bool | `True` | Whether the field must be set before the tool can be used |
+| `default` | any | `None` | Default value when not configured |
+| `placeholder` | string | `None` | Placeholder text shown in the input |
+| `description` | string | `None` | Help text for the field |
+| `options` | list | `None` | For `select` type: list of `{"label": "...", "value": "..."}` dicts |
+| `validation` | dict | `None` | Optional validation rules (min, max, pattern, etc.) |
+
+If your toolkit constructor expects MindRoom-managed values, declare them with `managed_init_args`.
 This applies to built-in tools under `src/mindroom/tools/` just as much as external plugins.
 MindRoom no longer inspects constructor parameter names and injects those values automatically.
 Undeclared managed constructor inputs will not be passed through.
+
+Available `ToolManagedInitArg` values:
+
+| Value | Constructor kwarg | Description |
+| --- | --- | --- |
+| `RUNTIME_PATHS` | `runtime_paths` | Access to storage paths and environment values |
+| `CREDENTIALS_MANAGER` | `credentials_manager` | Read and write the per-tool credentials store |
+| `WORKER_TARGET` | `worker_target` | Resolved worker routing context (scope, execution identity, worker key) |
 
 For example, a toolkit that expects `runtime_paths` must opt in explicitly:
 

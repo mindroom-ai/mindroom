@@ -31,8 +31,12 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Voice Messages | `voice.md` | `voice/index.md` | `page__voice__index.md` |
 | Image Messages | `images.md` | `images/index.md` | `page__images__index.md` |
 | File & Video Attachments | `attachments.md` | `attachments/index.md` | `page__attachments__index.md` |
+| Chat Commands | `chat-commands.md` | `chat-commands/index.md` | `page__chat-commands__index.md` |
+| Interactive Q&A | `interactive.md` | `interactive/index.md` | `page__interactive__index.md` |
+| Streaming | `streaming.md` | `streaming/index.md` | `page__streaming__index.md` |
 | Scheduling | `scheduling.md` | `scheduling/index.md` | `page__scheduling__index.md` |
 | Authorization | `authorization.md` | `authorization/index.md` | `page__authorization__index.md` |
+| Matrix Space | `matrix-space.md` | `matrix-space/index.md` | `page__matrix-space__index.md` |
 | OpenAI-Compatible API | `openai-api.md` | `openai-api/index.md` | `page__openai-api__index.md` |
 | Overview | `architecture/index.md` | `architecture/index.md` | `page__architecture__index.md` |
 | Matrix Integration | `architecture/matrix.md` | `architecture/matrix/index.md` | `page__architecture__matrix__index.md` |

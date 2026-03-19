@@ -4,6 +4,9 @@
 **Updated:** 2025-09-17 (Post-doc audit)
 **Status:** P0 🟢 (follow-up pending) | P1.1 🟢 | P1.2 ⚠️ (secrets lifecycle verification outstanding)
 
+> **Audit note (2026-03-18):** The risk score reduction (6.8→5.8) cited in the summary has no scoring methodology or evidence linking specific fixes to numeric changes.
+> P2 items (internal TLS, token cache) show no evidence of progress since September 2025.
+
 ## Priority System
 - **P0**: Legal/Regulatory blockers - Fix IMMEDIATELY
 - **P1**: Security blind spots - Fix within 1 week

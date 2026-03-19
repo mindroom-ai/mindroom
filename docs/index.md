@@ -122,8 +122,11 @@ mindroom run
 | **Images** | Pass user-sent images to vision-capable AI models |
 | **File & Video Attachments** | Context-scoped file and video handling with attachment IDs |
 | **Cultures** | Shared evolving principles across groups of agents |
+| **Interactive Q&A** | Clickable multiple-choice questions via Matrix reactions |
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
+| **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
+| **Chat Commands** | Built-in `!help`, `!schedule`, `!config`, `!skill` commands handled by the router |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
@@ -160,7 +163,11 @@ mindroom run
 - [Voice Messages](voice.md) - Voice message transcription
 - [Image Messages](images.md) - Image analysis with vision models
 - [File & Video Attachments](attachments.md) - Context-scoped file and video handling
+- [Streaming Responses](streaming.md) - Progressive message edits with presence-based gating
+- [Chat Commands](chat-commands.md) - Built-in `!help`, `!schedule`, `!config`, `!skill` commands
+- [Interactive Q&A](interactive.md) - Clickable multiple-choice questions via Matrix reactions
 - [Authorization](authorization.md) - User and room access control
+- [Matrix Space](matrix-space.md) - Optional root Matrix Space for grouping managed rooms
 - [Architecture](architecture/index.md) - How it works under the hood
 - [Deployment](deployment/index.md) - Docker and Kubernetes deployment
 - [Bridges](deployment/bridges/index.md) - Connect Telegram, Slack, and other platforms to Matrix

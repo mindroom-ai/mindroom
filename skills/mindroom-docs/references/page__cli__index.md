@@ -137,6 +137,119 @@ Sync configured room and root-space avatars to Matrix using the initialized rout
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
+## doctor
+
+Check your environment for common issues before running `mindroom run`.
+
+Runs a series of checks in one pass:
+
+- **Config file** exists and is valid YAML with correct Pydantic schema
+- **Providers** — validates API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, etc.)
+- **Memory config** — checks memory LLM and embedder reachability (Ollama, OpenAI embeddings, sentence-transformers)
+- **Matrix homeserver** — verifies the homeserver is reachable via `/_matrix/client/versions`
+- **Storage** — confirms the storage directory is writable
+
+```
+ Usage: root doctor [OPTIONS]
+
+ Check your environment for common issues.
+
+ Runs connectivity, configuration, and credential checks in a single pass
+ so you can fix everything before running `mindroom run`.
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+## config
+
+Manage MindRoom configuration files. The `config` subgroup contains commands for creating, viewing, editing, and validating your `config.yaml`.
+
+```
+ Usage: root config [OPTIONS] COMMAND [ARGS]...
+
+ Manage MindRoom configuration files.
+
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ init       Create a starter config.yaml with example agents and models.                │
+│ show       Display the current config file with syntax highlighting.                   │
+│ edit       Open config.yaml in your default editor.                                    │
+│ validate   Validate config.yaml and check for common issues.                           │
+│ path       Show the resolved config file path and search locations.                    │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+### config init
+
+Create a starter `config.yaml` with example agents, models, and sensible defaults.
+
+Profiles control the template style:
+
+- `--profile full` (default) — rich example config with interactive provider selection
+- `--profile minimal` — bare-minimum config
+- `--profile public` — hosted Matrix (`mindroom.chat`) with prefilled homeserver settings
+- `--profile public-vertexai-anthropic` — hosted Matrix with Vertex AI Claude defaults
+
+Provider presets (`--provider`) set the default model: `anthropic`, `openai`, `openrouter`, or `vertexai_claude`.
+
+```
+# Hosted Matrix quickstart (creates ~/.mindroom/config.yaml)
+mindroom config init --profile public
+
+# Minimal config with Anthropic
+mindroom config init --minimal --provider anthropic
+
+# Full config with Vertex AI Claude on hosted Matrix
+mindroom config init --profile public-vertexai-anthropic
+
+# Force overwrite existing config
+mindroom config init --force
+```
+
+### config show
+
+Display the current config file with syntax highlighting.
+
+```
+# Show config with syntax highlighting
+mindroom config show
+
+# Print raw YAML (useful for piping)
+mindroom config show --raw
+
+# Show config at a specific path
+mindroom config show --path /custom/path/config.yaml
+```
+
+### config edit
+
+Open `config.yaml` in your default editor. Editor preference: `$EDITOR` → `$VISUAL` → `nano` → `vim` → `vi`.
+
+```
+mindroom config edit
+```
+
+### config validate
+
+Validate `config.yaml` and check for common issues. Parses the YAML config using Pydantic and reports errors in a friendly format. Also checks whether required API keys are set as environment variables.
+
+```
+mindroom config validate
+```
+
+### config path
+
+Show the resolved config file path and all search locations.
+
+```
+mindroom config path
+```
+
 ## connect
 
 Pair this local MindRoom install with a provisioning service.
@@ -152,6 +265,7 @@ On success (default `--persist-env`), this writes to `.env` next to `config.yaml
 - `MINDROOM_PROVISIONING_URL`
 - `MINDROOM_LOCAL_CLIENT_ID`
 - `MINDROOM_LOCAL_CLIENT_SECRET`
+- `MINDROOM_NAMESPACE`
 
 If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__`, `connect` will auto-replace it when pairing returns a valid `owner_user_id`.
 
@@ -270,4 +384,22 @@ mindroom local-stack-setup --no-persist-env
 
 ```
 mindroom version
+```
+
+### Preflight environment check
+
+```
+mindroom doctor
+```
+
+### Initialize a config
+
+```
+mindroom config init --profile public
+```
+
+### Validate your config
+
+```
+mindroom config validate
 ```

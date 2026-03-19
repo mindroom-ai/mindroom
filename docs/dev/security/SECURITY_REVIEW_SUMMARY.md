@@ -1,5 +1,8 @@
 # MindRoom Security Review Summary
 
+> **Audit note (2026-03-18):** References in this summary may be stale as individual review docs have been updated independently.
+> Cross-reference with SECURITY_REVIEW_*.md files and SECURITY_ACTION_PLAN.md for current status.
+
 **Date:** September 12, 2025
 **Status:** 🟠 HIGH – Staging-ready with constraints (not production-ready)
 

@@ -70,6 +70,7 @@ services:
     command: ["/app/run-sandbox-runner.sh"]
     user: "1000:1000"
     volumes:
+      - ./mindroom_data:/app/mindroom_data:rw
       - sandbox-workspace:/app/workspace
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
@@ -310,6 +311,7 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `MINDROOM_SANDBOX_RUNNER_PORT` | Port the sandbox runner listens on | `8766` |
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to indicate runner mode | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Shared auth token (must match primary) | _(required)_ |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess` or `subprocess` | `inprocess` |
@@ -351,6 +353,20 @@ Each lease is consumed on use and expires after the configured TTL.
 - With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
+
+### Sandbox-runner API endpoints
+
+These endpoints are served by the sandbox-runner process, not the primary MindRoom runtime.
+All requests require the `MINDROOM_SANDBOX_PROXY_TOKEN` as a Bearer token.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/sandbox-runner/leases` | Create a one-time credential lease for an upcoming tool call |
+| POST | `/api/sandbox-runner/execute` | Execute a tool call with optional credential override via lease |
+| GET | `/api/sandbox-runner/workers` | List known workers with lifecycle metadata |
+| POST | `/api/sandbox-runner/workers/cleanup` | Mark idle workers for cleanup without deleting persisted state |
+
+Credential leases are single-use: once consumed by an `/execute` call, the lease cannot be replayed.
 
 ## Per-agent configuration
 
@@ -394,6 +410,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, w
 `worker_scope` controls how those sandbox runtimes are shared between calls.
 Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
+Additionally, `google` and `spotify` are shared-only integrations that require `worker_scope` unset or `shared` but can still be proxied through the sandbox.
 
 You can set `worker_scope` per agent or in `defaults`:
 
