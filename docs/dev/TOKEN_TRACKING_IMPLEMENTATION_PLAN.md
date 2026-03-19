@@ -1,5 +1,9 @@
 # Token Tracking Implementation Plan for MindRoom
 
+**Status: Not yet implemented.**
+None of the files described below (`token_tracking.py`, `api/usage.py`, frontend component, migration) have been created yet.
+This remains a design plan for future work.
+
 ## Overview
 
 This document outlines the complete implementation plan for adding token usage tracking to MindRoom. The system will track token usage for all AI agent interactions, supporting both self-hosted and SaaS deployment modes.
@@ -488,9 +492,9 @@ async def get_detailed_token_usage(
 
     # Calculate costs (simplified)
     MODEL_COSTS = {
-        "gpt-4o": {"input": 0.005, "output": 0.015},
-        "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
-        "claude-3-5-sonnet": {"input": 0.003, "output": 0.015},
+        "gpt-5.4": {"input": 0.005, "output": 0.015},
+        "claude-sonnet-4-6": {"input": 0.003, "output": 0.015},
+        "claude-haiku-4-5": {"input": 0.0008, "output": 0.004},
     }
 
     total_cost = 0

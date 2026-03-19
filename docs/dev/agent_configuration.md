@@ -38,15 +38,20 @@ models:
 
   openrouter:
     provider: "openrouter"
-    id: "anthropic/claude-sonnet-4.6"
+    id: "anthropic/claude-sonnet-4-6"
 ```
 
 ### Supported Providers
 
-- **ollama** - Local models via Ollama (requires Ollama installed)
 - **anthropic** - Claude models (requires API key)
-- **openai** - GPT models (requires API key)
+- **openai** - OpenAI and OpenAI-compatible models (requires API key)
+- **ollama** - Local models via Ollama (requires Ollama installed)
 - **openrouter** - Access multiple models through OpenRouter (requires API key)
+- **gemini** / **google** - Google Gemini models (requires API key)
+- **vertexai_claude** - Claude models via Vertex AI (requires GCP credentials)
+- **groq** - Groq-hosted models (requires API key)
+- **deepseek** - DeepSeek models (requires API key)
+- **cerebras** - Cerebras-hosted models (requires API key)
 
 ## Memory Configuration
 
@@ -157,6 +162,8 @@ agents:
       - SOUL.md
       - USER.md
     model: "anthropic"  # Optional: specific model for this agent (overrides default)
+    thread_mode: "thread"  # Optional: "thread" or "room"
+    delegate_to: [other_agent]  # Optional: agents this one can delegate to
 ```
 
 ### Configuration Fields
@@ -176,6 +183,18 @@ agents:
 - **context_files**: File paths (relative to `agents/<name>/workspace/`) loaded into each agent instance; edits take effect on the next reply without restarting
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
 - **allow_self_config**: (Optional) When `true`, gives the agent a scoped tool to read and modify its own configuration at runtime (default: inherits from `defaults.allow_self_config`, which defaults to `false`)
+- **thread_mode**: Conversation threading mode: `thread` (default) creates Matrix threads per conversation, `room` uses a single continuous conversation per room (ideal for bridges/mobile)
+- **room_thread_modes**: Per-room thread mode overrides keyed by room alias/name or Matrix room ID
+- **num_history_runs**: Number of prior Agno runs to include as history context (per-agent override)
+- **num_history_messages**: Max messages from history (mutually exclusive with `num_history_runs`)
+- **compress_tool_results**: Compress tool results in history to save context (per-agent override)
+- **enable_session_summaries**: Enable Agno session summaries for conversation compaction (per-agent override)
+- **max_tool_calls_from_history**: Max tool call messages replayed from history (per-agent override)
+- **show_tool_calls**: Whether to show tool call details inline in responses (per-agent override)
+- **worker_tools**: Tool names to route through scoped workers (overrides defaults; `null` uses the built-in default routing policy)
+- **worker_scope**: Worker runtime reuse mode for routed tools: `shared`, `user`, or `user_agent`
+- **delegate_to**: List of agent names this agent can delegate tasks to via tool calls
+- **private**: Optional requester-private state config for per-requester materialized instances
 
 ### File-Based Context Loading
 
@@ -402,6 +421,7 @@ You can create multiple configuration files for different purposes:
 ```yaml
 # Memory configuration
 memory:
+  backend: "mem0"  # "mem0" or "file"
   embedder:
     provider: "ollama"
     config:
@@ -435,6 +455,7 @@ agents:
 defaults:
   tools: [scheduler]
   markdown: true
+  enable_streaming: true
 
 # Router
 router:

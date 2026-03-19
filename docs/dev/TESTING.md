@@ -10,13 +10,20 @@ The dashboard includes comprehensive tests for both frontend (TypeScript/React) 
 
 The frontend uses Vitest as the test runner with React Testing Library for component testing.
 
-**Test Files:**
+**Test Files** (non-exhaustive, representative examples):
 - `src/store/configStore.test.ts` - Tests for the Zustand store
 - `src/components/AgentList/AgentList.test.tsx` - Tests for the AgentList component
 - `src/components/AgentEditor/AgentEditor.test.tsx` - Tests for the AgentEditor component
 - `src/components/ModelConfig/ModelConfig.test.tsx` - Tests for the ModelConfig component
 - `src/components/ToolConfig/ToolConfigDialog.test.tsx` - Tests for the ToolConfigDialog component
+- `src/components/Credentials/Credentials.test.tsx` - Tests for the Credentials component
+- `src/components/Knowledge/Knowledge.test.tsx` - Tests for the Knowledge component
+- `src/components/TeamEditor/TeamEditor.test.tsx` - Tests for the TeamEditor component
+- `src/components/VoiceConfig/VoiceConfig.test.tsx` - Tests for the VoiceConfig component
+- `src/components/Integrations/Integrations.test.tsx` - Tests for the Integrations component
 - `src/types/toolConfig.test.ts` - Tests for tool configuration types
+
+There are 27+ frontend test files covering components, hooks, and utilities.
 
 ### Running Frontend Tests
 
@@ -57,10 +64,17 @@ describe('ComponentName', () => {
 
 The backend uses pytest with FastAPI's TestClient for API testing.
 
-**Test Files:**
+**Test Files** (non-exhaustive, representative examples):
 - `tests/api/test_api.py` - Comprehensive API endpoint tests
 - `tests/api/test_file_watcher.py` - File watching functionality tests
+- `tests/api/test_credentials_api.py` - Credentials API tests
+- `tests/api/test_knowledge_api.py` - Knowledge base API tests
+- `tests/api/test_schedules_api.py` - Scheduling API tests
+- `tests/api/test_skills_api.py` - Skills API tests
+- `tests/api/test_sandbox_runner_api.py` - Sandbox runner API tests
 - `tests/conftest.py` - Pytest fixtures and configuration
+
+There are 150+ backend test files covering agents, authorization, commands, config, memory, tools, and more.
 
 ### Running Backend Tests
 
