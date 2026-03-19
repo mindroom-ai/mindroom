@@ -267,8 +267,9 @@ Runs a series of checks in one pass:
  Usage: root doctor [OPTIONS]
 
  Check your environment for common issues.
- Runs connectivity, configuration, and credential checks in a single pass so
- you can fix everything before running `mindroom run`.
+
+ Runs connectivity, configuration, and credential checks in a single pass
+ so you can fix everything before running `mindroom run`.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
@@ -300,6 +301,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
  Usage: root config [OPTIONS] COMMAND [ARGS]...
 
  Manage MindRoom configuration files.
+
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
