@@ -62,7 +62,7 @@ The corresponding emoji reactions are added to the message as clickable buttons.
 Users can respond in two ways:
 
 - **Reaction**: Click one of the emoji reactions added to the message.
-- **Text**: Send a message with just the option number (e.g., `1` or `2`) in the same thread.
+- **Text**: Send a message with a single-digit option number (e.g., `1` or `2`) in the same thread. Only digits 1–5 are recognized; multi-digit numbers like `10` are ignored.
 
 Both methods trigger the same follow-up behavior: the agent receives the selected value and continues the conversation.
 

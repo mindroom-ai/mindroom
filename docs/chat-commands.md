@@ -110,7 +110,7 @@ List pending scheduled tasks in the current room or thread.
 !list_schedules
 ```
 
-**Aliases:** `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`, `!inspectschedule`, `!inspect-schedule`
+**Aliases:** `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`, `!inspectschedules`, `!inspect-schedules`, `!inspect_schedule`, `!inspectschedule`, `!inspect-schedule`
 
 ### `!cancel_schedule`
 

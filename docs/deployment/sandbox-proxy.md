@@ -261,6 +261,20 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
+### Sandbox-runner API endpoints
+
+These endpoints are served by the sandbox-runner process, not the primary MindRoom runtime.
+All requests require the `MINDROOM_SANDBOX_PROXY_TOKEN` as a Bearer token.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/sandbox-runner/leases` | Create a one-time credential lease for an upcoming tool call |
+| POST | `/api/sandbox-runner/execute` | Execute a tool call with optional credential override via lease |
+| GET | `/api/sandbox-runner/workers` | List known workers with lifecycle metadata |
+| POST | `/api/sandbox-runner/workers/cleanup` | Mark idle workers for cleanup without deleting persisted state |
+
+Credential leases are single-use: once consumed by an `/execute` call, the lease cannot be replayed.
+
 ## Per-agent configuration
 
 MindRoom owns the default local-versus-worker routing policy. You can override which tools are routed through the sandbox proxy per agent (or set a default for all agents) in `config.yaml`:

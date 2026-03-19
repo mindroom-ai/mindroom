@@ -75,7 +75,7 @@ memory:
       host: http://localhost:11434
 ```
 
-Supported embedder providers: `openai`, `ollama`, `sentence_transformers`.
+Supported embedder providers: `openai`, `ollama`, `huggingface`, `sentence_transformers`.
 
 ### Memory LLM
 

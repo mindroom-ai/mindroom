@@ -145,7 +145,7 @@ Streaming itself still works — only the cancellation affordance is removed.
 
 ## Room Mode
 
-When an agent operates in `thread_mode: room` (see [Response Modes](architecture/orchestration.md#response-modes)), streaming skips all thread relations and sends plain room messages.
+When an agent operates in `thread_mode: room` (see [Thread Mode Resolution](configuration/agents.md#thread-mode-resolution)), streaming skips all thread relations and sends plain room messages.
 This is used for bridges and mobile clients that don't support Matrix threads.
 
 ## Replacement Streaming

@@ -96,11 +96,11 @@ The `src/mindroom/orchestration/` subpackage contains helpers extracted from the
 
 ### Runtime Resolution
 
-Agent and team materialization is handled by dedicated resolution modules:
+Agent and team materialization is handled by dedicated top-level modules (not inside the `orchestration/` subpackage):
 
-- **`runtime_resolution.py`** — Resolves `ResolvedAgentRuntime` (the full set of runtime parameters for one agent instance) including `ResolvedKnowledgeBinding` for knowledge base attachment.
-- **`team_runtime_resolution.py`** — Resolves `ResolvedExactTeamMembers` for team materialization via `materialize_exact_requested_team_members()`.
-- **`runtime_state.py`** — Shared runtime readiness state with `set_runtime_starting()`, `set_runtime_ready()`, and `set_runtime_failed()` used by health endpoints.
+- **`src/mindroom/runtime_resolution.py`** — Resolves `ResolvedAgentRuntime` (the full set of runtime parameters for one agent instance) including `ResolvedKnowledgeBinding` for knowledge base attachment.
+- **`src/mindroom/team_runtime_resolution.py`** — Resolves `ResolvedExactTeamMembers` for team materialization via `materialize_exact_requested_team_members()`.
+- **`src/mindroom/runtime_state.py`** — Shared runtime readiness state with `set_runtime_starting()`, `set_runtime_ready()`, and `set_runtime_failed()` used by health endpoints.
 
 ## Message Handling
 
@@ -117,6 +117,10 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 7. Router performs AI routing when no agent mentioned and thread doesn't have multiple human participants
 8. Check for team formation or individual response
 9. Generate response and store memory
+
+**Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content.
+The agent edits its own previous reply in place rather than sending a new message.
+Edits from other agents are ignored, and the feature requires that the original response event ID is tracked by the `ResponseTracker`.
 
 **`_on_media_message`**: Handles media events (images, videos, files, and audio). Downloads and decrypts media data, then processes it through the agent. When no agent is mentioned, AI routing is used to select the appropriate agent, similar to text messages.
 

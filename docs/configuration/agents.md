@@ -162,8 +162,9 @@ Absolute paths and `..` traversal are rejected.
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
-Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
-`google` and `spotify` are shared-only integrations (they require `worker_scope` unset or `shared`) but can still be proxied through the sandbox.
+Six integrations are shared-only (they require `worker_scope` unset or `shared`): `google`, `spotify`, `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+Of those, `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` also always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
+`google` and `spotify` can still be proxied through the sandbox.
 
 The supported `worker_scope` values are:
 
@@ -386,6 +387,11 @@ agents:
 - Targets must reference existing agent names in the config
 - An agent cannot delegate to itself
 - Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
+
+## Naming Rules
+
+Agent and team YAML keys must contain only alphanumeric characters and underscores (matching `^[a-zA-Z0-9_]+$`).
+Agent and team names must be distinct — the same key cannot appear in both `agents:` and `teams:`.
 
 ## Rich Prompt Agents
 

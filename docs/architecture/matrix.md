@@ -128,6 +128,19 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 - Preview event is compact (for example no inline `io.mindroom.tool_trace`), while the sidecar preserves full content fidelity
 - Encrypted rooms: sidecar JSON is encrypted before upload (`message-content.json.enc`)
 
+## Response Tracking
+
+MindRoom prevents duplicate responses using a `ResponseTracker` that records which events have already been processed.
+When a sync reconnection or retry delivers the same event twice, the tracker suppresses the duplicate so only one agent response is sent per triggering message.
+Tracking state is persisted under `mindroom_data/tracking/` and survives restarts.
+
+## Room Cleanup
+
+On startup, MindRoom detects orphaned bot memberships left over from a previous configuration.
+When an agent is removed from `config.yaml`, its Matrix bot account may still be a member of rooms it previously joined.
+The cleanup process leaves those rooms safely without ejecting currently configured entities from their required rooms.
+This runs automatically — no manual intervention is needed.
+
 ## Identity Management
 
 The `MatrixID` class handles Matrix user ID parsing and agent identification:

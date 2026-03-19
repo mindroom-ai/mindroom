@@ -301,7 +301,8 @@ voice:
   intelligence:
     model: default                 # Model for command recognition
 
-# Internal MindRoom user account (optional)
+# Internal MindRoom user account (optional, omit for hosted/public profiles)
+# When present, defaults are: username: mindroom_user, display_name: MindRoomUser
 mindroom_user:
   username: mindroom_user          # Set before first startup (localpart only)
   display_name: MindRoomUser       # Can be changed later

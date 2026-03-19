@@ -86,7 +86,7 @@ memory:
   backend: "mem0"  # Global default backend: "mem0" or "file"
   team_reads_member_memory: false  # Allow team reads to access member agent memories
   embedder:
-    provider: "ollama"  # Options: openai, ollama, huggingface, sentence_transformers, etc.
+    provider: "ollama"  # Options: openai, ollama, sentence_transformers
     config:
       model: "nomic-embed-text"  # Embedding model to use
       host: "http://localhost:11434"  # Ollama host URL

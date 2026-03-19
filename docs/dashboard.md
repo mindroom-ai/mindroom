@@ -84,7 +84,7 @@ Configure AI model providers:
 Configure global memory defaults:
 
 - **Backend** - Global default backend (`mem0` or `file`)
-- **Provider** - Ollama (local), OpenAI, HuggingFace, or Sentence Transformers
+- **Provider** - Ollama (local), OpenAI, or Sentence Transformers
 - **Model** - Provider-specific embedding models
 - **Host URL** - For Ollama provider
 - **File backend settings** - Path and file memory tuning options

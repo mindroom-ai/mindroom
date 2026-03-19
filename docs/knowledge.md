@@ -271,7 +271,7 @@ Knowledge bases use the same embedder configured in the `memory` section:
 ```yaml
 memory:
   embedder:
-    provider: openai        # or "ollama" or "sentence_transformers"
+    provider: openai        # or "ollama", "huggingface", or "sentence_transformers"
     config:
       model: text-embedding-3-small
       host: null             # For self-hosted (Ollama)
