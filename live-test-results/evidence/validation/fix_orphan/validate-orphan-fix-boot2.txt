@@ -1,0 +1,71 @@
+
+Warning: Missing environment variables:
+
+  * openai: Set OPENAI_API_KEY
+
+You can set these in a .env file or export them in your shell.
+╭──────────────────────────────────────────────╮
+│            ┌┬┐┬┌┐┌┌┬┐┬─┐┌─┐┌─┐┌┬┐            │
+│            │││││││ ││├┬┘│ ││ ││││            │
+│            ┴ ┴┴┘└┘─┴┘┴└─└─┘└─┘┴ ┴            │
+│ 💊 Wake up... Your agents are in the Matrix. │
+╰──────────────────────────────────────────────╯
+
+Starting Mindroom (log level: INFO)...
+Dashboard: http://localhost:8765
+API: http://localhost:8765/api
+Press Ctrl+C to stop
+
+2026-03-19T18:10:37.544200Z [info     ] Logging initialized            [mindroom.logging_config] log_file=/home/basnijholt/gt/mindroom/crew/fix_orphan/mindroom_data/logs/mindroom_20260319_181037.log
+2026-03-19T18:10:37.544686Z [info     ] Syncing API keys from environment to CredentialsManager... [mindroom.orchestrator]
+2026-03-19T18:10:37.545465Z [info     ] Starting orchestrator...       [mindroom.orchestrator]
+2026-03-19T18:10:37.545804Z [info     ] Starting bundled dashboard/API server on 0.0.0.0:8765 [mindroom.orchestrator]
+2026-03-19T18:10:37.546328Z [info     ] Waiting for Matrix homeserver  [mindroom.orchestration.runtime] timeout_seconds=None url=http://localhost:8108/_matrix/client/versions
+/home/basnijholt/gt/mindroom/crew/fix_orphan/.venv/lib/python3.13/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+  warnings.warn(  # deprecated in 14.0 - 2024-11-09
+/home/basnijholt/gt/mindroom/crew/fix_orphan/.venv/lib/python3.13/site-packages/uvicorn/protocols/websockets/websockets_impl.py:17: DeprecationWarning: websockets.server.WebSocketServerProtocol is deprecated
+  from websockets.server import WebSocketServerProtocol
+INFO:     Started server process [1811304]
+INFO:     Waiting for application startup.
+2026-03-19T18:10:38.623867Z [info     ] Loaded agent configuration from /home/basnijholt/gt/mindroom/crew/fix_orphan/config.yaml [mindroom.config.main]
+2026-03-19T18:10:38.624349Z [info     ] Found 1 agent configurations   [mindroom.config.main]
+2026-03-19T18:10:38.624803Z [info     ] Loaded API config              [mindroom.api.config_lifecycle] config_path=/home/basnijholt/gt/mindroom/crew/fix_orphan/config.yaml
+2026-03-19T18:10:38.625220Z [info     ] Initialized API runtime config [mindroom.api.main] config_exists=True config_path=/home/basnijholt/gt/mindroom/crew/fix_orphan/config.yaml
+2026-03-19T18:10:38.625548Z [info     ] Syncing API credentials from runtime env [mindroom.api.main]
+INFO:     Application startup complete.
+ERROR:    [Errno 98] error while attempting to bind on address ('0.0.0.0', 8765): [errno 98] address already in use
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+2026-03-19T18:10:38.633960Z [info     ] HTTP Request: GET http://localhost:8108/_matrix/client/versions "HTTP/1.1 200 OK"
+2026-03-19T18:10:38.636597Z [info     ] Matrix homeserver ready        [mindroom.orchestration.runtime] url=http://localhost:8108/_matrix/client/versions
+2026-03-19T18:10:38.638378Z [info     ] Initializing multi-agent system... [mindroom.orchestrator]
+2026-03-19T18:10:38.645216Z [info     ] Loaded agent configuration from /home/basnijholt/gt/mindroom/crew/fix_orphan/config.yaml [mindroom.config.main]
+2026-03-19T18:10:38.645594Z [info     ] Found 1 agent configurations   [mindroom.config.main]
+2026-03-19T18:10:38.650561Z [info     ] Initialized agent bots         [mindroom.orchestrator] count=2
+2026-03-19T18:10:38.658280Z [info     ] Using existing credentials for agent router from matrix_state.yaml [mindroom.matrix.users]
+2026-03-19T18:10:39.105817Z [info     ] Ensured Matrix user account: @mindroom_router:localhost [mindroom.bot] agent='🎪 router'
+2026-03-19T18:10:39.447825Z [info     ] Successfully logged in: @mindroom_router:localhost [mindroom.matrix.client]
+2026-03-19T18:10:39.466079Z [info     ] Successfully set avatar for router [mindroom.bot] agent='🎪 router'
+2026-03-19T18:10:39.495686Z [info     ] Set presence status: 🤖 Model: openai/claude-sonnet-4-6 | 📍 Routes messages to appropriate agents [mindroom.matrix.presence]
+2026-03-19T18:10:39.505397Z [info     ] Checking 2 rooms for orphaned bots [mindroom.matrix.room_cleanup]
+2026-03-19T18:10:39.557365Z [info     ] No orphaned bots found in any room [mindroom.matrix.room_cleanup]
+2026-03-19T18:10:39.557936Z [info     ] Agent setup complete: @mindroom_router:localhost [mindroom.bot] agent='🎪 router'
+2026-03-19T18:10:39.564234Z [info     ] Using existing credentials for agent general from matrix_state.yaml [mindroom.matrix.users]
+2026-03-19T18:10:39.985355Z [info     ] Ensured Matrix user account: @mindroom_general:localhost [mindroom.bot] agent='🔮 general'
+2026-03-19T18:10:40.384306Z [info     ] Successfully logged in: @mindroom_general:localhost [mindroom.matrix.client]
+2026-03-19T18:10:40.399235Z [info     ] Successfully set avatar for general [mindroom.bot] agent='🔮 general'
+2026-03-19T18:10:40.439345Z [info     ] Set presence status: 🤖 Model: openai/claude-sonnet-4-6 | 💼 General-purpose assistant | 🔧 1 tools available [mindroom.matrix.presence]
+2026-03-19T18:10:40.439790Z [info     ] Agent setup complete: @mindroom_general:localhost [mindroom.bot] agent='🔮 general'
+2026-03-19T18:10:40.440712Z [info     ] All agent bots started successfully [mindroom.orchestrator]
+2026-03-19T18:10:40.461991Z [info     ] Ensured existence of 1 rooms   [mindroom.orchestrator]
+2026-03-19T18:10:40.490026Z [info     ] Set avatar for managed Matrix room [mindroom.matrix.rooms] avatar_path=/home/basnijholt/gt/mindroom/crew/fix_orphan/avatars/spaces/root_space.png context=root_space room_id=!lXZAQwbTTQGSNOqbwg:localhost
+2026-03-19T18:10:40.538439Z [info     ] Ensured room invitations for all configured agents and authorized users [mindroom.orchestrator]
+2026-03-19T18:10:40.664987Z [info     ] Ensured existence of 1 rooms   [mindroom.orchestrator]
+2026-03-19T18:10:40.703254Z [info     ] Set avatar for managed Matrix room [mindroom.matrix.rooms] avatar_path=/home/basnijholt/gt/mindroom/crew/fix_orphan/avatars/spaces/root_space.png context=root_space room_id=!lXZAQwbTTQGSNOqbwg:localhost
+2026-03-19T18:10:40.745472Z [info     ] Ensured room invitations for all configured agents and authorized users [mindroom.orchestrator]
+2026-03-19T18:10:40.783962Z [info     ] All agents have joined their configured rooms [mindroom.orchestrator]
+2026-03-19T18:10:40.789357Z [info     ] Starting sync loop for router  [mindroom.orchestration.runtime]
+2026-03-19T18:10:40.794674Z [info     ] Starting sync loop for general [mindroom.orchestration.runtime]
+2026-03-19T18:10:40.903029Z [info     ] Received message               [mindroom.bot] agent='🎪 router' event_id=$jVsgZb4_SvIqwx9QSPHqAqv2TyON4gggQhWLQNm2HW8 room_id=!HkjpHvhnJvhZuOxHsx:localhost sender=@mindroom_router:localhost
+2026-03-19T18:10:40.921066Z [info     ] Received message               [mindroom.bot] agent='🔮 general' event_id=$jVsgZb4_SvIqwx9QSPHqAqv2TyON4gggQhWLQNm2HW8 room_id=!HkjpHvhnJvhZuOxHsx:localhost sender=@mindroom_router:localhost
+2026-03-19T18:10:40.922544Z [info     ] Cleaned up old events for general, keeping 0 events [mindroom.response_tracker]

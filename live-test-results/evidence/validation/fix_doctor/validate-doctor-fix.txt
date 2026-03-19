@@ -1,0 +1,15 @@
+MindRoom Doctor
+
+✓ Config file: 
+/home/basnijholt/gt/mindroom/crew/fix_doctor/evidence/test-config.yaml
+✓ Config valid (1 agent, 0 teams, 1 model, 1 room)
+  Providers: openai (1 model)
+✓ openai API key valid
+✓ Memory LLM: openai/gpt-oss-low:20b API key valid
+✗ Memory embedder: openai/text-embedding-3-small embeddings endpoint failed 
+(http://192.168.1.6:4000/v1) (HTTP 400)
+✓ Matrix homeserver: http://localhost:8008
+✓ Storage writable: 
+/home/basnijholt/gt/mindroom/crew/fix_doctor/evidence/storage/
+
+6 passed, 1 failed, 0 warnings
