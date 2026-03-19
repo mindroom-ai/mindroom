@@ -607,6 +607,8 @@ class DockerProjectionManager:
             return (matching_agent_names[0],)
         if not resolved_agent_policies:
             return None
+        if worker_scope == "user_agent":
+            return None
         msg = f"Worker key does not match any configured agent policy: {worker_key}"
         raise WorkerBackendError(msg)
 
