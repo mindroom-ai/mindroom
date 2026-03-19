@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.constants import runtime_env_values
+from mindroom.constants import runtime_env_values, serialize_public_runtime_paths
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -183,6 +183,11 @@ def kubernetes_backend_config_signature(
     config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
+    public_runtime_json = json.dumps(
+        serialize_public_runtime_paths(runtime_paths),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return (
         "kubernetes",
         config.namespace,
@@ -203,6 +208,7 @@ def kubernetes_backend_config_signature(
         config.name_prefix,
         config.node_name or "",
         str(config.colocate_with_control_plane_node),
+        public_runtime_json,
         extra_env_json,
         extra_labels_json,
         config.owner_deployment_name or "",
