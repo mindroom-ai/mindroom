@@ -635,6 +635,36 @@ def test_docker_worker_backend_rejects_reserved_extra_labels(
 
 
 @pytest.mark.parametrize(
+    ("label_name"),
+    [
+        "mindroom.ai/launch-config-hash",
+        "mindroom.ai/worker-key",
+        "mindroom.ai/component",
+    ],
+)
+def test_docker_worker_config_rejects_reserved_extra_labels_from_env(
+    tmp_path: Path,
+    label_name: str,
+) -> None:
+    """Runtime env loading should reject reserved Docker labels before backend creation."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_LABELS_JSON": json.dumps({label_name: "user-value"}),
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match="extra labels cannot override reserved labels"):
+        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+
+
+@pytest.mark.parametrize(
     ("storage_mount_path", "config_path"),
     [
         ("/app/worker", "/app/worker/config.yaml"),
@@ -664,6 +694,38 @@ def test_docker_worker_backend_rejects_overlapping_config_mount_targets(
             extra_env={},
             extra_labels={},
         )
+
+
+@pytest.mark.parametrize(
+    ("storage_mount_path", "config_path"),
+    [
+        ("/app/worker", "/app/worker/config.yaml"),
+        ("/app/worker", "/app/worker/nested/config.yaml"),
+        ("/app/worker/config-host", "/app/worker/config.yaml"),
+    ],
+)
+def test_docker_worker_config_rejects_overlapping_config_mount_targets_from_env(
+    tmp_path: Path,
+    storage_mount_path: str,
+    config_path: str,
+) -> None:
+    """Runtime env loading should reject overlapping Docker config and worker-state mount targets."""
+    runtime_config_path = tmp_path / "config.yaml"
+    runtime_config_path.write_text("agents: {}\n", encoding="utf-8")
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH": storage_mount_path,
+            "MINDROOM_DOCKER_WORKER_CONFIG_PATH": config_path,
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match="config_path must mount outside the worker storage root"):
+        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
 
 def _projection_signature_for_hash_seed(hash_seed: str, workspace_root: Path) -> dict[str, object]:
