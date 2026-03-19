@@ -116,6 +116,7 @@ mindroom run
 | **Images**                   | Pass user-sent images to vision-capable AI models                 |
 | **File & Video Attachments** | Context-scoped file and video handling with attachment IDs        |
 | **Cultures**                 | Shared evolving principles across groups of agents                |
+| **Interactive Q&A**          | Clickable multiple-choice questions via Matrix reactions          |
 | **Authorization**            | Fine-grained user and room access control                         |
 | **OpenAI-Compatible API**    | Use agents from LibreChat, Open WebUI, or any OpenAI client       |
 | **Hot Reload**               | Config changes are detected and agents restart automatically      |
@@ -154,6 +155,7 @@ mindroom run
 - [Voice Messages](https://docs.mindroom.chat/voice/index.md) - Voice message transcription
 - [Image Messages](https://docs.mindroom.chat/images/index.md) - Image analysis with vision models
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/index.md) - Context-scoped file and video handling
+- [Interactive Q&A](https://docs.mindroom.chat/interactive/index.md) - Clickable multiple-choice questions via Matrix reactions
 - [Authorization](https://docs.mindroom.chat/authorization/index.md) - User and room access control
 - [Architecture](https://docs.mindroom.chat/architecture/index.md) - How it works under the hood
 - [Deployment](https://docs.mindroom.chat/deployment/index.md) - Docker and Kubernetes deployment

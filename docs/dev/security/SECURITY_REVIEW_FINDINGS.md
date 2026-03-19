@@ -1,5 +1,9 @@
 # MindRoom Security Review - Initial Findings Report
 
+> **Audit note (2026-03-18):** This is a summary/index page.
+> Some references to individual review docs may be stale as the detailed reviews have been updated independently.
+> Cross-reference with individual SECURITY_REVIEW_*.md files for current status.
+
 ## Executive Summary
 Initial security review of the MindRoom codebase has identified several critical security issues that must be addressed before open-source release. The most critical issues involve default passwords and authentication configurations.
 

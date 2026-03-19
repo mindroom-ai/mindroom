@@ -54,9 +54,9 @@ Notes:
 | `command-dispatch`         | `"tool"`                | Set to `tool` to run a tool directly                                                                                   |
 | `command-tool`             | string                  | Function to call: `function_name`, `toolkit.function_name`, or `toolkit` (if the toolkit exposes exactly one function) |
 | `command-arg-mode`         | `"raw"`                 | Argument passing mode; only `raw` is currently supported                                                               |
-| `license`                  | string                  | Optional license information                                                                                           |
-| `compatibility`            | string                  | Optional compatibility requirements                                                                                    |
-| `allowed-tools`            | list                    | Optional list of tools this skill is allowed to use                                                                    |
+| `license`                  | string                  | Informational only; accepted but not used by the runtime                                                               |
+| `compatibility`            | string                  | Informational only; accepted but not used by the runtime                                                               |
+| `allowed-tools`            | list                    | Reserved; accepted in frontmatter but not enforced by the runtime                                                      |
 
 ## Eligibility gating (OpenClaw metadata)
 

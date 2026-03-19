@@ -117,6 +117,32 @@ Manage service credentials directly from the dashboard:
 - **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name
 - `GITHUB_TOKEN` auto-seeds `github_private` (`username: x-access-token`, `token: <GITHUB_TOKEN>`, `_source: env`) unless the service is UI-managed
 
+### Culture
+
+Configure shared culture rules that apply across agents:
+
+- **Create/edit/delete cultures** with description and mode
+- **Assign agents** to cultures
+- **Mode selection** - `automatic` (always active), `agentic` (agent decides when to update), or `manual` (read-only)
+
+### Schedules
+
+View and manage scheduled tasks across rooms:
+
+- **List all schedules** with room, status, schedule type, and next run time
+- **Edit schedule timing** and description
+- **Cancel schedules** by task ID
+
+### Skills
+
+Manage OpenClaw-compatible skills:
+
+- **List installed skills** with origin and edit status
+- **View skill content** (SKILL.md)
+- **Create new skills** with name and description
+- **Edit user-created skills**
+- **Delete user-created skills**
+
 ### Voice
 
 Configure voice message handling:
@@ -130,8 +156,8 @@ Configure voice message handling:
 Connect external services to enable agent capabilities:
 
 - **Categories** - Email & Calendar, Communication, Shopping, Entertainment, Social, Development, Research, Smart Home, Information
-- **Search and filter** by status (Available, Unconfigured, Configured, Coming Soon)
-- **OAuth flows** for Google, Spotify, Home Assistant, etc.
+- **Search and filter** by status (Available, Unconfigured, Configured)
+- **OAuth flows** for Google (6 endpoints), Spotify (4 endpoints), Home Assistant (7 endpoints), and more
 
 ## Features
 
@@ -154,35 +180,42 @@ The dashboard communicates with the backend API at `/api/`:
 
 ### Configuration
 
-| Method | Endpoint                  | Description                 |
-| ------ | ------------------------- | --------------------------- |
-| POST   | `/api/config/load`        | Fetch current configuration |
-| PUT    | `/api/config/save`        | Save full configuration     |
-| GET    | `/api/config/agents`      | List all agents             |
-| POST   | `/api/config/agents`      | Create new agent            |
-| PUT    | `/api/config/agents/{id}` | Update agent                |
-| DELETE | `/api/config/agents/{id}` | Delete agent                |
-| GET    | `/api/config/teams`       | List all teams              |
-| POST   | `/api/config/teams`       | Create new team             |
-| PUT    | `/api/config/teams/{id}`  | Update team                 |
-| DELETE | `/api/config/teams/{id}`  | Delete team                 |
-| GET    | `/api/config/models`      | List model configurations   |
-| PUT    | `/api/config/models/{id}` | Update model configuration  |
-| GET    | `/api/config/room-models` | Get room model overrides    |
-| PUT    | `/api/config/room-models` | Update room model overrides |
+| Method | Endpoint                     | Description                                           |
+| ------ | ---------------------------- | ----------------------------------------------------- |
+| POST   | `/api/config/load`           | Fetch current configuration                           |
+| PUT    | `/api/config/save`           | Save full configuration                               |
+| GET    | `/api/config/agents`         | List all agents                                       |
+| POST   | `/api/config/agents`         | Create new agent                                      |
+| PUT    | `/api/config/agents/{id}`    | Update agent                                          |
+| DELETE | `/api/config/agents/{id}`    | Delete agent                                          |
+| GET    | `/api/config/teams`          | List all teams                                        |
+| POST   | `/api/config/teams`          | Create new team                                       |
+| PUT    | `/api/config/teams/{id}`     | Update team                                           |
+| DELETE | `/api/config/teams/{id}`     | Delete team                                           |
+| GET    | `/api/config/models`         | List model configurations                             |
+| PUT    | `/api/config/models/{id}`    | Update model configuration                            |
+| GET    | `/api/config/room-models`    | Get room model overrides                              |
+| PUT    | `/api/config/room-models`    | Update room model overrides                           |
+| POST   | `/api/config/agent-policies` | Get backend-derived agent policies for a draft config |
 
 ### Credentials
 
-| Method | Endpoint                             | Description                    |
-| ------ | ------------------------------------ | ------------------------------ |
-| GET    | `/api/credentials/list`              | List services with credentials |
-| GET    | `/api/credentials/{service}/status`  | Get credential status          |
-| GET    | `/api/credentials/{service}`         | Get credentials for editing    |
-| POST   | `/api/credentials/{service}`         | Set credentials                |
-| POST   | `/api/credentials/{service}/api-key` | Set API key                    |
-| GET    | `/api/credentials/{service}/api-key` | Get masked API key             |
-| POST   | `/api/credentials/{service}/test`    | Test credentials validity      |
-| DELETE | `/api/credentials/{service}`         | Delete credentials             |
+| Method | Endpoint                                                | Description                           |
+| ------ | ------------------------------------------------------- | ------------------------------------- |
+| GET    | `/api/credentials/list`                                 | List services with credentials        |
+| GET    | `/api/credentials/{service}/status`                     | Get credential status                 |
+| GET    | `/api/credentials/{service}`                            | Get credentials for editing           |
+| POST   | `/api/credentials/{service}`                            | Set credentials                       |
+| POST   | `/api/credentials/{service}/api-key`                    | Set API key                           |
+| GET    | `/api/credentials/{service}/api-key`                    | Get masked API key                    |
+| POST   | `/api/credentials/{service}/test`                       | Test credentials validity             |
+| DELETE | `/api/credentials/{service}`                            | Delete credentials                    |
+| POST   | `/api/credentials/{service}/copy-from/{source_service}` | Copy credentials from another service |
+
+Credentials support scoping via query parameters:
+
+- `agent_name` — scope credentials to a specific agent
+- `execution_scope` — scope credentials to a specific worker scope (e.g., `shared`, `unscoped`)
 
 ### Knowledge
 
@@ -194,6 +227,49 @@ The dashboard communicates with the backend API at `/api/`:
 | DELETE | `/api/knowledge/bases/{base_id}/files/{path}` | Delete a file from disk and index |
 | GET    | `/api/knowledge/bases/{base_id}/status`       | Get indexing status               |
 | POST   | `/api/knowledge/bases/{base_id}/reindex`      | Rebuild the index for a base      |
+
+### Skills
+
+| Method | Endpoint                   | Description                                     |
+| ------ | -------------------------- | ----------------------------------------------- |
+| GET    | `/api/skills`              | List all installed skills                       |
+| GET    | `/api/skills/{skill_name}` | Get skill detail (content, origin, edit status) |
+| POST   | `/api/skills`              | Create a new user skill                         |
+| PUT    | `/api/skills/{skill_name}` | Update a user skill's content                   |
+| DELETE | `/api/skills/{skill_name}` | Delete a user skill                             |
+
+### Schedules
+
+| Method | Endpoint                   | Description                               |
+| ------ | -------------------------- | ----------------------------------------- |
+| GET    | `/api/schedules`           | List scheduled tasks (filterable by room) |
+| PUT    | `/api/schedules/{task_id}` | Edit a scheduled task                     |
+| DELETE | `/api/schedules/{task_id}` | Cancel a scheduled task                   |
+
+### Workers
+
+| Method | Endpoint               | Description                   |
+| ------ | ---------------------- | ----------------------------- |
+| GET    | `/api/workers`         | List active sandbox workers   |
+| POST   | `/api/workers/cleanup` | Clean up idle sandbox workers |
+
+### Health & Readiness
+
+| Method | Endpoint      | Description                                                                                                                                     |
+| ------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/api/health` | Always returns `{"status": "healthy"}` — confirms the HTTP server is running                                                                    |
+| GET    | `/api/ready`  | Returns `{"status": "ready"}` when the orchestrator has finished startup. Returns `503` with `{"status": "<phase>", "detail": "..."}` otherwise |
+
+MindRoom tracks runtime phases internally:
+
+| Phase      | Meaning                                               |
+| ---------- | ----------------------------------------------------- |
+| `idle`     | Process not started                                   |
+| `starting` | Startup in progress (detail message available)        |
+| `ready`    | Orchestrator booted, serving requests                 |
+| `failed`   | Startup or runtime failure (detail message available) |
+
+Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators.
 
 ### Tools & Matrix
 

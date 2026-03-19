@@ -138,6 +138,15 @@ For Ollama, you can also set:
 OLLAMA_HOST=http://localhost:11434
 ```
 
+For Vertex AI Claude, set these instead of an API key:
+
+```
+ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project
+CLOUD_ML_REGION=us-central1
+```
+
+Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
+
 ### File-based Secrets
 
 For container environments (Kubernetes, Docker Swarm), you can also use file-based secrets by appending `_FILE` to any environment variable name:

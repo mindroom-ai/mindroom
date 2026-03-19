@@ -4,7 +4,7 @@ icon: lucide/workflow
 
 # Agent Orchestration
 
-The `MultiAgentOrchestrator` (in `src/mindroom/bot.py`) manages the lifecycle of all agents, teams, and the router.
+The `MultiAgentOrchestrator` (in `src/mindroom/orchestrator.py`) manages the lifecycle of all agents, teams, and the router.
 
 ## Boot Sequence
 
@@ -48,7 +48,7 @@ main() entry
          │
          ▼
 ┌──────────────────────────────────────┐
-│  Concurrent Tasks (asyncio.wait)     │
+│  Concurrent Tasks (asyncio.gather)   │
 │ ─────────────────────────────────────│
 │ • orchestrator_task (sync loops)     │
 │ • watcher_task (config file polling) │
@@ -60,7 +60,7 @@ main() entry
 
 - **Entity order**: Router first, then agents, then teams
 - **Room setup** (`_setup_rooms_and_memberships`): Router creates rooms, invites agents/users, bots join
-- **Sync loops**: Each bot runs `_sync_forever_with_restart()` with automatic retry
+- **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry
 - **Internal user identity**: `mindroom_user.username` is bootstrap-only; only `display_name` should change later
 
 ## Hot Reload
@@ -91,7 +91,7 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 8. Check for team formation or individual response
 9. Generate response and store memory
 
-**`_on_image_message`**: Handles `RoomMessageImage` and `RoomEncryptedImage` events. Downloads and decrypts image data, then processes it through the agent. When no agent is mentioned, AI routing is used to select the appropriate agent, similar to text messages.
+**`_on_media_message`**: Handles media events (images, videos, files, and audio). Downloads and decrypts media data, then processes it through the agent. When no agent is mentioned, AI routing is used to select the appropriate agent, similar to text messages.
 
 **`_on_reaction`**: Handles `ReactionEvent` for the interactive Q&A system (e.g., confirming or rejecting agent suggestions) and config confirmation workflows.
 
@@ -99,7 +99,7 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 
 ## Concurrency
 
-- Each bot runs its own sync loop via `_sync_forever_with_restart()`
+- Each bot runs its own sync loop via `sync_forever_with_restart()`
 - Sync loop failures trigger automatic restart with linear backoff (5s, 10s, 15s, ... up to 60s max)
 - Event callbacks run as background tasks (never block the sync loop)
 - `ResponseTracker` prevents duplicate replies
@@ -109,7 +109,7 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 
 On `orchestrator.stop()`:
 
-1. Shut down knowledge managers (`shutdown_knowledge_managers()`)
+1. Shut down knowledge managers (`shutdown_shared_knowledge_managers()`)
 2. Cancel all sync tasks
 3. Signal all bots to stop (`bot.running = False`)
 4. Call `bot.stop()` for each bot (waits 5s for background tasks, closes Matrix client)
