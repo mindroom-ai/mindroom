@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from mindroom.agents import _load_context_files
 from mindroom.config.main import load_config
 from mindroom.constants import (
     RuntimePaths,
@@ -1361,6 +1362,61 @@ def test_build_dedicated_worker_runtime_paths_rejects_reserved_extra_env_names(t
             shared_storage_root="/app/shared-storage",
             extra_env={"MINDROOM_STORAGE_PATH": str((tmp_path / "escape").resolve())},
         )
+
+
+def test_docker_projected_context_files_load_in_worker_runtime(tmp_path: Path) -> None:
+    """Projected Docker context files should still load through the worker runtime."""
+    config_text, _projected_paths = _projected_config_fixture(tmp_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(config_text, encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
+    config = _DockerWorkerBackendConfig(
+        image="ghcr.io/mindroom-ai/mindroom:latest",
+        worker_port=8766,
+        storage_mount_path="/app/worker",
+        config_path="/app/config-host/config.yaml",
+        host_config_path=config_path,
+        idle_timeout_seconds=60.0,
+        ready_timeout_seconds=5.0,
+        name_prefix="mindroom-worker",
+        publish_host="127.0.0.1",
+        endpoint_host="127.0.0.1",
+        user="1000:1000",
+        extra_env={},
+        extra_labels={},
+    )
+    manager = DockerProjectionManager(
+        config=config,
+        projected_configs_root=tmp_path / _PROJECTED_CONFIGS_DIRNAME,
+        runtime_paths=runtime_paths,
+    )
+    worker_paths = local_worker_state_paths_for_root(worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY))
+    projection = manager.projected_config(worker_paths, worker_key=_TEST_UNSCOPED_WORKER_KEY, materialize=True)
+    projected_config = yaml.safe_load(projection.projected_yaml)
+    projected_context_file = projected_config["agents"]["code"]["context_files"][0]
+    worker_runtime = build_dedicated_worker_runtime_paths(
+        runtime_paths=runtime_paths,
+        backend_name="Docker",
+        worker_key=_TEST_UNSCOPED_WORKER_KEY,
+        config_path=projection.root / "config.yaml",
+        dedicated_root=worker_paths.root,
+        local_dedicated_root=worker_paths.root,
+        worker_port=8766,
+        shared_storage_root=str(worker_paths.root),
+        extra_env={},
+    )
+
+    loaded = _load_context_files(
+        [projected_context_file],
+        worker_runtime,
+        agent_name="code",
+        storage_path=worker_runtime.storage_root,
+    )
+
+    assert len(loaded) == 1
+    assert loaded[0].kind == "personality"
+    assert loaded[0].title == "00-context.md"
+    assert loaded[0].body == "# Context"
 
 
 def test_docker_backend_recreates_container_when_launch_config_changes(
