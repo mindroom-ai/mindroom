@@ -233,7 +233,7 @@ defaults:
 # Memory system configuration (optional)
 memory:
   backend: mem0                    # Global default backend (mem0 or file); agents can override with memory_backend
-  team_reads_member_memory: false  # Default: false (let team reads access member agent memories)
+  team_reads_member_memory: false  # Default: false (when true, team reads can access member agent memories)
   embedder:
     provider: openai               # Default: openai (openai, ollama, huggingface, sentence_transformers)
     config:

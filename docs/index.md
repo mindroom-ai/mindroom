@@ -167,6 +167,7 @@ mindroom run
 - [Chat Commands](chat-commands.md) - Built-in `!help`, `!schedule`, `!config`, `!skill` commands
 - [Interactive Q&A](interactive.md) - Clickable multiple-choice questions via Matrix reactions
 - [Authorization](authorization.md) - User and room access control
+- [Matrix Space](matrix-space.md) - Optional root Matrix Space for grouping managed rooms
 - [Architecture](architecture/index.md) - How it works under the hood
 - [Deployment](deployment/index.md) - Docker and Kubernetes deployment
 - [Bridges](deployment/bridges/index.md) - Connect Telegram, Slack, and other platforms to Matrix
