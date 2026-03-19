@@ -556,10 +556,10 @@ Expected outcome: Skill origin labeling, kebab-case name validation, unsaved-cha
 Expected outcome: Scoped tool previews fail closed when policy derivation is unavailable and team member pickers show explicit eligibility reasons instead of leaving blocked members selectable.
 
 - [ ] `UI-020` Use the External Rooms tab and trigger a bulk leave where at least one room succeeds and another fails.
-Expected outcome: Mixed-success feedback reports both the rooms that were left and the rooms that failed instead of collapsing partial failure into a generic success or error state.
+Expected outcome: Partial failure does not present as full success, and the UI surfaces the current generic failure-count messaging for the rooms that could not be left.
 
 - [ ] `UI-021` Use the Tools or Integrations tab while switching between `shared`, `user`, and `user_agent` execution scopes during load.
-Expected outcome: Shared-only integrations and dashboard-managed credential controls are marked unsupported for non-shared scopes, stale in-flight scope requests do not bleed status across selections, and unsaved draft scope overrides are treated as non-authoritative.
+Expected outcome: Shared-only integrations are hidden from the catalog for non-shared scopes, dashboard-managed credential controls show the current unsupported or preview warnings, stale in-flight scope requests do not bleed status across selections, and unsaved draft scope overrides are treated as non-authoritative.
 
 ## 15. SaaS Platform
 
@@ -660,7 +660,7 @@ Expected outcome: OAuth client credentials are written to the active runtime env
 Expected outcome: Both connection modes persist usable credentials, entity listing reflects the live instance, and service calls succeed or fail clearly against the actual Home Assistant runtime.
 
 - [ ] `INT-011` Compare one OAuth-backed integration under `shared`, `user`, and `user_agent` execution scopes, including an unsaved draft scope override in the dashboard.
-Expected outcome: Shared-only integrations remain visible but unsupported outside shared scope, dashboard credential status becomes non-authoritative for unsaved draft scope overrides, and connect flows reject isolating scopes the runtime does not support.
+Expected outcome: Shared-only integrations are hidden from the dashboard catalog outside shared scope, dashboard credential status becomes non-authoritative for unsaved draft scope overrides, and connect flows reject isolating scopes the runtime does not support.
 
 - [ ] `INT-012` Exercise Google or Home Assistant OAuth callbacks after changing user or target service context, then retry credential writes with stale or mismatched dashboard state.
 Expected outcome: OAuth callback state stays bound to the original user and service, stale or mismatched callback attempts are rejected, and persisted credential writes only apply to the committed supported scope.
