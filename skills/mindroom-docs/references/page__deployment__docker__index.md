@@ -70,6 +70,7 @@ Key environment variables (set in `.env` or pass directly):
 | `MINDROOM_CONFIG_PATH`  | Path to config.yaml                        | `./config.yaml`, then `~/.mindroom/config.yaml` |
 | `ANTHROPIC_API_KEY`     | Anthropic API key (if using Claude models) | -                                               |
 | `OPENAI_API_KEY`        | OpenAI API key (if using OpenAI models)    | -                                               |
+| `MINDROOM_PORT`         | Port for the MindRoom API/dashboard        | `8765`                                          |
 | `MINDROOM_API_KEY`      | API key for dashboard auth (standalone)    | - (open access)                                 |
 
 Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).

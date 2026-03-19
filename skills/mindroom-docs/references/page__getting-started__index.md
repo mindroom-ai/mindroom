@@ -19,6 +19,23 @@ This creates:
 - `~/.mindroom/config.yaml`
 - `~/.mindroom/.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
 
+The `--profile public` template defaults to the `openai` provider. Use `--provider` to select a different provider preset:
+
+```
+# Use Anthropic Claude
+uvx mindroom config init --profile public --provider anthropic
+
+# Use Vertex AI Claude (Google Cloud)
+uvx mindroom config init --profile public-vertexai-anthropic
+```
+
+Profile aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted.
+
+Other profiles:
+
+- `--profile full` — rich starter config with interactive provider selection (default)
+- `--profile minimal` or `--minimal` — bare-minimum config
+
 ### 2. Add model API key(s)
 
 ```
@@ -27,9 +44,10 @@ $EDITOR ~/.mindroom/.env
 
 Set at least one key:
 
+- `ANTHROPIC_API_KEY=...`, or
 - `OPENAI_API_KEY=...`, or
 - `OPENROUTER_API_KEY=...`, or
-- another supported provider key.
+- For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` and authenticate with `gcloud auth application-default login`.
 
 ### 3. Pair your local install from chat UI
 
@@ -44,8 +62,9 @@ uvx mindroom connect --pair-code ABCD-EFGH
 
 Notes:
 
-- Pair code is short-lived (10 minutes).
+- Pair code is short-lived (10 minutes). Generate a new one if it expires.
 - `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env` by default.
+- Use `--no-persist-env` to export variables only for the current shell session instead of writing to `.env`.
 
 ### 4. Run MindRoom
 
@@ -53,9 +72,13 @@ Notes:
 uvx mindroom run
 ```
 
-### 5. Verify in chat
+### 5. Verify
 
-Send a message mentioning your agent in a room where it is configured.
+**In chat:** Send a message mentioning your agent in a room where it is configured.
+
+**Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools. Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
+
+**Preflight check:** Run `mindroom doctor` before `mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
 
 For a detailed architecture and credential model, see: [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/index.md).
 

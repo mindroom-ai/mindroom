@@ -1,5 +1,9 @@
 # MindRoom Security Review Checklist
 
+> **Audit note (2026-03-18):** Some checked items in this checklist contradict the status reported in individual SECURITY_REVIEW_*.md documents and SECURITY_ACTION_PLAN.md.
+> Known inconsistencies: default password removal is marked done here but action plan still mentions rotation; secrets rotation is marked pending here while other docs say helper scripts exist but execution is unconfirmed; monitoring items are unchecked here but Prometheus metrics are deployed per SECURITY_REVIEW_11.
+> Treat the individual review docs as the more detailed source of truth.
+
 ## Overview
 This document provides a systematic security review checklist for the MindRoom beta release. Each item should be verified and documented before making the codebase open-source.
 

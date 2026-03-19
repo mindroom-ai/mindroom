@@ -47,6 +47,7 @@ memory:
     provider: openai
     config:
       model: text-embedding-3-small
+      dimensions: null             # Optional: embedding dimension override (e.g., 256)
 ```
 
 Fully local embedder example:
@@ -62,6 +63,34 @@ memory:
 
 MindRoom auto-installs the optional `sentence_transformers` extra the first time this provider is used.
 
+Ollama embedder example:
+
+```yaml
+memory:
+  backend: mem0
+  embedder:
+    provider: ollama
+    config:
+      model: nomic-embed-text
+      host: http://localhost:11434
+```
+
+Supported embedder providers: `openai`, `ollama`, `sentence_transformers`.
+
+### Memory LLM
+
+The memory system uses an LLM for extraction. Configure it with `memory.llm`:
+
+```yaml
+memory:
+  llm:
+    provider: ollama    # ollama, openai, or anthropic
+    config:
+      model: llama3.2
+```
+
+Supported LLM providers: `ollama` (default), `openai`, `anthropic`.
+
 ## Backend: `file`
 
 `file` keeps memory in markdown files and treats files as source-of-truth.
@@ -75,8 +104,9 @@ memory:
     max_entrypoint_lines: 200
 ```
 
-`memory.file.path` is an optional fallback root for direct file-memory paths.
-It does not relocate canonical agent or team file memory.
+`memory.file.path` is an optional fallback root for file-memory paths.
+It does not relocate canonical agent file memory (which always lives under the agent's workspace root).
+It can affect team file memory when the resolution determines the configured path should be used.
 
 Per-agent override example:
 
@@ -144,6 +174,8 @@ memory:
     max_dirty_age_seconds: 600
     stale_ttl_seconds: 86400
     max_cross_session_reprioritize: 5
+    retry_cooldown_seconds: 30       # Cooldown before retrying a failed extraction
+    max_retry_cooldown_seconds: 300   # Upper bound for retry cooldown backoff
     batch:
       max_sessions_per_cycle: 10
       max_sessions_per_agent_per_cycle: 3
@@ -152,6 +184,9 @@ memory:
       max_messages_per_flush: 20
       max_chars_per_flush: 12000
       max_extraction_seconds: 30
+      include_memory_context:
+        memory_snippets: 5
+        snippet_max_chars: 400
 ```
 
 High-level behavior:
@@ -171,7 +206,7 @@ The Dashboard **Memory** page supports:
 - file backend settings (`path`, `max_entrypoint_lines`)
 - auto-flush settings (intervals, idle/age thresholds, retries)
 - batch sizing
-- extractor settings (`no_reply_token`, message/char/time limits, memory-context bounds)
+- extractor settings (`no_reply_token`, message/char/time limits, `include_memory_context` dedupe bounds)
 
 Save from the Memory page to persist changes to `config.yaml`.
 Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** override.
@@ -186,4 +221,36 @@ agents:
     tools: [memory]
 ```
 
-This exposes `add_memory`, `search_memory`, `get_all_memories`, and `delete_all_memories`.
+This exposes `add_memory`, `search_memories`, `list_memories`, `get_memory`, `update_memory`, and `delete_memory`.
+
+## Agno Learning
+
+MindRoom integrates Agno's built-in Learning system, which lets agents learn and adapt from conversations.
+Learning is separate from the memory backends above — it uses Agno's own SQLite-backed storage in each agent's state root (`learning/`).
+
+### Configuration
+
+```yaml
+defaults:
+  learning: true          # Enable learning for all agents (default: true)
+  learning_mode: always   # "always" (extract after every turn) or "agentic" (agent decides via tool)
+```
+
+Per-agent override:
+
+```yaml
+agents:
+  assistant:
+    learning: false       # Disable learning for this agent
+  research:
+    learning_mode: agentic  # Agent controls when to learn
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `learning` | bool | `true` | Enable Agno Learning for the agent |
+| `learning_mode` | string | `always` | `always`: automatic extraction after every turn. `agentic`: agent decides via tool when to learn |
+
+Agents inherit `learning` and `learning_mode` from `defaults` unless explicitly overridden.
+Disabled agents do not create or update learning state.
+Learning data persists in `agents/<name>/learning/<agent>.db` within the agent's state root.

@@ -1,5 +1,7 @@
 # MindRoom Security Review: Error Handling & Information Disclosure
 
+> **Audit note (2026-03-18):** Log sanitization is in place but database error codes can still leak schema information in some admin error paths.
+
 **Review Date:** September 11, 2025
 **Updated:** September 16, 2025 (Post-Implementation Review)
 **Scope:** Category 9 - Error Handling & Information Disclosure

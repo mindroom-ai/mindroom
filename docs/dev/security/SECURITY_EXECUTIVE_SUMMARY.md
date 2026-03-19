@@ -4,6 +4,10 @@
 **Updated:** September 17, 2025 (Status refresh after doc audit)
 **Status:** 🟠 MEDIUM-HIGH – Staging-only; production launch blocked by open security items
 
+> **Audit note (2026-03-18):** Completion claims in this summary lack PR/commit proof.
+> Alertmanager receiver configuration is still pending.
+> The 6.8→5.8 risk score reduction is stated without supporting methodology.
+
 ## Overview
 
 A comprehensive security review of the MindRoom SaaS platform was conducted across 12 security categories, covering authentication, multi-tenancy, secrets management, infrastructure, and application security. The most critical blockers (unauthenticated admin APIs, default credentials, missing rate limits) have been fixed, but several high/medium risks remain. Additional hardening is required before any production rollout.

@@ -30,7 +30,8 @@ mindroom config validate --path /path/to/config.yaml
 |----------|-------------|---------|
 | `MINDROOM_CONFIG_PATH` | Path to `config.yaml` | `./config.yaml` → `~/.mindroom/config.yaml` |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | `mindroom_data/` next to config |
-| `MINDROOM_CONFIG_TEMPLATE` | Template to seed config from (for containers) | Same as config path |
+| `MINDROOM_CONFIG_TEMPLATE` | Path to a config template. When set and `config.yaml` does not exist, MindRoom copies this template to the config path. Used in Docker containers to seed config from bundled templates | Same as config path |
+| `LOG_LEVEL` | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 
 ### Matrix
 
@@ -54,10 +55,79 @@ Set the API key for each provider you use in `config.yaml`:
 | `CEREBRAS_API_KEY` | Cerebras |
 | `GROQ_API_KEY` | Groq |
 | `OLLAMA_HOST` | Ollama (host URL, not a key) |
+| `OPENAI_BASE_URL` | Base URL for OpenAI-compatible APIs (e.g., local inference servers) |
 
-### Sandbox Proxy
+All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
+See [Model Configuration — File-based Secrets](models.md#file-based-secrets) for details.
 
-See [Sandbox Proxy](../deployment/sandbox-proxy.md) for the full list of `MINDROOM_SANDBOX_*` variables.
+### Operational
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
+| `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
+| `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
+| `MINDROOM_ENABLE_AI_CACHE` | Enable the AI response cache (caches model responses keyed by model, messages, and tools — useful during development to avoid repeated API calls) | `true` |
+| `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
+| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
+| `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner` or `kubernetes`) | `static_runner` |
+
+### OpenAI-Compatible API
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OPENAI_COMPAT_API_KEYS` | Comma-separated API keys for authenticating `/v1/*` requests | _(none — locked without this or the flag below)_ |
+| `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED` | Set to `true` to allow unauthenticated `/v1/*` access (local dev only) | _(unset — locked)_ |
+
+See [OpenAI-Compatible API](../openai-api.md) for the full auth matrix.
+
+### Provisioning / Pairing
+
+These are set automatically by `mindroom connect` and stored in `.env`:
+
+| Variable | Description |
+|----------|-------------|
+| `MINDROOM_PROVISIONING_URL` | Provisioning service URL (e.g., `https://mindroom.chat`) |
+| `MINDROOM_LOCAL_CLIENT_ID` | Client ID from hosted pairing |
+| `MINDROOM_LOCAL_CLIENT_SECRET` | Client secret from hosted pairing |
+
+### Frontend / Development
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_FRONTEND_DIST` | Override path to pre-built frontend assets | _(auto-detected)_ |
+| `MINDROOM_AUTO_BUILD_FRONTEND` | Set to `0` to skip automatic frontend build | _(enabled)_ |
+| `DOCKER_CONTAINER` | Set to `true` when running inside the packaged Docker image | _(unset)_ |
+| `BROWSER_EXECUTABLE_PATH` | Path to browser executable for the browser tool | _(system default)_ |
+
+### Vertex AI
+
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_VERTEX_PROJECT_ID` | Google Cloud project ID for Vertex AI Claude |
+| `ANTHROPIC_VERTEX_BASE_URL` | Custom Vertex AI base URL |
+| `CLOUD_ML_REGION` | Google Cloud region for Vertex AI |
+| `GOOGLE_CLOUD_PROJECT` | Google Cloud project ID |
+| `GOOGLE_CLOUD_LOCATION` | Google Cloud region |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to Google service account JSON |
+
+Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS`.
+
+### Worker / Sandbox
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
+| `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
+
+See [Sandbox Proxy](../deployment/sandbox-proxy.md) for the full list of `MINDROOM_SANDBOX_*` variables, including Kubernetes backend variables (`MINDROOM_SANDBOX_KUBERNETES_*`).
+
+### SaaS-Only
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CUSTOMER_ID` | Tenant identity for worker key derivation (SaaS platform only) | _(none)_ |
+| `ACCOUNT_ID` | Account identity for worker key derivation (SaaS platform only) | _(none)_ |
 
 ## Basic Structure
 
@@ -115,6 +185,7 @@ models:
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
+    context_window: null           # Optional: Context window in tokens (enables auto history trimming)
 
 # Team configurations (optional)
 teams:
@@ -154,6 +225,7 @@ defaults:
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
+  allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
@@ -161,15 +233,42 @@ defaults:
 # Memory system configuration (optional)
 memory:
   backend: mem0                    # Global default backend (mem0 or file); agents can override with memory_backend
+  team_reads_member_memory: false  # Default: false (let team reads access member agent memories)
   embedder:
-    provider: openai               # Default: openai (openai, ollama, or sentence_transformers)
+    provider: openai               # Default: openai (openai, ollama, huggingface, sentence_transformers)
     config:
       model: text-embedding-3-small  # Default embedding model
       api_key: null                # Optional: From env var
       host: null                   # Optional: For self-hosted
+      dimensions: null             # Optional: Embedding dimension override (e.g., 256)
   llm:                             # Optional: LLM for memory operations
     provider: ollama
     config: {}
+  file:                            # File-backed memory settings (when backend: file)
+    path: null                     # Optional: fallback root for file memory paths
+    max_entrypoint_lines: 200      # Default: 200 (max lines preloaded from MEMORY.md)
+  auto_flush:                      # Background memory auto-flush (file backend only)
+    enabled: false                 # Default: false (enable background flush worker)
+    flush_interval_seconds: 1800   # Default: 1800 (loop interval)
+    idle_seconds: 120              # Default: 120 (idle time before flush eligibility)
+    max_dirty_age_seconds: 600     # Default: 600 (force flush after this many seconds dirty)
+    stale_ttl_seconds: 86400       # Default: 86400 (drop stale flush-state entries older than this)
+    max_cross_session_reprioritize: 5  # Default: 5 (same-agent dirty sessions reprioritized per prompt)
+    retry_cooldown_seconds: 30     # Default: 30 (cooldown before retrying a failed extraction)
+    max_retry_cooldown_seconds: 300  # Default: 300 (upper bound for retry cooldown backoff)
+    batch:
+      max_sessions_per_cycle: 10   # Default: 10 (max sessions processed per auto-flush loop)
+      max_sessions_per_agent_per_cycle: 3  # Default: 3 (max sessions per agent per loop)
+    extractor:
+      no_reply_token: NO_REPLY     # Default: NO_REPLY (token indicating no durable memory)
+      max_messages_per_flush: 20   # Default: 20 (max messages considered per extraction)
+      max_chars_per_flush: 12000   # Default: 12000 (max chars considered per extraction)
+      max_extraction_seconds: 30   # Default: 30 (timeout for one extraction job)
+      include_memory_context:
+        memory_snippets: 5         # Default: 5 (max MEMORY.md snippets for dedupe context)
+        snippet_max_chars: 400     # Default: 400 (max chars per snippet)
+#
+# See docs/memory.md for full auto-flush behavior and tuning guidance.
 #
 # Set memory.embedder.provider: sentence_transformers to run embeddings in-process.
 # MindRoom auto-installs that optional extra on first use.
@@ -177,8 +276,10 @@ memory:
 # Knowledge base configuration (optional)
 knowledge_bases:
   docs:
-    path: ./knowledge_docs/default # Folder containing documents for this base
+    path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)
     watch: true                    # Reindex automatically when files change
+    chunk_size: 5000               # Default: 5000 (max characters per indexed chunk)
+    chunk_overlap: 0               # Default: 0 (overlapping characters between chunks)
     git:                           # Optional: Sync this folder from a Git repository
       repo_url: https://github.com/pipefunc/pipefunc
       branch: main
@@ -218,6 +319,7 @@ authorization:
   global_users: []                 # Users with access to all rooms
   room_permissions: {}             # Keys: room ID (!id), full alias (#alias:domain), or managed room key (alias)
   default_room_access: false       # Default: false
+  aliases: {}                      # Map canonical Matrix user IDs to bridge aliases (see authorization docs)
   agent_reply_permissions: {}      # Per-agent/team/router (or '*') reply allowlists; supports globs like '*:example.com'
 
 # Room-specific model overrides (optional)
@@ -232,6 +334,11 @@ bot_accounts:
 
 # Plugin paths (optional)
 plugins: []
+
+# Matrix Space grouping (optional)
+matrix_space:
+  enabled: true                    # Default: true (create a root Matrix Space for managed rooms)
+  name: MindRoom                   # Default: "MindRoom" (display name for the root Space)
 
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
@@ -254,6 +361,7 @@ timezone: America/Los_Angeles      # Default: UTC
 - [Knowledge Bases](../knowledge.md) - Configure file-backed knowledge bases
 - [Voice](../voice.md) - Configure speech-to-text voice processing
 - [Authorization](../authorization.md) - Configure user and room access control
+- [Matrix Space](../matrix-space.md) - Configure the root Matrix Space for managed rooms
 - [Skills](../skills.md) - Skill format, gating, and allowlists
 - [Plugins](../plugins.md) - Plugin manifest and tool/skill loading
 
@@ -268,6 +376,7 @@ timezone: America/Los_Angeles      # Default: UTC
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
+- `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](../authorization.md))
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
 - `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
 - In `multi_user` mode, MindRoom sets managed room join rules and directory visibility from config

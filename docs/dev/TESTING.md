@@ -10,30 +10,40 @@ The dashboard includes comprehensive tests for both frontend (TypeScript/React) 
 
 The frontend uses Vitest as the test runner with React Testing Library for component testing.
 
-**Test Files:**
+**Test Files** (non-exhaustive, representative examples):
 - `src/store/configStore.test.ts` - Tests for the Zustand store
 - `src/components/AgentList/AgentList.test.tsx` - Tests for the AgentList component
 - `src/components/AgentEditor/AgentEditor.test.tsx` - Tests for the AgentEditor component
 - `src/components/ModelConfig/ModelConfig.test.tsx` - Tests for the ModelConfig component
 - `src/components/ToolConfig/ToolConfigDialog.test.tsx` - Tests for the ToolConfigDialog component
+- `src/components/Credentials/Credentials.test.tsx` - Tests for the Credentials component
+- `src/components/Knowledge/Knowledge.test.tsx` - Tests for the Knowledge component
+- `src/components/TeamEditor/TeamEditor.test.tsx` - Tests for the TeamEditor component
+- `src/components/VoiceConfig/VoiceConfig.test.tsx` - Tests for the VoiceConfig component
+- `src/components/Integrations/Integrations.test.tsx` - Tests for the Integrations component
 - `src/types/toolConfig.test.ts` - Tests for tool configuration types
+
+There are 28 frontend test files covering components, hooks, and utilities.
 
 ### Running Frontend Tests
 
 ```bash
 cd frontend
 
-# Run all tests once
+# Run tests in watch mode (default vitest behavior)
 bun test
 
-# Run tests in watch mode
-bun run test
+# Run all tests once (no watch)
+bun run test:unit
 
 # Run tests with UI
 bun run test:ui
 
 # Run tests with coverage
 bun run test:coverage
+
+# Run e2e tests
+bun run test:e2e
 ```
 
 ### Writing Frontend Tests
@@ -57,10 +67,18 @@ describe('ComponentName', () => {
 
 The backend uses pytest with FastAPI's TestClient for API testing.
 
-**Test Files:**
-- `tests/test_api.py` - Comprehensive API endpoint tests
-- `tests/test_file_watcher.py` - File watching functionality tests
+**Test Files** (non-exhaustive, representative examples):
+- `tests/api/test_api.py` - Comprehensive API endpoint tests
+- `tests/api/test_file_watcher.py` - File watching functionality tests
+- `tests/api/test_credentials_api.py` - Credentials API tests
+- `tests/api/test_knowledge_api.py` - Knowledge base API tests
+- `tests/api/test_schedules_api.py` - Scheduling API tests
+- `tests/api/test_skills_api.py` - Skills API tests
+- `tests/api/test_sandbox_runner_api.py` - Sandbox runner API tests
+- `tests/api/test_matrix_operations.py` - Matrix room operations API tests
 - `tests/conftest.py` - Pytest fixtures and configuration
+
+There are 145+ backend test files covering agents, authorization, commands, config, memory, tools, and more.
 
 ### Running Backend Tests
 
@@ -96,17 +114,42 @@ def test_endpoint(test_client: TestClient):
     assert "expected_key" in data
 ```
 
+## Test Configuration
+
+### pytest Markers
+
+The following markers are defined in `pyproject.toml` and can be used to select or skip tests:
+
+- **`requires_matrix`** — Tests that require a real Matrix server connection. Deselect with `-m "not requires_matrix"`.
+- **`e2e`** — End-to-end tests.
+- **`slow`** — Tests that take a long time to run.
+
+### Async Tests
+
+The effective asyncio mode is `strict` (`--asyncio-mode=strict` in `addopts` overrides the ini-level `asyncio_mode = "auto"`).
+In strict mode, async test functions require an explicit `@pytest.mark.asyncio` decorator or a module/class-level `pytestmark = pytest.mark.asyncio`.
+
+### Parallel Execution
+
+Tests run in parallel by default via `pytest-xdist` (`-n auto` in `addopts`).
+To run serially for debugging, pass `-n0`: `python -m pytest tests/ -n0`.
+
+### Timeouts and Durations
+
+Each test has a 60-second timeout (`--timeout 60` in `addopts`).
+The 20 slowest tests are reported at the end of every run (`--durations 20`).
+
+### Automatic Coverage
+
+Coverage runs automatically with every test invocation (`--cov=mindroom` in `addopts`).
+Reports are generated in three formats: terminal summary, HTML (`htmlcov/`), and XML (`coverage.xml`).
+
 ## Running All Tests
 
 Use the convenience script to run both frontend and backend tests:
 
 ```bash
-./run-ui-tests.sh
-```
-
-Or with Nix for all dependencies:
-```bash
-./run-ui-tests-nix.sh
+./run-tests.sh
 ```
 
 ## Test Coverage
@@ -133,35 +176,8 @@ Or with Nix for all dependencies:
 
 ## CI/CD Integration
 
-To integrate tests into CI/CD:
-
-```yaml
-# Example GitHub Actions workflow
-name: Tests
-on: [push, pull_request]
-
-jobs:
-  frontend-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
-        with:
-          node-version: '20'
-      - run: cd frontend && bun install --frozen-lockfile
-      - run: cd frontend && bun test
-
-  backend-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      - run: pip install uv
-      - run: uv sync --all-extras
-      - run: python -m pytest tests/api/
-```
+Backend tests run via `.github/workflows/pytest.yml` (Python 3.12).
+There is no dedicated frontend test workflow yet; frontend tests are run locally with `bun run test`.
 
 ## Troubleshooting
 

@@ -42,7 +42,7 @@ Users are automatically created during orchestrator startup and credentials are 
 
 Agents can join existing rooms, create new rooms with AI-generated topics, respond to invites automatically, leave unconfigured rooms, and set room avatars.
 
-Rooms are auto-created via `ensure_room_exists()` and `ensure_all_rooms_exist()`. DM rooms can be detected with `is_dm_room(client, room_id)`.
+Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_rooms_exist()` (public). DM rooms can be detected with `async is_dm_room(client, room_id) -> bool`.
 
 ## Threading (MSC3440)
 
@@ -73,7 +73,7 @@ Use `build_message_content()` from `message_builder.py` to construct thread-awar
 
 ### Sync Loop
 
-Each agent bot runs its own sync loop with 30-second long-polling timeout. Sync loops are wrapped with `_sync_forever_with_restart()` for automatic restart on connection failures.
+Each agent bot runs its own sync loop with 30-second long-polling timeout. Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
 
 Events are processed in background tasks:
 1. Sync receives event via long-polling
@@ -83,14 +83,14 @@ Events are processed in background tasks:
 
 ### Streaming Responses
 
-Agents stream responses by progressively editing messages. Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
+Agents stream responses by progressively editing messages. Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users. See [Streaming Responses](../streaming.md) for the full feature documentation.
 
 Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
 
 Marker format:
 ```text
-Pending:   🔧 `tool_name` [N] ⏳
-Completed: 🔧 `tool_name` [N]
+🔧 `tool_name` [N] ⏳     ← pending
+🔧 `tool_name` [N]        ← completed
 ```
 
 Where `N` is 1-indexed per message and maps to `io.mindroom.tool_trace.events[N-1]`.
@@ -124,7 +124,7 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 - Messages > 55,000 bytes and edits > 27,000 bytes use a fallback event
 - Full original Matrix message content is uploaded as a JSON sidecar (`message-content.json`)
 - Preview text included in message body (maximum that fits)
-- Custom metadata (`io.mindroom.long_text.version = 2`) points to sidecar encoding (`matrix_event_content_json`)
+- Custom metadata dict `io.mindroom.long_text` contains `version: 2`, `encoding: "matrix_event_content_json"`, original and preview sizes, and a completeness flag
 - Preview event is compact (for example no inline `io.mindroom.tool_trace`), while the sidecar preserves full content fidelity
 - Encrypted rooms: sidecar JSON is encrypted before upload (`message-content.json.enc`)
 
@@ -139,11 +139,24 @@ mid.domain    # "example.com"
 mid.full_id   # "@mindroom_assistant:example.com"
 
 # Create from agent name
-mid = MatrixID.from_agent("assistant", "example.com")
+mid = MatrixID.from_agent("assistant", "example.com", runtime_paths)
 
 # Extract agent name (returns "code" if configured, None otherwise)
-agent_name = extract_agent_name("@mindroom_code:localhost", config)
+agent_name = extract_agent_name("@mindroom_code:localhost", config, runtime_paths)
 ```
+
+## Root Space
+
+MindRoom can create and maintain a root Matrix Space that groups all managed rooms.
+
+```yaml
+matrix_space:
+  enabled: true        # Default: true
+  name: MindRoom       # Display name for the Space
+```
+
+When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
+The Space name is reconciled on each startup to match the configured value.
 
 ## Configuration
 

@@ -337,3 +337,8 @@ Re-run this action plan after the above are delivered.
 - **Outstanding:** Secrets rotation confirmation, monitoring alerts, internal TLS, checklist backlog.
 
 **Platform Status:** Safe for restricted staging with trusted testers only. Do **not** expose publicly until remaining blockers are resolved and documentation is refreshed.
+
+> **Audit note (2026-03-18):** The 6.8→5.8 risk reduction is unsubstantiated — no scoring methodology or evidence ties specific fixes to numeric changes.
+> Several items marked pending here have no target dates or responsible parties assigned.
+> The compliance section (P4/GDPR) contradicts itself: items 12-14 list GDPR as TODO while the completed section above confirms GDPR flows are live.
+> The P3-P8 sections have not been refreshed since the original write-up and may not reflect current state.

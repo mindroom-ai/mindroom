@@ -69,6 +69,7 @@ services:
     command: ["/app/run-sandbox-runner.sh"]
     user: "1000:1000"
     volumes:
+      - ./mindroom_data:/app/mindroom_data:rw
       - sandbox-workspace:/app/workspace
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
@@ -221,6 +222,7 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `MINDROOM_SANDBOX_RUNNER_PORT` | Port the sandbox runner listens on | `8766` |
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to indicate runner mode | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Shared auth token (must match primary) | _(required)_ |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess` or `subprocess` | `inprocess` |
@@ -298,6 +300,7 @@ With `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamic
 `worker_tools` controls which tools run in the sandbox proxy.
 `worker_scope` controls how those sandbox runtimes are shared between calls.
 Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+Additionally, `google` and `spotify` are shared-only integrations that require `worker_scope` unset or `shared` but can still be proxied through the sandbox.
 
 You can set `worker_scope` per agent or in `defaults`:
 

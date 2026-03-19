@@ -1,6 +1,12 @@
 # MindRoom Memory Consolidation and Auto-Flush Plan
 
-Last updated: 2026-02-27
+Last updated: 2026-03-18
+
+**Status: ~90% complete.**
+Core auto-flush exists (`memory/auto_flush.py`, `memory/_file_backend.py`).
+The full config surface (`MemoryAutoFlushConfig`) is implemented including stale cleanup (`stale_ttl_seconds`) and max-dirty-age fallback (`max_dirty_age_seconds`).
+Auto-flush defaults to disabled (`enabled: false`) with a 30-minute flush interval (`flush_interval_seconds: 1800`).
+Remaining: optional daily curation pass (not yet implemented).
 
 ## Goals
 
@@ -119,18 +125,20 @@ Cross-thread memory is eventually consistent:
 - sometimes available in the same turn if background flush completes quickly,
 - never delays the user reply.
 
-## Config Surface (Proposed)
+## Config Surface (Implemented)
 
 ```yaml
 memory:
   backend: file # file | mem0
   auto_flush:
-    enabled: true
-    flush_interval_seconds: 180
+    enabled: false  # disabled by default
+    flush_interval_seconds: 1800
     idle_seconds: 120
     max_dirty_age_seconds: 600
     stale_ttl_seconds: 86400
     max_cross_session_reprioritize: 5
+    retry_cooldown_seconds: 30
+    max_retry_cooldown_seconds: 300
     batch:
       max_sessions_per_cycle: 10
       max_sessions_per_agent_per_cycle: 3
@@ -139,17 +147,14 @@ memory:
       max_messages_per_flush: 20
       max_chars_per_flush: 12000
       max_extraction_seconds: 30
-      max_retries: 3
       include_memory_context:
-        daily_tail_lines: 80
         memory_snippets: 5
         snippet_max_chars: 400
-    curation:
-      enabled: false
-      max_lines_per_pass: 20
-      max_passes_per_day: 1
-      append_only: true
 ```
+
+Note: The `curation` section from the original proposal has not been implemented yet.
+`max_retries` was replaced by `retry_cooldown_seconds` / `max_retry_cooldown_seconds` with backoff.
+`daily_tail_lines` was removed from the context config.
 
 ## Why This Design
 

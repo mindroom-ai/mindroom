@@ -1,5 +1,8 @@
 # Frontend Security Review - MindRoom SaaS Platform
 
+> **Audit note (2026-03-18):** CSP/headers are good, but the `NEXT_PUBLIC_DEV_AUTH` bypass still exists.
+> Re-authentication for sensitive operations is missing.
+
 **Review Date:** 2025-09-11
 **Updated:** 2025-09-17
 **Reviewer:** Claude Code Security Analysis
