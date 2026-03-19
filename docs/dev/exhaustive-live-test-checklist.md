@@ -391,7 +391,7 @@ Expected outcome: Dirty-session reprioritization and later flushes stay isolated
 
 ## 11. Skills, Plugins, Tools, Workers, And Runtime Context
 
-Source anchors: `src/mindroom/tool_system/skills.py`, `src/mindroom/tool_system/plugins.py`, `src/mindroom/tool_system/runtime_context.py`, `src/mindroom/tool_system/sandbox_proxy.py`, `src/mindroom/tool_system/dependencies.py`, `src/mindroom/tool_system/metadata.py`, `src/mindroom/api/tools.py`, `src/mindroom/api/skills.py`, `src/mindroom/api/workers.py`, `src/mindroom/api/sandbox_runner.py`.
+Source anchors: `src/mindroom/tool_system/skills.py`, `src/mindroom/tool_system/plugins.py`, `src/mindroom/tool_system/runtime_context.py`, `src/mindroom/tool_system/sandbox_proxy.py`, `src/mindroom/tool_system/dependencies.py`, `src/mindroom/tool_system/metadata.py`, `src/mindroom/api/tools.py`, `src/mindroom/api/skills.py`, `src/mindroom/api/workers.py`, `src/mindroom/api/sandbox_runner.py`, `src/mindroom/workers/backends/docker.py`, `src/mindroom/workers/backends/docker_projection.py`, `src/mindroom/workers/backends/_dedicated_worker_common.py`, `src/mindroom/constants.py`, `docs/deployment/sandbox-proxy.md`.
 
 - [ ] `TOOL-001` Load a skill from a bundled skill location, a plugin skill directory, and a user skill directory.
 Expected outcome: Skill precedence, allowlisting, and eligibility gating all match the implemented load order and rules.
@@ -425,6 +425,27 @@ Expected outcome: The enabled runtime installs the extra and retries successfull
 
 - [ ] `TOOL-011` Exercise the sandbox-runner API by creating a credential lease, executing a tool call with token auth, retrying the consumed lease, and then checking worker listing plus idle-worker cleanup.
 Expected outcome: Sandbox-runner endpoints require the configured token, credential overrides are accepted only via leases, one-time leases are consumed after use, known workers are listed with lifecycle metadata, and cleanup marks idle workers without deleting their persisted state.
+
+- [ ] `TOOL-012` Run worker-routed tools with `MINDROOM_WORKER_BACKEND=docker`, then compare repeated calls across multiple agents and requesters under unscoped, `shared`, `user`, and `user_agent` worker scopes.
+Expected outcome: Dedicated Docker workers start on demand, reuse only within the configured scope, and containers from one MindRoom runtime never attach to another runtime on the same host.
+
+- [ ] `TOOL-013` Change live Docker worker inputs such as `config.yaml`, `MINDROOM_DOCKER_WORKER_CONFIG_PATH`, or a referenced config-relative asset while workers already exist.
+Expected outcome: The backend rebuilds the projected snapshot and restarts or reprovisions only the affected Docker workers instead of reusing stale config roots, stale container-side config filenames, or stale copied assets.
+
+- [ ] `TOOL-014` Configure agent `context_files` and `knowledge_bases`, place same-named files in both the config root and an agent workspace, and then execute Docker-routed tools from both agent-scoped and `user`-scoped workers.
+Expected outcome: Agent-scoped workers project only the selected agent workspace files and assigned knowledge assets, `user` scope intentionally keeps the broader shared projection, and `context_files` resolve from the agent workspace rather than the config root.
+
+- [ ] `TOOL-015` Inspect a fresh Docker worker after running tools that create files or need persisted credentials.
+Expected outcome: Writable state lands only under the worker's own storage root, shared credential sync reaches the documented worker-visible paths, and the container identity matches the configured worker user or the host uid:gid default.
+
+- [ ] `TOOL-016` Start Docker workers with a config-adjacent `.env`, explicit `MINDROOM_DOCKER_WORKER_ENV_JSON`, public runtime path exports, and any provider-specific ADC files or private template directories referenced by the config.
+Expected outcome: The mounted worker snapshot masks the raw `.env`, only the filtered public runtime payload and explicit worker env overrides reach the container, and copied assets exclude unsafe symlinks, unrelated private template directories, and other non-worker files.
+
+- [ ] `TOOL-017` Start the Docker backend once on an environment without the optional Docker SDK installed and once with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1`.
+Expected outcome: The backend auto-installs the optional `docker` extra when allowed, and otherwise fails clearly with the documented manual install path.
+
+- [ ] `TOOL-018` Exercise a malformed or unsupported dedicated worker key through a worker-routed call or sandbox-runner request while the Docker backend is enabled.
+Expected outcome: Unknown worker keys are rejected before container creation, no broad fallback projection is materialized for the invalid target, and only resolved valid worker keys can launch containers.
 
 ## 12. Scheduling And Background Task Execution
 
