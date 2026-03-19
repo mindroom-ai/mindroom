@@ -20,6 +20,22 @@ if TYPE_CHECKING:
     from mindroom.workers.models import WorkerHandle, WorkerStatus
 
 
+_DEDICATED_WORKER_RESERVED_ENV_NAMES = frozenset(
+    {
+        "HOME",
+        "MINDROOM_CONFIG_PATH",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT",
+        "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE",
+        "MINDROOM_SANDBOX_RUNNER_MODE",
+        "MINDROOM_SANDBOX_RUNNER_PORT",
+        "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT",
+        "MINDROOM_STORAGE_PATH",
+        SHARED_CREDENTIALS_PATH_ENV,
+    },
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ScopedVisibleStateRoot:
     """One durable state root that a dedicated worker may see."""
@@ -147,6 +163,22 @@ def stable_signature_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def validate_dedicated_worker_extra_env(
+    extra_env: Mapping[str, str],
+    *,
+    backend_name: str,
+    extra_reserved_names: Iterable[str] = (),
+) -> None:
+    """Reject extra env that would override backend-owned dedicated-worker variables."""
+    reserved_names = _DEDICATED_WORKER_RESERVED_ENV_NAMES.union(extra_reserved_names)
+    invalid_names = sorted(name for name in extra_env if name in reserved_names)
+    if not invalid_names:
+        return
+    invalid_names_text = ", ".join(invalid_names)
+    msg = f"{backend_name} worker extra env cannot override reserved env vars: {invalid_names_text}"
+    raise WorkerBackendError(msg)
+
+
 def build_backend_config_signature(
     *,
     prefix_parts: tuple[str, ...],
@@ -177,6 +209,8 @@ def build_dedicated_worker_runtime_paths(
     required_existing_storage_root: Path | None = None,
 ) -> RuntimePaths:
     """Build worker-visible runtime paths for one dedicated worker."""
+    validate_dedicated_worker_extra_env(extra_env, backend_name=backend_name)
+
     process_env = dict(runtime_paths.process_env)
     process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
     env_file_values = dict(runtime_paths.env_file_values)
