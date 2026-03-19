@@ -217,7 +217,8 @@ def _projected_config_fixture(tmp_path: Path) -> tuple[str, dict[str, Path]]:
     knowledge_root = tmp_path / "knowledge_docs"
     knowledge_root.mkdir()
     (knowledge_root / "guide.md").write_text("# Guide v1\n", encoding="utf-8")
-    context_file = tmp_path / "context.md"
+    context_file = tmp_path / "agents" / "code" / "workspace" / "context.md"
+    context_file.parent.mkdir(parents=True)
     context_file.write_text("# Context\n", encoding="utf-8")
     memory_root = tmp_path / "memory_files"
     memory_root.mkdir()
@@ -242,7 +243,7 @@ agents:
     model: default
     knowledge_bases: [docs]
     context_files:
-      - ./context.md
+      - context.md
 models:
   default:
     provider: openai
@@ -287,9 +288,11 @@ def _multi_agent_projected_config_fixture(tmp_path: Path) -> tuple[str, dict[str
     beta_knowledge_root = tmp_path / "knowledge_beta"
     beta_knowledge_root.mkdir()
     (beta_knowledge_root / "b.txt").write_text("beta knowledge\n", encoding="utf-8")
-    alpha_context = tmp_path / "alpha.md"
+    alpha_context = tmp_path / "agents" / "alpha" / "workspace" / "alpha.md"
+    alpha_context.parent.mkdir(parents=True)
     alpha_context.write_text("# Alpha\n", encoding="utf-8")
-    beta_context = tmp_path / "beta.md"
+    beta_context = tmp_path / "agents" / "beta" / "workspace" / "beta.md"
+    beta_context.parent.mkdir(parents=True)
     beta_context.write_text("# Beta\n", encoding="utf-8")
     memory_root = tmp_path / "memory_files"
     memory_root.mkdir()
@@ -312,7 +315,7 @@ agents:
     worker_scope: shared
     knowledge_bases: [a]
     context_files:
-      - ./alpha.md
+      - alpha.md
   beta:
     display_name: Beta
     role: Beta test
@@ -320,7 +323,7 @@ agents:
     worker_scope: shared
     knowledge_bases: [b]
     context_files:
-      - ./beta.md
+      - beta.md
 models:
   default:
     provider: openai
@@ -342,9 +345,11 @@ def _private_user_agent_projected_config_fixture(tmp_path: Path) -> tuple[str, d
     beta_knowledge_root = tmp_path / "knowledge_beta"
     beta_knowledge_root.mkdir()
     (beta_knowledge_root / "b.txt").write_text("beta knowledge\n", encoding="utf-8")
-    alpha_context = tmp_path / "alpha.md"
+    alpha_context = tmp_path / "agents" / "alpha" / "workspace" / "alpha.md"
+    alpha_context.parent.mkdir(parents=True)
     alpha_context.write_text("# Alpha\n", encoding="utf-8")
-    beta_context = tmp_path / "beta.md"
+    beta_context = tmp_path / "agents" / "beta" / "workspace" / "beta.md"
+    beta_context.parent.mkdir(parents=True)
     beta_context.write_text("# Beta\n", encoding="utf-8")
     return (
         """
@@ -362,7 +367,7 @@ agents:
       per: user_agent
     knowledge_bases: [a]
     context_files:
-      - ./alpha.md
+      - alpha.md
   beta:
     display_name: Beta
     role: Beta test
@@ -370,7 +375,7 @@ agents:
     worker_scope: shared
     knowledge_bases: [b]
     context_files:
-      - ./beta.md
+      - beta.md
 models:
   default:
     provider: openai
@@ -694,7 +699,7 @@ def test_docker_backend_projects_assets_from_runtime_storage_root(
     knowledge_root = runtime_storage / "knowledge_docs"
     knowledge_root.mkdir()
     (knowledge_root / "guide.md").write_text("# Runtime Guide\n", encoding="utf-8")
-    context_file = runtime_storage / "context.md"
+    context_file = runtime_storage / "agents" / "code" / "workspace" / "context.md"
     context_file.parent.mkdir(parents=True, exist_ok=True)
     context_file.write_text("# Runtime Context\n", encoding="utf-8")
 
@@ -716,7 +721,7 @@ agents:
     model: default
     knowledge_bases: [docs]
     context_files:
-      - ${MINDROOM_STORAGE_PATH}/context.md
+      - context.md
 models:
   default:
     provider: openai
@@ -786,10 +791,12 @@ def test_docker_backend_rejects_symlinked_projected_file_assets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Projected file assets must reject symlink roots instead of copying their targets."""
+    """Projected file assets must reject symlink roots instead of escaping the agent workspace."""
     secret_path = tmp_path / "secret.md"
     secret_path.write_text("secret\n", encoding="utf-8")
-    (tmp_path / "context.md").symlink_to(secret_path)
+    context_path = tmp_path / "agents" / "code" / "workspace" / "context.md"
+    context_path.parent.mkdir(parents=True)
+    context_path.symlink_to(secret_path)
     backend, _fake_client, _sync_calls = _backend(
         monkeypatch,
         tmp_path,
@@ -800,7 +807,7 @@ agents:
     role: Test
     model: default
     context_files:
-      - ./context.md
+      - context.md
 models:
   default:
     provider: openai
@@ -808,7 +815,7 @@ models:
 """.lstrip(),
     )
 
-    with pytest.raises(WorkerBackendError, match="Docker worker asset must not contain symlinks"):
+    with pytest.raises(WorkerBackendError, match="Agent-owned paths must stay within"):
         backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
 
@@ -1510,6 +1517,46 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
     assert projected_paths["beta_context"].resolve() not in projection_root.parents
     assert projected_paths["alpha_knowledge_root"].resolve() not in projection_root.parents
     assert projected_paths["beta_knowledge_root"].resolve() not in projection_root.parents
+
+
+def test_docker_backend_projects_context_files_from_canonical_agent_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shared workers should project context files from the agent workspace, not the config dir."""
+    (tmp_path / "README.md").write_text("CONFIG ROOT FILE\n", encoding="utf-8")
+    workspace_readme = tmp_path / "agents" / "alpha" / "workspace" / "README.md"
+    workspace_readme.parent.mkdir(parents=True)
+    workspace_readme.write_text("AGENT WORKSPACE FILE\n", encoding="utf-8")
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="""
+agents:
+  alpha:
+    display_name: Alpha
+    role: Alpha test
+    model: default
+    worker_scope: shared
+    context_files:
+      - README.md
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip(),
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
+    projected_readme = (
+        projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "context_files" / "00-README.md"
+    )
+
+    assert projected_readme.read_text(encoding="utf-8") == "AGENT WORKSPACE FILE\n"
 
 
 def test_docker_backend_projects_only_private_user_agent_assets_for_private_agent(

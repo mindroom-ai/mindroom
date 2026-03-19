@@ -17,6 +17,7 @@ import yaml
 
 from mindroom.agent_policy import ResolvedAgentPolicy, build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import config_relative_path, resolve_config_relative_path
+from mindroom.tool_system.worker_routing import resolve_agent_owned_path
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
@@ -719,7 +720,8 @@ class DockerProjectionManager:
             agent_dir = PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "agents", safe_agent_name)
             self._rewrite_projected_context_files(
                 agent,
-                agent_dir,
+                agent_name=agent_name,
+                agent_dir=agent_dir,
                 asset_paths_by_host=asset_paths_by_host,
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
@@ -735,8 +737,9 @@ class DockerProjectionManager:
     def _rewrite_projected_context_files(
         self,
         raw_agent: dict[str, object],
-        agent_dir: PurePosixPath,
         *,
+        agent_name: str,
+        agent_dir: PurePosixPath,
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
@@ -749,7 +752,11 @@ class DockerProjectionManager:
         for index, raw_context_file in enumerate(context_files):
             if not isinstance(raw_context_file, str) or not raw_context_file.strip():
                 continue
-            host_path = config_relative_path(raw_context_file, self._runtime_paths)
+            host_path = resolve_agent_owned_path(
+                raw_context_file,
+                agent_name=agent_name,
+                base_storage_path=self._runtime_paths.storage_root,
+            )
             context_files[index] = self._projected_path_value(
                 host_path,
                 agent_dir
