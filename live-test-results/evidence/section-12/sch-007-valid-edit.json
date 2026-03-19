@@ -1,1 +1,0 @@
-{"test": "valid_edit_once_task", "task_id": "1915e523", "old_execute_at": "2026-03-19T07:28:03.347000Z", "new_execute_at": "2026-03-20T12:00:00Z", "old_message": "@mindroom_code_tests12 review the latest commit. @mindroom_shell_tests12 run the tests.", "new_message": "@mindroom_code_tests12 review commit abc123", "preserved_task_id": true, "preserved_thread_id": true}

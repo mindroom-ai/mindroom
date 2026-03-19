@@ -1,1 +1,0 @@
-{"test": "schedule_type_change_once_to_cron", "response": {"detail": "Changing schedule_type is not supported; cancel and recreate the schedule"}, "status": 400}

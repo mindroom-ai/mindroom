@@ -1,2 +1,0 @@
-=== TOOL-001 Evidence ===
-[{"name":"mindroom-docs","description":"MindRoom documentation corpus for accurate product, configuration, and workflow guidance.","origin":"bundled","can_edit":false},{"name":"test-plugin-skill","description":"A test skill from a plugin directory for live testing.","origin":"plugin","can_edit":false},{"name":"test-user-skill","description":"Updated test skill for cache invalidation testing.","origin":"user","can_edit":true}]

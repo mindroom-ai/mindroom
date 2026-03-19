@@ -1,8 +1,0 @@
-Lease creation: lease_id=VPb7nIJFxGofQVfFj4vNY1qq6UexMrC1, uses_remaining=1
-Lease consumption: credentials={'test_key': 'test_value'}
-Second consumption: HTTPException 400: Credential lease is invalid or expired.
-Worker listing: 0 workers (no backend configured)
-Cleanup: 0 cleaned, idle_timeout=1800.0s
-Proxy config without env: proxy_url=None, proxy_token=None
-Proxy config with env: proxy_url=http://localhost:9999, proxy_token=test-token-123
-Sandbox-runner routes: Not mounted in primary runtime (404) - expected behavior

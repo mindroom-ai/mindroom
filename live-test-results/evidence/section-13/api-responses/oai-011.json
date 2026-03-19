@@ -1,1 +1,0 @@
-{"id":"chatcmpl-a115db5291d9","object":"chat.completion","created":1773908541,"model":"general","choices":[{"index":0,"message":{"role":"assistant","content":"pong\n🔧 `schedule` [1]\n\n🔧 `schedule` [2]"},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"system_fingerprint":null}
