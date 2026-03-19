@@ -317,6 +317,38 @@ class TestParseWorkflowSchedule:
         assert result_cron.schedule_type == "cron"
         assert result_cron.cron_schedule is not None
 
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
+    async def test_parse_conditional_schedule_rejects_non_polling_cron(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
+        """Conditional schedules should fail instead of accepting a non-polling cron."""
+        mock_agent = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = ScheduledWorkflow(
+            schedule_type="cron",
+            is_conditional=True,
+            cron_schedule=CronSchedule(minute="0", hour="9"),
+            message="@general Check for messages containing urgent. If found, notify the team.",
+            description="Monitor urgent mentions",
+        )
+        mock_agent.arun.return_value = mock_response
+        mock_agent_class.return_value = mock_agent
+
+        result = await _parse_workflow_schedule(
+            "If someone mentions urgent then notify the team immediately",
+            config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
+            available_agents=[_mid("general")],
+        )
+
+        assert isinstance(result, _WorkflowParseError)
+        assert "polling cron" in result.error
+        assert "0 9 * * *" in result.error
+
 
 @pytest.mark.asyncio
 class TestExecuteScheduledWorkflow:

@@ -91,6 +91,7 @@ class ScheduledWorkflow(BaseModel):
     """Structured representation of a scheduled task or workflow."""
 
     schedule_type: Literal["once", "cron"]
+    is_conditional: bool = False
     execute_at: datetime | None = None
     cron_schedule: CronSchedule | None = None
     message: str
@@ -200,6 +201,43 @@ def _cancelled_task_content(
 
     cancelled_content["updated_at"] = datetime.now(UTC).isoformat()
     return cancelled_content
+
+
+def _is_polling_cron_schedule(cron_schedule: CronSchedule) -> bool:
+    """Return whether a cron schedule looks like an interval-based polling cadence."""
+    if cron_schedule.day != "*" or cron_schedule.month != "*" or cron_schedule.weekday != "*":
+        return False
+
+    minute = cron_schedule.minute.strip()
+    hour = cron_schedule.hour.strip()
+
+    def is_interval(field: str) -> bool:
+        return field == "*" or field.startswith("*/")
+
+    return (is_interval(minute) and is_interval(hour)) or (minute.isdigit() and is_interval(hour))
+
+
+def _validate_conditional_workflow(
+    workflow: ScheduledWorkflow,
+) -> _WorkflowParseError | None:
+    """Reject conditional parses that do not resolve to a polling-style recurring schedule."""
+    if not workflow.is_conditional:
+        return None
+
+    if workflow.schedule_type != "cron" or workflow.cron_schedule is None:
+        return _WorkflowParseError(
+            error="Conditional schedules must resolve to a recurring polling schedule.",
+            suggestion="Try again, or specify the polling cadence explicitly.",
+        )
+
+    cron_string = workflow.cron_schedule.to_cron_string()
+    if _is_polling_cron_schedule(workflow.cron_schedule):
+        return None
+
+    return _WorkflowParseError(
+        error=f"Conditional schedules must use a polling cron, but the parsed schedule was `{cron_string}`.",
+        suggestion="Try again, or specify the polling cadence explicitly.",
+    )
 
 
 def _start_scheduled_task(
@@ -438,16 +476,19 @@ Your task is to:
 1. Determine if this is a one-time task or recurring (cron)
 2. Extract the schedule/timing
 3. Create a message that mentions the appropriate agents
+4. Set is_conditional=true only when the request is event-based or conditional
 
 Available agents: {agent_list}
 
 IMPORTANT: Event-based and conditional requests:
-When users say "if", "when", "whenever", "once X happens" or describe events/conditions:
+When the request depends on an external event or condition rather than a fixed time:
 1. Convert to an appropriate recurring (cron) schedule for polling
 2. Include BOTH the condition check AND the action in the message
 3. Choose polling frequency based on urgency and type
+4. Set is_conditional to true
 
 Important rules:
+- Set is_conditional=false for normal time-based schedules
 - For conditional/event-based requests, ALWAYS include the check condition in the message
 - Mention relevant agents with @ only when needed
 - Convert time expressions to UTC for the schedule, but DO NOT include them in the message
@@ -481,6 +522,10 @@ Examples of event/condition phrasing to include in the message (do not include t
                 result.execute_at = current_time + timedelta(minutes=30)
             elif result.schedule_type == "cron" and not result.cron_schedule:
                 result.cron_schedule = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+
+            conditional_validation_error = _validate_conditional_workflow(result)
+            if conditional_validation_error is not None:
+                return conditional_validation_error
 
             logger.info("Successfully parsed workflow schedule", request=request, schedule_type=result.schedule_type)
             return result
