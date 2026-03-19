@@ -1,5 +1,7 @@
 # Security Review: Monitoring & Incident Response
 
+> **Audit note (2026-03-18):** Prometheus metrics and alert rules are live, but Alertmanager is not routed to any receiver and no incident response playbook exists.
+
 **Review Date**: 2025-01-11
 **Updated**: 2025-09-16 (Post-Implementation Review)
 **Reviewer**: Claude Code Security Analysis

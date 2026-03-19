@@ -162,7 +162,9 @@ Absolute paths and `..` traversal are rejected.
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
-Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+Six integrations are shared-only (they require `worker_scope` unset or `shared`): `google`, `spotify`, `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+Of those, `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` also always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
+`google` and `spotify` can still be proxied through the sandbox.
 
 The supported `worker_scope` values are:
 
@@ -279,7 +281,13 @@ For a `mind` agent with `private.per: user`, different users get different priva
 | `private.root` | string | `<agent_name>_data` | Private root name under the canonical private-instance state root. Must be a relative path and cannot escape with `..` |
 | `private.template_dir` | string | `null` | Optional local directory copied recursively into each private root without overwriting existing files. Relative paths are resolved from `config.yaml`, and absolute paths are also allowed. MindRoom raises an error when the directory does not exist |
 | `private.context_files` | list | `null` | Optional files loaded into role context from inside the private root. Each path is relative to the private root and cannot escape it |
-| `private.knowledge` | object | `null` | Optional requester-local knowledge indexed from inside the private root. See [Knowledge Bases](../knowledge.md#private-agent-knowledge) |
+| `private.knowledge` | object | `null` | Optional requester-local knowledge indexed from inside the private root. Sub-fields below. See [Knowledge Bases](../knowledge.md#private-agent-knowledge) |
+| `private.knowledge.enabled` | bool | `true` | Whether to index requester-local knowledge for this private agent instance. Set to `false` to disable indexing |
+| `private.knowledge.path` | string | `null` | Path to a private knowledge directory relative to the private root |
+| `private.knowledge.watch` | bool | `true` | Watch the private knowledge directory for changes and auto-reindex |
+| `private.knowledge.chunk_size` | int | `5000` | Maximum characters per indexed chunk (min: 128) |
+| `private.knowledge.chunk_overlap` | int | `0` | Overlapping characters between adjacent chunks (min: 0) |
+| `private.knowledge.git` | object | `null` | Optional Git sync configuration for requester-local private knowledge (same schema as top-level `knowledge_bases.<id>.git`) |
 
 ### Runtime Behavior
 
@@ -379,6 +387,11 @@ agents:
 - Targets must reference existing agent names in the config
 - An agent cannot delegate to itself
 - Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
+
+## Naming Rules
+
+Agent and team YAML keys must contain only alphanumeric characters and underscores (matching `^[a-zA-Z0-9_]+$`).
+Agent and team names must be distinct — the same key cannot appear in both `agents:` and `teams:`.
 
 ## Rich Prompt Agents
 

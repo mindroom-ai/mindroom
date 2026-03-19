@@ -1,5 +1,7 @@
 # MindRoom API Security Review - Category 10
 
+> **Audit note (2026-03-18):** Rate limiting is done (slowapi) but CAPTCHA, API versioning, and DoS vectors remain open.
+
 **Review Date**: 2024-11-XX
 **Scope**: API Security for MindRoom SaaS Platform Backend
 **Reviewer**: Claude Code Security Analysis

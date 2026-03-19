@@ -1,5 +1,8 @@
 # Security Review 03: Secrets Management
 
+> **Audit note (2026-03-18):** K8s Secrets are done but rotation has never been confirmed executed.
+> Three keys found in git history (DeepSeek, Google, OpenRouter) have no revocation proof on record.
+
 ## Executive Summary
 
 **Overall Status: PARTIAL – K8s Secrets implemented; rotation & encryption verification pending**

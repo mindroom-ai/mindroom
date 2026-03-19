@@ -572,7 +572,7 @@ The highest-value target is to make `shared`, `user_agent`, and unscoped dedicat
 - `src/mindroom/api/sandbox_runner.py` is one of the main places that still needs tighter runtime filesystem visibility rules for agent-isolated scopes.
 - `src/mindroom/tool_system/sandbox_proxy.py` should resolve worker handles through the worker manager and stay free of provider-specific assumptions.
 - `src/mindroom/workers/` is now the home of the backend-neutral worker contract plus the built-in `static_runner` and `kubernetes` backends that ship with core.
-- `src/mindroom/workers/backends/kubernetes_resources.py` is the main Kubernetes manifest layer that must stop exposing broader shared storage to agent-isolated workers.
+- `src/mindroom/workers/backends/kubernetes_resources.py` is the Kubernetes manifest layer that now narrows mounts for `shared`, `user_agent`, and unscoped dedicated execution to only the addressed agent root plus the worker runtime root.
 - `src/mindroom/api/workers.py` and the background cleanup loop in `src/mindroom/api/main.py` are the current backend-neutral observability and lifecycle surfaces.
 - `cluster/k8s/instance/templates/deployment-mindroom.yaml` and related worker templates encode the shared-runner and dedicated Kubernetes-worker deployment shapes and must be checked against the per-agent mount rules in this plan.
 

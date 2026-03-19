@@ -58,9 +58,9 @@ Notes:
 | `command-dispatch` | `"tool"` | Set to `tool` to run a tool directly |
 | `command-tool` | string | Function to call: `function_name`, `toolkit.function_name`, or `toolkit` (if the toolkit exposes exactly one function) |
 | `command-arg-mode` | `"raw"` | Argument passing mode; only `raw` is currently supported |
-| `license` | string | Optional license information |
-| `compatibility` | string | Optional compatibility requirements |
-| `allowed-tools` | list | Optional list of tools this skill is allowed to use |
+| `license` | string | Informational only; accepted but not used by the runtime |
+| `compatibility` | string | Informational only; accepted but not used by the runtime |
+| `allowed-tools` | list | Reserved; accepted in frontmatter but not enforced by the runtime |
 
 ## Eligibility gating (OpenClaw metadata)
 
@@ -120,7 +120,7 @@ Users can run a skill by name:
 
 Agent resolution:
 
-- If you mention an agent (e.g., `@mindroom_code !skill build`), that agent handles the skill.
+- If the message includes a Matrix mention of an agent, that agent handles the skill. The message must still start with `!skill`.
 - If only one agent in the room has the skill enabled, it handles the request.
 - If multiple agents have the skill, you must mention one to disambiguate.
 

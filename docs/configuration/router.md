@@ -125,7 +125,7 @@ Accounts in this list are treated like MindRoom agents for response logic — th
 
 ### Routing Fallback
 
-If routing fails (model error, invalid suggestion, etc.), the router sends a helpful error message: "I couldn't determine which agent should help with this. Please try mentioning an agent directly with @ or rephrase your request."
+If routing fails (model error, invalid suggestion, etc.), the router sends a helpful error message: "⚠️ I couldn't determine which agent should help with this. Please try mentioning an agent directly with @ or rephrase your request."
 
 Users can always mention agents directly with `@agent_name` to bypass routing.
 

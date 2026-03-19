@@ -1,5 +1,9 @@
 # Token Tracking Implementation Plan for MindRoom
 
+**Status: Not yet implemented.**
+None of the files described below (`token_tracking.py`, `api/usage.py`, frontend component, migration) have been created yet.
+This remains a design plan for future work.
+
 ## Overview
 
 This document outlines the complete implementation plan for adding token usage tracking to MindRoom. The system will track token usage for all AI agent interactions, supporting both self-hosted and SaaS deployment modes.
@@ -7,7 +11,7 @@ This document outlines the complete implementation plan for adding token usage t
 ## Architecture Overview
 
 Token tracking will integrate at these key points:
-1. **Collection**: After agent responses in `ai.py` (lines 237, 247, 388)
+1. **Collection**: After agent responses in `ai.py`
 2. **Storage**: Dual-mode (JSON for self-hosted, Supabase for SaaS)
 3. **API**: Expose usage via MindRoom API (`src/mindroom/api/`)
 4. **Frontend**: Display in the MindRoom dashboard (`frontend/`)
@@ -181,14 +185,14 @@ def _query_from_supabase(
 
 ### 2.1 Integrate in ai.py
 **File**: `src/mindroom/ai.py`
-**Location**: After line 247 (in `_cached_agent_run`) and line 388 (in `stream_agent_response`)
+**Location**: In `_cached_agent_run` and `stream_agent_response`
 
-**Add import at top** (after line 15):
+**Add import at top**:
 ```python
 from .token_tracking import TokenUsage, store_token_usage
 ```
 
-**Add tracking function** (after line 253):
+**Add tracking function**:
 ```python
 async def _track_token_usage(
     response: RunResponse,
@@ -219,7 +223,7 @@ async def _track_token_usage(
     await store_token_usage(usage)
 ```
 
-**Modify `_cached_agent_run`** (line 247-252):
+**Modify `_cached_agent_run`**:
 ```python
 response = await agent.arun(full_prompt, session_id=session_id)
 
@@ -231,14 +235,13 @@ cache.set(cache_key, response)
 
 ### 2.2 Integrate in bot.py for Team Tracking
 **File**: `src/mindroom/bot.py`
-**Location**: In `_generate_response` method after line 1414
 
-**Add import** (after line 50):
+**Add import**:
 ```python
 from .token_tracking import TokenUsage, store_token_usage
 ```
 
-**Add tracking for team responses** (in `_generate_team_response_helper`, after line 1038):
+**Add tracking for team responses** (in `_generate_team_response_helper`):
 ```python
 # Track token usage for team responses
 if hasattr(response, 'metrics') and response.metrics:
@@ -335,13 +338,12 @@ async def get_agent_breakdown(
 
 ### 3.2 Register Usage Router
 **File**: `src/mindroom/api/main.py`
-**Location**: After line 21 (with other router imports)
 
 ```python
 from mindroom.api.usage import router as usage_router
 ```
 
-**Location**: After line 120 (with other router registrations)
+**Register the router** (with other router registrations):
 ```python
 app.include_router(usage_router)
 ```
@@ -490,9 +492,9 @@ async def get_detailed_token_usage(
 
     # Calculate costs (simplified)
     MODEL_COSTS = {
-        "gpt-4o": {"input": 0.005, "output": 0.015},
-        "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
-        "claude-3-5-sonnet": {"input": 0.003, "output": 0.015},
+        "gpt-5.4": {"input": 0.005, "output": 0.015},
+        "claude-sonnet-4-6": {"input": 0.003, "output": 0.015},
+        "claude-haiku-4-5": {"input": 0.0008, "output": 0.004},
     }
 
     total_cost = 0

@@ -56,6 +56,7 @@ services:
     command: ["/app/run-sandbox-runner.sh"]
     user: "1000:1000"
     volumes:
+      - ./mindroom_data:/app/mindroom_data:rw
       - sandbox-workspace:/app/workspace
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
@@ -176,6 +177,7 @@ When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker e
 
 | Variable                                             | Description                                                                                          | Default                                                      |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `MINDROOM_SANDBOX_RUNNER_PORT`                       | Port the sandbox runner listens on                                                                   | `8766`                                                       |
 | `MINDROOM_SANDBOX_RUNNER_MODE`                       | Set to `true` to indicate runner mode                                                                | `false`                                                      |
 | `MINDROOM_SANDBOX_PROXY_TOKEN`                       | Shared auth token (must match primary)                                                               | *(required)*                                                 |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE`             | `inprocess` or `subprocess`                                                                          | `inprocess`                                                  |
@@ -214,6 +216,19 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
+### Sandbox-runner API endpoints
+
+These endpoints are served by the sandbox-runner process, not the primary MindRoom runtime. All requests require the `MINDROOM_SANDBOX_PROXY_TOKEN` as a Bearer token.
+
+| Method | Endpoint                              | Description                                                     |
+| ------ | ------------------------------------- | --------------------------------------------------------------- |
+| POST   | `/api/sandbox-runner/leases`          | Create a one-time credential lease for an upcoming tool call    |
+| POST   | `/api/sandbox-runner/execute`         | Execute a tool call with optional credential override via lease |
+| GET    | `/api/sandbox-runner/workers`         | List known workers with lifecycle metadata                      |
+| POST   | `/api/sandbox-runner/workers/cleanup` | Mark idle workers for cleanup without deleting persisted state  |
+
+Credential leases are single-use: once consumed by an `/execute` call, the lease cannot be replayed.
+
 ## Per-agent configuration
 
 MindRoom owns the default local-versus-worker routing policy. You can override which tools are routed through the sandbox proxy per agent (or set a default for all agents) in `config.yaml`:
@@ -248,7 +263,7 @@ Agent-level `worker_tools` overrides `defaults.worker_tools`. With `MINDROOM_WOR
 
 ## Worker Scope
 
-`worker_tools` controls which tools run in the sandbox proxy. `worker_scope` controls how those sandbox runtimes are shared between calls. Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+`worker_tools` controls which tools run in the sandbox proxy. `worker_scope` controls how those sandbox runtimes are shared between calls. Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`. Additionally, `google` and `spotify` are shared-only integrations that require `worker_scope` unset or `shared` but can still be proxied through the sandbox.
 
 You can set `worker_scope` per agent or in `defaults`:
 
