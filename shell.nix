@@ -32,6 +32,10 @@ pkgs.mkShell {
 
     # uv for Python package management
     uv
+
+    # Required for pip-installed native extensions (numpy, chromadb, etc.)
+    stdenv.cc.cc.lib
+    zlib
   ];
 
   shellHook = ''
@@ -39,6 +43,7 @@ pkgs.mkShell {
     echo "Tools available: uv, bun, nodejs, python3, chromium"
     export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
     export PUPPETEER_EXECUTABLE_PATH=${pkgs.chromium}/bin/chromium
+    export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]}:$LD_LIBRARY_PATH"
 
     echo ""
     echo "Run MindRoom locally:"
