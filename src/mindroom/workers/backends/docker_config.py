@@ -55,6 +55,17 @@ _DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
         "MINDROOM_SANDBOX_PROXY_TOKEN",
     },
 )
+_DOCKER_RESERVED_LABEL_NAMES = frozenset(
+    {
+        "mindroom.ai/component",
+        "app.mindroom.ai/managed-by",
+        "app.mindroom.ai/name",
+        "mindroom.ai/worker-id",
+        "mindroom.ai/worker-key",
+        "mindroom.ai/launch-config-hash",
+        "mindroom.ai/runtime-namespace",
+    },
+)
 
 
 def _read_env(env: Mapping[str, str], name: str, default: str = "") -> str:
@@ -98,6 +109,16 @@ def _read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
         elif value is not None:
             cleaned[key] = str(value)
     return cleaned
+
+
+def validate_docker_extra_labels(extra_labels: Mapping[str, str]) -> None:
+    """Reject extra labels that would override backend-owned Docker metadata."""
+    invalid_names = sorted(name for name in extra_labels if name in _DOCKER_RESERVED_LABEL_NAMES)
+    if not invalid_names:
+        return
+    invalid_names_text = ", ".join(invalid_names)
+    msg = f"Docker worker extra labels cannot override reserved labels: {invalid_names_text}"
+    raise WorkerBackendError(msg)
 
 
 def _read_host_config_path(runtime_paths: RuntimePaths, env: Mapping[str, str]) -> Path | None:
@@ -171,6 +192,9 @@ class _DockerWorkerBackendConfig:
     user: str | None
     extra_env: dict[str, str]
     extra_labels: dict[str, str]
+
+    def __post_init__(self) -> None:
+        validate_docker_extra_labels(self.extra_labels)
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> _DockerWorkerBackendConfig:
