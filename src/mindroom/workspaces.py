@@ -90,6 +90,38 @@ def validate_local_copy_source_dir(
     return resolved_source_dir
 
 
+def copy_validated_local_file_to_root(
+    source_path: Path,
+    *,
+    destination_root: Path,
+    destination_relative_path: str | Path,
+    destination_field_name: str,
+    destination_root_label: str,
+    mode: int | None = None,
+) -> Path:
+    """Copy one validated local file into a root without following destination symlinks."""
+    if not source_path.is_file():
+        msg = f"{destination_field_name} requires a file source: {source_path}"
+        raise ValueError(msg)
+
+    destination_path = resolve_relative_path_within_root(
+        destination_root,
+        destination_relative_path,
+        field_name=destination_field_name,
+        root_label=destination_root_label,
+    )
+    if destination_path.exists() and destination_path.is_dir():
+        msg = f"{destination_field_name} must be a file path within the {destination_root_label}: {destination_path}"
+        raise ValueError(msg)
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    if source_path.resolve() != destination_path.resolve():
+        shutil.copyfile(source_path, destination_path)
+    if mode is not None:
+        destination_path.chmod(mode)
+    return destination_path
+
+
 def resolve_relative_path_within_root(
     root: Path,
     relative_path: str | Path,

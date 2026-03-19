@@ -479,6 +479,44 @@ def test_kubernetes_backend_rejects_symlinked_google_application_credentials_pat
         backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
 
+def test_kubernetes_backend_rejects_symlinked_google_application_credentials_destination(
+    tmp_path: Path,
+) -> None:
+    """Explicit ADC handoff should reject worker-owned destination symlinks."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    credentials_path = tmp_path / "google-credentials.json"
+    credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    local_storage_root = (tmp_path / "local-shared-storage").resolve()
+    local_storage_root.mkdir()
+    victim_path = tmp_path / "victim.txt"
+    victim_path.write_text("victim\n", encoding="utf-8")
+    destination_path = (
+        local_storage_root / "workers" / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A) / ".runtime" / credentials_path.name
+    )
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    destination_path.symlink_to(victim_path)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=local_storage_root,
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+    )
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    with pytest.raises(
+        WorkerBackendError,
+        match="Kubernetes worker GOOGLE_APPLICATION_CREDENTIALS destination must stay within the worker state root",
+    ):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert victim_path.read_text(encoding="utf-8") == "victim\n"
+
+
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:
     """Dedicated worker payloads should keep the primary runtime config path when no ConfigMap is mounted."""
     config_path = tmp_path / "workspace-config.yaml"

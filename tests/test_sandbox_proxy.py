@@ -1264,6 +1264,138 @@ def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_cha
     workers_runtime_module._reset_primary_worker_manager()
 
 
+def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Changing committed worker runtime env should rebuild the Docker worker manager."""
+    workers_runtime_module._reset_primary_worker_manager()
+    built_browser_paths: list[str | None] = []
+
+    class _FakeDockerBackend:
+        backend_name = "docker"
+        idle_timeout_seconds = 60.0
+
+        @classmethod
+        def from_runtime(
+            cls,
+            runtime_paths: RuntimePaths,
+            *,
+            auth_token: str | None,
+            storage_path: Path | None = None,
+        ) -> _FakeDockerBackend:
+            assert auth_token == _TEST_AUTH_TOKEN
+            assert storage_path == tmp_path.resolve()
+            built_browser_paths.append(runtime_paths.env_value("BROWSER_EXECUTABLE_PATH"))
+            return cls()
+
+    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
+
+    config_path = tmp_path / "config.yaml"
+    first_runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "BROWSER_EXECUTABLE_PATH": "/usr/bin/a",
+        },
+    )
+    second_runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "BROWSER_EXECUTABLE_PATH": "/usr/bin/b",
+        },
+    )
+
+    first_manager = workers_runtime_module.get_primary_worker_manager(
+        first_runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+    )
+    second_manager = workers_runtime_module.get_primary_worker_manager(
+        second_runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+    )
+
+    assert built_browser_paths == ["/usr/bin/a", "/usr/bin/b"]
+    assert first_manager is not second_manager
+    workers_runtime_module._reset_primary_worker_manager()
+
+
+def test_kubernetes_worker_manager_rebuilds_when_committed_runtime_env_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Changing committed worker runtime env should rebuild the Kubernetes worker manager."""
+    workers_runtime_module._reset_primary_worker_manager()
+    built_browser_paths: list[str | None] = []
+
+    class _FakeKubernetesBackend:
+        backend_name = "kubernetes"
+        idle_timeout_seconds = 60.0
+
+        @classmethod
+        def from_runtime(
+            cls,
+            runtime_paths: RuntimePaths,
+            *,
+            auth_token: str | None,
+            storage_root: Path,
+        ) -> _FakeKubernetesBackend:
+            assert auth_token == _TEST_AUTH_TOKEN
+            assert storage_root == tmp_path.resolve()
+            built_browser_paths.append(runtime_paths.env_value("BROWSER_EXECUTABLE_PATH"))
+            return cls()
+
+    monkeypatch.setattr(workers_runtime_module, "KubernetesWorkerBackend", _FakeKubernetesBackend)
+
+    config_path = tmp_path / "config.yaml"
+    first_runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "mindroom-storage",
+            "BROWSER_EXECUTABLE_PATH": "/usr/bin/a",
+        },
+    )
+    second_runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "mindroom-storage",
+            "BROWSER_EXECUTABLE_PATH": "/usr/bin/b",
+        },
+    )
+
+    first_manager = workers_runtime_module.get_primary_worker_manager(
+        first_runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+    )
+    second_manager = workers_runtime_module.get_primary_worker_manager(
+        second_runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+    )
+
+    assert built_browser_paths == ["/usr/bin/a", "/usr/bin/b"]
+    assert first_manager is not second_manager
+    workers_runtime_module._reset_primary_worker_manager()
+
+
 def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Worker-routed tools should stay proxy-enabled when the Kubernetes backend provides worker handles directly."""
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")

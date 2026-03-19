@@ -14,6 +14,7 @@ from mindroom.constants import (
     resolve_primary_runtime_paths,
     runtime_env_values,
     runtime_paths_with_storage_root,
+    serialize_public_runtime_paths,
 )
 from mindroom.credentials import runtime_credentials_manager_key
 from mindroom.tool_system.worker_routing import worker_root_path
@@ -209,6 +210,11 @@ def docker_backend_config_signature(
     credentials_key = runtime_credentials_manager_key(effective_runtime_paths)
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
+    public_runtime_json = json.dumps(
+        serialize_public_runtime_paths(effective_runtime_paths),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return (
         "docker",
         config.image,
@@ -226,6 +232,7 @@ def docker_backend_config_signature(
         str(credentials_key.shared_base_path),
         credentials_key.current_worker_key or "",
         str(credentials_key.current_worker_root or ""),
+        public_runtime_json,
         extra_env_json,
         extra_labels_json,
         auth_token or "",

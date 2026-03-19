@@ -56,7 +56,7 @@ from mindroom.workers.backends.docker_projection import (
 )
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
-from mindroom.workspaces import validate_local_copy_source_path
+from mindroom.workspaces import copy_validated_local_file_to_root, validate_local_copy_source_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -779,10 +779,17 @@ class DockerWorkerBackend:
 
         runtime_dir = local_dedicated_root / ".runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
-        target_path = runtime_dir / resolved_source_path.name
-        if resolved_source_path.resolve() != target_path.resolve():
-            shutil.copyfile(resolved_source_path, target_path)
-            target_path.chmod(0o600)
+        try:
+            copy_validated_local_file_to_root(
+                resolved_source_path,
+                destination_root=local_dedicated_root,
+                destination_relative_path=Path(".runtime") / resolved_source_path.name,
+                destination_field_name="Docker worker GOOGLE_APPLICATION_CREDENTIALS destination",
+                destination_root_label="worker state root",
+                mode=0o600,
+            )
+        except ValueError as exc:
+            raise WorkerBackendError(str(exc)) from exc
         return str(dedicated_root / ".runtime" / resolved_source_path.name)
 
     def _worker_runtime_config_path(self) -> Path:

@@ -985,6 +985,51 @@ def test_docker_backend_rejects_symlinked_google_application_credentials_path(
         backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
 
 
+def test_docker_backend_rejects_symlinked_google_application_credentials_destination(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Explicit ADC handoff should reject worker-owned destination symlinks."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_path.write_text(config_text, encoding="utf-8")
+    runtime_storage = (tmp_path / "runtime-storage").resolve()
+    credentials_path = tmp_path / "google-credentials.json"
+    credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    victim_path = tmp_path / "victim.txt"
+    victim_path.write_text("victim\n", encoding="utf-8")
+    destination_path = worker_root_path(runtime_storage, "worker-a") / ".runtime" / credentials_path.name
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    destination_path.symlink_to(victim_path)
+    (config_dir / ".env").write_text(
+        f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=runtime_storage,
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+    )
+    backend, _fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+        runtime_paths=runtime_paths,
+        storage_path=runtime_storage,
+        host_config_path=config_path,
+    )
+
+    with pytest.raises(
+        WorkerBackendError,
+        match="Docker worker GOOGLE_APPLICATION_CREDENTIALS destination must stay within the worker state root",
+    ):
+        backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+
+    assert victim_path.read_text(encoding="utf-8") == "victim\n"
+
+
 def test_docker_backend_redacts_projected_config_secrets_and_support_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

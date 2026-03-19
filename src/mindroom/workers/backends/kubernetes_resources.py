@@ -6,7 +6,6 @@ import hashlib
 import importlib
 import json
 import os
-import shutil
 import time
 from pathlib import Path
 from types import MappingProxyType
@@ -17,7 +16,7 @@ from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workspaces import validate_local_copy_source_path
+from mindroom.workspaces import copy_validated_local_file_to_root, validate_local_copy_source_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -666,10 +665,17 @@ class KubernetesResourceManager:
 
         runtime_dir = local_dedicated_root / ".runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
-        target_path = runtime_dir / resolved_source_path.name
-        if resolved_source_path.resolve() != target_path.resolve():
-            shutil.copyfile(resolved_source_path, target_path)
-            target_path.chmod(0o600)
+        try:
+            copy_validated_local_file_to_root(
+                resolved_source_path,
+                destination_root=local_dedicated_root,
+                destination_relative_path=Path(".runtime") / resolved_source_path.name,
+                destination_field_name="Kubernetes worker GOOGLE_APPLICATION_CREDENTIALS destination",
+                destination_root_label="worker state root",
+                mode=0o600,
+            )
+        except ValueError as exc:
+            raise WorkerBackendError(str(exc)) from exc
         return str(dedicated_root / ".runtime" / resolved_source_path.name)
 
     def _worker_runtime_paths(
