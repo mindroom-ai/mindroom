@@ -479,7 +479,6 @@ class DockerProjectionManager:
         )
         self._rewrite_projected_agent_paths(
             config_data,
-            paths,
             projected_agent_names,
             asset_paths_by_host,
             host_paths_by_relative_asset_path,
@@ -699,7 +698,6 @@ class DockerProjectionManager:
     def _rewrite_projected_agent_paths(
         self,
         config_data: dict[str, object],
-        paths: LocalWorkerStatePaths,
         projected_agent_names: tuple[str, ...] | None,
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
@@ -731,11 +729,6 @@ class DockerProjectionManager:
                 asset_paths_by_host=asset_paths_by_host,
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
-            )
-            self._rewrite_projected_agent_memory_file_path(
-                agent,
-                paths,
-                PurePosixPath("agents", safe_agent_name, "memory_file_path"),
             )
 
     def _rewrite_projected_context_files(
@@ -791,21 +784,6 @@ class DockerProjectionManager:
             asset_paths_by_host=asset_paths_by_host,
             host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
             assets=assets,
-        )
-
-    def _rewrite_projected_agent_memory_file_path(
-        self,
-        raw_agent: dict[str, object],
-        paths: LocalWorkerStatePaths,
-        relative_worker_path: PurePosixPath,
-    ) -> None:
-        raw_memory_file_path = raw_agent.get("memory_file_path")
-        if not isinstance(raw_memory_file_path, str) or not raw_memory_file_path.strip():
-            return
-
-        raw_agent["memory_file_path"] = self._worker_config_state_path_value(
-            paths,
-            relative_worker_path,
         )
 
     def _rewrite_projected_memory_paths(

@@ -190,20 +190,24 @@ def _resolved_docker_image_identity(
     return resolved_identity
 
 
-def ensure_docker_dependencies() -> None:
+def ensure_docker_dependencies(runtime_paths: RuntimePaths | None = None) -> None:
     """Install the optional Docker SDK runtime when needed."""
+    effective_runtime_paths = runtime_paths or resolve_primary_runtime_paths(process_env=dict(os.environ))
     try:
         ensure_optional_deps(
             _DOCKER_DEPENDENCIES,
             _DOCKER_EXTRA,
-            resolve_primary_runtime_paths(process_env=dict(os.environ)),
+            effective_runtime_paths,
         )
     except ImportError as exc:
         raise WorkerBackendError(str(exc)) from exc
 
 
-def _load_docker_client_and_errors() -> tuple[_DockerClient, _DockerErrors]:
-    ensure_docker_dependencies()
+def _load_docker_client_and_errors(
+    *,
+    runtime_paths: RuntimePaths | None = None,
+) -> tuple[_DockerClient, _DockerErrors]:
+    ensure_docker_dependencies(runtime_paths)
     try:
         docker_module = importlib.import_module("docker")
         docker_errors = cast("_DockerErrors", importlib.import_module("docker.errors"))
@@ -262,10 +266,6 @@ class DockerWorkerBackend:
         self.config = config
         self.auth_token = auth_token
         self.idle_timeout_seconds = config.idle_timeout_seconds
-        self._client, self._docker_errors = _load_docker_client_and_errors()
-        self._worker_locks: dict[str, threading.Lock] = {}
-        self._worker_locks_lock = threading.Lock()
-        self._metadata_lock = threading.Lock()
         self._storage_path = resolve_docker_storage_path(storage_path, runtime_paths=runtime_paths)
         self._workers_root = docker_workers_root(self._storage_path)
         self._runtime_paths = (
@@ -277,6 +277,10 @@ class DockerWorkerBackend:
             if runtime_paths is None
             else runtime_paths_with_storage_root(runtime_paths, self._storage_path)
         )
+        self._client, self._docker_errors = _load_docker_client_and_errors(runtime_paths=self._runtime_paths)
+        self._worker_locks: dict[str, threading.Lock] = {}
+        self._worker_locks_lock = threading.Lock()
+        self._metadata_lock = threading.Lock()
         self._projection_manager = DockerProjectionManager(
             config=config,
             projected_configs_root=self._workers_root / _PROJECTED_CONFIGS_DIRNAME,
