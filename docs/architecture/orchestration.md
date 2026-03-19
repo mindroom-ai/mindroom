@@ -86,6 +86,22 @@ Config changes are detected via polling (`watch_file()` checks `st_mtime` every 
 
 Skills are watched separately via `_watch_skills_task()` with cache invalidation.
 
+## Orchestration Subpackage
+
+The `src/mindroom/orchestration/` subpackage contains helpers extracted from the monolithic orchestrator:
+
+- **`runtime.py`** — Sync loop helpers: `sync_forever_with_restart()` with linear backoff (capped at 60s), `cancel_task()`, and `create_logged_task()` for safe asyncio task creation.
+- **`config_updates.py`** — Config diffing and reload planning: `build_config_update_plan()` computes a `ConfigUpdatePlan` by calling `_identify_entities_to_restart()`, which diffs old and new configs using `model_dump(exclude_none=True)`.
+- **`rooms.py`** — Room invitation helpers: `get_authorized_user_ids_to_invite()` and `get_root_space_user_ids_to_invite()` compute which users should be invited to managed rooms and the root Matrix space.
+
+### Runtime Resolution
+
+Agent and team materialization is handled by dedicated resolution modules:
+
+- **`runtime_resolution.py`** — Resolves `ResolvedAgentRuntime` (the full set of runtime parameters for one agent instance) including `ResolvedKnowledgeBinding` for knowledge base attachment.
+- **`team_runtime_resolution.py`** — Resolves `ResolvedExactTeamMembers` for team materialization via `materialize_exact_requested_team_members()`.
+- **`runtime_state.py`** — Shared runtime readiness state with `set_runtime_starting()`, `set_runtime_ready()`, and `set_runtime_failed()` used by health endpoints.
+
 ## Message Handling
 
 Event callbacks are wrapped in `_create_task_wrapper()` to run as background tasks, ensuring the sync loop is never blocked.

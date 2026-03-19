@@ -75,6 +75,7 @@ The backend uses pytest with FastAPI's TestClient for API testing.
 - `tests/api/test_schedules_api.py` - Scheduling API tests
 - `tests/api/test_skills_api.py` - Skills API tests
 - `tests/api/test_sandbox_runner_api.py` - Sandbox runner API tests
+- `tests/api/test_matrix_operations.py` - Matrix room operations API tests
 - `tests/conftest.py` - Pytest fixtures and configuration
 
 There are 145+ backend test files covering agents, authorization, commands, config, memory, tools, and more.
@@ -125,12 +126,23 @@ The following markers are defined in `pyproject.toml` and can be used to select 
 
 ### Async Tests
 
-`asyncio_mode = "auto"` is set in `pyproject.toml`, so `async def test_*` functions are automatically collected and run by `pytest-asyncio` without needing an explicit `@pytest.mark.asyncio` decorator.
+The effective asyncio mode is `strict` (`--asyncio-mode=strict` in `addopts` overrides the ini-level `asyncio_mode = "auto"`).
+In strict mode, async test functions require an explicit `@pytest.mark.asyncio` decorator or a module/class-level `pytestmark = pytest.mark.asyncio`.
 
 ### Parallel Execution
 
 Tests run in parallel by default via `pytest-xdist` (`-n auto` in `addopts`).
 To run serially for debugging, pass `-n0`: `python -m pytest tests/ -n0`.
+
+### Timeouts and Durations
+
+Each test has a 60-second timeout (`--timeout 60` in `addopts`).
+The 20 slowest tests are reported at the end of every run (`--durations 20`).
+
+### Automatic Coverage
+
+Coverage runs automatically with every test invocation (`--cov=mindroom` in `addopts`).
+Reports are generated in three formats: terminal summary, HTML (`htmlcov/`), and XML (`coverage.xml`).
 
 ## Running All Tests
 

@@ -371,7 +371,9 @@ Below is a representative selection:
 - **file** - Read, write, and manage files
 - **shell** - Execute command line operations
 - **python** - Run Python code snippets
-- **coding** - Code generation and editing
+- **coding** - Code generation and editing (file read/write/edit, grep, find, ls)
+- **sleep** - Pause execution for a specified duration
+- **reasoning** - Chain-of-thought reasoning prompts
 
 ### Data & Analysis Tools
 - **csv** - Process and analyze CSV files
@@ -384,6 +386,7 @@ Below is a representative selection:
 - **duckduckgo** - Web search
 - **googlesearch** - Google search (requires API key)
 - **tavily** - AI-powered search (requires API key)
+- **exa** - Neural search API (requires API key)
 - **wikipedia** - Encyclopedia lookup
 - **newspaper4k** - Parse and extract news articles
 - **website** - Extract content from websites
@@ -415,11 +418,13 @@ Below is a representative selection:
 - **gmail** - Gmail integration (requires Google OAuth)
 - **google_calendar** - Calendar management (requires Google OAuth)
 - **google_sheets** - Spreadsheet operations (requires Google OAuth)
+- **homeassistant** - Home Assistant device control (requires OAuth or long-lived access token)
+- **spotify** - Spotify playback and library (requires OAuth)
 - **todoist** - Task management (requires API key)
 - **notion** - Notion workspace integration (requires API key)
 
 ### Special Tool Bundles
-- **openclaw_compat** - Convenience bundle that implies: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message, attachments
+- **openclaw_compat** - Convenience bundle that expands to: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message (matrix_message also implies attachments via `IMPLIED_TOOLS`)
 
 ## Example Agent Configurations
 
@@ -516,15 +521,21 @@ Some tools need additional setup:
 ### Tools requiring API keys:
 - **googlesearch** - Set up Google API credentials
 - **tavily** - Get API key from Tavily
+- **exa** - Get API key from Exa
 - **github** - Create a GitHub personal access token
 - **telegram** - Create a Telegram bot and get token
 - **email** - Configure SMTP server details
+
+### Tools requiring OAuth:
+- **gmail**, **google_calendar**, **google_sheets** - Google OAuth (configure via dashboard)
+- **homeassistant** - Home Assistant OAuth or long-lived access token
+- **spotify** - Spotify OAuth (configure via dashboard)
 
 ### Tools requiring software:
 - **docker** - Install Docker on your system
 
 ### Tools that work immediately:
-- **calculator**, **file**, **shell**, **python**, **csv**, **pandas**, **arxiv**, **duckduckgo**, **wikipedia**, **newspaper4k**, **website**, **jina**, **yfinance**
+- **calculator**, **file**, **shell**, **python**, **csv**, **pandas**, **arxiv**, **duckduckgo**, **wikipedia**, **newspaper4k**, **website**, **jina**, **yfinance**, **sleep**, **reasoning**
 
 ## Complete Configuration Example
 

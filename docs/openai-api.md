@@ -126,6 +126,7 @@ Agents that use `agents.<name>.private` are not listed there, because `private.p
 ### Auto-routing
 
 Select the `auto` model to let MindRoom's router pick the best agent for each message, the same routing logic used in Matrix rooms.
+Once routing resolves a specific agent, session continuity and streamed identity bind to that resolved agent name, not the literal `auto` label.
 
 ### Teams
 
@@ -138,6 +139,12 @@ Teams are exposed as `team/<team_name>` models. Selecting `team/super_team` runs
 Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas).
 MindRoom currently emits tool events in stream chunks as inline `<tool id="N" state="start|done">...</tool>` content.
 
+### Multimodal messages
+
+When a message's `content` is an array of content parts (the OpenAI multimodal format), MindRoom extracts only the `text` parts and concatenates them as the prompt.
+Non-text parts such as `image_url` are silently ignored by the current implementation.
+Agents still process the text normally with all their configured tools and instructions.
+
 ### Session continuity
 
 Session IDs are derived from request headers:
@@ -148,6 +155,9 @@ Session IDs are derived from request headers:
 
 Agent memory and conversation history persist across requests with the same session ID.
 For persistent MindRoom tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
+
+Session IDs are namespaced internally with a hash of the API key to prevent cross-key session collision.
+Two different API keys using the same `X-Session-Id` value will not share a session.
 
 ### Claude Agent tool sessions
 

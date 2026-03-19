@@ -75,7 +75,7 @@ memory:
       host: http://localhost:11434
 ```
 
-Supported embedder providers: `openai`, `ollama`, `huggingface`, `sentence_transformers`.
+Supported embedder providers: `openai`, `ollama`, `sentence_transformers`.
 
 ### Memory LLM
 
@@ -222,3 +222,35 @@ agents:
 ```
 
 This exposes `add_memory`, `search_memories`, `list_memories`, `get_memory`, `update_memory`, and `delete_memory`.
+
+## Agno Learning
+
+MindRoom integrates Agno's built-in Learning system, which lets agents learn and adapt from conversations.
+Learning is separate from the memory backends above — it uses Agno's own SQLite-backed storage in each agent's state root (`learning/`).
+
+### Configuration
+
+```yaml
+defaults:
+  learning: true          # Enable learning for all agents (default: true)
+  learning_mode: always   # "always" (extract after every turn) or "agentic" (agent decides via tool)
+```
+
+Per-agent override:
+
+```yaml
+agents:
+  assistant:
+    learning: false       # Disable learning for this agent
+  research:
+    learning_mode: agentic  # Agent controls when to learn
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `learning` | bool | `true` | Enable Agno Learning for the agent |
+| `learning_mode` | string | `always` | `always`: automatic extraction after every turn. `agentic`: agent decides via tool when to learn |
+
+Agents inherit `learning` and `learning_mode` from `defaults` unless explicitly overridden.
+Disabled agents do not create or update learning state.
+Learning data persists in `agents/<name>/learning/<agent>.db` within the agent's state root.

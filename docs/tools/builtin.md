@@ -246,6 +246,41 @@ Use the gateway host root for `anthropic_base_url` (no `/v1` suffix), because Cl
 Some Anthropic-compatible backends may reject Claude's `anthropic-beta` headers.
 Set `disable_experimental_betas` to `true` in that case.
 
+## Worker-Routed Tools
+
+Some tools default to running in a sandboxed worker container instead of the primary agent process.
+This is controlled by the `default_execution_target` metadata field.
+
+The following tools default to worker execution:
+
+| Tool | Purpose |
+|------|---------|
+| `file` | File read/write operations |
+| `shell` | Shell command execution |
+| `python` | Python code execution |
+| `coding` | Advanced code editing and discovery |
+
+When a [sandbox proxy](../deployment/sandbox-proxy.md) backend is configured, calls to these tools are forwarded to an isolated container.
+The worker container receives credentials via short-lived leases and inherits the agent's execution scope.
+
+### Execution Scopes
+
+Worker routing uses three scope levels configured via `worker_scope` on an agent:
+
+| Scope | Isolation | Worker Key |
+|-------|-----------|------------|
+| `shared` | One worker per agent (all requesters share state) | `v1:<tenant>:shared:<agent>` |
+| `user` | One worker per requester (state shared across agents) | `v1:<tenant>:user:<requester>` |
+| `user_agent` | One worker per requester-agent pair (full isolation) | `v1:<tenant>:user_agent:<requester>:<agent>` |
+
+### Shared-Only Integrations
+
+Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with `user` or `user_agent` worker scope:
+
+`google`, `spotify`, `homeassistant`, `gmail`, `google_calendar`, `google_sheets`
+
+If an agent with an isolating scope tries to use one of these integrations, the tool call is rejected with an error explaining the scope restriction.
+
 ## Enabling Tools
 
 Add tools to agents in `config.yaml`:

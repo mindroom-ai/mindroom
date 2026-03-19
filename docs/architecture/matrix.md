@@ -124,7 +124,7 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 - Messages > 55,000 bytes and edits > 27,000 bytes use a fallback event
 - Full original Matrix message content is uploaded as a JSON sidecar (`message-content.json`)
 - Preview text included in message body (maximum that fits)
-- Custom metadata (`io.mindroom.long_text.version = 2`) points to sidecar encoding (`matrix_event_content_json`)
+- Custom metadata dict `io.mindroom.long_text` contains `version: 2`, `encoding: "matrix_event_content_json"`, original and preview sizes, and a completeness flag
 - Preview event is compact (for example no inline `io.mindroom.tool_trace`), while the sidecar preserves full content fidelity
 - Encrypted rooms: sidecar JSON is encrypted before upload (`message-content.json.enc`)
 
@@ -144,6 +144,19 @@ mid = MatrixID.from_agent("assistant", "example.com", runtime_paths)
 # Extract agent name (returns "code" if configured, None otherwise)
 agent_name = extract_agent_name("@mindroom_code:localhost", config, runtime_paths)
 ```
+
+## Root Space
+
+MindRoom can create and maintain a root Matrix Space that groups all managed rooms.
+
+```yaml
+matrix_space:
+  enabled: true        # Default: true
+  name: MindRoom       # Display name for the Space
+```
+
+When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
+The Space name is reconciled on each startup to match the configured value.
 
 ## Configuration
 

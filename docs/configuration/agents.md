@@ -162,7 +162,8 @@ Absolute paths and `..` traversal are rejected.
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
-Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google`, `google_calendar`, `google_sheets`, `homeassistant`, and `spotify`.
+Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+`google` and `spotify` are shared-only integrations (they require `worker_scope` unset or `shared`) but can still be proxied through the sandbox.
 
 The supported `worker_scope` values are:
 

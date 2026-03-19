@@ -123,6 +123,31 @@ If an error occurs during streaming, the message is finalized with:
 If a streamed response exceeds the Matrix event size limit (55KB for new messages, 27KB for edits), the large message system automatically uploads a JSON sidecar and includes a preview in the event body.
 See [Matrix Integration — Large Messages](architecture/matrix.md#large-messages) for details.
 
+## Visibility Toggles
+
+Two global defaults control what users see during streaming:
+
+```yaml
+defaults:
+  show_tool_calls: true     # Default: true — show inline tool markers and tool-trace metadata
+  show_stop_button: true    # Default: true — add 🛑 reaction for cancellation
+```
+
+When `show_tool_calls` is `false`, inline tool markers (`🔧 tool_name [N]`) are omitted from the message text and `io.mindroom.tool_trace` metadata is not attached.
+The agent still shows typing activity during hidden tool calls.
+`show_tool_calls` can also be overridden per agent in the agent config.
+
+When `show_stop_button` is `false`, the 🛑 reaction is not added to in-progress messages.
+Streaming itself still works — only the cancellation affordance is removed.
+`show_stop_button` is a global-only setting under `defaults`.
+
+`enable_streaming` is also global-only and cannot be overridden per agent.
+
+## Room Mode
+
+When an agent operates in `thread_mode: room` (see [Response Modes](architecture/orchestration.md#response-modes)), streaming skips all thread relations and sends plain room messages.
+This is used for bridges and mobile clients that don't support Matrix threads.
+
 ## Replacement Streaming
 
 MindRoom also supports a `ReplacementStreamingResponse` variant where each chunk replaces the entire message content instead of appending to it.

@@ -110,7 +110,7 @@ List pending scheduled tasks in the current room or thread.
 !list_schedules
 ```
 
-**Aliases:** `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`
+**Aliases:** `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`, `!inspectschedule`, `!inspect-schedule`
 
 ### `!cancel_schedule`
 
@@ -217,7 +217,7 @@ MindRoom supports cancelling in-progress responses via a reaction-based stop but
 
 When `defaults.show_stop_button` is `true` (the default), MindRoom adds a 🛑 reaction to the agent's message while it is generating.
 React with 🛑 on the message to cancel the response.
-The agent finalizes the partial text with `[Response cancelled by user]`.
+The agent finalizes the partial text with `**[Response cancelled by user]**`.
 
 The stop button only works on messages currently being generated.
 Only non-agent users can trigger cancellation — agent reactions are ignored.

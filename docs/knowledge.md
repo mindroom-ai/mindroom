@@ -286,8 +286,9 @@ memory:
 
 ## Storage
 
-Knowledge data is stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<base_id>_<hash>`.
-For requester-private agent knowledge, the effective private-root path is part of that storage key, so each requester-local root gets an isolated index.
+Knowledge data is stored under `<storage_path>/knowledge_db/<sanitized_base_id>_<hash>/`.
+Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<sanitized_base_id>_<hash>`, where the base ID is sanitized to alphanumerics, hyphens, and underscores only, and the hash is a digest of the resolved knowledge path.
+For requester-private agent knowledge, the effective private-root path is part of that hash, so each requester-local root gets an isolated index.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 

@@ -35,7 +35,8 @@ uvx mindroom config init --profile public --provider anthropic
 uvx mindroom config init --profile public-vertexai-anthropic
 ```
 
-Profile aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted.
+`public-vertexai-anthropic` is the canonical profile name for Vertex AI Claude on hosted Matrix.
+Aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted.
 
 Other profiles:
 

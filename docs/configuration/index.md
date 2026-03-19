@@ -65,7 +65,7 @@ See [Model Configuration — File-based Secrets](models.md#file-based-secrets) f
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
-| `MINDROOM_PORT` | Port for the bundled dashboard/API server | `8765` |
+| `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
 | `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
 | `MINDROOM_ENABLE_AI_CACHE` | Enable the AI response cache (caches model responses keyed by model, messages, and tools — useful during development to avoid repeated API calls) | `true` |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
@@ -276,7 +276,7 @@ memory:
 # Knowledge base configuration (optional)
 knowledge_bases:
   docs:
-    path: ./knowledge_docs/default # Folder containing documents for this base
+    path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)
     watch: true                    # Reindex automatically when files change
     chunk_size: 5000               # Default: 5000 (max characters per indexed chunk)
     chunk_overlap: 0               # Default: 0 (overlapping characters between chunks)
