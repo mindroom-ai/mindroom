@@ -20,7 +20,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-folder-cog: | `neo4j` | Query Neo4j graph databases with Cypher | `uri`, `user`, `password` |
 | :lucide-folder-cog: | `duckdb` | Query data with DuckDB | - |
 | :lucide-folder-cog: | `pandas` | Data manipulation with Pandas | - |
-| :lucide-folder-cog: | `csv` | Read and write CSV files | - |
+| :lucide-folder-cog: | `csv` | CSV file analysis and querying with SQL support | - |
 | :lucide-folder-cog: | `calculator` | Mathematical calculations | - |
 | :lucide-folder-cog: | `reasoning` | Step-by-step reasoning scratchpad for structured problem solving | - |
 | :lucide-folder-cog: | `file_generation` | Generate JSON, CSV, PDF, and text files from data | - |
@@ -40,8 +40,8 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-search: | `exa` | AI-powered web search and research | `api_key` |
 | :lucide-search: | `serpapi` | Search API aggregator | `api_key` |
 | :lucide-search: | `serper` | Google search API | `api_key` |
-| :lucide-search: | `searxng` | Self-hosted metasearch | `host` |
-| :lucide-search: | `linkup` | Link discovery | `api_key` |
+| :lucide-search: | `searxng` | Open source metasearch engine for web, images, news, and more | `host` |
+| :lucide-search: | `linkup` | Web search via Linkup API for real-time information | `api_key` |
 
 ## Web Scraping & Crawling
 
@@ -52,10 +52,10 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-globe: | `browserbase` | Cloud browser automation | `api_key` |
 | :lucide-globe: | `agentql` | Structured web scraping | `api_key` |
 | :lucide-globe: | `spider` | Web spider/crawler | `api_key` |
-| :lucide-globe: | `scrapegraph` | Graph-based scraping | `api_key` |
+| :lucide-globe: | `scrapegraph` | Extract structured data from webpages using AI and natural language prompts | `api_key` |
 | :lucide-globe: | `apify` | Web scraping platform | `api_key` |
 | :lucide-globe: | `brightdata` | Proxy and scraping | `api_key` |
-| :lucide-globe: | `oxylabs` | Web scraping proxy | `api_key` |
+| :lucide-globe: | `oxylabs` | Web scraping including SERP, product data, and universal scraping | `api_key` |
 | :lucide-globe: | `jina` | Web content reading and search | `api_key` (optional) |
 | :lucide-globe: | `website` | Web scraping and content extraction from websites | - |
 | :lucide-globe: | `trafilatura` | Web content and metadata extraction | - |
@@ -143,7 +143,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 | Icon | Tool | Description | Config Required |
 |------|------|-------------|-----------------|
-| :lucide-map-pinned: | `google_maps` | Maps and places | `api_key` |
+| :lucide-map-pinned: | `google_maps` | Place search, directions, geocoding, and more via Google Maps | `key` |
 | :lucide-map-pinned: | `openweather` | Weather data | `api_key` |
 
 ## DevOps & Infrastructure
@@ -156,7 +156,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-server: | `e2b` | Code execution sandbox | `api_key` |
 | :lucide-server: | `daytona` | Development environments | `api_key` |
 | :lucide-server: | `claude_agent` | Persistent Claude coding sessions with tool use and subagents | `api_key` (recommended) |
-| :lucide-server: | `composio` | API composition | `api_key` |
+| :lucide-server: | `composio` | Access 1000+ integrations including Gmail, Salesforce, GitHub, and more | `api_key` |
 | :lucide-server: | `google_bigquery` | Query Google BigQuery - list tables, schemas, run SQL | `dataset`, `project`, `location` |
 
 ## Smart Home
@@ -190,7 +190,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | Icon | Tool | Description | Config Required |
 |------|------|-------------|-----------------|
 | :lucide-sliders-horizontal: | `custom_api` | Custom API calls | Varies |
-| :lucide-sliders-horizontal: | `config_manager` | MindRoom configuration management | - |
+| :lucide-sliders-horizontal: | `config_manager` | Build and manage MindRoom agents with expert knowledge of the system | - |
 | :lucide-workflow: | `subagents` | Spawn and communicate with sub-agent sessions | - |
 | :lucide-workflow: | `delegate` | Delegate tasks to other configured agents | - |
 
