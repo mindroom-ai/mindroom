@@ -6,6 +6,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from mindroom.constants import (
@@ -121,6 +122,18 @@ def validate_docker_extra_labels(extra_labels: Mapping[str, str]) -> None:
     raise WorkerBackendError(msg)
 
 
+def validate_docker_mount_layout(*, storage_mount_path: str, config_path: str) -> None:
+    """Reject projected-config mount layouts that overlap the writable worker state root."""
+    storage_root = PurePosixPath(storage_mount_path)
+    config_dir = PurePosixPath(config_path).parent
+    if storage_root == config_dir or storage_root in config_dir.parents or config_dir in storage_root.parents:
+        msg = (
+            "Docker worker config_path must mount outside the worker storage root: "
+            f"storage_mount_path={storage_mount_path}, config_path={config_path}"
+        )
+        raise WorkerBackendError(msg)
+
+
 def _read_host_config_path(runtime_paths: RuntimePaths, env: Mapping[str, str]) -> Path | None:
     configured = _read_env(env, _HOST_CONFIG_PATH_ENV)
     if configured:
@@ -195,6 +208,10 @@ class _DockerWorkerBackendConfig:
 
     def __post_init__(self) -> None:
         validate_docker_extra_labels(self.extra_labels)
+        validate_docker_mount_layout(
+            storage_mount_path=self.storage_mount_path,
+            config_path=self.config_path,
+        )
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> _DockerWorkerBackendConfig:
