@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from mindroom.config.main import load_config
 from mindroom.constants import (
     RuntimePaths,
     deserialize_runtime_paths,
@@ -37,6 +38,7 @@ from mindroom.workers.backends.docker_config import (
 from mindroom.workers.backends.docker_projection import _PROJECTED_CONFIGS_DIRNAME, _WORKER_CONFIG_STATE_DIRNAME
 from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
+from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _ROTATED_AUTH_TOKEN = "rotated-token"  # noqa: S105
@@ -1512,6 +1514,7 @@ def test_docker_backend_projects_only_private_user_agent_assets_for_private_agen
         ),
         agent_name="alpha",
     )
+    assert worker_key is not None
 
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=10.0)
 
@@ -1537,6 +1540,80 @@ def test_docker_backend_projects_only_private_user_agent_assets_for_private_agen
     assert projected_paths["beta_context"].resolve() not in projection_root.parents
     assert projected_paths["alpha_knowledge_root"].resolve() not in projection_root.parents
     assert projected_paths["beta_knowledge_root"].resolve() not in projection_root.parents
+
+
+def test_docker_backend_projects_private_template_dirs_for_private_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Projected configs should keep private template scaffolds usable inside Docker workers."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "README.md").write_text("template scaffold\n", encoding="utf-8")
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="""
+agents:
+  alpha:
+    display_name: Alpha
+    role: Test
+    model: default
+    private:
+      per: user_agent
+      template_dir: ./template
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip(),
+    )
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="alpha",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="alpha",
+    )
+    assert worker_key is not None
+
+    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
+    projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
+
+    assert projected_config["agents"]["alpha"]["private"]["template_dir"] == (
+        "./.mindroom-worker-assets/agents/alpha/private/template_dir"
+    )
+    assert (
+        projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "private" / "template_dir" / "README.md"
+    ).read_text(encoding="utf-8") == "template scaffold\n"
+
+    projected_runtime_paths = resolve_runtime_paths(
+        config_path=projection_root / "config.yaml",
+        storage_path=tmp_path / "projected-storage",
+    )
+    projected_runtime_config = load_config(projected_runtime_paths)
+    workspace = resolve_agent_workspace_from_state_path(
+        "alpha",
+        projected_runtime_config,
+        runtime_paths=projected_runtime_paths,
+        state_storage_path=tmp_path / "private-root",
+        use_state_storage_path=True,
+        create=True,
+    )
+
+    assert workspace is not None
+    assert (workspace.root / "README.md").read_text(encoding="utf-8") == "template scaffold\n"
 
 
 def test_docker_backend_shared_worker_mounts_canonical_agent_root(

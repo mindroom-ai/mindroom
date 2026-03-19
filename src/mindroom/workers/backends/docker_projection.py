@@ -725,6 +725,13 @@ class DockerProjectionManager:
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
             )
+            self._rewrite_projected_private_template_dir(
+                agent,
+                agent_dir,
+                asset_paths_by_host=asset_paths_by_host,
+                host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
+                assets=assets,
+            )
             self._rewrite_projected_agent_memory_file_path(
                 agent,
                 paths,
@@ -758,6 +765,33 @@ class DockerProjectionManager:
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
             )
+
+    def _rewrite_projected_private_template_dir(
+        self,
+        raw_agent: dict[str, object],
+        agent_dir: PurePosixPath,
+        *,
+        asset_paths_by_host: dict[Path, PurePosixPath],
+        host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
+        assets: list[_DockerProjectedConfigAsset],
+    ) -> None:
+        raw_private = raw_agent.get("private")
+        if not isinstance(raw_private, dict):
+            return
+
+        private_config = cast("dict[str, object]", raw_private)
+        raw_template_dir = private_config.get("template_dir")
+        if not isinstance(raw_template_dir, str) or not raw_template_dir.strip():
+            return
+
+        host_path = config_relative_path(raw_template_dir, self._runtime_paths)
+        private_config["template_dir"] = self._projected_path_value(
+            host_path,
+            agent_dir / "private" / "template_dir",
+            asset_paths_by_host=asset_paths_by_host,
+            host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
+            assets=assets,
+        )
 
     def _rewrite_projected_agent_memory_file_path(
         self,
