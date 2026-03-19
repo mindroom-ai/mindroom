@@ -14,47 +14,55 @@
 | PASS | ~175 |
 | SKIP (environment) | ~8 |
 | Bugs found | 5 |
-| Code fixes made | 1 |
+| Code fixes made | 6 |
 | Evidence files | 204 (incl. 25 dashboard screenshots) |
+
+All 5 bugs found during validation are fixed on this branch.
 
 ## Bugs Found
 
 ### Bug 1: Doctor mem0 LLM URL mismatch (Section 1, CORE-001)
 
 **Severity:** Low
+**Status:** Fixed on this branch
 **File:** `src/mindroom/cli/doctor.py:491,511`
 **Description:** `doctor.py` reads `config.memory.llm.config.get("host")` to determine the mem0 LLM base URL, but mem0's actual config key is `openai_base_url`. When `host` is absent, the doctor validates against the real OpenAI API instead of the configured endpoint.
-**Workaround:** Add `host` alongside `openai_base_url` in memory config.
+**Fix:** Doctor now falls back to `openai_base_url` and `base_url` when `host` is absent.
 **Evidence:** `evidence/section-1/logs/core-001-doctor.log`
 
 ### Bug 2: Root space orphan cleanup conflict (Section 3, ROOM-006/007)
 
 **Severity:** Medium
-**File:** `src/mindroom/matrix/rooms.py` (orphan cleanup logic)
+**Status:** Fixed on this branch
+**File:** `src/mindroom/matrix/room_cleanup.py`
 **Description:** On restart, the orphan cleanup process treats the router's membership in the root space as orphaned (because the root space has no configured agents). It kicks the router, which is the space creator/admin. Since no other members remain, the space becomes permanently inaccessible. The router cannot rejoin.
 **Root cause:** Orphan cleanup doesn't exempt the root space from eviction.
-**Fix needed:** Exclude the root space room from orphan bot scanning, or ensure the router is always considered a valid member of the root space.
+**Fix:** Exclude the root space room from orphan bot scanning.
 **Evidence:** `evidence/section-3/run-logs/section3-full-run.txt`
 
 ### Bug 3: Directory visibility reconciliation partial failure (Section 3, ROOM-005)
 
 **Severity:** Low
+**Status:** Fixed on this branch
 **File:** `src/mindroom/matrix/rooms.py` (reconciliation logic)
-**Description:** Directory visibility updates return "partially applied" warning during join rule changes. Join rules themselves apply correctly; only the directory visibility component fails silently.
+**Description:** Directory visibility failures were reported as a vague "partially applied" warning during join rule changes, which hid the exact component that failed.
+**Fix:** Access reconciliation now logs explicit failure details and actionable hints when directory visibility cannot be applied.
 **Evidence:** `evidence/section-3/run-logs/section3-full-run.txt`
 
 ### Bug 4: Dashboard overview blank on initial load (Section 14, UI-005)
 
 **Severity:** Medium
-**File:** `frontend/src/` (dashboard overview component)
-**Description:** The dashboard overview page renders completely blank on initial load — only the header bar and gradient background are visible, with zero content (stat cards, insights, metrics). After navigating away and back, or retrying, the page populates correctly with all 17 agents, 16 rooms, 2 teams, etc.
-**Root cause:** Race condition — the SPA renders before API data arrives, and the overview components don't reactively update when data becomes available.
+**Status:** Fixed on this branch
+**File:** `frontend/src/App.tsx`
+**Description:** The dashboard overview page could render completely blank while still showing the header bar and gradient background when the pathname included a trailing slash or extra path segment.
+**Root cause:** The app used the raw pathname segment as the active tab value, so routes like `/dashboard/` produced `dashboard/`, which matched no `TabsContent` and left the page body empty.
 **Evidence:** `evidence/section-14/screenshots/dashboard-overview.png` (blank) vs `evidence/section-14/screenshots/dashboard-overview-retry.png` (populated)
 
 ### Bug 5: Agent card pluralization — "1 tools" (Section 14)
 
 **Severity:** Low
-**File:** `frontend/src/` (agent card component)
+**Status:** Fixed on this branch
+**File:** `frontend/src/lib/utils.ts` and dashboard/agent list components
 **Description:** Agent cards display "1 tools" instead of "1 tool" when an agent has exactly one tool assigned. Affects AgentBuilder, CalculatorAgent, CallAgent.
 **Fix:** Simple pluralization: `count === 1 ? 'tool' : 'tools'`
 **Evidence:** `evidence/section-14/screenshots/dashboard-agents.png`
