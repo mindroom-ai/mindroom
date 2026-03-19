@@ -2050,6 +2050,25 @@ def test_docker_backend_rejects_stale_unscoped_worker_keys_for_projection(
     assert fake_client.containers.run_calls == []
 
 
+def test_docker_backend_rejects_stale_user_agent_worker_keys_for_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale user-agent worker key must fail closed instead of broadening projection."""
+    config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    with pytest.raises(WorkerBackendError, match="does not match any configured agent policy"):
+        backend.ensure_worker(
+            WorkerSpec(
+                "v1:tenant-123:user_agent:@alice:example.org:missing",
+                private_agent_names=frozenset({"missing"}),
+            ),
+            now=10.0,
+        )
+    assert fake_client.containers.run_calls == []
+
+
 def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

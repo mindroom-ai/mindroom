@@ -18,7 +18,11 @@ import yaml
 
 from mindroom.agent_policy import ResolvedAgentPolicy, build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import config_relative_path, resolve_config_relative_path
-from mindroom.tool_system.worker_routing import resolve_agent_owned_path, resolved_worker_key_scope
+from mindroom.tool_system.worker_routing import (
+    resolve_agent_owned_path,
+    resolved_worker_key_scope,
+    worker_key_agent_name,
+)
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
@@ -608,7 +612,9 @@ class DockerProjectionManager:
         if not resolved_agent_policies:
             return None
         if worker_scope == "user_agent":
-            return None
+            encoded_agent_name = worker_key_agent_name(worker_key)
+            if encoded_agent_name in resolved_agent_policies:
+                return (encoded_agent_name,)
         msg = f"Worker key does not match any configured agent policy: {worker_key}"
         raise WorkerBackendError(msg)
 
