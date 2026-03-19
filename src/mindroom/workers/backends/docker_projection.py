@@ -318,6 +318,7 @@ class DockerProjectionManager:
         projected_yaml = yaml.safe_dump(config_data, sort_keys=False, allow_unicode=True)
         projection_manifest = {
             "config_yaml": projected_yaml,
+            "config_filename": PurePosixPath(self.config.config_path).name,
             "assets": [
                 {
                     "host_path": str(asset.host_path),
