@@ -37,7 +37,7 @@ defaults:
 
 Tools are organized by category:
 
-- **File & System** - File operations, shell, Docker, Python, SQL, databases (Postgres, Redshift, Neo4j, DuckDB), Pandas, CSV, coding, self-config, calculator, reasoning, file generation, visualization
+- **File & System** - File operations, shell, Docker, Python, SQL, databases (Postgres, Redshift, Neo4j, DuckDB), Pandas, CSV, coding, self-config, calculator, reasoning, file generation, visualization, sleep
 - **Web Search & Research** - DuckDuckGo, Google Search, Baidu, Tavily, Exa, SerpAPI, Serper, SearXNG, Linkup
 - **Web Scraping & Crawling** - Firecrawl, Crawl4AI, BrowserBase, AgentQL, Spider, ScrapeGraph, Apify, BrightData, Oxylabs, Jina, Website, Trafilatura, Newspaper4k, Web Browser Tools, Browser (OpenClaw)
 - **AI & ML APIs** - OpenAI, Gemini, Groq, Replicate, Fal, DALL-E, Cartesia, ElevenLabs, Desi Vocal, LumaLabs, ModelsLabs
@@ -119,7 +119,7 @@ Each tool declares its Python dependencies as an optional extra in `pyproject.to
 When an agent tries to use a tool whose dependencies aren't installed, MindRoom automatically installs them at runtime:
 
 1. **Pre-check** — uses `importlib.util.find_spec()` to detect missing packages without importing anything
-2. **Locked install** — runs `uv sync --locked --inexact --extra <tool>` to install exact pinned versions from `uv.lock`
+2. **Locked install** — runs `uv sync --locked --inexact --no-dev --extra <tool>` to install exact pinned versions from `uv.lock`
 3. **Fallback** — if no lockfile is available, falls back to `uv pip install` or `pip install`
 
 This means you don't need to install all 100+ tool dependencies upfront — only the tools your agents actually use get installed.

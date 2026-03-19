@@ -111,7 +111,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | Icon | Tool | Description | Config Required |
 |------|------|-------------|-----------------|
 | :lucide-kanban: | `github` | Repository and issue management | `access_token` |
-| :lucide-kanban: | `bitbucket` | Bitbucket repository, PR, and issue management | `username`, `password` or `token` |
+| :lucide-kanban: | `bitbucket` | Bitbucket repository, PR, and issue management | `username`, `password` or `token`, `workspace`, `repo_slug` |
 | :lucide-kanban: | `jira` | Issue tracking and project management | `server_url`, `username`, `password` or `token` |
 | :lucide-kanban: | `linear` | Issue tracking and project management | `api_key` |
 | :lucide-kanban: | `clickup` | ClickUp task, space, and list management | `api_key`, `master_space_id` |
