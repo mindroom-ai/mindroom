@@ -21,7 +21,6 @@ from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
     _execute_scheduled_workflow,
-    _fix_interval_cron,
     _parse_workflow_schedule,
     _validate_conditional_workflow,
     _WorkflowParseError,
@@ -547,76 +546,6 @@ class TestIntegrationWithScheduling:
             assert task_id is not None
             assert "recurring task" in message
             assert "0 9 * * *" in message
-
-
-class TestFixIntervalCron:
-    """Test _fix_interval_cron corrects wrong cron for simple interval patterns."""
-
-    def test_every_2_minutes_corrected(self) -> None:
-        """Correct fixed-time minute output to an every-2-minutes cron."""
-        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
-        result = _fix_interval_cron("every 2 minutes check status", wrong_cron)
-        assert result.to_cron_string() == "*/2 * * * *"
-
-    def test_every_5_minutes_corrected(self) -> None:
-        """Correct fixed-time minute output to an every-5-minutes cron."""
-        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
-        result = _fix_interval_cron("every 5 minutes send update", wrong_cron)
-        assert result.to_cron_string() == "*/5 * * * *"
-
-    def test_every_1_minute_uses_star(self) -> None:
-        """Collapse every-one-minute requests to a wildcard minute field."""
-        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
-        result = _fix_interval_cron("every 1 minute ping", wrong_cron)
-        assert result.to_cron_string() == "* * * * *"
-
-    def test_every_3_hours_corrected(self) -> None:
-        """Correct fixed-time hourly output to a 3-hour interval."""
-        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
-        result = _fix_interval_cron("every 3 hours check servers", wrong_cron)
-        assert result.to_cron_string() == "0 */3 * * *"
-
-    def test_every_2_hours_corrects_wrong_minute_offset(self) -> None:
-        """Reset hourly interval schedules to minute zero when the offset is wrong."""
-        wrong_cron = CronSchedule(minute="30", hour="*/2", day="*", month="*", weekday="*")
-        result = _fix_interval_cron("every 2 hours check servers", wrong_cron)
-        assert result.to_cron_string() == "0 */2 * * *"
-
-    def test_every_1_hour_uses_star(self) -> None:
-        """Normalize every-one-hour requests to the wildcard hour field."""
-        wrong_cron = CronSchedule(minute="30", hour="9", day="*", month="*", weekday="*")
-        result = _fix_interval_cron("every 1 hour run report", wrong_cron)
-        assert result.to_cron_string() == "0 * * * *"
-
-    def test_correct_cron_not_modified(self) -> None:
-        """Leave already-correct interval cron strings untouched."""
-        correct_cron = CronSchedule(minute="*/5", hour="*", day="*", month="*", weekday="*")
-        result = _fix_interval_cron("every 5 minutes check", correct_cron)
-        assert result is correct_cron  # same object, not replaced
-
-    def test_no_interval_pattern_returns_unchanged(self) -> None:
-        """Ignore requests that are not simple interval schedules."""
-        cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
-        result = _fix_interval_cron("daily at 9am send report", cron)
-        assert result is cron
-
-    def test_abbreviated_units(self) -> None:
-        """Handle abbreviated minute and hour units."""
-        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
-        assert _fix_interval_cron("every 10 mins check", wrong_cron).to_cron_string() == "*/10 * * * *"
-        assert _fix_interval_cron("every 2 hrs run", wrong_cron).to_cron_string() == "0 */2 * * *"
-
-    def test_case_insensitive(self) -> None:
-        """Match interval phrases regardless of capitalization."""
-        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
-        result = _fix_interval_cron("Every 5 Minutes check status", wrong_cron)
-        assert result.to_cron_string() == "*/5 * * * *"
-
-    def test_plural_and_singular(self) -> None:
-        """Accept both singular and plural interval unit spellings."""
-        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
-        assert _fix_interval_cron("every 2 minute check", wrong_cron).to_cron_string() == "*/2 * * * *"
-        assert _fix_interval_cron("every 2 minutes check", wrong_cron).to_cron_string() == "*/2 * * * *"
 
 
 class TestValidateConditionalWorkflow:
