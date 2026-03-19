@@ -413,6 +413,35 @@ def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path:
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
 
 
+def test_kubernetes_backend_drops_host_local_generic_file_secret_when_not_mounted(tmp_path: Path) -> None:
+    """Dedicated worker payloads must not retain unusable host-local generic *_FILE secrets."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={"OPENAI_API_KEY_FILE": "/host/path/openai.key"},
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path=str(tmp_path / "not-mounted-storage"),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+
+    assert committed_runtime.env_value("OPENAI_API_KEY_FILE") is None
+    assert "OPENAI_API_KEY_FILE" not in committed_runtime.env_file_values
+
+
 def test_kubernetes_backend_commits_relative_file_backed_secrets_into_worker_payload(tmp_path: Path) -> None:
     """Dedicated Kubernetes workers should preserve relative *_FILE secrets by copying them into worker state."""
     config_dir = tmp_path / "cfg"
