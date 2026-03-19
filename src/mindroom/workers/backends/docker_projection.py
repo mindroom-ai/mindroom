@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, cast
 import yaml
 
 from mindroom.constants import config_relative_path, resolve_config_relative_path
-from mindroom.tool_system.worker_routing import resolve_agent_owned_path
+from mindroom.tool_system.worker_routing import resolve_agent_owned_path, resolved_worker_key_scope
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
@@ -589,6 +589,13 @@ class DockerProjectionManager:
         if worker_key is None:
             return None
 
+        worker_scope = resolved_worker_key_scope(worker_key)
+        if worker_scope is None:
+            msg = f"Unsupported worker key for projected agent selection: {worker_key}"
+            raise WorkerBackendError(msg)
+        if worker_scope == "user":
+            return None
+
         for agent_name, policy in resolved_agent_policies.items():
             if self._worker_key_targets_agent(
                 worker_key,
@@ -596,7 +603,10 @@ class DockerProjectionManager:
                 worker_scope=policy.effective_execution_scope,
             ):
                 return (agent_name,)
-        return None
+        if worker_scope != "shared" or not resolved_agent_policies:
+            return None
+        msg = f"Worker key does not match any configured agent policy: {worker_key}"
+        raise WorkerBackendError(msg)
 
     def _projected_knowledge_base_ids(
         self,
