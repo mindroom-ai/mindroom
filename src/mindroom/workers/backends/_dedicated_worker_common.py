@@ -377,6 +377,8 @@ def _rewrite_worker_file_env_values(
     for env_name in sorted({*process_env, *env_file_values}):
         if not env_name.endswith("_FILE"):
             continue
+        process_env.pop(env_name, None)
+        env_file_values.pop(env_name, None)
         worker_visible_path = _worker_file_env_path(
             runtime_paths=runtime_paths,
             env_name=env_name,
@@ -388,7 +390,6 @@ def _rewrite_worker_file_env_values(
         if worker_visible_path is None:
             continue
         process_env[env_name] = worker_visible_path
-        env_file_values.pop(env_name, None)
 
 
 def _worker_file_env_path(
