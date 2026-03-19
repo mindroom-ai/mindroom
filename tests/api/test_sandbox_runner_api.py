@@ -424,6 +424,40 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
     assert response.result == "visible-in-shell"
 
 
+def test_sandbox_runner_subprocess_shell_sees_explicit_execution_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sandbox subprocess shell execution should preserve explicit per-request execution env values."""
+    _set_sandbox_token(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=[["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""]],
+            kwargs={},
+            execution_env={"TEST_EXECUTION_ENV": "explicit-value"},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=SANDBOX_TOKEN,
+    )
+
+    assert response.ok is True
+    assert response.result == "explicit-value"
+
+
 def test_subprocess_worker_consumes_prepared_request_without_repreparing_worker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

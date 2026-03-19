@@ -162,13 +162,15 @@ def runtime_paths_with_execution_env(
 
     process_env = dict(runtime_paths.process_env)
     process_env.update(execution_env)
+    env_file_values = dict(runtime_paths.env_file_values)
+    env_file_values.update(execution_env)
     return constants.RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
         env_path=runtime_paths.env_path,
         storage_root=runtime_paths.storage_root,
         process_env=MappingProxyType(process_env),
-        env_file_values=runtime_paths.env_file_values,
+        env_file_values=MappingProxyType(env_file_values),
     )
 
 
