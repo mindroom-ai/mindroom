@@ -1,13 +1,14 @@
-"""Shared helpers for dedicated worker backend runtime and mount planning."""
+"""Shared helpers for dedicated worker backends."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from mindroom.constants import RuntimePaths, runtime_env_source_path
+from mindroom.constants import RuntimePaths, runtime_env_source_path, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
@@ -16,6 +17,8 @@ from mindroom.workspaces import copy_validated_local_file_to_root, validate_loca
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    from mindroom.workers.models import WorkerHandle, WorkerStatus
+
 
 @dataclass(frozen=True, slots=True)
 class ScopedVisibleStateRoot:
@@ -23,6 +26,141 @@ class ScopedVisibleStateRoot:
 
     local_path: Path
     worker_visible_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class DedicatedWorkerLifecycleState:
+    """Backend-neutral lifecycle fields persisted for one dedicated worker."""
+
+    created_at: float
+    last_used_at: float
+    status: WorkerStatus
+    last_started_at: float | None = None
+    startup_count: int = 0
+    failure_count: int = 0
+    failure_reason: str | None = None
+
+
+def initial_dedicated_worker_lifecycle_state(*, now: float) -> DedicatedWorkerLifecycleState:
+    """Return the initial lifecycle state for a newly created dedicated worker."""
+    return DedicatedWorkerLifecycleState(
+        created_at=now,
+        last_used_at=now,
+        status="starting",
+    )
+
+
+def dedicated_worker_lifecycle_from_handle(
+    handle: WorkerHandle | None,
+    *,
+    now: float,
+) -> DedicatedWorkerLifecycleState:
+    """Extract lifecycle fields from an existing worker handle or synthesize a new state."""
+    if handle is None:
+        return initial_dedicated_worker_lifecycle_state(now=now)
+    return DedicatedWorkerLifecycleState(
+        created_at=handle.created_at,
+        last_used_at=handle.last_used_at,
+        status=handle.status,
+        last_started_at=handle.last_started_at,
+        startup_count=handle.startup_count,
+        failure_count=handle.failure_count,
+        failure_reason=handle.failure_reason,
+    )
+
+
+def prepare_dedicated_worker_ensure_lifecycle(
+    state: DedicatedWorkerLifecycleState,
+    *,
+    now: float,
+    should_restart: bool,
+    keep_starting_status: bool = False,
+) -> DedicatedWorkerLifecycleState:
+    """Return lifecycle fields for one ensure attempt before backend-specific startup IO."""
+    return replace(
+        state,
+        last_used_at=now,
+        status="starting" if should_restart or keep_starting_status else state.status,
+        last_started_at=now if should_restart else state.last_started_at,
+        startup_count=state.startup_count + int(should_restart),
+        failure_reason=None,
+    )
+
+
+def touch_dedicated_worker_lifecycle(
+    state: DedicatedWorkerLifecycleState,
+    *,
+    now: float,
+) -> DedicatedWorkerLifecycleState:
+    """Refresh last-used state and revive idle workers back to ready."""
+    next_status = "ready" if state.status == "idle" else state.status
+    return replace(state, last_used_at=now, status=next_status)
+
+
+def mark_dedicated_worker_ready(
+    state: DedicatedWorkerLifecycleState,
+    *,
+    now: float,
+) -> DedicatedWorkerLifecycleState:
+    """Return lifecycle fields for one worker that completed startup successfully."""
+    return replace(
+        state,
+        last_used_at=now,
+        status="ready",
+        failure_reason=None,
+    )
+
+
+def mark_dedicated_worker_idle(
+    state: DedicatedWorkerLifecycleState,
+    *,
+    now: float | None = None,
+    update_last_used: bool = False,
+) -> DedicatedWorkerLifecycleState:
+    """Return lifecycle fields for one worker whose persisted state is being retained."""
+    if not update_last_used:
+        return replace(state, status="idle")
+    if now is None:
+        msg = "now is required when update_last_used is true."
+        raise ValueError(msg)
+    return replace(state, last_used_at=now, status="idle")
+
+
+def mark_dedicated_worker_failed(
+    state: DedicatedWorkerLifecycleState,
+    *,
+    now: float,
+    failure_reason: str,
+) -> DedicatedWorkerLifecycleState:
+    """Return lifecycle fields for one worker that failed to start or execute."""
+    return replace(
+        state,
+        last_used_at=now,
+        status="failed",
+        failure_count=state.failure_count + 1,
+        failure_reason=failure_reason,
+    )
+
+
+def stable_signature_json(value: object) -> str:
+    """Serialize one cache-signature value with stable JSON ordering."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def build_backend_config_signature(
+    *,
+    prefix_parts: tuple[str, ...],
+    runtime_paths: RuntimePaths,
+    json_values: tuple[object, ...] = (),
+    suffix_parts: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Assemble one backend config cache signature with a shared runtime segment."""
+    return (
+        *prefix_parts,
+        stable_signature_json(serialize_public_runtime_paths(runtime_paths)),
+        *(stable_signature_json(value) for value in json_values),
+        *suffix_parts,
+    )
 
 
 def build_dedicated_worker_runtime_paths(

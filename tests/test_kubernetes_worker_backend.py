@@ -985,6 +985,21 @@ def test_kubernetes_backend_touch_only_patches_deployment_metadata() -> None:
     assert "template" not in patch_body.get("spec", {})
 
 
+def test_kubernetes_backend_reuses_ready_deployment_without_incrementing_startups() -> None:
+    """Ensuring an already-ready worker should keep its original startup metadata."""
+    backend, apps_api, _core_api = _backend()
+    first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    second = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+
+    assert second.worker_id == first.worker_id
+    deployment = apps_api.deployments[first.worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/startup-count"] == "1"
+    assert deployment.metadata.annotations["mindroom.ai/last-started-at"] == "10.0"
+    assert deployment.metadata.annotations["mindroom.ai/last-used-at"] == "20.0"
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "ready"
+
+
 def test_kubernetes_backend_pins_workers_to_control_plane_node(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

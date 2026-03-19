@@ -14,6 +14,7 @@ from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
+    DedicatedWorkerLifecycleState,
     build_dedicated_worker_runtime_paths,
     plan_scoped_visible_state_roots,
     validate_unique_worker_visible_paths,
@@ -170,32 +171,62 @@ def parse_annotation_int(annotations: dict[str, str], key: str, default: int = 0
         return default
 
 
+def lifecycle_state_from_annotations(
+    annotations: dict[str, str],
+    *,
+    now: float,
+) -> DedicatedWorkerLifecycleState:
+    """Parse dedicated-worker lifecycle fields from Deployment annotations."""
+    last_used_at = parse_annotation_float(annotations, ANNOTATION_LAST_USED_AT, now)
+    created_at = parse_annotation_float(annotations, ANNOTATION_CREATED_AT, last_used_at)
+    raw_status = annotations.get(ANNOTATION_WORKER_STATUS, "starting")
+    status: WorkerStatus = "starting"
+    if raw_status == "ready":
+        status = "ready"
+    elif raw_status == "idle":
+        status = "idle"
+    elif raw_status == "failed":
+        status = "failed"
+
+    raw_last_started_at = annotations.get(ANNOTATION_LAST_STARTED_AT)
+    last_started_at: float | None = None
+    if raw_last_started_at is not None:
+        try:
+            last_started_at = float(raw_last_started_at)
+        except ValueError:
+            last_started_at = None
+
+    return DedicatedWorkerLifecycleState(
+        created_at=created_at,
+        last_used_at=last_used_at,
+        status=status,
+        last_started_at=last_started_at,
+        startup_count=parse_annotation_int(annotations, ANNOTATION_STARTUP_COUNT),
+        failure_count=parse_annotation_int(annotations, ANNOTATION_FAILURE_COUNT),
+        failure_reason=annotations.get(ANNOTATION_FAILURE_REASON),
+    )
+
+
 def metadata_annotations(
     *,
     worker_key: str,
     state_subpath: str,
-    created_at: float,
-    last_used_at: float,
-    last_started_at: float | None,
-    startup_count: int,
-    failure_count: int,
-    failure_reason: str | None,
-    status: WorkerStatus,
+    lifecycle: DedicatedWorkerLifecycleState,
 ) -> dict[str, str]:
     """Build persisted worker lifecycle metadata stored on Deployments."""
     annotations = {
         ANNOTATION_WORKER_KEY: worker_key,
         ANNOTATION_STATE_SUBPATH: state_subpath,
-        ANNOTATION_CREATED_AT: str(created_at),
-        ANNOTATION_LAST_USED_AT: str(last_used_at),
-        ANNOTATION_STARTUP_COUNT: str(startup_count),
-        ANNOTATION_FAILURE_COUNT: str(failure_count),
-        ANNOTATION_WORKER_STATUS: status,
+        ANNOTATION_CREATED_AT: str(lifecycle.created_at),
+        ANNOTATION_LAST_USED_AT: str(lifecycle.last_used_at),
+        ANNOTATION_STARTUP_COUNT: str(lifecycle.startup_count),
+        ANNOTATION_FAILURE_COUNT: str(lifecycle.failure_count),
+        ANNOTATION_WORKER_STATUS: lifecycle.status,
     }
-    if last_started_at is not None:
-        annotations[ANNOTATION_LAST_STARTED_AT] = str(last_started_at)
-    if failure_reason:
-        annotations[ANNOTATION_FAILURE_REASON] = failure_reason
+    if lifecycle.last_started_at is not None:
+        annotations[ANNOTATION_LAST_STARTED_AT] = str(lifecycle.last_started_at)
+    if lifecycle.failure_reason:
+        annotations[ANNOTATION_FAILURE_REASON] = lifecycle.failure_reason
     return annotations
 
 

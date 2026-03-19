@@ -1934,6 +1934,12 @@ def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(
     assert fake_client.containers.by_name[second_handle.worker_id] is first_container
     assert len(fake_client.containers.run_calls) == 1
     assert first_container.removed == 0
+    metadata_path = worker_root_path(tmp_path, "worker-a") / "metadata" / "worker.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["startup_count"] == 1
+    assert metadata["last_started_at"] == 10.0
+    assert metadata["last_used_at"] == 20.0
+    assert metadata["status"] == "ready"
 
 
 def test_docker_backend_recreates_container_when_same_tag_resolves_to_new_image_id(

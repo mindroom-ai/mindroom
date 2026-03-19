@@ -14,11 +14,11 @@ from mindroom.constants import (
     resolve_primary_runtime_paths,
     runtime_env_values,
     runtime_paths_with_storage_root,
-    serialize_public_runtime_paths,
 )
 from mindroom.credentials import runtime_credentials_manager_key
 from mindroom.tool_system.worker_routing import worker_root_path
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._dedicated_worker_common import build_backend_config_signature
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -208,32 +208,29 @@ def docker_backend_config_signature(
     config = _DockerWorkerBackendConfig.from_runtime(effective_runtime_paths)
     workers_root = docker_workers_root(effective_runtime_paths.storage_root)
     credentials_key = runtime_credentials_manager_key(effective_runtime_paths)
-    extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
-    extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
-    public_runtime_json = json.dumps(
-        serialize_public_runtime_paths(effective_runtime_paths),
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return (
-        "docker",
-        config.image,
-        str(config.worker_port),
-        config.storage_mount_path,
-        config.config_path,
-        str(config.host_config_path or ""),
-        str(config.idle_timeout_seconds),
-        str(config.ready_timeout_seconds),
-        config.name_prefix,
-        config.publish_host,
-        config.endpoint_host,
-        config.user or "",
-        str(workers_root),
-        str(credentials_key.shared_base_path),
-        credentials_key.current_worker_key or "",
-        str(credentials_key.current_worker_root or ""),
-        public_runtime_json,
-        extra_env_json,
-        extra_labels_json,
-        auth_token or "",
+    return build_backend_config_signature(
+        prefix_parts=(
+            "docker",
+            config.image,
+            str(config.worker_port),
+            config.storage_mount_path,
+            config.config_path,
+            str(config.host_config_path or ""),
+            str(config.idle_timeout_seconds),
+            str(config.ready_timeout_seconds),
+            config.name_prefix,
+            config.publish_host,
+            config.endpoint_host,
+            config.user or "",
+            str(workers_root),
+            str(credentials_key.shared_base_path),
+            credentials_key.current_worker_key or "",
+            str(credentials_key.current_worker_root or ""),
+        ),
+        runtime_paths=effective_runtime_paths,
+        json_values=(
+            config.extra_env,
+            config.extra_labels,
+        ),
+        suffix_parts=(auth_token or "",),
     )
