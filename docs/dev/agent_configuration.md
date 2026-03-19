@@ -157,7 +157,8 @@ agents:
 - **skills**: Skill names the agent can use
 - **instructions**: Specific guidelines for the agent's behavior
 - **rooms**: List of room aliases where this agent should be active
-- **learning**: Enable Agno Learning for this agent (default: true)
+- **markdown**: Per-agent override for markdown formatting (default: inherits from `defaults.markdown`; `null` means inherit)
+- **learning**: Enable Agno Learning for this agent (default: inherits from `defaults.learning`, which defaults to `true`)
 - **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)
 - **memory_backend**: Optional per-agent memory backend override (`mem0` or `file`), inherits from `memory.backend` when omitted
 - **knowledge_bases**: List of configured knowledge base IDs assigned to this agent

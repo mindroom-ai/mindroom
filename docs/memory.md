@@ -104,8 +104,9 @@ memory:
     max_entrypoint_lines: 200
 ```
 
-`memory.file.path` is an optional fallback root for direct file-memory paths.
-It does not relocate canonical agent or team file memory.
+`memory.file.path` is an optional fallback root for file-memory paths.
+It does not relocate canonical agent file memory (which always lives under the agent's workspace root).
+It can affect team file memory when the resolution determines the configured path should be used.
 
 Per-agent override example:
 

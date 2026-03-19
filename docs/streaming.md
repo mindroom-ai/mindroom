@@ -79,8 +79,9 @@ The marker is removed on the final edit.
 MindRoom throttles edits to avoid overwhelming the Matrix homeserver:
 
 - **Time-based**: Edits are spaced by a configurable interval (default: 5 seconds steady-state).
-- **Character-based**: An edit is also triggered when enough new characters have accumulated (default: 240 characters).
-- **Ramp-up**: Early in the stream, edits are sent more frequently (starting at 0.5s intervals) and ramp up to the steady-state interval over 15 seconds.
+- **Character-based**: An edit is also triggered when enough new characters have accumulated.
+  The character threshold ramps from 48 characters (fast start) to 240 characters (steady-state) over the ramp-up period.
+- **Ramp-up**: Early in the stream, both time intervals and character thresholds start low and ramp up to steady-state values over 15 seconds (time intervals from 0.5s to 5s, character threshold from 48 to 240).
 - **Minimum interval**: A hard floor (0.35s) prevents edit spam even when character thresholds are met.
 
 ## Tool Calls During Streaming

@@ -48,11 +48,22 @@ main() entry
          │
          ▼
 ┌──────────────────────────────────────┐
-│  Concurrent Tasks (asyncio.gather)   │
+│  Auxiliary Tasks (auto-restart)      │
 │ ─────────────────────────────────────│
-│ • orchestrator_task (sync loops)     │
-│ • watcher_task (config file polling) │
-│ • skills_watcher_task (skill cache)  │
+│ • config watcher (file polling)      │
+│ • skills watcher (skill cache)       │
+│ • API server (if enabled)            │
+│  (each wrapped in                    │
+│   _run_auxiliary_task_forever)        │
+└───────────────┬──────────────────────┘
+                │
+                ▼
+┌──────────────────────────────────────┐
+│  Bot Sync Tasks (asyncio.gather)     │
+│ ─────────────────────────────────────│
+│ • One sync loop per bot              │
+│ • sync_forever_with_restart()        │
+│ • Awaited until shutdown             │
 └──────────────────────────────────────┘
 ```
 
@@ -109,7 +120,11 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 
 On `orchestrator.stop()`:
 
-1. Shut down knowledge managers (`shutdown_shared_knowledge_managers()`)
-2. Cancel all sync tasks
-3. Signal all bots to stop (`bot.running = False`)
-4. Call `bot.stop()` for each bot (waits 5s for background tasks, closes Matrix client)
+1. Set `self.running = False`
+2. Stop memory auto-flush worker
+3. Cancel knowledge refresh task
+4. Cancel pending bot start tasks
+5. Shut down knowledge managers (`shutdown_shared_knowledge_managers()`)
+6. Cancel all sync tasks
+7. Signal all bots to stop (`bot.running = False`)
+8. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)

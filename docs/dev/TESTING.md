@@ -30,17 +30,20 @@ There are 28 frontend test files covering components, hooks, and utilities.
 ```bash
 cd frontend
 
-# Run all tests once
+# Run tests in watch mode (default vitest behavior)
 bun test
 
-# Run tests in watch mode
-bun run test
+# Run all tests once (no watch)
+bun run test:unit
 
 # Run tests with UI
 bun run test:ui
 
 # Run tests with coverage
 bun run test:coverage
+
+# Run e2e tests
+bun run test:e2e
 ```
 
 ### Writing Frontend Tests
@@ -74,7 +77,7 @@ The backend uses pytest with FastAPI's TestClient for API testing.
 - `tests/api/test_sandbox_runner_api.py` - Sandbox runner API tests
 - `tests/conftest.py` - Pytest fixtures and configuration
 
-There are 150+ backend test files covering agents, authorization, commands, config, memory, tools, and more.
+There are 145+ backend test files covering agents, authorization, commands, config, memory, tools, and more.
 
 ### Running Backend Tests
 
@@ -109,6 +112,25 @@ def test_endpoint(test_client: TestClient):
     data = response.json()
     assert "expected_key" in data
 ```
+
+## Test Configuration
+
+### pytest Markers
+
+The following markers are defined in `pyproject.toml` and can be used to select or skip tests:
+
+- **`requires_matrix`** — Tests that require a real Matrix server connection. Deselect with `-m "not requires_matrix"`.
+- **`e2e`** — End-to-end tests.
+- **`slow`** — Tests that take a long time to run.
+
+### Async Tests
+
+`asyncio_mode = "auto"` is set in `pyproject.toml`, so `async def test_*` functions are automatically collected and run by `pytest-asyncio` without needing an explicit `@pytest.mark.asyncio` decorator.
+
+### Parallel Execution
+
+Tests run in parallel by default via `pytest-xdist` (`-n auto` in `addopts`).
+To run serially for debugging, pass `-n0`: `python -m pytest tests/ -n0`.
 
 ## Running All Tests
 
