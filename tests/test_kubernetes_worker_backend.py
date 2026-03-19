@@ -413,6 +413,50 @@ def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path:
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
 
 
+def test_kubernetes_backend_commits_relative_file_backed_secrets_into_worker_payload(tmp_path: Path) -> None:
+    """Dedicated Kubernetes workers should preserve relative *_FILE secrets by copying them into worker state."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    secret_path = config_dir / "secrets" / "openai.key"
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    secret_path.write_text("sk-relative\n", encoding="utf-8")
+    storage_mount_path = tmp_path / "worker-storage"
+    storage_mount_path.mkdir()
+    (config_dir / ".env").write_text("OPENAI_API_KEY_FILE=secrets/openai.key\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path=str(storage_mount_path),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+    expected_worker_root = Path(env_values["MINDROOM_STORAGE_PATH"])
+    local_secret_copy = (
+        runtime_paths.storage_root
+        / "workers"
+        / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+        / ".runtime"
+        / "file-secrets"
+        / "OPENAI_API_KEY_FILE"
+        / "openai.key"
+    )
+
+    assert committed_runtime.env_value("OPENAI_API_KEY_FILE") == str(
+        expected_worker_root / ".runtime" / "file-secrets" / "OPENAI_API_KEY_FILE" / "openai.key",
+    )
+    assert local_secret_copy.read_text(encoding="utf-8") == "sk-relative\n"
+
+
 def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_paths_differ(tmp_path: Path) -> None:
     """Dedicated workers should copy ADC into the local shared storage root even when pod mount paths differ."""
     config_dir = tmp_path / "cfg"

@@ -35,6 +35,7 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
         "GOOGLE_APPLICATION_CREDENTIALS",
         "GOOGLE_CLOUD_LOCATION",
         "GOOGLE_CLOUD_PROJECT",
+        "GITHUB_TOKEN",
         "OLLAMA_HOST",
         "OPENAI_BASE_URL",
         "POD_NAMESPACE",
@@ -254,6 +255,14 @@ def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
 def _is_public_runtime_startup_env_name(name: str) -> bool:
     if name in _RUNTIME_STARTUP_EXCLUDED_NAMES:
         return False
+    if name.endswith("_FILE"):
+        base_name = name.removesuffix("_FILE")
+        return base_name not in _RUNTIME_STARTUP_EXCLUDED_NAMES and (
+            base_name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES)
+            or base_name in _RUNTIME_STARTUP_ENV_EXTRA_KEYS
+            or base_name in PROVIDER_ENV_KEYS.values()
+            or base_name in VERTEXAI_CLAUDE_ENV_KEYS
+        )
     if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _RUNTIME_STARTUP_ENV_EXTRA_KEYS):
         return False
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)

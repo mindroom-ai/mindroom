@@ -1047,6 +1047,52 @@ def test_docker_backend_commits_parent_runtime_env_into_worker_payload(
     assert local_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
 
 
+def test_docker_backend_commits_relative_file_backed_secrets_into_worker_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated Docker workers should preserve relative *_FILE secrets by copying them into worker state."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_path.write_text(config_text, encoding="utf-8")
+    secret_path = config_dir / "secrets" / "openai.key"
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    secret_path.write_text("sk-relative\n", encoding="utf-8")
+    runtime_storage = (tmp_path / "runtime-storage").resolve()
+    (config_dir / ".env").write_text("OPENAI_API_KEY_FILE=secrets/openai.key\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=runtime_storage)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+        runtime_paths=runtime_paths,
+        storage_path=runtime_storage,
+        host_config_path=config_path,
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    run_call = fake_client.containers.run_calls[0]
+    env = run_call["environment"]
+    assert isinstance(env, dict)
+    committed_runtime = deserialize_runtime_paths(json.loads(env["MINDROOM_RUNTIME_PATHS_JSON"]))
+    local_secret_copy = (
+        worker_root_path(runtime_storage, _TEST_UNSCOPED_WORKER_KEY)
+        / ".runtime"
+        / "file-secrets"
+        / "OPENAI_API_KEY_FILE"
+        / "openai.key"
+    )
+
+    assert (
+        committed_runtime.env_value("OPENAI_API_KEY_FILE")
+        == "/app/worker/.runtime/file-secrets/OPENAI_API_KEY_FILE/openai.key"
+    )
+    assert local_secret_copy.read_text(encoding="utf-8") == "sk-relative\n"
+
+
 def test_docker_backend_rejects_symlinked_google_application_credentials_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

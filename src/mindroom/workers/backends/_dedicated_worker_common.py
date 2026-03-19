@@ -34,6 +34,7 @@ _DEDICATED_WORKER_RESERVED_ENV_NAMES = frozenset(
         SHARED_CREDENTIALS_PATH_ENV,
     },
 )
+_WORKER_FILE_SECRET_ROOT = Path(".runtime") / "file-secrets"
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +225,15 @@ def build_dedicated_worker_runtime_paths(
         required_existing_storage_root=required_existing_storage_root,
     ):
         process_env["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
+    _rewrite_worker_file_env_values(
+        runtime_paths=runtime_paths,
+        backend_name=backend_name,
+        dedicated_root=dedicated_root,
+        local_dedicated_root=local_dedicated_root,
+        process_env=process_env,
+        env_file_values=env_file_values,
+        required_existing_storage_root=required_existing_storage_root,
+    )
 
     process_env.update(
         {
@@ -352,3 +362,72 @@ def _worker_google_application_credentials_path(
     except ValueError as exc:
         raise WorkerBackendError(str(exc)) from exc
     return str(dedicated_root / ".runtime" / resolved_source_path.name)
+
+
+def _rewrite_worker_file_env_values(
+    *,
+    runtime_paths: RuntimePaths,
+    backend_name: str,
+    dedicated_root: Path,
+    local_dedicated_root: Path,
+    process_env: dict[str, str],
+    env_file_values: dict[str, str],
+    required_existing_storage_root: Path | None,
+) -> None:
+    for env_name in sorted({*process_env, *env_file_values}):
+        if not env_name.endswith("_FILE"):
+            continue
+        worker_visible_path = _worker_file_env_path(
+            runtime_paths=runtime_paths,
+            env_name=env_name,
+            backend_name=backend_name,
+            dedicated_root=dedicated_root,
+            local_dedicated_root=local_dedicated_root,
+            required_existing_storage_root=required_existing_storage_root,
+        )
+        if worker_visible_path is None:
+            continue
+        process_env[env_name] = worker_visible_path
+        env_file_values.pop(env_name, None)
+
+
+def _worker_file_env_path(
+    *,
+    runtime_paths: RuntimePaths,
+    env_name: str,
+    backend_name: str,
+    dedicated_root: Path,
+    local_dedicated_root: Path,
+    required_existing_storage_root: Path | None,
+) -> str | None:
+    raw_value = runtime_paths.env_value(env_name)
+    if raw_value is None or not raw_value.strip():
+        return None
+    if required_existing_storage_root is not None and not required_existing_storage_root.exists():
+        return None
+
+    source_path = runtime_env_source_path(runtime_paths, env_name)
+    if source_path is None or (not source_path.exists() and not source_path.is_symlink()):
+        return None
+
+    field_name = f"{backend_name} worker {env_name}"
+    try:
+        resolved_source_path = validate_local_copy_source_path(source_path, field_name=field_name)
+    except ValueError as exc:
+        raise WorkerBackendError(str(exc)) from exc
+    if not resolved_source_path.is_file():
+        return None
+
+    destination_relative_path = _WORKER_FILE_SECRET_ROOT / env_name / resolved_source_path.name
+    try:
+        copy_validated_local_file_to_root(
+            resolved_source_path,
+            destination_root=local_dedicated_root,
+            destination_relative_path=destination_relative_path,
+            destination_field_name=f"{field_name} destination",
+            destination_root_label="worker state root",
+            mode=0o600,
+        )
+    except ValueError as exc:
+        raise WorkerBackendError(str(exc)) from exc
+    return str(dedicated_root / destination_relative_path)
