@@ -594,14 +594,18 @@ class DockerProjectionManager:
         if worker_scope == "user":
             return None
 
-        for agent_name, policy in resolved_agent_policies.items():
+        matching_agent_names = tuple(
+            agent_name
+            for agent_name, policy in resolved_agent_policies.items()
             if self._worker_key_targets_agent(
                 worker_key,
                 agent_name=agent_name,
                 worker_scope=policy.effective_execution_scope,
-            ):
-                return (agent_name,)
-        if worker_scope != "shared" or not resolved_agent_policies:
+            )
+        )
+        if matching_agent_names:
+            return (matching_agent_names[0],)
+        if not resolved_agent_policies:
             return None
         msg = f"Worker key does not match any configured agent policy: {worker_key}"
         raise WorkerBackendError(msg)
