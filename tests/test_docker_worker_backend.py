@@ -602,6 +602,37 @@ def test_docker_worker_host_config_path_resolves_relative_to_runtime_config_dir(
     assert config.host_config_path == host_config_path.resolve()
 
 
+@pytest.mark.parametrize(
+    ("label_name"),
+    [
+        "mindroom.ai/launch-config-hash",
+        "mindroom.ai/worker-key",
+        "mindroom.ai/component",
+    ],
+)
+def test_docker_worker_backend_rejects_reserved_extra_labels(
+    tmp_path: Path,
+    label_name: str,
+) -> None:
+    """Reserved Docker labels must fail fast instead of overriding backend-owned metadata."""
+    with pytest.raises(WorkerBackendError, match="extra labels cannot override reserved labels"):
+        _DockerWorkerBackendConfig(
+            image="ghcr.io/mindroom-ai/mindroom:latest",
+            worker_port=8766,
+            storage_mount_path="/app/worker",
+            config_path="/app/config-host/config.yaml",
+            host_config_path=tmp_path / "config.yaml",
+            idle_timeout_seconds=60.0,
+            ready_timeout_seconds=5.0,
+            name_prefix="mindroom-worker",
+            publish_host="127.0.0.1",
+            endpoint_host="127.0.0.1",
+            user="1000:1000",
+            extra_env={},
+            extra_labels={label_name: "user-value"},
+        )
+
+
 def _projection_signature_for_hash_seed(hash_seed: str, workspace_root: Path) -> dict[str, object]:
     script = (
         textwrap.dedent(
