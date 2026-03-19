@@ -2069,6 +2069,121 @@ def test_docker_backend_rejects_stale_user_agent_worker_keys_for_projection(
     assert fake_client.containers.run_calls == []
 
 
+def test_docker_backend_projects_only_user_scoped_assets_for_requester_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Requester-scoped Docker workers should only snapshot agents that resolve to worker_scope=user."""
+    for name, contents in {
+        "alpha": "alpha knowledge\n",
+        "beta": "beta knowledge\n",
+        "gamma": "gamma knowledge\n",
+        "delta": "delta knowledge\n",
+    }.items():
+        knowledge_root = tmp_path / f"knowledge_{name}"
+        knowledge_root.mkdir()
+        (knowledge_root / f"{name}.txt").write_text(contents, encoding="utf-8")
+        context_path = tmp_path / "agents" / name / "workspace" / f"{name}.md"
+        context_path.parent.mkdir(parents=True, exist_ok=True)
+        context_path.write_text(f"# {name.title()}\n", encoding="utf-8")
+
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="""
+knowledge_bases:
+  a:
+    path: ./knowledge_alpha
+  b:
+    path: ./knowledge_beta
+  c:
+    path: ./knowledge_gamma
+  d:
+    path: ./knowledge_delta
+agents:
+  alpha:
+    display_name: Alpha
+    role: Alpha test
+    model: default
+    worker_scope: user
+    knowledge_bases: [a]
+    context_files:
+      - alpha.md
+  beta:
+    display_name: Beta
+    role: Beta test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [b]
+    context_files:
+      - beta.md
+  gamma:
+    display_name: Gamma
+    role: Gamma test
+    model: default
+    knowledge_bases: [c]
+    context_files:
+      - gamma.md
+  delta:
+    display_name: Delta
+    role: Delta test
+    model: default
+    private:
+      per: user
+    knowledge_bases: [d]
+    context_files:
+      - delta.md
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip(),
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
+    projected_config_data = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
+
+    assert set(projected_config_data["agents"]) == {"alpha", "delta"}
+    assert set(projected_config_data["knowledge_bases"]) == {"a", "d"}
+    assert (
+        projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "context_files" / "00-alpha.md"
+    ).read_text(encoding="utf-8") == "# Alpha\n"
+    assert (
+        projection_root / ".mindroom-worker-assets" / "agents" / "delta" / "context_files" / "00-delta.md"
+    ).read_text(encoding="utf-8") == "# Delta\n"
+    assert not (
+        projection_root / ".mindroom-worker-assets" / "agents" / "beta" / "context_files" / "00-beta.md"
+    ).exists()
+    assert not (
+        projection_root / ".mindroom-worker-assets" / "agents" / "gamma" / "context_files" / "00-gamma.md"
+    ).exists()
+    assert (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "a" / "alpha.txt").read_text(
+        encoding="utf-8",
+    ) == "alpha knowledge\n"
+    assert (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "d" / "delta.txt").read_text(
+        encoding="utf-8",
+    ) == "delta knowledge\n"
+    assert not (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "b" / "beta.txt").exists()
+    assert not (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "c" / "gamma.txt").exists()
+
+
+def test_docker_backend_rejects_user_worker_keys_without_user_scoped_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Requester-scoped workers must fail closed when no configured agent resolves to worker_scope=user."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    with pytest.raises(WorkerBackendError, match="does not match any configured agent policy"):
+        backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
+    assert fake_client.containers.run_calls == []
+
+
 def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

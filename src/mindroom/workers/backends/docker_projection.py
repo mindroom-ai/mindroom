@@ -596,7 +596,17 @@ class DockerProjectionManager:
             msg = f"Unsupported worker key for projected agent selection: {worker_key}"
             raise WorkerBackendError(msg)
         if worker_scope == "user":
-            return None
+            user_scoped_agent_names = tuple(
+                agent_name
+                for agent_name, policy in resolved_agent_policies.items()
+                if policy.effective_execution_scope == "user"
+            )
+            if user_scoped_agent_names:
+                return user_scoped_agent_names
+            if not resolved_agent_policies:
+                return None
+            msg = f"Worker key does not match any configured agent policy: {worker_key}"
+            raise WorkerBackendError(msg)
 
         matching_agent_names = tuple(
             agent_name
