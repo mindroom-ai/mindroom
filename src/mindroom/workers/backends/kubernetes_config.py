@@ -6,8 +6,9 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.constants import runtime_env_values, serialize_public_runtime_paths
+from mindroom.constants import runtime_env_values
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._dedicated_worker_common import build_backend_config_signature
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -181,37 +182,36 @@ def kubernetes_backend_config_signature(
 ) -> tuple[str, ...]:
     """Return a cache signature for one concrete Kubernetes backend config."""
     config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
-    extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
-    extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
-    public_runtime_json = json.dumps(
-        serialize_public_runtime_paths(runtime_paths),
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return (
-        "kubernetes",
-        config.namespace,
-        config.image,
-        config.image_pull_policy,
-        str(config.worker_port),
-        config.service_account_name,
-        config.storage_pvc_name,
-        config.storage_mount_path,
-        config.storage_subpath_prefix,
-        config.config_map_name or "",
-        config.config_key,
-        config.config_path,
-        config.token_secret_name or "",
-        config.token_secret_key,
-        str(config.idle_timeout_seconds),
-        str(config.ready_timeout_seconds),
-        config.name_prefix,
-        config.node_name or "",
-        str(config.colocate_with_control_plane_node),
-        public_runtime_json,
-        extra_env_json,
-        extra_labels_json,
-        config.owner_deployment_name or "",
-        auth_token or "",
-        str(storage_root.expanduser().resolve()) if storage_root is not None else "",
+    return build_backend_config_signature(
+        prefix_parts=(
+            "kubernetes",
+            config.namespace,
+            config.image,
+            config.image_pull_policy,
+            str(config.worker_port),
+            config.service_account_name,
+            config.storage_pvc_name,
+            config.storage_mount_path,
+            config.storage_subpath_prefix,
+            config.config_map_name or "",
+            config.config_key,
+            config.config_path,
+            config.token_secret_name or "",
+            config.token_secret_key,
+            str(config.idle_timeout_seconds),
+            str(config.ready_timeout_seconds),
+            config.name_prefix,
+            config.node_name or "",
+            str(config.colocate_with_control_plane_node),
+        ),
+        runtime_paths=runtime_paths,
+        json_values=(
+            config.extra_env,
+            config.extra_labels,
+        ),
+        suffix_parts=(
+            config.owner_deployment_name or "",
+            auth_token or "",
+            str(storage_root.expanduser().resolve()) if storage_root is not None else "",
+        ),
     )
