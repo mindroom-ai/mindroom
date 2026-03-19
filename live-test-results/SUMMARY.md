@@ -1,16 +1,23 @@
 # Live Test Validation Summary
 
-This file intentionally keeps only the items that failed, were not rerun, or were not testable in the available environments.
-The detailed evidence bundle and per-section reports were removed from this PR on purpose.
+This file intentionally keeps only the current high-signal status for the PR.
+The detailed evidence bundle and per-section reports were removed from the PR on purpose.
 
-## Did Not Succeed
+## Issues Found And Addressed
 
-- `SCH-003` failed during rerun because the conditional schedule was stored as `0 9 * * *` instead of a polling cadence.
-- The branch code was changed afterward to reject invalid conditional parses instead of silently storing that cron.
-- That exact live scheduling flow was not rerun after the code change.
+- `CORE-001`: Doctor mem0 URL mismatch was fixed on this branch.
+- `ROOM-005`: Directory visibility reconciliation failure reporting was fixed on this branch.
+- `ROOM-006` and `ROOM-007`: Root-space orphan cleanup behavior was fixed on this branch.
+- `UI-005`: Dashboard overview blank on initial load was fixed on this branch.
+- Agent card pluralization (`1 tools`) was fixed on this branch.
+- The local Matrix host-port regression from `8008` to `8108` was fixed on this branch.
+- The detailed validation evidence bundle was removed from this PR instead of being kept as merge payload.
 
-## Not Fully Retested
+## Addressed But Not Fully Revalidated
 
+- `SCH-003` failed during rerun because a conditional schedule was stored as `0 9 * * *` instead of a polling cadence.
+- The branch code now rejects invalid conditional parses instead of autocorrecting or silently storing that cron.
+- That exact live scheduling flow was not rerun after the final simplification.
 - The full 186-item live checklist was not rerun end-to-end after the final fixes on this branch.
 
 ## Not Tested Or Environment Blocked
