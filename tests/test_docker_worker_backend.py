@@ -39,7 +39,12 @@ from mindroom.workers.backends.docker_config import (
     _DockerWorkerBackendConfig,
     _read_docker_user,
 )
-from mindroom.workers.backends.docker_projection import _PROJECTED_CONFIGS_DIRNAME, _WORKER_CONFIG_STATE_DIRNAME
+from mindroom.workers.backends.docker_projection import (
+    _PROJECTED_CONFIGS_DIRNAME,
+    _WORKER_CONFIG_STATE_DIRNAME,
+    DockerProjectionManager,
+)
+from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
@@ -1846,6 +1851,59 @@ models:
 
     assert first_signature == second_signature
     assert first_signature["knowledge_bases"] == ["a", "b"]
+
+
+def test_docker_projection_hash_changes_when_container_config_filename_changes(tmp_path: Path) -> None:
+    """Renaming the container-side config file should materialize a fresh projection snapshot."""
+    host_config_path = tmp_path / "config.yaml"
+    host_config_path.write_text(
+        """
+models:
+  default:
+    provider: openai
+    id: test-model
+agents: {}
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(config_path=host_config_path, storage_path=tmp_path)
+    paths = local_worker_state_paths_for_root(tmp_path / "workers" / "projection-test")
+    base_config = _DockerWorkerBackendConfig(
+        image="ghcr.io/mindroom-ai/mindroom:latest",
+        worker_port=8766,
+        storage_mount_path="/app/worker",
+        config_path="/app/config-host/config.yaml",
+        host_config_path=host_config_path,
+        idle_timeout_seconds=60.0,
+        ready_timeout_seconds=5.0,
+        name_prefix="mindroom-worker",
+        publish_host="127.0.0.1",
+        endpoint_host="127.0.0.1",
+        user="1000:1000",
+        extra_env={},
+        extra_labels={},
+    )
+
+    first_manager = DockerProjectionManager(
+        config=base_config,
+        projected_configs_root=tmp_path / "projections",
+        runtime_paths=runtime_paths,
+    )
+    first_projection = first_manager.projected_config(paths, materialize=True)
+
+    renamed_manager = DockerProjectionManager(
+        config=replace(base_config, config_path="/app/config-host/alt.yaml"),
+        projected_configs_root=tmp_path / "projections",
+        runtime_paths=runtime_paths,
+    )
+    renamed_projection = renamed_manager.projected_config(paths, materialize=True)
+
+    assert renamed_projection.root != first_projection.root
+    assert not first_projection.root.exists()
+    assert (renamed_projection.root / "alt.yaml").is_file()
+    assert not (renamed_projection.root / "config.yaml").exists()
 
 
 def test_docker_backend_rebuilds_incomplete_projection_snapshot(
