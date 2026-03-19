@@ -11,7 +11,6 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
@@ -19,7 +18,6 @@ import httpx
 from mindroom.constants import (
     RuntimePaths,
     resolve_primary_runtime_paths,
-    runtime_env_source_path,
     runtime_paths_with_storage_root,
     serialize_public_runtime_paths,
 )
@@ -32,11 +30,14 @@ from mindroom.credentials import (
 from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import (
     is_unscoped_worker_key,
-    resolved_worker_key_scope,
-    visible_state_roots_for_worker_key,
     worker_dir_name,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._dedicated_worker_common import (
+    build_dedicated_worker_runtime_paths,
+    plan_scoped_visible_state_roots,
+    validate_unique_worker_visible_paths,
+)
 from mindroom.workers.backends._metadata_store import (
     list_worker_state_paths,
     load_worker_metadata,
@@ -56,7 +57,6 @@ from mindroom.workers.backends.docker_projection import (
 )
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
-from mindroom.workspaces import copy_validated_local_file_to_root, validate_local_copy_source_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -753,45 +753,6 @@ class DockerWorkerBackend:
             actual_env[name] = value
         return all(actual_env.get(name) == value for name, value in expected_env.items())
 
-    def _worker_google_application_credentials_path(
-        self,
-        dedicated_root: Path,
-        *,
-        local_dedicated_root: Path,
-    ) -> str | None:
-        """Return a worker-visible ADC file path, copying the source into worker state when needed."""
-        raw_value = self._runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS")
-        if raw_value is None or not raw_value.strip():
-            return None
-
-        source_path = runtime_env_source_path(self._runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-        if source_path is None or (not source_path.exists() and not source_path.is_symlink()):
-            return None
-        try:
-            resolved_source_path = validate_local_copy_source_path(
-                source_path,
-                field_name="Docker worker GOOGLE_APPLICATION_CREDENTIALS",
-            )
-        except ValueError as exc:
-            raise WorkerBackendError(str(exc)) from exc
-        if not resolved_source_path.is_file():
-            return None
-
-        runtime_dir = local_dedicated_root / ".runtime"
-        runtime_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            copy_validated_local_file_to_root(
-                resolved_source_path,
-                destination_root=local_dedicated_root,
-                destination_relative_path=Path(".runtime") / resolved_source_path.name,
-                destination_field_name="Docker worker GOOGLE_APPLICATION_CREDENTIALS destination",
-                destination_root_label="worker state root",
-                mode=0o600,
-            )
-        except ValueError as exc:
-            raise WorkerBackendError(str(exc)) from exc
-        return str(dedicated_root / ".runtime" / resolved_source_path.name)
-
     def _worker_runtime_config_path(self) -> Path:
         configured_container_path = Path(self.config.config_path)
         if self.config.host_config_path is not None:
@@ -807,37 +768,16 @@ class DockerWorkerBackend:
         dedicated_root: Path,
         local_dedicated_root: Path,
     ) -> RuntimePaths:
-        config_path = self._worker_runtime_config_path()
-        process_env = dict(self._runtime_paths.process_env)
-        process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        env_file_values = dict(self._runtime_paths.env_file_values)
-        env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        if google_application_credentials := self._worker_google_application_credentials_path(
-            dedicated_root,
+        return build_dedicated_worker_runtime_paths(
+            runtime_paths=self._runtime_paths,
+            backend_name="Docker",
+            worker_key=worker_key,
+            config_path=self._worker_runtime_config_path(),
+            dedicated_root=dedicated_root,
             local_dedicated_root=local_dedicated_root,
-        ):
-            process_env["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
-        process_env.update(
-            {
-                "MINDROOM_SANDBOX_RUNNER_MODE": "true",
-                "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
-                _RUNNER_PORT_ENV_NAME: str(self.config.worker_port),
-                "MINDROOM_CONFIG_PATH": str(config_path),
-                "MINDROOM_STORAGE_PATH": str(dedicated_root),
-                _SHARED_STORAGE_ROOT_ENV: _CONTAINER_SHARED_STORAGE_ROOT,
-                SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/.shared_credentials",
-                _DEDICATED_WORKER_KEY_ENV: worker_key,
-                _DEDICATED_WORKER_ROOT_ENV: str(dedicated_root),
-            },
-        )
-        process_env.update(self.config.extra_env)
-        return RuntimePaths(
-            config_path=config_path,
-            config_dir=config_path.parent,
-            env_path=config_path.parent / ".env",
-            storage_root=dedicated_root.resolve(),
-            process_env=MappingProxyType(process_env),
-            env_file_values=MappingProxyType(env_file_values),
+            worker_port=self.config.worker_port,
+            shared_storage_root=_CONTAINER_SHARED_STORAGE_ROOT,
+            extra_env=self.config.extra_env,
         )
 
     def _container_volumes(
@@ -876,37 +816,21 @@ class DockerWorkerBackend:
         *,
         private_agent_names: frozenset[str] | None,
     ) -> list[tuple[Path, str, bool]]:
-        if resolved_worker_key_scope(worker_key) is None:
-            return []
-        if resolved_worker_key_scope(worker_key) == "user_agent" and private_agent_names is None:
-            msg = f"user_agent workers require explicit private-agent visibility: {worker_key}"
-            raise WorkerBackendError(msg)
-
-        effective_private_agent_names = private_agent_names or frozenset()
-        container_visible_state_roots = visible_state_roots_for_worker_key(
-            Path(_CONTAINER_SHARED_STORAGE_ROOT),
-            worker_key,
-            private_agent_names=effective_private_agent_names,
-        )
-        local_visible_state_roots = visible_state_roots_for_worker_key(
-            self._storage_path,
-            worker_key,
-            private_agent_names=effective_private_agent_names,
-        )
-        if not container_visible_state_roots or len(container_visible_state_roots) != len(local_visible_state_roots):
-            msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
-            raise WorkerBackendError(msg)
-        for local_state_root in local_visible_state_roots:
-            local_state_root.mkdir(parents=True, exist_ok=True)
-
         mount_specs = [
-            (host_path, str(container_path), False)
-            for host_path, container_path in zip(local_visible_state_roots, container_visible_state_roots, strict=True)
+            (planned_root.local_path, str(planned_root.worker_visible_path), False)
+            for planned_root in plan_scoped_visible_state_roots(
+                worker_key=worker_key,
+                local_shared_storage_root=self._storage_path,
+                worker_visible_shared_storage_root=Path(_CONTAINER_SHARED_STORAGE_ROOT),
+                private_agent_names=private_agent_names,
+                allow_unknown_worker_key=True,
+            )
         ]
-        mount_paths = [container_path for _host_path, container_path, _read_only in mount_specs]
-        if len(mount_paths) != len(set(mount_paths)):
-            msg = f"Duplicate Docker mount generated for worker key: {worker_key}"
-            raise WorkerBackendError(msg)
+        validate_unique_worker_visible_paths(
+            (container_path for _host_path, container_path, _read_only in mount_specs),
+            worker_key=worker_key,
+            duplicate_label="Docker mount",
+        )
         return mount_specs
 
     def _container_labels(self, metadata: _DockerWorkerMetadata) -> dict[str, str]:

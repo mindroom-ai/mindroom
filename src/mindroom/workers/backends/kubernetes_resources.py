@@ -8,15 +8,16 @@ import json
 import os
 import time
 from pathlib import Path
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
-from mindroom import constants
 from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
-from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workspaces import copy_validated_local_file_to_root, validate_local_copy_source_path
+from mindroom.workers.backends._dedicated_worker_common import (
+    build_dedicated_worker_runtime_paths,
+    plan_scoped_visible_state_roots,
+    validate_unique_worker_visible_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -637,47 +638,6 @@ class KubernetesResourceManager:
             env.append({"name": name, "value": value})
         return env
 
-    def _worker_google_application_credentials_path(
-        self,
-        dedicated_root: Path,
-        *,
-        local_dedicated_root: Path,
-    ) -> str | None:
-        """Return a worker-visible ADC file path, copying the source into shared storage when needed."""
-        raw_value = self.runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS")
-        if raw_value is None or not raw_value.strip():
-            return None
-        if not self.storage_root.exists():
-            return None
-
-        source_path = constants.runtime_env_source_path(self.runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-        if source_path is None or (not source_path.exists() and not source_path.is_symlink()):
-            return None
-        try:
-            resolved_source_path = validate_local_copy_source_path(
-                source_path,
-                field_name="Kubernetes worker GOOGLE_APPLICATION_CREDENTIALS",
-            )
-        except ValueError as exc:
-            raise WorkerBackendError(str(exc)) from exc
-        if not resolved_source_path.is_file():
-            return None
-
-        runtime_dir = local_dedicated_root / ".runtime"
-        runtime_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            copy_validated_local_file_to_root(
-                resolved_source_path,
-                destination_root=local_dedicated_root,
-                destination_relative_path=Path(".runtime") / resolved_source_path.name,
-                destination_field_name="Kubernetes worker GOOGLE_APPLICATION_CREDENTIALS destination",
-                destination_root_label="worker state root",
-                mode=0o600,
-            )
-        except ValueError as exc:
-            raise WorkerBackendError(str(exc)) from exc
-        return str(dedicated_root / ".runtime" / resolved_source_path.name)
-
     def _worker_runtime_paths(
         self,
         *,
@@ -690,36 +650,17 @@ class KubernetesResourceManager:
             if self.config.config_map_name is not None
             else self.runtime_paths.config_path.expanduser().resolve()
         )
-        process_env = dict(self.runtime_paths.process_env)
-        process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        env_file_values = dict(self.runtime_paths.env_file_values)
-        env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        if google_application_credentials := self._worker_google_application_credentials_path(
-            dedicated_root,
-            local_dedicated_root=local_dedicated_root,
-        ):
-            process_env["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
-        process_env.update(
-            {
-                "MINDROOM_SANDBOX_RUNNER_MODE": "true",
-                "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
-                _RUNNER_PORT_ENV_NAME: str(self.config.worker_port),
-                "MINDROOM_CONFIG_PATH": str(config_path),
-                "MINDROOM_STORAGE_PATH": str(dedicated_root),
-                _SHARED_STORAGE_ROOT_ENV: self.config.storage_mount_path,
-                SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/.shared_credentials",
-                _DEDICATED_WORKER_KEY_ENV: worker_key,
-                _DEDICATED_WORKER_ROOT_ENV: str(dedicated_root),
-            },
-        )
-        process_env.update(self.config.extra_env)
-        return RuntimePaths(
+        return build_dedicated_worker_runtime_paths(
+            runtime_paths=self.runtime_paths,
+            backend_name="Kubernetes",
+            worker_key=worker_key,
             config_path=config_path,
-            config_dir=config_path.parent,
-            env_path=config_path.parent / ".env",
-            storage_root=dedicated_root.resolve(),
-            process_env=MappingProxyType(process_env),
-            env_file_values=MappingProxyType(env_file_values),
+            dedicated_root=dedicated_root,
+            local_dedicated_root=local_dedicated_root,
+            worker_port=self.config.worker_port,
+            shared_storage_root=self.config.storage_mount_path,
+            extra_env=self.config.extra_env,
+            required_existing_storage_root=self.storage_root,
         )
 
     def _volume_mounts(
@@ -820,33 +761,19 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None,
     ) -> list[dict[str, object]]:
         mounted_storage_root = Path(self.config.storage_mount_path)
-        if resolved_worker_key_scope(worker_key) == "user_agent" and private_agent_names is None:
-            msg = f"user_agent workers require explicit private-agent visibility: {worker_key}"
-            raise WorkerBackendError(msg)
-        effective_private_agent_names = private_agent_names or frozenset()
-        visible_state_roots = visible_state_roots_for_worker_key(
-            mounted_storage_root,
-            worker_key,
-            private_agent_names=effective_private_agent_names,
-        )
-        local_visible_state_roots = visible_state_roots_for_worker_key(
-            self.storage_root,
-            worker_key,
-            private_agent_names=effective_private_agent_names,
-        )
-        if not visible_state_roots or len(visible_state_roots) != len(local_visible_state_roots):
-            msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
-            raise WorkerBackendError(msg)
-        for local_state_root in local_visible_state_roots:
-            local_state_root.mkdir(parents=True, exist_ok=True)
-
         mounts: list[dict[str, object]] = [
             {
                 "name": "worker-storage",
-                "mountPath": str(state_root),
-                "subPath": str(state_root.relative_to(mounted_storage_root)),
+                "mountPath": str(planned_root.worker_visible_path),
+                "subPath": str(planned_root.worker_visible_path.relative_to(mounted_storage_root)),
             }
-            for state_root in visible_state_roots
+            for planned_root in plan_scoped_visible_state_roots(
+                worker_key=worker_key,
+                local_shared_storage_root=self.storage_root,
+                worker_visible_shared_storage_root=mounted_storage_root,
+                private_agent_names=private_agent_names,
+                allow_unknown_worker_key=False,
+            )
         ]
         mounts.append(
             {
@@ -855,8 +782,9 @@ class KubernetesResourceManager:
                 "subPath": state_subpath,
             },
         )
-        mount_paths = [str(mount["mountPath"]) for mount in mounts]
-        if len(mount_paths) != len(set(mount_paths)):
-            msg = f"Duplicate Kubernetes mountPath generated for worker key: {worker_key}"
-            raise WorkerBackendError(msg)
+        validate_unique_worker_visible_paths(
+            (str(mount["mountPath"]) for mount in mounts),
+            worker_key=worker_key,
+            duplicate_label="Kubernetes mountPath",
+        )
         return mounts
