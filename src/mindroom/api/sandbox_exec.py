@@ -188,6 +188,7 @@ def tool_runtime_paths_with_request_env(
         if include_base_execution_env
         else {}
     )
+    env_file_values.update(execution_env)
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
         process_env.update(trusted_env_overlay)
