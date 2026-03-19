@@ -1802,6 +1802,32 @@ def test_docker_backend_rejects_unknown_worker_keys_for_scoped_mounts(
     assert fake_client.containers.run_calls == []
 
 
+def test_docker_backend_rejects_stale_scoped_worker_keys_for_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Scoped worker keys must fail closed when they no longer resolve to any configured agent."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    with pytest.raises(WorkerBackendError, match="does not match any configured agent policy"):
+        backend.ensure_worker(WorkerSpec("v1:default:shared:missing"), now=10.0)
+    assert fake_client.containers.run_calls == []
+
+
+def test_docker_backend_rejects_scoped_worker_keys_that_no_longer_match_agent_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale shared worker key must not broaden projection after an agent switches to user_agent isolation."""
+    config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    with pytest.raises(WorkerBackendError, match="does not match any configured agent policy"):
+        backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
+    assert fake_client.containers.run_calls == []
+
+
 def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
