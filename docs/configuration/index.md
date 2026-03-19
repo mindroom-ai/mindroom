@@ -63,9 +63,9 @@ Set the API key for each provider you use in `config.yaml`:
 |----------|-------------|---------|
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
 | `MINDROOM_PORT` | Port for the bundled dashboard/API server | `8765` |
-| `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests | _(auto-generated)_ |
+| `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
 | `MINDROOM_ENABLE_AI_CACHE` | Enable the AI response cache (caches model responses keyed by model, messages, and tools — useful during development to avoid repeated API calls) | `true` |
-| `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(disabled)_ |
+| `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner` or `kubernetes`) | `static_runner` |
 
@@ -99,29 +99,14 @@ These are set automatically by `mindroom connect` and stored in `.env`:
 | `GOOGLE_CLOUD_LOCATION` | Google Cloud region |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to Google service account JSON |
 
-### Vertex AI Claude
-
-| Variable | Description |
-|----------|-------------|
-| `ANTHROPIC_VERTEX_PROJECT_ID` | GCP project ID for Vertex AI Claude |
-| `CLOUD_ML_REGION` | GCP region (e.g., `us-central1`) |
-
 Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS`.
-
-### Other
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENAI_BASE_URL` | Global base URL for all OpenAI-provider models | _(provider default)_ |
-| `MINDROOM_API_KEY` | API key to protect the dashboard API (standalone mode) | _(open access)_ |
 
 ### Worker / Sandbox
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MINDROOM_SANDBOX_RUNNER_URL` | Static runner endpoint URL | _(none)_ |
-| `MINDROOM_SANDBOX_RUNNER_AUTH_TOKEN` | Auth token for the static runner | _(none)_ |
-| `VOICE_PREFIX` | Prefix prepended to voice transcription messages | _(none)_ |
+| `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
+| `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
 
 See [Sandbox Proxy](../deployment/sandbox-proxy.md) for the full list of `MINDROOM_SANDBOX_*` variables, including Kubernetes backend variables (`MINDROOM_SANDBOX_KUBERNETES_*`).
 
@@ -238,7 +223,7 @@ memory:
   backend: mem0                    # Global default backend (mem0 or file); agents can override with memory_backend
   team_reads_member_memory: false  # Default: false (let team reads access member agent memories)
   embedder:
-    provider: openai               # Default: openai (openai, ollama, or sentence_transformers)
+    provider: openai               # Default: openai (openai, ollama, huggingface, sentence_transformers)
     config:
       model: text-embedding-3-small  # Default embedding model
       api_key: null                # Optional: From env var
