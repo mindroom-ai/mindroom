@@ -77,6 +77,9 @@ Expected outcome: Starter configs are generated for the chosen profile, expected
 - [ ] `CORE-010` Exercise `mindroom local-stack-setup` in a local Matrix development environment.
 Expected outcome: The command prepares the expected local stack artifacts and prints usable next-step guidance instead of requiring undocumented manual repair.
 
+- [ ] `CORE-011` Run `mindroom config init` for a full or public starter profile with and without an explicit `MINDROOM_STORAGE_PATH`.
+Expected outcome: The starter profile scaffolds the canonical Mind workspace files including `MEMORY.md`, writes or preserves the correct storage-root env settings, and keeps the starter knowledge-base path aligned with the effective runtime storage root.
+
 ## 2. Config Loading, Hot Reload, And Reconciliation
 
 Source anchors: `src/mindroom/config/main.py`, `src/mindroom/file_watcher.py`, `src/mindroom/orchestrator.py`, `src/mindroom/orchestration/config_updates.py`, `src/mindroom/orchestration/rooms.py`, `src/mindroom/tool_system/plugins.py`, `src/mindroom/tool_system/skills.py`.
@@ -222,6 +225,9 @@ Expected outcome: Main-timeline DM messages can materialize multi-agent teamwork
 
 - [ ] `TEAM-006` Include a private agent in a team or in a delegation path that should be unsupported.
 Expected outcome: The request fails clearly with a materialization or unsupported-member explanation instead of silently misrouting.
+
+- [ ] `TEAM-007` Mention an ad-hoc team where one or more requested members are off-room, private, or otherwise not materializable.
+Expected outcome: The exact requested-member set is preserved in the rejection result with member-specific failure statuses and reasons, and MindRoom does not silently shrink the team to only the remaining materializable members.
 
 ## 7. Commands And Interactive Workflows
 
@@ -385,7 +391,7 @@ Expected outcome: Dirty-session reprioritization and later flushes stay isolated
 
 ## 11. Skills, Plugins, Tools, Workers, And Runtime Context
 
-Source anchors: `src/mindroom/tool_system/skills.py`, `src/mindroom/tool_system/plugins.py`, `src/mindroom/tool_system/runtime_context.py`, `src/mindroom/tool_system/sandbox_proxy.py`, `src/mindroom/tool_system/dependencies.py`, `src/mindroom/tool_system/metadata.py`, `src/mindroom/api/tools.py`, `src/mindroom/api/skills.py`, `src/mindroom/api/workers.py`.
+Source anchors: `src/mindroom/tool_system/skills.py`, `src/mindroom/tool_system/plugins.py`, `src/mindroom/tool_system/runtime_context.py`, `src/mindroom/tool_system/sandbox_proxy.py`, `src/mindroom/tool_system/dependencies.py`, `src/mindroom/tool_system/metadata.py`, `src/mindroom/api/tools.py`, `src/mindroom/api/skills.py`, `src/mindroom/api/workers.py`, `src/mindroom/api/sandbox_runner.py`.
 
 - [ ] `TOOL-001` Load a skill from a bundled skill location, a plugin skill directory, and a user skill directory.
 Expected outcome: Skill precedence, allowlisting, and eligibility gating all match the implemented load order and rules.
@@ -416,6 +422,9 @@ Expected outcome: Repeated calls with the same session identity continue the exi
 
 - [ ] `TOOL-010` Trigger a tool whose optional extra is missing once with auto-install enabled and once with auto-install disabled.
 Expected outcome: The enabled runtime installs the extra and retries successfully, while the disabled runtime raises a clear missing-dependencies error without partial tool registration.
+
+- [ ] `TOOL-011` Exercise the sandbox-runner API by creating a credential lease, executing a tool call with token auth, retrying the consumed lease, and then checking worker listing plus idle-worker cleanup.
+Expected outcome: Sandbox-runner endpoints require the configured token, credential overrides are accepted only via leases, one-time leases are consumed after use, known workers are listed with lifecycle metadata, and cleanup marks idle workers without deleting their persisted state.
 
 ## 12. Scheduling And Background Task Execution
 
