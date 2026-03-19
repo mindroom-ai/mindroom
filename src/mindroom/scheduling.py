@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import typing
 import uuid
 from dataclasses import dataclass
@@ -454,53 +453,6 @@ async def save_edited_scheduled_task(
     )
 
 
-# Pattern matching simple interval requests like "every 5 minutes", "every 2 hours".
-_INTERVAL_PATTERN = re.compile(
-    r"\bevery\s+(\d+)\s+(minute|hour|min|hr)s?\b",
-    re.IGNORECASE,
-)
-
-
-def _fix_interval_cron(request: str, cron: CronSchedule) -> CronSchedule:
-    """Fix cron expressions for simple interval patterns the AI often gets wrong.
-
-    When a user says "every N minutes" or "every N hours", the correct cron is
-    ``*/N * * * *`` or ``0 */N * * *``.  Weak models frequently produce a fixed
-    time (e.g. ``0 9 * * *``) instead.  This function detects the mismatch and
-    returns a corrected CronSchedule.
-    """
-    match = _INTERVAL_PATTERN.search(request)
-    if not match:
-        return cron
-
-    value = int(match.group(1))
-    unit = match.group(2).lower()
-
-    if unit in ("minute", "min"):
-        expected_minute = f"*/{value}" if value > 1 else "*"
-        if cron.minute != expected_minute or cron.hour != "*":
-            logger.info(
-                "Correcting cron for interval pattern",
-                original=cron.to_cron_string(),
-                corrected_minute=expected_minute,
-                request=request,
-            )
-            return CronSchedule(minute=expected_minute, hour="*", day="*", month="*", weekday="*")
-    elif unit in ("hour", "hr"):
-        expected_hour = f"*/{value}" if value > 1 else "*"
-        if cron.hour != expected_hour or cron.minute != "0":
-            logger.info(
-                "Correcting cron for interval pattern",
-                original=cron.to_cron_string(),
-                corrected_minute="0",
-                corrected_hour=expected_hour,
-                request=request,
-            )
-            return CronSchedule(minute="0", hour=expected_hour, day="*", month="*", weekday="*")
-
-    return cron
-
-
 async def _parse_workflow_schedule(
     request: str,
     config: Config,
@@ -570,9 +522,6 @@ Examples of event/condition phrasing to include in the message (do not include t
                 result.execute_at = current_time + timedelta(minutes=30)
             elif result.schedule_type == "cron" and not result.cron_schedule:
                 result.cron_schedule = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
-
-            if result.schedule_type == "cron" and result.cron_schedule:
-                result.cron_schedule = _fix_interval_cron(request, result.cron_schedule)
 
             conditional_validation_error = _validate_conditional_workflow(result)
             if conditional_validation_error is not None:
