@@ -56,7 +56,7 @@ Edits an existing scheduled task by ID. The task description is re-parsed to upd
 !cancel_schedule all             # Cancel all tasks in room
 ```
 
-Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!inspect_schedules`, `!cancelschedule`, `!cancel-schedule`, `!editschedule`, `!edit-schedule`
+Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`, `!inspectschedule`, `!inspect-schedule`, `!cancelschedule`, `!cancel-schedule`, `!editschedule`, `!edit-schedule`
 
 Use `!help schedule` for detailed inline help on scheduling commands.
 
