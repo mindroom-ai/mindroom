@@ -1,3 +1,0 @@
-@basnijholt:localhost: Hey Alpha, this is a DM. What is 3+3?
-@mindroom_alpha_test4b:localhost: Thinking...  ⋯
-@mindroom_alpha_test4b:localhost: * {}

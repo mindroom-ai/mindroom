@@ -1,9 +1,0 @@
-╭─────────────────────╮
-│ Thread in Solo Room │
-╰─────────────────────╯
-🧵 Thread Start
-07:08 @basnijholt:localhost: Hello, what is 2+2?
-  ↳ 07:08 @mindroom_alpha_test4b:localhost: 
-
-🔧 `edit_schedule` [1]
-2+2 is 4 

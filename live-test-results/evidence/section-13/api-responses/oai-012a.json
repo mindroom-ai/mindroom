@@ -1,1 +1,0 @@
-{"id":"chatcmpl-c44fa410944b","object":"chat.completion","created":1773908558,"model":"analyst","choices":[{"index":0,"message":{"role":"assistant","content":"Here are my reasoning steps:\n🔧 `edit_schedule` [1]"},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"system_fingerprint":null}

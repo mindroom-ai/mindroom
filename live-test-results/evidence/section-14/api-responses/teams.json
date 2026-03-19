@@ -1,1 +1,0 @@
-[{"id":"code_team","display_name":"Code Team","role":"New team description","agents":["shell"],"rooms":[],"model":"default","mode":"coordinate"},{"id":"super_team","display_name":"Super Team","role":"A team with all the great agents.","agents":["code","shell","research","finance"],"rooms":["research","lobby"],"model":"sonnet","mode":"collaborate"}]

@@ -1,2 +1,0 @@
-2026-03-19T07:53:47.452653Z [info     ] Restored scheduled tasks in room [mindroom.scheduling] restored_count=4 room_id=!KRmQmwSbHmWqyQGefK:localhost
-2026-03-19T07:53:47.453232Z [info     ] Restored 4 scheduled tasks in room !KRmQmwSbHmWqyQGefK:localhost [mindroom.bot] agent='🎪 router'
