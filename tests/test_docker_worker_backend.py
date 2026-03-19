@@ -2069,6 +2069,25 @@ def test_docker_backend_rejects_stale_user_agent_worker_keys_for_projection(
     assert fake_client.containers.run_calls == []
 
 
+def test_docker_backend_rejects_user_agent_worker_keys_when_agent_is_shared(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A user-agent worker key must fail closed when the agent still exists but is not user_agent scoped."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    with pytest.raises(WorkerBackendError, match="does not match any configured agent policy"):
+        backend.ensure_worker(
+            WorkerSpec(
+                "v1:default:user_agent:@alice:example.org:alpha",
+                private_agent_names=frozenset({"alpha"}),
+            ),
+            now=10.0,
+        )
+    assert fake_client.containers.run_calls == []
+
+
 def test_docker_backend_projects_only_user_scoped_assets_for_requester_worker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2189,7 +2208,7 @@ def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
     tmp_path: Path,
 ) -> None:
     """User-agent workers should mount their private instance root when explicitly visible."""
-    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
     worker_key = resolve_worker_key(
         "user_agent",
@@ -2223,7 +2242,7 @@ def test_docker_backend_recreates_user_agent_container_when_private_visibility_c
     tmp_path: Path,
 ) -> None:
     """Changing user-agent private visibility should recreate the container."""
-    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
     worker_key = resolve_worker_key(
         "user_agent",
