@@ -1682,6 +1682,18 @@ def test_docker_backend_user_agent_requires_explicit_private_visibility(
         backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
 
+def test_docker_backend_rejects_unknown_worker_keys_for_scoped_mounts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Malformed worker keys must not fall back to mounting the whole storage root."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    with pytest.raises(WorkerBackendError, match="Unsupported worker key"):
+        backend.ensure_worker(WorkerSpec("legacy-worker"), now=10.0)
+
+
 def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
