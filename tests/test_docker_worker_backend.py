@@ -633,6 +633,38 @@ def test_docker_worker_backend_rejects_reserved_extra_labels(
         )
 
 
+@pytest.mark.parametrize(
+    ("storage_mount_path", "config_path"),
+    [
+        ("/app/worker", "/app/worker/config.yaml"),
+        ("/app/worker", "/app/worker/nested/config.yaml"),
+        ("/app/worker/config-host", "/app/worker/config.yaml"),
+    ],
+)
+def test_docker_worker_backend_rejects_overlapping_config_mount_targets(
+    tmp_path: Path,
+    storage_mount_path: str,
+    config_path: str,
+) -> None:
+    """Projected config mounts must stay disjoint from the writable worker state root."""
+    with pytest.raises(WorkerBackendError, match="config_path must mount outside the worker storage root"):
+        _DockerWorkerBackendConfig(
+            image="ghcr.io/mindroom-ai/mindroom:latest",
+            worker_port=8766,
+            storage_mount_path=storage_mount_path,
+            config_path=config_path,
+            host_config_path=tmp_path / "config.yaml",
+            idle_timeout_seconds=60.0,
+            ready_timeout_seconds=5.0,
+            name_prefix="mindroom-worker",
+            publish_host="127.0.0.1",
+            endpoint_host="127.0.0.1",
+            user="1000:1000",
+            extra_env={},
+            extra_labels={},
+        )
+
+
 def _projection_signature_for_hash_seed(hash_seed: str, workspace_root: Path) -> dict[str, object]:
     script = (
         textwrap.dedent(
