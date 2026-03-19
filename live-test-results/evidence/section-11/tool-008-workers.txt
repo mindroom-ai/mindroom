@@ -1,0 +1,2 @@
+GET /api/workers -> HTTP 503: {"detail":"Worker backend is not configured."}
+POST /api/workers/cleanup -> HTTP 503: {"detail":"Worker backend is not configured."}

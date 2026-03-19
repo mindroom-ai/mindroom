@@ -1,0 +1,45 @@
+{
+    "object": "list",
+    "data": [
+        {
+            "id": "auto",
+            "object": "model",
+            "created": 1773905580,
+            "owned_by": "mindroom",
+            "name": "Auto",
+            "description": "Automatically routes to the best agent for your message"
+        },
+        {
+            "id": "general",
+            "object": "model",
+            "created": 1773905580,
+            "owned_by": "mindroom",
+            "name": "GeneralAgent",
+            "description": "A general-purpose assistant."
+        },
+        {
+            "id": "analyst",
+            "object": "model",
+            "created": 1773905580,
+            "owned_by": "mindroom",
+            "name": "AnalystAgent",
+            "description": "Provide analytical insights and recommendations."
+        },
+        {
+            "id": "calculator",
+            "object": "model",
+            "created": 1773905580,
+            "owned_by": "mindroom",
+            "name": "CalculatorAgent",
+            "description": "Solve mathematical problems."
+        },
+        {
+            "id": "team/super_team",
+            "object": "model",
+            "created": 1773905580,
+            "owned_by": "mindroom",
+            "name": "Super Team",
+            "description": "A collaborative team of agents."
+        }
+    ]
+}

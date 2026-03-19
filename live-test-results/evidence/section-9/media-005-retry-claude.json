@@ -1,0 +1,71 @@
+{
+  "room": "Media",
+  "thread_id": "t73",
+  "messages": [
+    {
+      "sender": "@matty_s9:localhost",
+      "content": "@mindroom_coder_tests9 Please use the attachments tool to list the attachment with ID att_0a7cfd7f03ea40ee56bdfbc1. Show its metadata including filename, kind, and mime_type.",
+      "timestamp": "2026-03-19 14:29:06.532000+00:00",
+      "room_id": "!ShPFjmoQkqblLFeZfZ:localhost",
+      "event_id": "$9T5VL3hmbK_y3FAOpKbrXjT8-KEN4xHLeW5X0RyvuV4",
+      "thread_root_id": null,
+      "reply_to_id": null,
+      "is_thread_root": true,
+      "reactions": {},
+      "handle": "m26",
+      "thread_handle": "t73"
+    },
+    {
+      "sender": "@mindroom_coder_tests9:localhost",
+      "content": "Sure! Let me fetch the attachment metadata for that ID right away.Here's the result of fetching the attachment metadata:\n\n---\n\n### \ud83d\udcce Attachment Lookup Result\n\n| Field | Value |\n|-------|-------|\n| **Attachment ID** | `att_0a7cfd7f03ea40ee56bdfbc1` |\n| **Status** | \u274c Error |\n| **Message** | Attachment ID is not available in this context |\n\n---\n\nUnfortunately, the attachment with ID **`att_0a7cfd7f03ea40ee56bdfbc1`** is **not accessible** in the current context. This could be due to one of the following reasons:\n\n1. \ud83d\udd0d **The attachment doesn't exist** \u2014 the ID may be incorrect or mistyped.\n2. \ud83d\udd12 **Context mismatch** \u2014 the attachment may belong to a different room, thread, or session.\n3. \u23f3 **Expired attachment** \u2014 the attachment may no longer be available.\n\nCould you double-check the attachment ID or re-upload the file so I can inspect it properly?\n\ud83d\udd27 `get_attachment` [1] [edited]",
+      "timestamp": "2026-03-19 14:29:06.835000+00:00",
+      "room_id": "!ShPFjmoQkqblLFeZfZ:localhost",
+      "event_id": "$rNg7X3AqxKWHXwdaFmSnUuZYinE1b-9QRzwgCIYM3V8",
+      "thread_root_id": "$9T5VL3hmbK_y3FAOpKbrXjT8-KEN4xHLeW5X0RyvuV4",
+      "reply_to_id": "$9T5VL3hmbK_y3FAOpKbrXjT8-KEN4xHLeW5X0RyvuV4",
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m27",
+      "thread_handle": "t73"
+    },
+    {
+      "sender": "@mindroom_coder_tests9:localhost",
+      "content": "I'll use the attachments tool to inspect the attachment right away!Here's the metadata for the attached file:\n\n---\n\n### \ud83d\udcce Attachment Metadata\n\n| Field | Value |\n|-------|-------|\n| **Attachment ID** | `att_e0cf094ae9552b92b7ca0675` |\n| **Filename** | `test_s9.pdf` |\n| **Kind** | `file` |\n| **MIME Type** | `application/pdf` |\n| **Size** | 316 bytes |\n| **Sender** | `@matty_s9:localhost` |\n| **Created At** | 2026-03-19 14:31:13 UTC |\n| **Status** | \u2705 Available |\n\n---\n\nThe file **`test_s9.pdf`** is a small PDF (316 bytes) and is fully accessible. Would you like me to do anything with it \u2014 such as read its contents or process it further?\n\ud83d\udd27 `get_attachment` [1] [edited]",
+      "timestamp": "2026-03-19 14:31:14.060000+00:00",
+      "room_id": "!ShPFjmoQkqblLFeZfZ:localhost",
+      "event_id": "$ijKYCs8u4DOyjKYxauQb_F39j7fgAhOCKK8UEqXbR5w",
+      "thread_root_id": "$9T5VL3hmbK_y3FAOpKbrXjT8-KEN4xHLeW5X0RyvuV4",
+      "reply_to_id": "$8qrUglqCeAZ5pM0KmqFiYmzh6fQx6HOqkfy1tqDjmd8",
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m28",
+      "thread_handle": "t73"
+    },
+    {
+      "sender": "@matty_s9:localhost",
+      "content": "@mindroom_coder_tests9 Now use the attachments tool to list all attachments available in THIS thread. Show their IDs and metadata.",
+      "timestamp": "2026-03-19 14:31:18.020000+00:00",
+      "room_id": "!ShPFjmoQkqblLFeZfZ:localhost",
+      "event_id": "$kI45M3MBttEpPSJVSKRO69p0UQ_mZ9uYLf-v-cpNZIA",
+      "thread_root_id": "$9T5VL3hmbK_y3FAOpKbrXjT8-KEN4xHLeW5X0RyvuV4",
+      "reply_to_id": null,
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m29",
+      "thread_handle": "t73"
+    },
+    {
+      "sender": "@mindroom_coder_tests9:localhost",
+      "content": "Sure! Let me list all attachments available in this thread right now.Here are the results:\n\n---\n\n### \ud83d\udcce Thread Attachments\n\n| Field | Value |\n|-------|-------|\n| **Status** | \u2705 OK |\n| **Total Attachments Found** | 0 |\n\n---\n\nIt appears there are **no attachments** currently available in this thread. The list came back completely empty.\n\n### \ud83d\udca1 What this means:\n- No files have been shared/attached in this conversation thread that are accessible to me.\n- The previously referenced attachment ID `att_0a7cfd7f03ea40ee56bdfbc1` is also **not present** here, which is consistent with the error from the earlier lookup.\n\n### \ud83d\ude80 To get started, you can:\n1. **Upload a file** directly in this chat \u2014 I'll be able to inspect it once it's attached.\n2. **Share a file path** if it exists on the server and I'll read it directly.\n3. **Paste the content** you'd like me to work with.\n\nLet me know how you'd like to proceed! \ud83d\ude0a\n\ud83d\udd27 `list_attachments` [1] [edited]",
+      "timestamp": "2026-03-19 14:31:18.817000+00:00",
+      "room_id": "!ShPFjmoQkqblLFeZfZ:localhost",
+      "event_id": "$urWFP8Q7MoiDY_WfHAF0chbvoUdhgzFy5b98uMDow4o",
+      "thread_root_id": "$9T5VL3hmbK_y3FAOpKbrXjT8-KEN4xHLeW5X0RyvuV4",
+      "reply_to_id": "$kI45M3MBttEpPSJVSKRO69p0UQ_mZ9uYLf-v-cpNZIA",
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m30",
+      "thread_handle": "t73"
+    }
+  ]
+}

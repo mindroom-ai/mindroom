@@ -1,0 +1,32 @@
+{
+  "chunk": [
+    {
+      "type": "m.room.message",
+      "sender": "@mindroom_router_tests7c:localhost",
+      "content": {
+        "msgtype": "m.text",
+        "body": "No scheduled tasks found.",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "<p>No scheduled tasks found.</p>",
+        "m.relates_to": {
+          "rel_type": "m.thread",
+          "event_id": "$OlVKBjLgLAZMrYYObkAy6MzHTRdsP_LbjGn5DNpXaYM",
+          "is_falling_back": false,
+          "m.in_reply_to": {
+            "event_id": "$OlVKBjLgLAZMrYYObkAy6MzHTRdsP_LbjGn5DNpXaYM"
+          }
+        },
+        "com.mindroom.skip_mentions": true
+      },
+      "room_id": "!ZmJHHMXtvsQYowDgOf:localhost",
+      "origin_server_ts": 1773932045861,
+      "unsigned": {
+        "membership": "join",
+        "age": 13989
+      },
+      "event_id": "$_6_tW6EZhghBzvkH7mMhJaJEXZvia-OkuJR52R8CuIk",
+      "user_id": "@mindroom_router_tests7c:localhost",
+      "age": 13989
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+╭──────────────────────╮
+│ Thread in Multi Room │
+╰──────────────────────╯
+🧵 Thread Start
+07:15 @basnijholt:localhost: @mindroom_beta_test4b:localhost what day is today?
+  ↳ 07:15 @mindroom_beta_test4b:localhost: 
+
+🔧 `schedule` [1]
+
+
+🔧 `schedule` [2]
+The current date is 2026-03-19. 
+  ↳ 07:18 @mindroom_beta_test4b:localhost: ⏰ [Automated Task]
+@mindroom_beta_test4b:localhost current date
+
+_Note: Automated task - no follow-up expected._
+  ↳ 07:18 @mindroom_beta_test4b:localhost: The current date is ... 
+  ↳ 07:20 @mindroom_beta_test4b:localhost: ⏰ [Automated Task]
+
+
+_Note: Automated task - no follow-up expected._
+  ↳ 07:20 @mindroom_beta_test4b:localhost: 
+
+🔧 `schedule` [1]
+
+
+🔧 `schedule` [2]
+
+
+🔧 `schedule` [3] ⏳
+ ⋯. 
+  ↳ 07:21 @mindroom_beta_test4b:localhost: ⏰ [Automated Task]
+Get current date.
+
+_Note: Automated task - no follow-up expected._
+  ↳ 07:21 @mindroom_beta_test4b:localhost: 
+
+🔧 `schedule` [1]
+ ⚠️ Error: Expecting value: line 1 column 1 (char 0) 
+  ↳ 07:22 @mindroom_beta_test4b:localhost: ⏰ [Automated Task]
+Get current date
+
+_Note: Automated task - no follow-up expected._
+  ↳ 07:22 @mindroom_beta_test4b:localhost:  ⚠️ Error: Expecting value: line 1 
+column 1 (char 0) 
+  ↳ 07:22 @mindroom_beta_test4b:localhost: ⏰ [Automated Task]
+User requested the current date.
+
+_Note: Automated task - no follow-up expected._
+  ↳ 07:22 @mindroom_beta_test4b:localhost: Thinking...  ⋯

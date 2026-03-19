@@ -20,7 +20,9 @@ from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
     _execute_scheduled_workflow,
+    _fix_interval_cron,
     _parse_workflow_schedule,
+    _validate_conditional_schedule,
     _WorkflowParseError,
     schedule_task,
 )
@@ -512,3 +514,115 @@ class TestIntegrationWithScheduling:
             assert task_id is not None
             assert "recurring task" in message
             assert "0 9 * * *" in message
+
+
+class TestFixIntervalCron:
+    """Test _fix_interval_cron corrects wrong cron for simple interval patterns."""
+
+    def test_every_2_minutes_corrected(self) -> None:
+        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+        result = _fix_interval_cron("every 2 minutes check status", wrong_cron)
+        assert result.to_cron_string() == "*/2 * * * *"
+
+    def test_every_5_minutes_corrected(self) -> None:
+        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+        result = _fix_interval_cron("every 5 minutes send update", wrong_cron)
+        assert result.to_cron_string() == "*/5 * * * *"
+
+    def test_every_1_minute_uses_star(self) -> None:
+        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+        result = _fix_interval_cron("every 1 minute ping", wrong_cron)
+        assert result.to_cron_string() == "* * * * *"
+
+    def test_every_3_hours_corrected(self) -> None:
+        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+        result = _fix_interval_cron("every 3 hours check servers", wrong_cron)
+        assert result.to_cron_string() == "0 */3 * * *"
+
+    def test_every_1_hour_uses_star(self) -> None:
+        wrong_cron = CronSchedule(minute="30", hour="9", day="*", month="*", weekday="*")
+        result = _fix_interval_cron("every 1 hour run report", wrong_cron)
+        assert result.to_cron_string() == "0 * * * *"
+
+    def test_correct_cron_not_modified(self) -> None:
+        correct_cron = CronSchedule(minute="*/5", hour="*", day="*", month="*", weekday="*")
+        result = _fix_interval_cron("every 5 minutes check", correct_cron)
+        assert result is correct_cron  # same object, not replaced
+
+    def test_no_interval_pattern_returns_unchanged(self) -> None:
+        cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+        result = _fix_interval_cron("daily at 9am send report", cron)
+        assert result is cron
+
+    def test_abbreviated_units(self) -> None:
+        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+        assert _fix_interval_cron("every 10 mins check", wrong_cron).to_cron_string() == "*/10 * * * *"
+        assert _fix_interval_cron("every 2 hrs run", wrong_cron).to_cron_string() == "0 */2 * * *"
+
+    def test_case_insensitive(self) -> None:
+        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+        result = _fix_interval_cron("Every 5 Minutes check status", wrong_cron)
+        assert result.to_cron_string() == "*/5 * * * *"
+
+    def test_plural_and_singular(self) -> None:
+        wrong_cron = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+        assert _fix_interval_cron("every 2 minute check", wrong_cron).to_cron_string() == "*/2 * * * *"
+        assert _fix_interval_cron("every 2 minutes check", wrong_cron).to_cron_string() == "*/2 * * * *"
+
+
+class TestValidateConditionalSchedule:
+    """Test _validate_conditional_schedule rejects lost conditionals."""
+
+    def _workflow(self, message: str) -> ScheduledWorkflow:
+        return ScheduledWorkflow(
+            schedule_type="cron",
+            cron_schedule=CronSchedule(minute="0", hour="9"),
+            message=message,
+            description="test",
+        )
+
+    def test_conditional_with_empty_message_returns_error(self) -> None:
+        result = _validate_conditional_schedule(
+            "if someone mentions urgent then notify the team",
+            self._workflow(""),
+        )
+        assert isinstance(result, _WorkflowParseError)
+        assert "condition text was not preserved" in result.error
+
+    def test_conditional_with_whitespace_message_returns_error(self) -> None:
+        result = _validate_conditional_schedule(
+            "when server load spikes alert ops",
+            self._workflow("   "),
+        )
+        assert isinstance(result, _WorkflowParseError)
+
+    def test_conditional_with_message_passes(self) -> None:
+        result = _validate_conditional_schedule(
+            "if CPU > 80% then @ops scale up",
+            self._workflow("@ops Check CPU usage. If above 80%, scale up."),
+        )
+        assert result is None
+
+    def test_non_conditional_with_empty_message_passes(self) -> None:
+        result = _validate_conditional_schedule(
+            "every 5 minutes check status",
+            self._workflow(""),
+        )
+        assert result is None
+
+    def test_when_pattern_detected(self) -> None:
+        result = _validate_conditional_schedule("when Bitcoin drops below 40k alert me", self._workflow(""))
+        assert isinstance(result, _WorkflowParseError)
+
+    def test_whenever_pattern_detected(self) -> None:
+        result = _validate_conditional_schedule("whenever I get email from boss notify me", self._workflow(""))
+        assert isinstance(result, _WorkflowParseError)
+
+    def test_once_happens_pattern_detected(self) -> None:
+        result = _validate_conditional_schedule("once deployment happens run smoke tests", self._workflow(""))
+        assert isinstance(result, _WorkflowParseError)
+
+    def test_suggestion_includes_rephrasing_hint(self) -> None:
+        result = _validate_conditional_schedule("if server down then restart", self._workflow(""))
+        assert isinstance(result, _WorkflowParseError)
+        assert "rephrasing" in result.suggestion.lower()

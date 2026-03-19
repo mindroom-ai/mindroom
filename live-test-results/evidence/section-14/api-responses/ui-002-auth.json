@@ -1,0 +1,8 @@
+{
+  "auth_mode": "none",
+  "root_no_auth": "200",
+  "health_no_auth": "200",
+  "config_load_no_auth": "200",
+  "agents_no_auth": "200",
+  "login_page": "{"detail":"Not found"}"
+}

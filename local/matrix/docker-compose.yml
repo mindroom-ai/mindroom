@@ -38,7 +38,7 @@ services:
       - synapse_media:/data/media_store
     entrypoint: /data/entrypoint.sh
     ports:
-      - "8008:8008"
+      - "8108:8008"
     depends_on:
       postgres:
         condition: service_healthy

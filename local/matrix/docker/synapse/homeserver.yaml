@@ -157,3 +157,10 @@ form_secret: "mindroom_form_secret_change_in_production"
 # Minimal configuration - no email, no TURN, no metrics
 report_stats: false
 enable_metrics: false
+
+# Allow any room member to publish rooms to the directory
+room_list_publication_rules:
+  - user_id: "*"
+    alias: "*"
+    room_id: "*"
+    action: allow

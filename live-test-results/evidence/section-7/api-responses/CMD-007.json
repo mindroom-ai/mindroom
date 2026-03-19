@@ -1,0 +1,73 @@
+{
+  "chunk": [
+    {
+      "type": "m.room.message",
+      "sender": "@mindroom_router_tests7c:localhost",
+      "content": {
+        "msgtype": "m.text",
+        "body": "## What is MindRoom?\n\n**MindRoom** is an **AI agent orchestration system with Matrix integration** \u2014 in short, it lets you run AI agents that live in [Matrix](https://matrix.org) chat rooms and can collaborate with each other to get things done.\n\n---\n\n### \ud83e\udde0 Core Concept\n\n> *\"AI agents that live in Matrix and work everywhere via bridges.\"*\n\nMindRoom connects AI agents (powered by LLMs like GPT, Claude, etc.) to Matrix rooms. From there, agents can be bridged to Discord, Slack, Telegram, and other platforms.\n\n---\n\n### \u2728 Key Features\n\n| Feature | Description |\n|---|---|\n| **Multi-agent collaboration** | Configure specialized agents that work together in teams |\n| **Matrix-native** | Agents live in Matrix rooms and respond to messages |\n| **Persistent memory** | Agent & team-scoped memory across conversations |\n| **100+ tool integrations** | GitHub, Slack, Gmail, Calendar, and more |\n| **Router** | Built-in traffic director routes messages to the right agent |\n| **Skills** | OpenClaw-compatible skills system for extended capabilities |\n| **Knowledge Bases** | File-backed RAG indexing for document search |\n| **Scheduling** | Schedule tasks via cron or natural language |\n| **Voice & Image support** | Speech-to-text + image analysis with vision models |\n| **Authorization** | Fine-grained access control per user and room |\n| **Hot Reload** | Config changes auto-restart agents without downtime |\n| **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |\n\n---\n\n### \ud83c\udfd7\ufe0f Architecture\n\n```\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 Matrix Homeserver \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n                       \u2502\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u25bc\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502              MultiAgentOrchestrator                              \u2502\n\u2502  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510 \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510 \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510 \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510               \u2502\n\u2502  \u2502 Router  \u2502 \u2502 Agent 1 \u2502 \u2502 Agent 2 \u2502 \u2502  Team   \u2502               \u2502\n\u2502  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518 \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518 \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518 \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518               \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n```\n\n- **Matrix Homeserver** is the communication backbone\n- **MultiAgentOrchestrator** manages all agents and routes messages\n- **Agents** are single-specialty actors with specific tools and instructions\n- **Teams** are collaborative bundles of agents (in *coordinate* or *collaborate* modes)\n- **Router** decides which agent handles each message\n\n---\n\n### \ud83d\ude80 Quick Start\n\nThe easiest way to get started is with the full Docker Compose stack:\n\n```bash\ngit clone https://github.com/mindroom-ai/mindroom-stack\ncd mindroom-stack\ncp .env.example .env\n# Add at least one AI provider key (e.g. OPENAI_API_KEY)\ndocker compose up -d\n```\n\nThen open:\n- **MindRoom UI**: http://localhost:8765\n- **Chat client**: http://localhost:8080\n- **Matrix homeserver**: http://localhost:8008\n\n---\n\n### \ud83d\udcc4 Reference\n\n*Answer based on:* `page__index.md`\n\ud83d\udd27 `get_skill_instructions` [1]\n\n\ud83d\udd27 `get_skill_reference` [2]",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "<h2>What is MindRoom?</h2>\n<p><strong>MindRoom</strong> is an <strong>AI agent orchestration system with Matrix integration</strong> \u2014 in short, it lets you run AI agents that live in <a href=\"https://matrix.org\">Matrix</a> chat rooms and can collaborate with each other to get things done.</p>\n<hr />\n<h3>\ud83e\udde0 Core Concept</h3>\n<blockquote>\n<p><em>\"AI agents that live in Matrix and work everywhere via bridges.\"</em></p>\n</blockquote>\n<p>MindRoom connects AI agents (powered by LLMs like GPT, Claude, etc.) to Matrix rooms. From there, agents can be bridged to Discord, Slack, Telegram, and other platforms.</p>\n<hr />\n<h3>\u2728 Key Features</h3>\n<table>\n<thead>\n<tr>\n<th>Feature</th>\n<th>Description</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td><strong>Multi-agent collaboration</strong></td>\n<td>Configure specialized agents that work together in teams</td>\n</tr>\n<tr>\n<td><strong>Matrix-native</strong></td>\n<td>Agents live in Matrix rooms and respond to messages</td>\n</tr>\n<tr>\n<td><strong>Persistent memory</strong></td>\n<td>Agent &amp; team-scoped memory across conversations</td>\n</tr>\n<tr>\n<td><strong>100+ tool integrations</strong></td>\n<td>GitHub, Slack, Gmail, Calendar, and more</td>\n</tr>\n<tr>\n<td><strong>Router</strong></td>\n<td>Built-in traffic director routes messages to the right agent</td>\n</tr>\n<tr>\n<td><strong>Skills</strong></td>\n<td>OpenClaw-compatible skills system for extended capabilities</td>\n</tr>\n<tr>\n<td><strong>Knowledge Bases</strong></td>\n<td>File-backed RAG indexing for document search</td>\n</tr>\n<tr>\n<td><strong>Scheduling</strong></td>\n<td>Schedule tasks via cron or natural language</td>\n</tr>\n<tr>\n<td><strong>Voice &amp; Image support</strong></td>\n<td>Speech-to-text + image analysis with vision models</td>\n</tr>\n<tr>\n<td><strong>Authorization</strong></td>\n<td>Fine-grained access control per user and room</td>\n</tr>\n<tr>\n<td><strong>Hot Reload</strong></td>\n<td>Config changes auto-restart agents without downtime</td>\n</tr>\n<tr>\n<td><strong>OpenAI-Compatible API</strong></td>\n<td>Use agents from LibreChat, Open WebUI, or any OpenAI client</td>\n</tr>\n</tbody>\n</table>\n<hr />\n<h3>\ud83c\udfd7\ufe0f Architecture</h3>\n<div class=\"codehilite\" style=\"background: #f8f8f8\"><pre style=\"line-height: 125%;\"><span></span><code>\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 Matrix Homeserver \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n                       \u2502\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u25bc\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502              MultiAgentOrchestrator                              \u2502\n\u2502  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510 \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510 \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510 \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510               \u2502\n\u2502  \u2502 Router  \u2502 \u2502 Agent 1 \u2502 \u2502 Agent 2 \u2502 \u2502  Team   \u2502               \u2502\n\u2502  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518 \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518 \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518 \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518               \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n</code></pre></div>\n\n<ul>\n<li><strong>Matrix Homeserver</strong> is the communication backbone</li>\n<li><strong>MultiAgentOrchestrator</strong> manages all agents and routes messages</li>\n<li><strong>Agents</strong> are single-specialty actors with specific tools and instructions</li>\n<li><strong>Teams</strong> are collaborative bundles of agents (in <em>coordinate</em> or <em>collaborate</em> modes)</li>\n<li><strong>Router</strong> decides which agent handles each message</li>\n</ul>\n<hr />\n<h3>\ud83d\ude80 Quick Start</h3>\n<p>The easiest way to get started is with the full Docker Compose stack:</p>\n<div class=\"codehilite\" style=\"background: #f8f8f8\"><pre style=\"line-height: 125%;\"><span></span><code>git<span style=\"color: #BBB\"> </span>clone<span style=\"color: #BBB\"> </span>https://github.com/mindroom-ai/mindroom-stack\n<span style=\"color: #008000\">cd</span><span style=\"color: #BBB\"> </span>mindroom-stack\ncp<span style=\"color: #BBB\"> </span>.env.example<span style=\"color: #BBB\"> </span>.env\n<span style=\"color: #3D7B7B; font-style: italic\"># Add at least one AI provider key (e.g. OPENAI_API_KEY)</span>\ndocker<span style=\"color: #BBB\"> </span>compose<span style=\"color: #BBB\"> </span>up<span style=\"color: #BBB\"> </span>-d\n</code></pre></div>\n\n<p>Then open:<br />\n- <strong>MindRoom UI</strong>: http://localhost:8765<br />\n- <strong>Chat client</strong>: http://localhost:8080<br />\n- <strong>Matrix homeserver</strong>: http://localhost:8008</p>\n<hr />\n<h3>\ud83d\udcc4 Reference</h3>\n<p><em>Answer based on:</em> <code>page__index.md</code><br />\n\ud83d\udd27 <code>get_skill_instructions</code> [1]</p>\n<p>\ud83d\udd27 <code>get_skill_reference</code> [2]</p>",
+        "m.relates_to": {
+          "rel_type": "m.thread",
+          "event_id": "$0e_L-uzxrnjoZy7ELOTuIGmNalxmxL19SbZmnIz4Rfo",
+          "is_falling_back": false,
+          "m.in_reply_to": {
+            "event_id": "$0e_L-uzxrnjoZy7ELOTuIGmNalxmxL19SbZmnIz4Rfo"
+          }
+        },
+        "io.mindroom.tool_trace": {
+          "version": 2,
+          "events": [
+            {
+              "type": "tool_call_completed",
+              "tool_name": "get_skill_instructions",
+              "args_preview": "skill_name=mindroom-docs",
+              "result_preview": "{\"skill_name\": \"mindroom-docs\", \"description\": \"MindRoom documentation corpus for accurate product, configuration, and workflow guidance.\", \"instructions\": \"# MindRoom Docs\\n\\nUse this skill when the user asks how MindRoom works, how to configure it, or which commands/workflows to follow.\\n\\n## Inputs\\n\\n- If invoked via `!skill mindroom-docs ...`, treat the command arguments as the user question.\\n- If used implicitly, use the current conversation request.\\n\\n## Workflow\\n\\n1. Load `reference-\u2026",
+              "truncated": true
+            },
+            {
+              "type": "tool_call_completed",
+              "tool_name": "get_skill_reference",
+              "args_preview": "skill_name=mindroom-docs, reference_path=page__index.md",
+              "result_preview": "{\"skill_name\": \"mindroom-docs\", \"reference_path\": \"page__index.md\", \"content\": \"# MindRoom\\n\\nAI agents that live in Matrix and work everywhere via bridges.\\n\\n## What is MindRoom?\\n\\nMindRoom is an AI agent orchestration system with Matrix integration. It provides:\\n\\n- **Multi-agent collaboration** - Configure multiple specialized agents that can work together\\n- **Matrix-native** - Agents live in Matrix rooms and respond to messages\\n- **Persistent memory** - Agent and team-scoped memory tha\u2026",
+              "truncated": true
+            }
+          ],
+          "content_truncated": true
+        },
+        "io.mindroom.ai_run": {
+          "version": 1,
+          "run_id": "1d43695b-2def-428e-a3bf-88d2c0ff79bb",
+          "session_id": "!NkTFNBZIxBziYjvNbP:localhost:$0e_L-uzxrnjoZy7ELOTuIGmNalxmxL19SbZmnIz4Rfo",
+          "status": "completed",
+          "model": {
+            "config": "default",
+            "id": "claude-sonnet-4-6",
+            "provider": "OpenAI"
+          },
+          "usage": {
+            "input_tokens": 18751,
+            "output_tokens": 998,
+            "total_tokens": 19749,
+            "time_to_first_token": "4.21947379201",
+            "duration": "19.368715197"
+          },
+          "tools": {
+            "count": 2
+          }
+        },
+        "com.mindroom.skip_mentions": true
+      },
+      "room_id": "!NkTFNBZIxBziYjvNbP:localhost",
+      "origin_server_ts": 1773932115552,
+      "unsigned": {
+        "membership": "join",
+        "age": 8147
+      },
+      "event_id": "$HM9VW0b5hSBYDDqeBe25G0v0HkhXMWrGuvJLv2-18XU",
+      "user_id": "@mindroom_router_tests7c:localhost",
+      "age": 8147
+    }
+  ]
+}

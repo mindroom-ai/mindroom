@@ -1,5 +1,6 @@
 import { useConfigStore } from '@/store/configStore';
 import { Home, Bot, Brain } from 'lucide-react';
+import { pluralize } from '@/lib/utils';
 import { ListPanel, ListItem } from '@/components/shared/ListPanel';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
 
@@ -26,7 +27,7 @@ export function RoomList() {
   const renderRoom = (room: RoomListItem, isSelected: boolean) => {
     const badges: ItemCardBadge[] = [
       {
-        content: `${room.agents.length} agents`,
+        content: pluralize(room.agents.length, 'agent'),
         variant: 'secondary' as const,
         icon: Bot,
       },

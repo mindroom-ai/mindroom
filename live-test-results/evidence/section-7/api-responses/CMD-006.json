@@ -1,0 +1,20 @@
+{
+  "test": "CMD-006",
+  "description": "Restart runtime while config confirmation pending",
+  "pre_restart": {
+    "pending_change_registered": "agents.general.display_name -> TestAgent7",
+    "event_id": "$P2cKZ3Kl0X5ZL7x8ypuky11l98UNw2KuJcM0_Y3rhWM",
+    "stored_in_matrix_state": true
+  },
+  "post_restart": {
+    "restored_count": 1,
+    "expired_count": 0,
+    "restored_path": "agents.general.display_name",
+    "restored_requester": "@test_user_s7c:localhost"
+  },
+  "log_evidence": [
+    "Restored pending config change config_path=agents.general.display_name",
+    "Completed restoration of pending config changes expired=0 restored=1",
+    "Restored 1 pending config changes in room"
+  ]
+}

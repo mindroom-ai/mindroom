@@ -51,7 +51,7 @@ describe('RoomList', () => {
     render(<RoomList />);
 
     expect(screen.getByText('2 agents')).toBeInTheDocument();
-    expect(screen.getByText('1 agents')).toBeInTheDocument();
+    expect(screen.getByText('1 agent')).toBeInTheDocument();
   });
 
   it('displays room model when present', () => {

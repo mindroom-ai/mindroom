@@ -1,0 +1,1 @@
+{"detail":[{"type":"missing","loc":["agents","bad_agent","display_name"],"msg":"Field required","input":{"model":"nonexistent_model_xyz"},"url":"https://errors.pydantic.dev/2.12/v/missing"}]}

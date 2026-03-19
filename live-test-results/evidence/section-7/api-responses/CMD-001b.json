@@ -1,0 +1,37 @@
+{
+  "chunk": [
+    {
+      "type": "m.room.message",
+      "sender": "@mindroom_router_tests7c:localhost",
+      "content": {
+        "msgtype": "m.text",
+        "body": "**Schedule Command**\n\nUsage: `!schedule <time> <message>` - Schedule tasks, reminders, or agent workflows\n\n**Simple Reminders:**\n- `!schedule in 5 minutes Check the deployment`\n- `!schedule tomorrow at 3pm Send the weekly report`\n- `!schedule later Ping me about the meeting`\n- `ping me tomorrow about the meeting`\n- `remind me in 2 hours to review PRs`\n\n**Event-Driven Workflows (New!):**\n- `!schedule If I get an email about \"urgent\", @phone_agent call me`\n- `!schedule When Bitcoin drops below $40k, @crypto_agent notify me`\n- `!schedule If server CPU > 80%, @ops_agent scale up`\n- `!schedule When someone mentions our product on Reddit, @mindroom_analyst_tests7c:localhost summarize it`\n- `!schedule Whenever I get email from boss, @notification_agent alert me immediately`\n\n**Agent Workflows:**\n- `!schedule Daily at 9am, @finance give me a market analysis`\n- `!schedule Every Monday, @research AI news and @email_assistant send me a summary`\n- `!schedule tomorrow at 2pm, @email_assistant check my Gmail`\n\n**Recurring Tasks (Cron-style):**\n- `!schedule Every hour, @shell check server status`\n- `!schedule Daily at 9am, @finance market report`\n- `!schedule Weekly on Friday, @mindroom_analyst_tests7c:localhost prepare weekly summary`\n\nHow it works:\n- **Time-based**: Executes at specific times or intervals\n- **Event-based**: Automatically converts to smart polling (e.g., \"if email\" \u2192 check every 1-2 min)\n- Agents receive clear instructions about conditions to check\n- Multiple agents collaborate when mentioned together\n- Automated tasks are clearly marked so agents don't wait for follow-up",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "<p><strong>Schedule Command</strong></p>\n<p>Usage: <code>!schedule &lt;time&gt; &lt;message&gt;</code> - Schedule tasks, reminders, or agent workflows</p>\n<p><strong>Simple Reminders:</strong><br />\n- <code>!schedule in 5 minutes Check the deployment</code><br />\n- <code>!schedule tomorrow at 3pm Send the weekly report</code><br />\n- <code>!schedule later Ping me about the meeting</code><br />\n- <code>ping me tomorrow about the meeting</code><br />\n- <code>remind me in 2 hours to review PRs</code></p>\n<p><strong>Event-Driven Workflows (New!):</strong><br />\n- <code>!schedule If I get an email about \"urgent\", @phone_agent call me</code><br />\n- <code>!schedule When Bitcoin drops below $40k, @crypto_agent notify me</code><br />\n- <code>!schedule If server CPU &gt; 80%, @ops_agent scale up</code><br />\n- <code>!schedule When someone mentions our product on Reddit, [@AnalystAgent](https://matrix.to/#/@mindroom_analyst_tests7c:localhost) summarize it</code><br />\n- <code>!schedule Whenever I get email from boss, @notification_agent alert me immediately</code></p>\n<p><strong>Agent Workflows:</strong><br />\n- <code>!schedule Daily at 9am, @finance give me a market analysis</code><br />\n- <code>!schedule Every Monday, @research AI news and @email_assistant send me a summary</code><br />\n- <code>!schedule tomorrow at 2pm, @email_assistant check my Gmail</code></p>\n<p><strong>Recurring Tasks (Cron-style):</strong><br />\n- <code>!schedule Every hour, @shell check server status</code><br />\n- <code>!schedule Daily at 9am, @finance market report</code><br />\n- <code>!schedule Weekly on Friday, [@AnalystAgent](https://matrix.to/#/@mindroom_analyst_tests7c:localhost) prepare weekly summary</code></p>\n<p>How it works:<br />\n- <strong>Time-based</strong>: Executes at specific times or intervals<br />\n- <strong>Event-based</strong>: Automatically converts to smart polling (e.g., \"if email\" \u2192 check every 1-2 min)<br />\n- Agents receive clear instructions about conditions to check<br />\n- Multiple agents collaborate when mentioned together<br />\n- Automated tasks are clearly marked so agents don't wait for follow-up</p>",
+        "m.mentions": {
+          "user_ids": [
+            "@mindroom_analyst_tests7c:localhost"
+          ]
+        },
+        "m.relates_to": {
+          "rel_type": "m.thread",
+          "event_id": "$jEJy0WdAzzJ7_xeb64XCha1VzNxKXtb6imSoQUg3QYs",
+          "is_falling_back": false,
+          "m.in_reply_to": {
+            "event_id": "$jEJy0WdAzzJ7_xeb64XCha1VzNxKXtb6imSoQUg3QYs"
+          }
+        },
+        "com.mindroom.skip_mentions": true
+      },
+      "room_id": "!ZmJHHMXtvsQYowDgOf:localhost",
+      "origin_server_ts": 1773931967697,
+      "unsigned": {
+        "membership": "join",
+        "age": 14960
+      },
+      "event_id": "$Lf2SXeBvbWfmcZrXbVTiGhPzV49V_I-KtPzQ-ldgVPY",
+      "user_id": "@mindroom_router_tests7c:localhost",
+      "age": 14960
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+Before edit:
+  desc: A user-created test skill for live testing.
+
+API PUT /api/skills/test-user-skill returned: {"success":true}
+
+After edit:
+  desc: Updated test skill for cache invalidation testing.

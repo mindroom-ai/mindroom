@@ -1,0 +1,23 @@
+{
+  "root_status": "200",
+  "css_status": "200",
+  "js_status": "200",
+  "favicon_status": "200",
+  "spa_routes": {
+    "overview": "200",
+    "teams": "200",
+    "external-rooms": "200",
+    "rooms": "200",
+    "knowledge": "200",
+    "agents": "200",
+    "voice": "200",
+    "skills": "200",
+    "schedules": "200",
+    "memory": "200",
+    "credentials": "200",
+    "models": "200",
+    "cultures": "200",
+    "tools": "200"
+  },
+  "root_content_preview": "<!doctype html>"
+}

@@ -122,18 +122,30 @@ async def _configure_managed_room_access(
         context=context,
     )
 
-    join_rule_updated = await ensure_room_join_rule(client, room_id, target_join_rule)
-    directory_visibility_updated = await ensure_room_directory_visibility(client, room_id, target_directory_visibility)
-    if join_rule_updated and directory_visibility_updated:
+    join_rule_ok = await ensure_room_join_rule(client, room_id, target_join_rule)
+    visibility_ok = await ensure_room_directory_visibility(client, room_id, target_directory_visibility)
+    if join_rule_ok and visibility_ok:
         return True
 
-    logger.warning(
-        "Managed room access policy was only partially applied",
+    failed = []
+    if not join_rule_ok:
+        failed.append(f"join_rule → {target_join_rule}")
+    if not visibility_ok:
+        failed.append(f"directory_visibility → {target_directory_visibility}")
+
+    logger.error(
+        "Managed room access policy failed to fully apply",
         room_key=room_key,
         room_id=room_id,
-        join_rule_success=join_rule_updated,
-        directory_visibility_success=directory_visibility_updated,
+        failed_components=failed,
+        join_rule_success=join_rule_ok,
+        directory_visibility_success=visibility_ok,
         context=context,
+        hint=(
+            "Check earlier log warnings for the specific Matrix API error. "
+            "Common causes: insufficient power level in the room, or server-level "
+            "room_list_publication_rules restricting directory visibility changes."
+        ),
     )
     return False
 

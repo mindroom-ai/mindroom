@@ -1,0 +1,70 @@
+{
+  "room": "Lobby",
+  "messages": [
+    {
+      "sender": "@mindroom_router_tests9:localhost",
+      "content": "\ud83c\udfa4 [Attached voice message]",
+      "timestamp": "2026-03-19 14:46:01.912000+00:00",
+      "room_id": "!nkVnHILopqsqcWFIVd:localhost",
+      "event_id": "$ZDyvr-CpOkIWLY7caMgbI7FsvGDNAvFRDdhLsAqaR6Q",
+      "thread_root_id": "$WqzbYsg9cz23WnooNHYEEzzXju7Of4NrYiJCFDuum-4",
+      "reply_to_id": "$WqzbYsg9cz23WnooNHYEEzzXju7Of4NrYiJCFDuum-4",
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m14",
+      "thread_handle": "t89"
+    },
+    {
+      "sender": "@mindroom_router_tests9:localhost",
+      "content": "@mindroom_general_tests9:localhost could you help with this?",
+      "timestamp": "2026-03-19 14:46:06.481000+00:00",
+      "room_id": "!nkVnHILopqsqcWFIVd:localhost",
+      "event_id": "$x14gS3lEh6OHNnttuDZQKK-jRObQ4GAXzohg4m0xglM",
+      "thread_root_id": "$WqzbYsg9cz23WnooNHYEEzzXju7Of4NrYiJCFDuum-4",
+      "reply_to_id": "$WqzbYsg9cz23WnooNHYEEzzXju7Of4NrYiJCFDuum-4",
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m15",
+      "thread_handle": "t89"
+    },
+    {
+      "sender": "@mindroom_general_tests9:localhost",
+      "content": "I'd be happy to help with your voice message! However, I don't currently have the ability to play back or transcribe audio attachments directly.\n\nCould you let me know what you need help with? You can:\n\n1. **Type out your question or request** \u2014 I'm ready to assist with whatever you have in mind!\n2. **Describe the topic** \u2014 even a brief summary will help me point you in the right direction.\n\nWhat's on your mind? \ud83d\ude0a [edited]",
+      "timestamp": "2026-03-19 14:46:11.677000+00:00",
+      "room_id": "!nkVnHILopqsqcWFIVd:localhost",
+      "event_id": "$Fo91rT1WfRL4VIg31sGMqx1iKQQNHmoMeGm4f9mb3is",
+      "thread_root_id": "$WqzbYsg9cz23WnooNHYEEzzXju7Of4NrYiJCFDuum-4",
+      "reply_to_id": "$x14gS3lEh6OHNnttuDZQKK-jRObQ4GAXzohg4m0xglM",
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m16",
+      "thread_handle": "t89"
+    },
+    {
+      "sender": "@mindroom_router_tests9:localhost",
+      "content": "@mindroom_general_tests9:localhost could you help with this?",
+      "timestamp": "2026-03-19 14:47:30.305000+00:00",
+      "room_id": "!nkVnHILopqsqcWFIVd:localhost",
+      "event_id": "$-X-3yZVcYJgdeP5aM5j3ujMqpiMuP-p9_8JxO3jwETA",
+      "thread_root_id": "$Ojxl55ZuomKLzAtjMFzrYrk3TFUqIXzLqYR_OtVVu5Q",
+      "reply_to_id": "$Ojxl55ZuomKLzAtjMFzrYrk3TFUqIXzLqYR_OtVVu5Q",
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m17",
+      "thread_handle": "t90"
+    },
+    {
+      "sender": "@mindroom_general_tests9:localhost",
+      "content": "I'd be happy to help! It looks like there's an attachment included with your message (ID: `att_761aa6882356787c877d308e`), but I don't currently have a tool available to inspect or open attachments directly.\n\nCould you tell me more about what you need help with? For example:\n\n- **What is the attachment?** (a document, image, code file, etc.)\n- **What would you like me to do with it?** (summarize, analyze, answer questions, etc.)\n- **Is there any additional context** I should know about?\n\nFeel free to paste the content directly into the chat if that's easier, and I'll do my best to assist! \ud83d\ude0a [edited]",
+      "timestamp": "2026-03-19 14:47:31.589000+00:00",
+      "room_id": "!nkVnHILopqsqcWFIVd:localhost",
+      "event_id": "$oTmamX_7drtnydISJTdiC-PDECw851yJ4b59TK465Oc",
+      "thread_root_id": "$Ojxl55ZuomKLzAtjMFzrYrk3TFUqIXzLqYR_OtVVu5Q",
+      "reply_to_id": "$-X-3yZVcYJgdeP5aM5j3ujMqpiMuP-p9_8JxO3jwETA",
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m18",
+      "thread_handle": "t90"
+    }
+  ]
+}

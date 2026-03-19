@@ -5,9 +5,11 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
 import { NetworkGraph } from './NetworkGraph';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
 import { sharedStyles } from '@/components/shared/styles';
+import { pluralize } from '@/lib/utils';
 import { FilterSelector } from '@/components/shared/FilterSelector';
 import {
   Bot,
@@ -21,6 +23,75 @@ import {
   Mic,
   MicOff,
 } from 'lucide-react';
+
+function DashboardSkeleton() {
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
+        <div>
+          <Skeleton className="h-7 w-48 mb-2" />
+          <Skeleton className="h-4 w-72" />
+        </div>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 sm:gap-4">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <Card key={i}>
+            <CardHeader className="pb-2">
+              <div className="flex items-center gap-3">
+                <Skeleton className="h-9 w-9 rounded-lg" />
+                <div>
+                  <Skeleton className="h-7 w-10 mb-1" />
+                  <Skeleton className="h-3 w-16" />
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <Skeleton className="h-3 w-24" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <div className="col-span-1 lg:col-span-4">
+          <Card>
+            <CardHeader>
+              <Skeleton className="h-6 w-24" />
+              <Skeleton className="h-4 w-40 mt-1" />
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-20 w-full rounded-lg" />
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+        <div className="col-span-1 lg:col-span-5">
+          <Card>
+            <CardHeader>
+              <Skeleton className="h-6 w-32" />
+              <Skeleton className="h-4 w-44 mt-1" />
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-20 w-full rounded-lg" />
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+        <div className="col-span-1 lg:col-span-3">
+          <Card>
+            <CardHeader>
+              <Skeleton className="h-6 w-20" />
+            </CardHeader>
+            <CardContent>
+              <Skeleton className="h-4 w-full mt-8" />
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function Dashboard() {
   const { agents, rooms, teams, config, selectedRoomId, selectedAgentId, selectRoom, selectAgent } =
@@ -127,6 +198,11 @@ export function Dashboard() {
         : [],
     };
   }, [agents, rooms, teams, searchTerm, showTypes]);
+
+  // Show skeleton while initial config is loading
+  if (!config) {
+    return <DashboardSkeleton />;
+  }
 
   // Get selected room details
   const selectedRoom = selectedRoomId ? rooms.find(r => r.id === selectedRoomId) : null;
@@ -449,7 +525,7 @@ export function Dashboard() {
 
                     if (agentTeams.length > 0) {
                       badges.push({
-                        content: `${agentTeams.length} team${agentTeams.length === 1 ? '' : 's'}`,
+                        content: pluralize(agentTeams.length, 'team'),
                         variant: 'secondary' as const,
                         icon: Users,
                       });
@@ -460,9 +536,7 @@ export function Dashboard() {
                         key={agent.id}
                         id={agent.id}
                         title={agent.display_name}
-                        description={`Model: ${agent.model || 'Default'} • ${
-                          agent.rooms.length
-                        } rooms • ${agent.tools.length} tools`}
+                        description={`Model: ${agent.model || 'Default'} • ${pluralize(agent.rooms.length, 'room')} • ${pluralize(agent.tools.length, 'tool')}`}
                         isSelected={selectedAgentId === agent.id}
                         onClick={id => {
                           selectAgent(id);
@@ -521,7 +595,7 @@ export function Dashboard() {
                   {filteredData.rooms.map(room => {
                     const badges: ItemCardBadge[] = [
                       {
-                        content: `${room.agents.length} agents`,
+                        content: pluralize(room.agents.length, 'agent'),
                         variant: 'outline' as const,
                         icon: Bot,
                       },
@@ -537,7 +611,7 @@ export function Dashboard() {
                     const roomTeams = teams.filter(team => team.rooms.includes(room.id));
                     if (roomTeams.length > 0) {
                       badges.push({
-                        content: `${roomTeams.length} teams`,
+                        content: pluralize(roomTeams.length, 'team'),
                         variant: 'outline' as const,
                         icon: Users,
                       });
@@ -550,8 +624,8 @@ export function Dashboard() {
                         title={room.display_name}
                         description={
                           room.model
-                            ? `Model: ${room.model} • ${room.agents.length} agents`
-                            : `${room.agents.length} agents`
+                            ? `Model: ${room.model} • ${pluralize(room.agents.length, 'agent')}`
+                            : pluralize(room.agents.length, 'agent')
                         }
                         isSelected={selectedRoomId === room.id}
                         onClick={id => {
@@ -649,7 +723,7 @@ export function Dashboard() {
                             <span>{agent.display_name}</span>
                             <div className="flex items-center gap-2">
                               <Badge variant="outline" className="text-xs">
-                                {agent.tools.length} tools
+                                {pluralize(agent.tools.length, 'tool')}
                               </Badge>
                               <div
                                 className={`w-2 h-2 rounded-full ${getStatusColor(
@@ -679,7 +753,7 @@ export function Dashboard() {
                                 <Users className="w-4 h-4" /> {team.display_name}
                               </div>
                               <div className="text-xs text-amber-700 dark:text-amber-300">
-                                {team.mode} mode • {team.agents.length} members
+                                {team.mode} mode • {pluralize(team.agents.length, 'member')}
                               </div>
                             </div>
                           ))}

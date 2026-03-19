@@ -1,0 +1,1 @@
+{"id":"chatcmpl-d006f3ff3a4d","object":"chat.completion","created":1773908412,"model":"general","choices":[{"index":0,"message":{"role":"assistant","content":"The magic word you told me is \"butterfly\"."},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"system_fingerprint":null}

@@ -1,0 +1,66 @@
+{
+  "room": "Teamroom",
+  "thread_id": "t68",
+  "messages": [
+    {
+      "sender": "@tester_s6:localhost",
+      "content": "@mindroom_general_tsec6 @mindroom_private_agent_tsec6 What is Python?",
+      "timestamp": "2026-03-19 08:11:47.296000+00:00",
+      "room_id": "!MiDyMlLRVZoeWePJEL:localhost",
+      "event_id": "$TWVPt634gyPte9m5bU2HfvysMKdiFJYSW1hc8R3TkDg",
+      "thread_root_id": null,
+      "reply_to_id": null,
+      "is_thread_root": true,
+      "reactions": {},
+      "handle": "m2",
+      "thread_handle": "t68"
+    },
+    {
+      "sender": "@mindroom_general_tsec6:localhost",
+      "content": "\n\n\ud83d\udd27 `schedule` [1]\nI \u22ef.. [edited]",
+      "timestamp": "2026-03-19 08:11:47.538000+00:00",
+      "room_id": "!MiDyMlLRVZoeWePJEL:localhost",
+      "event_id": "$ppn5vLoDSDCKBiUYLf-0BlJrHQcSY8qa__U5GXvA0Js",
+      "thread_root_id": "$TWVPt634gyPte9m5bU2HfvysMKdiFJYSW1hc8R3TkDg",
+      "reply_to_id": "$TWVPt634gyPte9m5bU2HfvysMKdiFJYSW1hc8R3TkDg",
+      "is_thread_root": false,
+      "reactions": {
+        "\ud83d\uded1": [
+          "@mindroom_general_tsec6:localhost"
+        ]
+      },
+      "handle": "m3",
+      "thread_handle": "t68"
+    },
+    {
+      "sender": "@mindroom_general_tsec6:localhost",
+      "content": "\u23f0 [Automated Task]\n\n\n_Note: Automated task - no follow-up expected._",
+      "timestamp": "2026-03-19 08:12:40.065000+00:00",
+      "room_id": "!MiDyMlLRVZoeWePJEL:localhost",
+      "event_id": "$chyJgTLmxXGcHmgLwvcpdYnfD6SbINyXS_C5jifvzHg",
+      "thread_root_id": "$TWVPt634gyPte9m5bU2HfvysMKdiFJYSW1hc8R3TkDg",
+      "reply_to_id": "$ppn5vLoDSDCKBiUYLf-0BlJrHQcSY8qa__U5GXvA0Js",
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m4",
+      "thread_handle": "t68"
+    },
+    {
+      "sender": "@mindroom_general_tsec6:localhost",
+      "content": "\n\n\ud83d\udd27 `schedule` [1] \u23f3\n \u22ef [edited]",
+      "timestamp": "2026-03-19 08:12:41.745000+00:00",
+      "room_id": "!MiDyMlLRVZoeWePJEL:localhost",
+      "event_id": "$2SN9pORiOQA3cSUFz7NhekUVCYlXXytdb4XP0IRzdVU",
+      "thread_root_id": "$TWVPt634gyPte9m5bU2HfvysMKdiFJYSW1hc8R3TkDg",
+      "reply_to_id": "$chyJgTLmxXGcHmgLwvcpdYnfD6SbINyXS_C5jifvzHg",
+      "is_thread_root": false,
+      "reactions": {
+        "\ud83d\uded1": [
+          "@mindroom_general_tsec6:localhost"
+        ]
+      },
+      "handle": "m5",
+      "thread_handle": "t68"
+    }
+  ]
+}

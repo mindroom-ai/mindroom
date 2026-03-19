@@ -1,0 +1,32 @@
+{
+  "chunk": [
+    {
+      "type": "m.room.message",
+      "sender": "@mindroom_router_tests7c:localhost",
+      "content": {
+        "msgtype": "m.text",
+        "body": "**Available Commands**\n\n- `!help [topic]` - Get help\n- `!schedule <task>` - Schedule a task\n- `!list_schedules` - List scheduled tasks\n- `!cancel_schedule <id>` - Cancel a scheduled task\n- `!edit_schedule <id> <task>` - Edit an existing scheduled task\n- `!config <operation>` - Manage configuration\n- `!hi` - Show welcome message\n- `!skill <name> [args]` - Run a skill by name\n\n**Scheduling Features:**\n- Time-based and event-driven workflows\n- Recurring tasks with cron-style scheduling (daily, weekly, hourly)\n- Agent workflows - mention agents to have them collaborate on scheduled tasks\n- Natural language time parsing - \"tomorrow\", \"in 5 minutes\", \"every Monday\"\n\nNote: All commands only work within threads, not in main room messages.\n\nFor detailed help on a command, use: `!help <command>`",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "<p><strong>Available Commands</strong></p>\n<ul>\n<li><code>!help [topic]</code> - Get help</li>\n<li><code>!schedule &lt;task&gt;</code> - Schedule a task</li>\n<li><code>!list_schedules</code> - List scheduled tasks</li>\n<li><code>!cancel_schedule &lt;id&gt;</code> - Cancel a scheduled task</li>\n<li><code>!edit_schedule &lt;id&gt; &lt;task&gt;</code> - Edit an existing scheduled task</li>\n<li><code>!config &lt;operation&gt;</code> - Manage configuration</li>\n<li><code>!hi</code> - Show welcome message</li>\n<li><code>!skill &lt;name&gt; [args]</code> - Run a skill by name</li>\n</ul>\n<p><strong>Scheduling Features:</strong><br />\n- Time-based and event-driven workflows<br />\n- Recurring tasks with cron-style scheduling (daily, weekly, hourly)<br />\n- Agent workflows - mention agents to have them collaborate on scheduled tasks<br />\n- Natural language time parsing - \"tomorrow\", \"in 5 minutes\", \"every Monday\"</p>\n<p>Note: All commands only work within threads, not in main room messages.</p>\n<p>For detailed help on a command, use: <code>!help &lt;command&gt;</code></p>",
+        "m.relates_to": {
+          "rel_type": "m.thread",
+          "event_id": "$7P6P1554k9EMmaZCo9Zs9uuKHdtbuHggz9vv42_EchM",
+          "is_falling_back": false,
+          "m.in_reply_to": {
+            "event_id": "$7P6P1554k9EMmaZCo9Zs9uuKHdtbuHggz9vv42_EchM"
+          }
+        },
+        "com.mindroom.skip_mentions": true
+      },
+      "room_id": "!ZmJHHMXtvsQYowDgOf:localhost",
+      "origin_server_ts": 1773932389614,
+      "unsigned": {
+        "membership": "join",
+        "age": 15063
+      },
+      "event_id": "$8nask0V6-uGTx1xAD5W8njzfLg0bzjctOJ3232atfPQ",
+      "user_id": "@mindroom_router_tests7c:localhost",
+      "age": 15063
+    }
+  ]
+}

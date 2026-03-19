@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import typing
 import uuid
 from dataclasses import dataclass
@@ -415,6 +416,82 @@ async def save_edited_scheduled_task(
     )
 
 
+# Pattern matching simple interval requests like "every 5 minutes", "every 2 hours".
+_INTERVAL_PATTERN = re.compile(
+    r"\bevery\s+(\d+)\s+(minute|hour|min|hr)s?\b",
+    re.IGNORECASE,
+)
+
+# Patterns that indicate conditional/event-driven scheduling.
+_CONDITIONAL_PATTERNS = re.compile(
+    r"\b(if\s+\w|when\s+\w|whenever\s|once\s+\w+\s+happens|on\s+condition)",
+    re.IGNORECASE,
+)
+
+
+def _fix_interval_cron(request: str, cron: CronSchedule) -> CronSchedule:
+    """Fix cron expressions for simple interval patterns the AI often gets wrong.
+
+    When a user says "every N minutes" or "every N hours", the correct cron is
+    ``*/N * * * *`` or ``0 */N * * *``.  Weak models frequently produce a fixed
+    time (e.g. ``0 9 * * *``) instead.  This function detects the mismatch and
+    returns a corrected CronSchedule.
+    """
+    match = _INTERVAL_PATTERN.search(request)
+    if not match:
+        return cron
+
+    value = int(match.group(1))
+    unit = match.group(2).lower()
+
+    if unit in ("minute", "min"):
+        expected_minute = f"*/{value}" if value > 1 else "*"
+        if cron.minute != expected_minute or cron.hour != "*":
+            logger.info(
+                "Correcting cron for interval pattern",
+                original=cron.to_cron_string(),
+                corrected_minute=expected_minute,
+                request=request,
+            )
+            return CronSchedule(minute=expected_minute, hour="*", day="*", month="*", weekday="*")
+    elif unit in ("hour", "hr"):
+        expected_hour = f"*/{value}" if value > 1 else "*"
+        if cron.hour != expected_hour:
+            logger.info(
+                "Correcting cron for interval pattern",
+                original=cron.to_cron_string(),
+                corrected_hour=expected_hour,
+                request=request,
+            )
+            return CronSchedule(minute="0", hour=expected_hour, day="*", month="*", weekday="*")
+
+    return cron
+
+
+def _validate_conditional_schedule(request: str, result: ScheduledWorkflow) -> _WorkflowParseError | None:
+    """Return an error if a conditional request produced a schedule with no actionable message.
+
+    When users write "if X then Y" or "when X do Y", the AI should embed the
+    condition check into the message so the executing agent can evaluate it.
+    If the message is empty or just whitespace, the condition was silently
+    dropped — return a clear error instead.
+    """
+    if not _CONDITIONAL_PATTERNS.search(request):
+        return None
+
+    if result.message.strip():
+        return None
+
+    return _WorkflowParseError(
+        error="Conditional schedule could not be created: the condition text was not preserved",
+        suggestion=(
+            "Conditional schedules (if/when/whenever) require the AI to embed the condition "
+            "into the task message, but parsing failed.  Try rephrasing as a recurring check, "
+            "e.g. '!schedule every 5 minutes check if <condition> and then <action>'"
+        ),
+    )
+
+
 async def _parse_workflow_schedule(
     request: str,
     config: Config,
@@ -481,6 +558,15 @@ Examples of event/condition phrasing to include in the message (do not include t
                 result.execute_at = current_time + timedelta(minutes=30)
             elif result.schedule_type == "cron" and not result.cron_schedule:
                 result.cron_schedule = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+
+            # Fix 1: Correct obviously wrong cron for simple interval patterns
+            if result.schedule_type == "cron" and result.cron_schedule:
+                result.cron_schedule = _fix_interval_cron(request, result.cron_schedule)
+
+            # Fix 2: Reject conditional schedules where the condition was silently lost
+            conditional_error = _validate_conditional_schedule(request, result)
+            if conditional_error is not None:
+                return conditional_error
 
             logger.info("Successfully parsed workflow schedule", request=request, schedule_type=result.schedule_type)
             return result

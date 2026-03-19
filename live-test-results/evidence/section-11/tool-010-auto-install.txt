@@ -1,0 +1,7 @@
+auto_install_enabled (default): True
+auto_install_enabled (NO_AUTO_INSTALL=1): False
+check_deps_installed(["agno"]): True
+check_deps_installed(["nonexistent_pkg_xyz"]): False
+ensure_tool_deps with installed dep: OK (no error)
+ensure_tool_deps with missing dep, auto-install disabled: Correctly raised ImportError
+ensure_tool_deps with missing dep, auto-install enabled (no matching extra): Correctly raised ImportError

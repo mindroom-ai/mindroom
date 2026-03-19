@@ -13,6 +13,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
@@ -267,3 +268,102 @@ class TestDMPreservationDuringCleanup:
             # Should only kick from configured room
             assert client.room_kick.call_count == 1
             assert client.room_kick.call_args[0][0] == "!configured:server"
+
+    async def test_orphaned_bot_cleanup_skips_root_space(self, tmp_path: Path) -> None:
+        """Test that orphaned bot cleanup skips the root space room.
+
+        The router is the creator/admin of the root space, but no agents are
+        explicitly configured for it. Without this guard the router would be
+        kicked and the space would become permanently inaccessible.
+        """
+        root_space_id = "!root_space:server"
+        client = AsyncMock()
+        config = _config_with_runtime_paths(
+            tmp_path,
+            agents={
+                "agent": AgentConfig(
+                    display_name="Agent",
+                    role="Test agent",
+                ),
+            },
+        )
+        rp = runtime_paths_for(config)
+
+        # Persist a root space in MatrixState so cleanup can detect it
+        state = MatrixState.load(runtime_paths=rp)
+        state.set_space_room_id(root_space_id)
+        state.save(runtime_paths=rp)
+
+        # The router bot is a member of the root space
+        members = ["@mindroom_router:server"]
+
+        with (
+            patch(
+                "mindroom.matrix.room_cleanup.get_room_members",
+                return_value=members,
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup._get_all_known_bot_usernames",
+                return_value={"mindroom_router"},
+            ),
+        ):
+            kicked_bots = await _cleanup_orphaned_bots_in_room(
+                client,
+                root_space_id,
+                config,
+                rp,
+            )
+
+            # Root space must be skipped entirely — no kicks
+            assert kicked_bots == []
+            assert not client.room_kick.called
+
+    async def test_cleanup_all_skips_root_space(self, tmp_path: Path) -> None:
+        """Test that cleanup_all_orphaned_bots skips the root space."""
+        root_space_id = "!root_space:server"
+        client = AsyncMock()
+        config = _config_with_runtime_paths(
+            tmp_path,
+            agents={
+                "agent": AgentConfig(
+                    display_name="Agent",
+                    role="Test agent",
+                    rooms=["lobby"],
+                ),
+            },
+        )
+        rp = runtime_paths_for(config)
+
+        # Persist root space
+        state = MatrixState.load(runtime_paths=rp)
+        state.set_space_room_id(root_space_id)
+        state.save(runtime_paths=rp)
+
+        joined_rooms = [root_space_id, "!lobby:server"]
+
+        async def mock_is_dm_room(client: Any, room_id: str) -> bool:  # noqa: ARG001, ANN401
+            return False
+
+        with (
+            patch("mindroom.matrix.room_cleanup.get_joined_rooms", return_value=joined_rooms),
+            patch(
+                "mindroom.matrix.room_cleanup.get_room_members",
+                return_value=["@mindroom_router:server"],
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup._get_all_known_bot_usernames",
+                return_value={"mindroom_router"},
+            ),
+            patch(
+                "mindroom.config.main.Config.get_configured_bots_for_room",
+                return_value={"mindroom_router"},
+            ),
+            patch("mindroom.matrix.room_cleanup.is_dm_room", side_effect=mock_is_dm_room),
+        ):
+            client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())
+            result = await cleanup_all_orphaned_bots(client, config, rp)
+
+            # Root space must not appear in kicked results
+            assert root_space_id not in result
+            # No kicks at all (router is configured in lobby)
+            assert not client.room_kick.called

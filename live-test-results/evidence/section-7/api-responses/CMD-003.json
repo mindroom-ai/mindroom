@@ -1,0 +1,32 @@
+{
+  "chunk": [
+    {
+      "type": "m.room.message",
+      "sender": "@mindroom_router_tests7c:localhost",
+      "content": {
+        "msgtype": "m.text",
+        "body": "\u274c Unknown command. Try !help for available commands.",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "<p>\u274c Unknown command. Try !help for available commands.</p>",
+        "m.relates_to": {
+          "rel_type": "m.thread",
+          "event_id": "$ECtDcgSgZECyUgZQtb9ZK2GCneTVnaiAiYJpd6nlP6A",
+          "is_falling_back": false,
+          "m.in_reply_to": {
+            "event_id": "$ECtDcgSgZECyUgZQtb9ZK2GCneTVnaiAiYJpd6nlP6A"
+          }
+        },
+        "com.mindroom.skip_mentions": true
+      },
+      "room_id": "!ZmJHHMXtvsQYowDgOf:localhost",
+      "origin_server_ts": 1773932015625,
+      "unsigned": {
+        "membership": "join",
+        "age": 14792
+      },
+      "event_id": "$C8KKirJ7iDT5SFfTANbiVYxXdmomfiG0Auwxm9rBJS8",
+      "user_id": "@mindroom_router_tests7c:localhost",
+      "age": 14792
+    }
+  ]
+}

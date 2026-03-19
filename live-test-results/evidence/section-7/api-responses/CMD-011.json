@@ -1,0 +1,32 @@
+{
+  "chunk": [
+    {
+      "type": "m.room.message",
+      "sender": "@mindroom_router_tests7c:localhost",
+      "content": {
+        "msgtype": "m.text",
+        "body": "\u274c Invalid configuration:\n\u2022 agents \u2192 nonexistent \u2192 display_name: Field required\n\nChanges were NOT applied.",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "<p>\u274c Invalid configuration:<br />\n\u2022 agents \u2192 nonexistent \u2192 display_name: Field required</p>\n<p>Changes were NOT applied.</p>",
+        "m.relates_to": {
+          "rel_type": "m.thread",
+          "event_id": "$Xf9tpqvyfcYczk-giYmTmm5BfqNTYxBLmB7-aoDk9lY",
+          "is_falling_back": false,
+          "m.in_reply_to": {
+            "event_id": "$Xf9tpqvyfcYczk-giYmTmm5BfqNTYxBLmB7-aoDk9lY"
+          }
+        },
+        "com.mindroom.skip_mentions": true
+      },
+      "room_id": "!ZmJHHMXtvsQYowDgOf:localhost",
+      "origin_server_ts": 1773932203351,
+      "unsigned": {
+        "membership": "join",
+        "age": 14904
+      },
+      "event_id": "$9IMsrk9hPLJzPWlrIiFeZ79sGEBokWy9jJrSciTnJFk",
+      "user_id": "@mindroom_router_tests7c:localhost",
+      "age": 14904
+    }
+  ]
+}

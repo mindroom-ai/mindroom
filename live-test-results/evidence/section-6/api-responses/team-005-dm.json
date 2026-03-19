@@ -1,0 +1,32 @@
+{
+  "room": "DM Test Room",
+  "thread_id": "t66",
+  "messages": [
+    {
+      "sender": "@tester_s6:localhost",
+      "content": "@mindroom_general_tsec6 @mindroom_analyst_tsec6 What are the colors of the rainbow?",
+      "timestamp": "2026-03-19 08:05:27.164000+00:00",
+      "room_id": "!rJslHQKpXKtqZcQNBM:localhost",
+      "event_id": "$5pP0eBpKre5lcSrUKW27Wwu4GNroOFXx8xJ5Inyb8J4",
+      "thread_root_id": null,
+      "reply_to_id": null,
+      "is_thread_root": true,
+      "reactions": {},
+      "handle": "m1",
+      "thread_handle": "t66"
+    },
+    {
+      "sender": "@mindroom_analyst_tsec6:localhost",
+      "content": "\ud83e\udd1d **Team Response** (GeneralAgent, AnalystAgent):\n\n**GeneralAgent**: The colors of a rainbow, in order from the outermost to the innermost, are: red, orange, yellow, green, blue, indigo, and violet (often remembered by the acronym ROYGBIV).\n\n\n**Team Consensus**:\n\nHere are my reasoning steps: [edited]",
+      "timestamp": "2026-03-19 08:06:54.141000+00:00",
+      "room_id": "!rJslHQKpXKtqZcQNBM:localhost",
+      "event_id": "$gDiaOyG0D1ch4ROZ_aIonBXvRRHm6mgHcsHRZTnfGRc",
+      "thread_root_id": "$5pP0eBpKre5lcSrUKW27Wwu4GNroOFXx8xJ5Inyb8J4",
+      "reply_to_id": "$5pP0eBpKre5lcSrUKW27Wwu4GNroOFXx8xJ5Inyb8J4",
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m2",
+      "thread_handle": "t66"
+    }
+  ]
+}

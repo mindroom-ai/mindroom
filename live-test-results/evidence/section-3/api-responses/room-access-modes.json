@@ -1,0 +1,37 @@
+{
+    "single_user_private_mode": {
+        "dev": {
+            "join_rule": "invite"
+        },
+        "testroom": {
+            "join_rule": "invite"
+        },
+        "lobby": {
+            "join_rule": "invite"
+        }
+    },
+    "multi_user_public_mode": {
+        "dev": {
+            "join_rule": "invite",
+            "note": "invite_only_rooms exception"
+        },
+        "testroom": {
+            "join_rule": "public"
+        },
+        "lobby": {
+            "join_rule": "public"
+        }
+    },
+    "multi_user_knock_mode": {
+        "dev": {
+            "join_rule": "invite",
+            "note": "invite_only_rooms exception"
+        },
+        "testroom": {
+            "join_rule": "knock"
+        },
+        "lobby": {
+            "join_rule": "knock"
+        }
+    }
+}

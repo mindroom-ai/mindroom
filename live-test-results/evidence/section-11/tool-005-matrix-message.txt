@@ -1,0 +1,32 @@
+=== TOOL-005: matrix_message tool end-to-end test ===
+Environment: core-local with litellm (Claude Sonnet 4.6 via Vertex AI)
+Model: claude-sonnet-4-6 via http://LOCAL_LITELLM_HOST:4000/v1
+Embedder: embeddinggemma:300m via http://LOCAL_MODEL_HOST:9292/v1
+Namespace: s11f
+Lobby Room: !XrbmjUIMyuZQUkDJQC:localhost
+
+=== Message sent ===
+User: @mindroom_agent_builder_s11f Use the matrix_message tool to send a message to this room with the text: TOOL-005-PASS
+
+=== Agent response (in thread) ===
+[router] @mindroom_agent_builder_s11f:localhost could you help with this?
+[agent_builder] 🔧 `matrix_message` [1] ⏳
+[agent_builder] TOOL-005-PASS      <-- tool sent this as a new room message
+[agent_builder] 🔧 `matrix_message` [1] Message sent! ✅
+
+=== Routing log ===
+Routing decision: agent=agent_builder reason='The message explicitly tags "@mindroom_agent_builder_s11f" 
+and requests the use of the "matrix_message" tool, which is available to the agent_builder agent.'
+
+=== Agent preparation log ===
+Preparing agent and prompt: agent=agent_builder
+  full_prompt includes: [Matrix metadata for tool calls]
+    room_id: !XrbmjUIMyuZQUkDJQC:localhost
+    thread_id: $wwHB7GSvDOHTbx_4bFE08IfYhrvZ9ZFsrZP7tuvSUGQ
+    reply_to_event_id: $N3kVmVYG2rA2nG_SeDzrIk68ZXci37i-uucfyrJwaFM
+    Use these IDs when calling matrix_message.
+
+=== Conclusion ===
+Tool runtime context correctly preserved room_id and thread_id.
+matrix_message tool successfully sent a new message to the room.
+The agent responded in-thread and the tool-sent message appeared at room level.

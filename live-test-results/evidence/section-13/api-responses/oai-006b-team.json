@@ -1,0 +1,1 @@
+{"id":"chatcmpl-6b5c5bc05ea3","object":"chat.completion","created":1773908480,"model":"team/super_team","choices":[{"index":0,"message":{"role":"assistant","content":"**AnalystAgent**: pong\n\n**GeneralAgent**: pong\n\n\n**Team Consensus**:\n\npong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"system_fingerprint":null}

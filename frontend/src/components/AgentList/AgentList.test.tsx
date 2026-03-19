@@ -49,7 +49,7 @@ describe('AgentList', () => {
     expect(screen.getByText('2 tools')).toBeInTheDocument();
     expect(screen.getByText('2 rooms')).toBeInTheDocument();
     expect(screen.getByText('0 tools')).toBeInTheDocument();
-    expect(screen.getByText('1 rooms')).toBeInTheDocument();
+    expect(screen.getByText('1 room')).toBeInTheDocument();
   });
 
   it('should highlight selected agent', () => {

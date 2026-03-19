@@ -1,0 +1,31 @@
+{
+  "room": "Lobby",
+  "messages": [
+    {
+      "sender": "@mindroom_router_tests9:localhost",
+      "content": "@mindroom_general_tests9:localhost could you help with this?",
+      "timestamp": "2026-03-19 14:43:01.493000+00:00",
+      "room_id": "!nkVnHILopqsqcWFIVd:localhost",
+      "event_id": "$VcIoEzDWFYbKdDOlosGcckP5FcCZ2JKaL72RSywRP1c",
+      "thread_root_id": "$NBLU_ghdwT3gJjzMBOFH4meGeRP4HRs8JZv4aAbjLkw",
+      "reply_to_id": "$NBLU_ghdwT3gJjzMBOFH4meGeRP4HRs8JZv4aAbjLkw",
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m10",
+      "thread_handle": "t84"
+    },
+    {
+      "sender": "@mindroom_general_tests9:localhost",
+      "content": "I'd be happy to help! However, I notice you've asked for assistance but I don't see any specific details about what you need help with. There's an attachment referenced (att_aeb7fbf1b23ba52e26823076), but I don't have a tool to inspect attachments directly.\n\nCould you tell me:\n\n1. **What's in the attachment?** (or describe what you'd like me to look at)\n2. **What specifically do you need help with?**\n\nWhether it's answering questions, analyzing information, solving a problem, or something else entirely \u2014 just let me know and I'll do my best to assist! \ud83d\ude0a [edited]",
+      "timestamp": "2026-03-19 14:43:11.592000+00:00",
+      "room_id": "!nkVnHILopqsqcWFIVd:localhost",
+      "event_id": "$y8BTaEDPfTj3wLPHTxvLXyCBC5LLNIazy_qbUygHKx8",
+      "thread_root_id": "$NBLU_ghdwT3gJjzMBOFH4meGeRP4HRs8JZv4aAbjLkw",
+      "reply_to_id": "$VcIoEzDWFYbKdDOlosGcckP5FcCZ2JKaL72RSywRP1c",
+      "is_thread_root": false,
+      "reactions": {},
+      "handle": "m11",
+      "thread_handle": "t84"
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"id":"chatcmpl-db26696e7708","object":"chat.completion","created":1773908457,"model":"calculator","choices":[{"index":0,"message":{"role":"assistant","content":"2+2=4\n🔧 `schedule` [1]"},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"system_fingerprint":null}

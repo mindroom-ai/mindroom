@@ -1,0 +1,77 @@
+agents:
+  general:
+    display_name: GeneralAgent
+    instructions:
+    - Always reply with a short acknowledgement including the sender's name.
+    - Keep responses under 20 words.
+    model: default
+    role: A general-purpose test assistant.
+    rooms:
+    - lobby
+    - restricted
+    - open
+    tools: []
+  restricted_agent:
+    display_name: RestrictedAgent
+    instructions:
+    - Always reply with a short acknowledgement including the sender's name.
+    - Keep responses under 20 words.
+    model: default
+    role: An agent with restricted reply permissions.
+    rooms:
+    - lobby
+    - restricted
+    tools: []
+
+authorization:
+  default_room_access: false
+  global_users:
+  - "@tests8_owner:localhost"
+  room_permissions:
+    # AUTH-002: managed room key format (final)
+    restricted:
+    - "@tests8_roomuser:localhost"
+    - "@tests8_botacct:localhost"
+  aliases:
+    # AUTH-004: bridge alias maps to owner
+    "@tests8_owner:localhost":
+    - "@tests8_bridge:localhost"
+  agent_reply_permissions:
+    # AUTH-005: default allows only owner; restricted_agent allows roomuser
+    "*":
+    - "@tests8_owner:localhost"
+    restricted_agent:
+    - "@tests8_roomuser:localhost"
+
+bot_accounts:
+- "@tests8_botacct:localhost"
+
+mindroom_user:
+  display_name: MindRoomUser
+  username: tests8_mindroom_user
+
+defaults:
+  enable_streaming: false
+  markdown: false
+
+models:
+  default:
+    extra_kwargs:
+      base_url: http://LOCAL_MODEL_HOST:9292/v1
+    id: apriel-thinker:15b
+    provider: openai
+
+router:
+  model: default
+
+teams: {}
+plugins: []
+room_models: {}
+knowledge_bases: {}
+timezone: America/Los_Angeles
+
+voice:
+  enabled: true
+  stt:
+    model: whisper-1
+    provider: openai
