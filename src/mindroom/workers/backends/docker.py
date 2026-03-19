@@ -172,7 +172,7 @@ def _docker_image_identity_state(
     except docker_errors.DockerException:
         return image, False
 
-    image_id = getattr(docker_image, "id", None)
+    image_id = docker_image.id
     if isinstance(image_id, str) and image_id.strip():
         return image_id, True
     return image, False
@@ -799,9 +799,11 @@ class DockerWorkerBackend:
     ) -> bool:
         if container is None:
             return False
-        attrs = getattr(container, "attrs", {})
-        config = attrs.get("Config", {}) if isinstance(attrs, dict) else {}
-        raw_env = config.get("Env") if isinstance(config, dict) else None
+        attrs = container.attrs
+        config = attrs.get("Config")
+        if not isinstance(config, dict):
+            return False
+        raw_env = cast("dict[str, object]", config).get("Env")
         if not isinstance(raw_env, list):
             return False
 
@@ -934,10 +936,14 @@ class DockerWorkerBackend:
     def _container_launch_config_hash(self, container: _DockerContainer | None) -> str | None:
         if container is None:
             return None
-        attrs = getattr(container, "attrs", {})
-        config = attrs.get("Config", {}) if isinstance(attrs, dict) else {}
-        labels = config.get("Labels", {}) if isinstance(config, dict) else {}
-        launch_config_hash = labels.get(_LABEL_LAUNCH_CONFIG_HASH) if isinstance(labels, dict) else None
+        attrs = container.attrs
+        config = attrs.get("Config")
+        if not isinstance(config, dict):
+            return None
+        labels = cast("dict[str, object]", config).get("Labels")
+        launch_config_hash = (
+            cast("dict[str, object]", labels).get(_LABEL_LAUNCH_CONFIG_HASH) if isinstance(labels, dict) else None
+        )
         if isinstance(launch_config_hash, str) and launch_config_hash:
             return launch_config_hash
         return None
@@ -946,13 +952,15 @@ class DockerWorkerBackend:
         if container is None:
             return None
 
-        attrs = getattr(container, "attrs", {})
-        raw_image = attrs.get("Image") if isinstance(attrs, dict) else None
+        attrs = container.attrs
+        raw_image = attrs.get("Image")
         if isinstance(raw_image, str) and raw_image.strip():
             return raw_image
 
-        config = attrs.get("Config", {}) if isinstance(attrs, dict) else {}
-        config_image = config.get("Image") if isinstance(config, dict) else None
+        config = attrs.get("Config")
+        if not isinstance(config, dict):
+            return None
+        config_image = cast("dict[str, object]", config).get("Image")
         if isinstance(config_image, str) and config_image.strip():
             return config_image
         return None
@@ -988,42 +996,42 @@ class DockerWorkerBackend:
             return False
 
         expected_host_path = str(host_path.expanduser().resolve())
-        attrs = getattr(container, "attrs", {})
-        mounts = attrs.get("Mounts", []) if isinstance(attrs, dict) else []
+        attrs = container.attrs
+        mounts = attrs.get("Mounts", [])
         if not isinstance(mounts, list):
             return False
 
         for mount in mounts:
             if not isinstance(mount, dict):
                 continue
-            source = mount.get("Source")
-            destination = mount.get("Destination")
+            mount_data = cast("dict[str, object]", mount)
+            source = mount_data.get("Source")
+            destination = mount_data.get("Destination")
             if not isinstance(source, str) or not isinstance(destination, str):
                 continue
             if destination != container_path:
                 continue
             if str(Path(source).expanduser().resolve()) != expected_host_path:
                 continue
-            writable = mount.get("RW")
+            writable = mount_data.get("RW")
             if isinstance(writable, bool):
                 return writable == (not read_only)
-            mode = mount.get("Mode")
+            mode = mount_data.get("Mode")
             if isinstance(mode, str):
                 return "ro" in mode if read_only else "ro" not in mode
             return True
         return False
 
     def _container_status(self, container: _DockerContainer) -> str | None:
-        status = getattr(container, "status", None)
+        status = container.status
         if isinstance(status, str):
             return status
-        attrs = getattr(container, "attrs", {})
-        if isinstance(attrs, dict):
-            state = attrs.get("State", {})
-            if isinstance(state, dict):
-                state_status = state.get("Status")
-                if isinstance(state_status, str):
-                    return state_status
+        attrs = container.attrs
+        state = attrs.get("State", {})
+        if isinstance(state, dict):
+            state_status = state.get("Status")
+            if isinstance(state_status, str):
+                return state_status
         return None
 
     def _container_is_running(self, container: _DockerContainer | None) -> bool:
@@ -1036,13 +1044,19 @@ class DockerWorkerBackend:
         if container is None:
             return host_port
 
-        attrs = getattr(container, "attrs", {})
-        network_settings = attrs.get("NetworkSettings", {}) if isinstance(attrs, dict) else {}
-        ports = network_settings.get("Ports", {}) if isinstance(network_settings, dict) else {}
-        bindings = ports.get(f"{self.config.worker_port}/tcp") if isinstance(ports, dict) else None
+        attrs = container.attrs
+        network_settings = attrs.get("NetworkSettings")
+        if not isinstance(network_settings, dict):
+            return host_port
+        ports = cast("dict[str, object]", network_settings).get("Ports")
+        bindings = (
+            cast("dict[str, object]", ports).get(f"{self.config.worker_port}/tcp") if isinstance(ports, dict) else None
+        )
         first_binding = bindings[0] if isinstance(bindings, list) and bindings else None
-        raw_host_port = first_binding.get("HostPort") if isinstance(first_binding, dict) else None
-        if raw_host_port is None:
+        raw_host_port = (
+            cast("dict[str, object]", first_binding).get("HostPort") if isinstance(first_binding, dict) else None
+        )
+        if not isinstance(raw_host_port, str):
             return host_port
         try:
             host_port = int(raw_host_port)
@@ -1053,7 +1067,7 @@ class DockerWorkerBackend:
     def _container_id(self, container: _DockerContainer | None) -> str | None:
         if container is None:
             return None
-        container_id = getattr(container, "id", None)
+        container_id = container.id
         return container_id if isinstance(container_id, str) and container_id else None
 
     def _stop_container(self, container: _DockerContainer | None) -> None:
