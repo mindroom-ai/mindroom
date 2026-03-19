@@ -157,7 +157,7 @@ The API accepts but ignores these OpenAI parameters (the agent's own config cont
 
 - `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`
 - `tools`, `tool_choice` (agents use their configured tools)
-- `stop`, `frequency_penalty`, `presence_penalty`, `seed`
+- `n`, `stop`, `frequency_penalty`, `presence_penalty`, `seed`
 - `response_format`, `logprobs`, `logit_bias`
 - `stream_options` (usage stats are always zeros)
 

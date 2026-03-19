@@ -33,15 +33,21 @@ defaults:
 
 Tools are organized by category:
 
-- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona, or MindRoom's built-in [container sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md)), Claude Agent SDK
-- **Research** - Web search (DuckDuckGo, Tavily, Exa, SerpAPI), academic papers (arXiv, PubMed), Wikipedia, Hacker News, web scraping (Firecrawl, Crawl4AI, Jina)
-- **Communication** - Slack, Discord, Telegram, Twilio, WhatsApp, Webex
-- **Email** - Gmail, AWS SES, Resend, generic SMTP
-- **Productivity** - Google Calendar, Todoist, Google Sheets, SQL, Pandas, CSV, DuckDB
-- **Social** - Reddit, X/Twitter, Zoom
-- **Entertainment** - YouTube, Giphy
+- **File & System** - File operations, shell, Docker, Python, SQL, databases (Postgres, Redshift, Neo4j, DuckDB), Pandas, CSV, coding, self-config, calculator, reasoning, file generation, visualization, sleep
+- **Web Search & Research** - DuckDuckGo, Google Search, Baidu, Tavily, Exa, SerpAPI, Serper, SearXNG, Linkup
+- **Web Scraping & Crawling** - Firecrawl, Crawl4AI, BrowserBase, AgentQL, Spider, ScrapeGraph, Apify, BrightData, Oxylabs, Jina, Website, Trafilatura, Newspaper4k, Web Browser Tools, Browser (OpenClaw)
+- **AI & ML APIs** - OpenAI, Gemini, Groq, Replicate, Fal, DALL-E, Cartesia, ElevenLabs, Desi Vocal, LumaLabs, ModelsLabs
+- **Knowledge & Research** - arXiv, Wikipedia, PubMed, Hacker News
+- **Communication & Social** - Matrix, Gmail, Slack, Discord, Telegram, WhatsApp, Twilio, Webex, Resend, Email (SMTP), X/Twitter, Reddit, Zoom
+- **Project Management** - GitHub, Bitbucket, Jira, Linear, ClickUp, Confluence, Notion, Trello, Todoist, Zendesk
+- **Calendar & Scheduling** - Google Calendar, Cal.com, Scheduler
+- **Data & Business** - Google Sheets, yFinance, OpenBB, Shopify, Financial Datasets API
+- **Location & Maps** - Google Maps, OpenWeather
+- **DevOps & Infrastructure** - AWS Lambda, AWS SES, Airflow, E2B, Daytona, Claude Agent, Composio, Google BigQuery, [container sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md)
 - **Smart Home** - Home Assistant
-- **Integrations** - Composio
+- **Media & Entertainment** - YouTube, Spotify, Giphy, MoviePy, Unsplash, Brandfetch
+- **Memory & Storage** - Memory, Mem0, Zep, Attachments
+- **Custom & Config** - Custom API, Config Manager, Subagents, Delegate
 
 ## Quick Examples
 
@@ -89,12 +95,24 @@ agents:
       - gmail
 ```
 
+## Implied Tools
+
+Some tools automatically include companion tools via the `IMPLIED_TOOLS` mapping. When `matrix_message` is in an agent's tool list, `attachments` is automatically added. This happens during tool name expansion — the effective tool set includes both the explicitly listed tools and any implied tools.
+
+Currently the only implied mapping is:
+
+| Tool             | Implies       |
+| ---------------- | ------------- |
+| `matrix_message` | `attachments` |
+
+This is why the `openclaw_compat` preset includes `attachments` in its effective tool set even though the preset definition only lists `matrix_message`.
+
 ## Automatic Dependency Installation
 
 Each tool declares its Python dependencies as an optional extra in `pyproject.toml`. When an agent tries to use a tool whose dependencies aren't installed, MindRoom automatically installs them at runtime:
 
 1. **Pre-check** — uses `importlib.util.find_spec()` to detect missing packages without importing anything
-1. **Locked install** — runs `uv sync --locked --inexact --extra <tool>` to install exact pinned versions from `uv.lock`
+1. **Locked install** — runs `uv sync --locked --inexact --no-dev --extra <tool>` to install exact pinned versions from `uv.lock`
 1. **Fallback** — if no lockfile is available, falls back to `uv pip install` or `pip install`
 
 This means you don't need to install all 100+ tool dependencies upfront — only the tools your agents actually use get installed.

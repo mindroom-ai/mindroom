@@ -41,7 +41,7 @@ Preset expansion:
 - `scheduler`
 - `subagents`
 - `matrix_message`
-- `attachments`
+- `attachments` (auto-implied by `matrix_message` via `IMPLIED_TOOLS`, not listed in the preset directly)
 
 Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend.
 
@@ -96,7 +96,7 @@ memory:
     enabled: true
 ```
 
-When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root, so there is no need to add it to `context_files`. If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, `matrix_message`, and `attachments` tools, so listing those tools individually is not necessary. Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `openclaw_memory` all read the same live workspace.
+When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root, so there is no need to add it to `context_files`. If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` is auto-implied by `matrix_message`), so listing those tools individually is not necessary. Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `openclaw_memory` all read the same live workspace.
 
 ## Recommended workspace layout
 
@@ -134,8 +134,8 @@ Recommended for OpenClaw-style setups: `memory_backend: file` with the canonical
 
 MindRoom includes built-in context controls for OpenClaw-style agents:
 
-- **Conversation history** is managed by Agno's session system - previous turns (including tool calls and results) are automatically replayed. Control depth with `num_history_runs` or `num_history_messages` (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md)).
-- **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars`.
+- **Conversation history** is managed by Agno's session system — previous turns (including tool calls and results) are automatically replayed. Control depth with `num_history_runs` or `num_history_messages` (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md)).
+- **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars` (configured in `config.yaml` under `defaults`). When the combined context exceeds this limit, chunks are trimmed from the end and a truncation marker is inserted.
 
 ## Known limitations
 
@@ -149,6 +149,8 @@ MindRoom includes built-in context controls for OpenClaw-style agents:
 - Split into private/public agents and exclude sensitive files from the public agent
 
 ## Skills
+
+For details on skill eligibility gating (`openclaw.os`, `openclaw.requires`, `openclaw.always`) and command dispatch (`command-dispatch`, `command-tool`, `command-arg-mode`), see [Skills](https://docs.mindroom.chat/skills/index.md).
 
 Skills are loaded from `~/.mindroom/skills/<name>/`. To use an OpenClaw skill like `transcribe`, copy the skill directory from your OpenClaw workspace:
 
