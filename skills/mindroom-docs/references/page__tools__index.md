@@ -41,7 +41,7 @@ Tools are organized by category:
 - **Communication & Social** - Matrix, Gmail, Slack, Discord, Telegram, WhatsApp, Twilio, Webex, Resend, Email (SMTP), X/Twitter, Reddit, Zoom
 - **Project Management** - GitHub, Bitbucket, Jira, Linear, ClickUp, Confluence, Notion, Trello, Todoist, Zendesk
 - **Calendar & Scheduling** - Google Calendar, Cal.com, Scheduler
-- **Data & Business** - Google Sheets, yFinance, OpenBB, Shopify, Financial Datasets API
+- **Data & Business** - Google Sheets, Yahoo Finance, OpenBB, Shopify, Financial Datasets API
 - **Location & Maps** - Google Maps, OpenWeather
 - **DevOps & Infrastructure** - AWS Lambda, AWS SES, Airflow, E2B, Daytona, Claude Agent, Composio, Google BigQuery, [container sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md)
 - **Smart Home** - Home Assistant
@@ -106,6 +106,12 @@ Currently the only implied mapping is:
 | `matrix_message` | `attachments` |
 
 This is why the `openclaw_compat` preset includes `attachments` in its effective tool set even though the preset definition only lists `matrix_message`.
+
+## Tool Runtime Context
+
+When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable. This context carries the current `room_id`, `thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths. Tools like `matrix_message` use this context to post messages back to the correct room and thread without the caller passing explicit IDs.
+
+Attachment IDs from the current conversation are also available in the runtime context. Tools that accept `attachment_ids` (such as `matrix_message`) resolve those IDs against the context-scoped attachment registry, preventing one conversation from accessing files uploaded in another.
 
 ## Automatic Dependency Installation
 

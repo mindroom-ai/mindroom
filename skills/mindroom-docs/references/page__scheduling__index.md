@@ -50,7 +50,7 @@ Edits an existing scheduled task by ID. The task description is re-parsed to upd
 !cancel_schedule all             # Cancel all tasks in room
 ```
 
-Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`, `!inspectschedule`, `!inspect-schedule`, `!cancelschedule`, `!cancel-schedule`, `!editschedule`, `!edit-schedule`
+Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`, `!inspectschedules`, `!inspect-schedules`, `!inspect_schedule`, `!inspectschedule`, `!inspect-schedule`, `!cancelschedule`, `!cancel-schedule`, `!editschedule`, `!edit-schedule`
 
 Use `!help schedule` for detailed inline help on scheduling commands.
 
@@ -73,4 +73,4 @@ timezone: America/Los_Angeles
 
 ## Persistence
 
-Schedules are stored in Matrix room state and persist across restarts. Past one-time tasks are automatically skipped during restoration.
+Schedules are stored in Matrix room state and persist across restarts. Past one-time tasks are automatically skipped during restoration. Only the router restores persisted schedules after startup — individual agents do not restore their own. On shutdown, the router cancels its in-memory scheduled tasks before exiting.

@@ -120,7 +120,7 @@ Users can run a skill by name:
 
 Agent resolution:
 
-- If you mention an agent (e.g., `@mindroom_code !skill build`), that agent handles the skill.
+- If the message includes a Matrix mention of an agent, that agent handles the skill. The message must still start with `!skill`.
 - If only one agent in the room has the skill enabled, it handles the request.
 - If multiple agents have the skill, you must mention one to disambiguate.
 

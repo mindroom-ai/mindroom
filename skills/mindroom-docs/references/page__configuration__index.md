@@ -60,7 +60,7 @@ All API key variables also support a `_FILE` suffix for file-based secrets (e.g.
 | Variable                                             | Description                                                                                                                                                                                                                                      | Default                          |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
 | `MINDROOM_NAMESPACE`                                 | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars)                                                                                                                                                         | *(none)*                         |
-| `MINDROOM_PORT`                                      | Port for the bundled dashboard/API server                                                                                                                                                                                                        | `8765`                           |
+| `MINDROOM_PORT`                                      | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that                                                                                | `8765`                           |
 | `MINDROOM_API_KEY`                                   | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access)                                                                                                                               | *(none)*                         |
 | `MINDROOM_ENABLE_AI_CACHE`                           | Enable the AI response cache (caches model responses keyed by model, messages, and tools — useful during development to avoid repeated API calls)                                                                                                | `true`                           |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS`                     | Set to `1`/`true`/`yes` to disable automatic tool dependency installation                                                                                                                                                                        | *(unset — auto-install enabled)* |
@@ -228,7 +228,7 @@ defaults:
 # Memory system configuration (optional)
 memory:
   backend: mem0                    # Global default backend (mem0 or file); agents can override with memory_backend
-  team_reads_member_memory: false  # Default: false (let team reads access member agent memories)
+  team_reads_member_memory: false  # Default: false (when true, team reads can access member agent memories)
   embedder:
     provider: openai               # Default: openai (openai, ollama, huggingface, sentence_transformers)
     config:
@@ -271,7 +271,7 @@ memory:
 # Knowledge base configuration (optional)
 knowledge_bases:
   docs:
-    path: ./knowledge_docs/default # Folder containing documents for this base
+    path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)
     watch: true                    # Reindex automatically when files change
     chunk_size: 5000               # Default: 5000 (max characters per indexed chunk)
     chunk_overlap: 0               # Default: 0 (overlapping characters between chunks)
@@ -296,7 +296,8 @@ voice:
   intelligence:
     model: default                 # Model for command recognition
 
-# Internal MindRoom user account (optional)
+# Internal MindRoom user account (optional, omit for hosted/public profiles)
+# When present, defaults are: username: mindroom_user, display_name: MindRoomUser
 mindroom_user:
   username: mindroom_user          # Set before first startup (localpart only)
   display_name: MindRoomUser       # Can be changed later
