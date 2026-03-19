@@ -57,6 +57,9 @@ Set the API key for each provider you use in `config.yaml`:
 | `OLLAMA_HOST` | Ollama (host URL, not a key) |
 | `OPENAI_BASE_URL` | Base URL for OpenAI-compatible APIs (e.g., local inference servers) |
 
+All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
+See [Model Configuration — File-based Secrets](models.md#file-based-secrets) for details.
+
 ### Operational
 
 | Variable | Description | Default |
@@ -239,6 +242,24 @@ memory:
     enabled: false                 # Default: false (enable background flush worker)
     flush_interval_seconds: 1800   # Default: 1800 (loop interval)
     idle_seconds: 120              # Default: 120 (idle time before flush eligibility)
+    max_dirty_age_seconds: 600     # Default: 600 (force flush after this many seconds dirty)
+    stale_ttl_seconds: 86400       # Default: 86400 (drop stale flush-state entries older than this)
+    max_cross_session_reprioritize: 5  # Default: 5 (same-agent dirty sessions reprioritized per prompt)
+    retry_cooldown_seconds: 30     # Default: 30 (cooldown before retrying a failed extraction)
+    max_retry_cooldown_seconds: 300  # Default: 300 (upper bound for retry cooldown backoff)
+    batch:
+      max_sessions_per_cycle: 10   # Default: 10 (max sessions processed per auto-flush loop)
+      max_sessions_per_agent_per_cycle: 3  # Default: 3 (max sessions per agent per loop)
+    extractor:
+      no_reply_token: NO_REPLY     # Default: NO_REPLY (token indicating no durable memory)
+      max_messages_per_flush: 20   # Default: 20 (max messages considered per extraction)
+      max_chars_per_flush: 12000   # Default: 12000 (max chars considered per extraction)
+      max_extraction_seconds: 30   # Default: 30 (timeout for one extraction job)
+      include_memory_context:
+        memory_snippets: 5         # Default: 5 (max MEMORY.md snippets for dedupe context)
+        snippet_max_chars: 400     # Default: 400 (max chars per snippet)
+#
+# See docs/memory.md for full auto-flush behavior and tuning guidance.
 #
 # Set memory.embedder.provider: sentence_transformers to run embeddings in-process.
 # MindRoom auto-installs that optional extra on first use.
