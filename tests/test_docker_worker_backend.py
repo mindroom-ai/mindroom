@@ -1953,6 +1953,125 @@ router:
     assert not (renamed_projection.root / "config.yaml").exists()
 
 
+def test_docker_projection_hash_changes_when_projected_file_mode_changes(tmp_path: Path) -> None:
+    """Changing only a projected file mode should rebuild the snapshot and preserve the new mode."""
+    plugin_dir = tmp_path / "plugins" / "demo"
+    plugin_dir.mkdir(parents=True)
+    plugin_file = plugin_dir / "helper.sh"
+    plugin_file.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    plugin_file.chmod(0o644)
+
+    host_config_path = tmp_path / "config.yaml"
+    host_config_path.write_text(
+        """
+plugins:
+  - ./plugins/demo
+models:
+  default:
+    provider: openai
+    id: test-model
+agents: {}
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(config_path=host_config_path, storage_path=tmp_path)
+    paths = local_worker_state_paths_for_root(tmp_path / "workers" / "projection-test")
+    config = _DockerWorkerBackendConfig(
+        image="ghcr.io/mindroom-ai/mindroom:latest",
+        worker_port=8766,
+        storage_mount_path="/app/worker",
+        config_path="/app/config-host/config.yaml",
+        host_config_path=host_config_path,
+        idle_timeout_seconds=60.0,
+        ready_timeout_seconds=5.0,
+        name_prefix="mindroom-worker",
+        publish_host="127.0.0.1",
+        endpoint_host="127.0.0.1",
+        user="1000:1000",
+        extra_env={},
+        extra_labels={},
+    )
+    manager = DockerProjectionManager(
+        config=config,
+        projected_configs_root=tmp_path / "projections",
+        runtime_paths=runtime_paths,
+    )
+
+    first_projection = manager.projected_config(paths, materialize=True)
+    first_projected_file = first_projection.root / ".mindroom-worker-assets" / "plugins" / "00-demo" / "helper.sh"
+    assert first_projected_file.stat().st_mode & 0o777 == 0o644
+
+    plugin_file.chmod(0o755)
+
+    second_projection = manager.projected_config(paths, materialize=True)
+    second_projected_file = second_projection.root / ".mindroom-worker-assets" / "plugins" / "00-demo" / "helper.sh"
+
+    assert second_projection.root != first_projection.root
+    assert not first_projection.root.exists()
+    assert second_projected_file.stat().st_mode & 0o777 == 0o755
+
+
+def test_docker_projection_hash_changes_when_projected_directory_mode_changes(tmp_path: Path) -> None:
+    """Changing only a projected directory mode should rebuild the snapshot and preserve the new mode."""
+    plugin_dir = tmp_path / "plugins" / "demo"
+    plugin_dir.mkdir(parents=True)
+    plugin_dir.chmod(0o755)
+    (plugin_dir / "helper.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+
+    host_config_path = tmp_path / "config.yaml"
+    host_config_path.write_text(
+        """
+plugins:
+  - ./plugins/demo
+models:
+  default:
+    provider: openai
+    id: test-model
+agents: {}
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(config_path=host_config_path, storage_path=tmp_path)
+    paths = local_worker_state_paths_for_root(tmp_path / "workers" / "projection-test")
+    config = _DockerWorkerBackendConfig(
+        image="ghcr.io/mindroom-ai/mindroom:latest",
+        worker_port=8766,
+        storage_mount_path="/app/worker",
+        config_path="/app/config-host/config.yaml",
+        host_config_path=host_config_path,
+        idle_timeout_seconds=60.0,
+        ready_timeout_seconds=5.0,
+        name_prefix="mindroom-worker",
+        publish_host="127.0.0.1",
+        endpoint_host="127.0.0.1",
+        user="1000:1000",
+        extra_env={},
+        extra_labels={},
+    )
+    manager = DockerProjectionManager(
+        config=config,
+        projected_configs_root=tmp_path / "projections",
+        runtime_paths=runtime_paths,
+    )
+
+    first_projection = manager.projected_config(paths, materialize=True)
+    first_projected_dir = first_projection.root / ".mindroom-worker-assets" / "plugins" / "00-demo"
+    assert first_projected_dir.stat().st_mode & 0o777 == 0o755
+
+    plugin_dir.chmod(0o700)
+
+    second_projection = manager.projected_config(paths, materialize=True)
+    second_projected_dir = second_projection.root / ".mindroom-worker-assets" / "plugins" / "00-demo"
+
+    assert second_projection.root != first_projection.root
+    assert not first_projection.root.exists()
+    assert second_projected_dir.stat().st_mode & 0o777 == 0o700
+
+
 def test_docker_backend_rebuilds_incomplete_projection_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

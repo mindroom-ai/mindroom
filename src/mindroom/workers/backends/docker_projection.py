@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -148,18 +149,25 @@ def _redact_sensitive_config_values(value: object, *, parent_key: str | None = N
     return value
 
 
+def _mode_bits(st_mode: int) -> int:
+    return stat.S_IMODE(st_mode)
+
+
 def _file_state_fingerprint(path: Path) -> str:
     stat = path.stat()
-    return f"file:{stat.st_size}:{stat.st_mtime_ns}"
+    return f"file:{stat.st_size}:{stat.st_mtime_ns}:{_mode_bits(stat.st_mode)}"
 
 
 def _directory_state_fingerprint(path: Path) -> str:
-    state_entries: list[str] = []
+    root_stat = path.stat()
+    state_entries = [f"root-dir::{_mode_bits(root_stat.st_mode)}"]
     for asset_path, relative_path in iter_local_copy_source_entries(path):
         stat = asset_path.stat()
         kind = "dir" if asset_path.is_dir() else "file"
         size = 0 if asset_path.is_dir() else stat.st_size
-        state_entries.append(f"{kind}:{relative_path.as_posix()}:{size}:{stat.st_mtime_ns}")
+        state_entries.append(
+            f"{kind}:{relative_path.as_posix()}:{size}:{stat.st_mtime_ns}:{_mode_bits(stat.st_mode)}",
+        )
     return hashlib.sha256("\0".join(state_entries).encode("utf-8")).hexdigest()
 
 
@@ -185,12 +193,15 @@ def _compute_path_contents_hash(host_path: Path) -> str:
     hasher = hashlib.sha256()
     try:
         if resolved_host_path.is_dir():
+            root_stat = resolved_host_path.stat()
+            hasher.update(f"root-dir:{_mode_bits(root_stat.st_mode)}\0".encode())
             for asset_path, relative_path in iter_local_copy_source_entries(resolved_host_path):
+                asset_stat = asset_path.stat()
                 if asset_path.is_dir():
-                    hasher.update(f"dir:{relative_path.as_posix()}\0".encode())
+                    hasher.update(f"dir:{relative_path.as_posix()}:{_mode_bits(asset_stat.st_mode)}\0".encode())
                     continue
 
-                hasher.update(f"file:{relative_path.as_posix()}\0".encode())
+                hasher.update(f"file:{relative_path.as_posix()}:{_mode_bits(asset_stat.st_mode)}\0".encode())
                 with asset_path.open("rb") as f:
                     while True:
                         chunk = f.read(1024 * 1024)
@@ -199,6 +210,8 @@ def _compute_path_contents_hash(host_path: Path) -> str:
                         hasher.update(chunk)
             return hasher.hexdigest()
 
+        file_stat = resolved_host_path.stat()
+        hasher.update(f"file:{_mode_bits(file_stat.st_mode)}\0".encode())
         with resolved_host_path.open("rb") as f:
             while True:
                 chunk = f.read(1024 * 1024)
@@ -218,6 +231,23 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path)
         return
     path.unlink()
+
+
+def _copy_directory_tree(source_dir: Path, destination_dir: Path) -> None:
+    entries = iter_local_copy_source_entries(source_dir)
+    for source_path, relative_path in entries:
+        destination_path = destination_dir.joinpath(*relative_path.parts)
+        if source_path.is_dir():
+            destination_path.mkdir(parents=True, exist_ok=True)
+            continue
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination_path)
+
+    for source_path, relative_path in reversed(entries):
+        if not source_path.is_dir():
+            continue
+        destination_dir.joinpath(*relative_path.parts).chmod(_mode_bits(source_path.stat().st_mode))
+    destination_dir.chmod(_mode_bits(source_dir.stat().st_mode))
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,13 +432,7 @@ class DockerProjectionManager:
                         asset.host_path,
                         field_name="Docker worker asset",
                     )
-                    for source_path, relative_path in iter_local_copy_source_entries(resolved_asset_dir):
-                        destination_path = placeholder_path.joinpath(*relative_path.parts)
-                        if source_path.is_dir():
-                            destination_path.mkdir(parents=True, exist_ok=True)
-                            continue
-                        destination_path.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(source_path, destination_path)
+                    _copy_directory_tree(resolved_asset_dir, placeholder_path)
                     continue
                 placeholder_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(
