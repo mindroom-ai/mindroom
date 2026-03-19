@@ -29,7 +29,11 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.docker import DockerWorkerBackend, _load_docker_client_and_errors
+from mindroom.workers.backends.docker import (
+    DockerWorkerBackend,
+    _load_docker_client_and_errors,
+    ensure_docker_dependencies,
+)
 from mindroom.workers.backends.docker_config import (
     _default_docker_user_for_os,
     _DockerWorkerBackendConfig,
@@ -203,14 +207,14 @@ def _noop_sync_shared_credentials(*_args: object, **_kwargs: object) -> None:
 def _projected_config_fixture(tmp_path: Path) -> tuple[str, dict[str, Path]]:
     plugin_root = tmp_path / "plugins" / "my-plugin"
     plugin_root.mkdir(parents=True)
+    (plugin_root / "plugin.py").write_text("PLUGIN_VERSION = 'v1'\n", encoding="utf-8")
     knowledge_root = tmp_path / "knowledge_docs"
     knowledge_root.mkdir()
+    (knowledge_root / "guide.md").write_text("# Guide v1\n", encoding="utf-8")
     context_file = tmp_path / "context.md"
     context_file.write_text("# Context\n", encoding="utf-8")
     memory_root = tmp_path / "memory_files"
     memory_root.mkdir()
-    agent_memory_root = tmp_path / "agent_memory" / "code"
-    agent_memory_root.mkdir(parents=True)
     primary_runtime_data = tmp_path / "mindroom_data" / "credentials"
     primary_runtime_data.mkdir(parents=True)
     (primary_runtime_data / "secret.json").write_text('{"api_key":"leak"}', encoding="utf-8")
@@ -232,7 +236,6 @@ agents:
     model: default
     context_files:
       - ./context.md
-    memory_file_path: ./agent_memory/code
 models:
   default:
     provider: openai
@@ -266,7 +269,6 @@ mindroom_user:
             "knowledge_root": knowledge_root,
             "context_file": context_file,
             "memory_root": memory_root,
-            "agent_memory_root": agent_memory_root,
         },
     )
 
@@ -284,10 +286,6 @@ def _multi_agent_projected_config_fixture(tmp_path: Path) -> tuple[str, dict[str
     beta_context.write_text("# Beta\n", encoding="utf-8")
     memory_root = tmp_path / "memory_files"
     memory_root.mkdir()
-    alpha_memory_root = tmp_path / "agent_memory" / "alpha"
-    alpha_memory_root.mkdir(parents=True)
-    beta_memory_root = tmp_path / "agent_memory" / "beta"
-    beta_memory_root.mkdir(parents=True)
     return (
         """
 knowledge_bases:
@@ -308,7 +306,6 @@ agents:
     knowledge_bases: [a]
     context_files:
       - ./alpha.md
-    memory_file_path: ./agent_memory/alpha
   beta:
     display_name: Beta
     role: Beta test
@@ -317,7 +314,6 @@ agents:
     knowledge_bases: [b]
     context_files:
       - ./beta.md
-    memory_file_path: ./agent_memory/beta
 models:
   default:
     provider: openai
@@ -328,8 +324,6 @@ models:
             "beta_context": beta_context,
             "alpha_knowledge_root": alpha_knowledge_root,
             "beta_knowledge_root": beta_knowledge_root,
-            "alpha_memory_root": alpha_memory_root,
-            "beta_memory_root": beta_memory_root,
         },
     )
 
@@ -439,17 +433,10 @@ def _assert_projected_worker_mounts(
     assert worker_root not in projection_root.parents
     assert str(tmp_path) not in volumes
     assert str(tmp_path / "mindroom_data") not in volumes
-    assert (
-        volumes[str(projected_paths["plugin_root"].resolve())]["bind"]
-        == "/app/config-host/.mindroom-worker-assets/plugins/00-my-plugin"
-    )
-    assert (
-        volumes[str(projected_paths["knowledge_root"].resolve())]["bind"]
-        == "/app/config-host/.mindroom-worker-assets/knowledge_bases/docs"
-    )
+    assert str(projected_paths["plugin_root"].resolve()) not in volumes
+    assert str(projected_paths["knowledge_root"].resolve()) not in volumes
     assert str(projected_paths["context_file"].resolve()) not in volumes
     assert str(projected_paths["memory_root"].resolve()) not in volumes
-    assert str(projected_paths["agent_memory_root"].resolve()) not in volumes
     return projection_root
 
 def _assert_projected_config_snapshot(projection_root: Path, tmp_path: Path) -> None:
@@ -467,15 +454,9 @@ def _assert_projected_config_snapshot(projection_root: Path, tmp_path: Path) -> 
     assert projected_plugin_path.read_text(encoding="utf-8") == "PLUGIN_VERSION = 'v1'\n"
     projected_knowledge_path = projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "docs" / "guide.md"
     assert projected_knowledge_path.read_text(encoding="utf-8") == "# Guide v1\n"
-    assert (
-        f"memory_file_path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/agents/code/memory_file_path" in projected_config
-    )
     assert (projection_root / ".env").read_text(encoding="utf-8") == ""
     assert (projection_root / ".projection-ready").read_text(encoding="utf-8") == "ready\n"
     assert (worker_root_path(tmp_path, "worker-a") / _WORKER_CONFIG_STATE_DIRNAME / "memory" / "file").is_dir()
-    assert (
-        worker_root_path(tmp_path, "worker-a") / _WORKER_CONFIG_STATE_DIRNAME / "agents" / "code" / "memory_file_path"
-    ).is_dir()
 def _backend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -510,7 +491,7 @@ def _backend(
 
     monkeypatch.setattr(
         "mindroom.workers.backends.docker._load_docker_client_and_errors",
-        lambda: (
+        lambda *_args, **_kwargs: (
             fake_client,
             SimpleNamespace(
                 DockerException=_FakeDockerError,
@@ -681,24 +662,7 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     volumes = run_call["volumes"]
     assert isinstance(volumes, dict)
     projection_root = _assert_projected_worker_mounts(tmp_path, volumes, projected_paths)
-
-    projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
-    assert "plugins:\n- ./.mindroom-worker-assets/plugins/00-my-plugin" in projected_config
-    assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in projected_config
-    assert f"path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/memory/file" in projected_config
-    assert "- ./.mindroom-worker-assets/agents/code/context_files/00-context.md" in projected_config
-    projected_context_path = (
-        projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
-    )
-    assert projected_context_path.read_text(encoding="utf-8") == "# Context\n"
-    assert (
-        f"memory_file_path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/agents/code/memory_file_path" in projected_config
-    )
-    assert (projection_root / ".env").read_text(encoding="utf-8") == ""
-    assert (worker_root_path(tmp_path, "worker-a") / _WORKER_CONFIG_STATE_DIRNAME / "memory" / "file").is_dir()
-    assert (
-        worker_root_path(tmp_path, "worker-a") / _WORKER_CONFIG_STATE_DIRNAME / "agents" / "code" / "memory_file_path"
-    ).is_dir()
+    _assert_projected_config_snapshot(projection_root, tmp_path)
     assert run_call["user"] == "1000:1000"
     assert run_call["ports"] == {"8766/tcp": ("127.0.0.1", None)}
 
@@ -1091,8 +1055,9 @@ def test_load_docker_client_auto_installs_optional_runtime(
     fake_client = object()
     fake_errors = SimpleNamespace(DockerException=_FakeDockerError, NotFound=_FakeNotFoundError)
 
-    def _ensure() -> None:
+    def _ensure(runtime_paths: RuntimePaths | None = None) -> None:
         captured["installed"] = True
+        captured["runtime_paths"] = runtime_paths
 
     def _import_module(name: str) -> object:
         if name == "docker":
@@ -1108,8 +1073,38 @@ def test_load_docker_client_auto_installs_optional_runtime(
     client, errors = _load_docker_client_and_errors()
 
     assert captured["installed"] is True
+    assert captured["runtime_paths"] is None
     assert client is fake_client
     assert errors is fake_errors
+
+
+def test_ensure_docker_dependencies_uses_explicit_runtime_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker dependency bootstrap should honor the active runtime's config-adjacent .env."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("MINDROOM_NO_AUTO_INSTALL_TOOLS=true\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
+    captured: dict[str, object] = {}
+
+    def _ensure_optional_deps(dependencies: list[str], extra_name: str, provided_runtime_paths: RuntimePaths) -> None:
+        captured["dependencies"] = dependencies
+        captured["extra_name"] = extra_name
+        captured["runtime_paths"] = provided_runtime_paths
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.ensure_optional_deps", _ensure_optional_deps)
+
+    ensure_docker_dependencies(runtime_paths)
+
+    assert captured["dependencies"] == ["docker"]
+    assert captured["extra_name"] == "docker"
+    assert captured["runtime_paths"] is runtime_paths
+    assert runtime_paths.env_value("MINDROOM_NO_AUTO_INSTALL_TOOLS") == "true"
 
 
 def test_read_docker_user_defaults_to_current_posix_uid_gid(
@@ -1304,7 +1299,7 @@ def test_docker_backend_uses_distinct_container_names_for_different_storage_root
 
     monkeypatch.setattr(
         "mindroom.workers.backends.docker._load_docker_client_and_errors",
-        lambda: (
+        lambda *_args, **_kwargs: (
             fake_client,
             SimpleNamespace(
                 DockerException=_FakeDockerError,
@@ -1489,11 +1484,6 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
     assert ".mindroom-worker-assets/agents/beta/context_files/00-beta.md" not in projected_config
     assert "path: ./.mindroom-worker-assets/knowledge_bases/a" in projected_config
     assert "path: ./.mindroom-worker-assets/knowledge_bases/b" not in projected_config
-    assert (
-        f"memory_file_path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/agents/alpha/memory_file_path"
-        in projected_config
-    )
-    assert f"/app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/agents/beta/memory_file_path" not in projected_config
     assert set(projected_config_data["agents"]) == {"alpha"}
     assert set(projected_config_data["knowledge_bases"]) == {"a"}
 
@@ -1508,10 +1498,6 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
     projected_alpha_knowledge = projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "a" / "a.txt"
     assert projected_alpha_knowledge.read_text(encoding="utf-8") == "alpha knowledge\n"
     assert not (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "b" / "b.txt").exists()
-
-    worker_config_state_root = worker_root_path(tmp_path, worker_key) / _WORKER_CONFIG_STATE_DIRNAME / "agents"
-    assert (worker_config_state_root / "alpha" / "memory_file_path").is_dir()
-    assert not (worker_config_state_root / "beta" / "memory_file_path").exists()
 
     assert projected_paths["alpha_context"].resolve() not in projection_root.parents
     assert projected_paths["beta_context"].resolve() not in projection_root.parents
@@ -1931,7 +1917,7 @@ def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(
 
     monkeypatch.setattr(
         "mindroom.workers.backends.docker._load_docker_client_and_errors",
-        lambda: (
+        lambda *_args, **_kwargs: (
             fake_client,
             SimpleNamespace(
                 DockerException=_FakeDockerError,
