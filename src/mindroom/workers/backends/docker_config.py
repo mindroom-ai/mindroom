@@ -6,11 +6,11 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.constants import (
     RuntimePaths,
+    resolve_config_relative_path,
     resolve_primary_runtime_paths,
     runtime_env_values,
     runtime_paths_with_storage_root,
@@ -25,6 +25,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
@@ -102,7 +103,7 @@ def _read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
 def _read_host_config_path(runtime_paths: RuntimePaths, env: Mapping[str, str]) -> Path | None:
     configured = _read_env(env, _HOST_CONFIG_PATH_ENV)
     if configured:
-        resolved = Path(configured).expanduser().resolve()
+        resolved = resolve_config_relative_path(configured, runtime_paths)
         if not resolved.exists():
             msg = f"{_HOST_CONFIG_PATH_ENV} points to a missing file: {resolved}"
             raise WorkerBackendError(msg)
