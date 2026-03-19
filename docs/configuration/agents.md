@@ -164,7 +164,8 @@ Absolute paths and `..` traversal are rejected.
 When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime files.
-Config-adjacent `.env` files are intentionally masked inside those Docker workers.
+Config-adjacent `.env` files are intentionally masked as files inside those Docker workers.
+A filtered public startup-runtime env payload can still propagate from exported env vars and allowed `.env` values.
 `worker_scope` controls how sandbox runtimes are reused between calls.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 Six integrations are shared-only (they require `worker_scope` unset or `shared`): `google`, `spotify`, `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
