@@ -6,6 +6,7 @@ import json
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -22,7 +23,7 @@ from mindroom.scheduling import (
     _execute_scheduled_workflow,
     _fix_interval_cron,
     _parse_workflow_schedule,
-    _validate_conditional_schedule,
+    _validate_conditional_workflow,
     _WorkflowParseError,
     schedule_task,
 )
@@ -319,6 +320,38 @@ class TestParseWorkflowSchedule:
         assert result_cron.schedule_type == "cron"
         assert result_cron.cron_schedule is not None
 
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
+    async def test_parse_conditional_schedule_rejects_non_polling_cron(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
+        """Conditional schedules should fail instead of accepting a non-polling cron."""
+        mock_agent = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = ScheduledWorkflow(
+            schedule_type="cron",
+            is_conditional=True,
+            cron_schedule=CronSchedule(minute="0", hour="9"),
+            message="@general Check for messages containing urgent. If found, notify the team.",
+            description="Monitor urgent mentions",
+        )
+        mock_agent.arun.return_value = mock_response
+        mock_agent_class.return_value = mock_agent
+
+        result = await _parse_workflow_schedule(
+            "If someone mentions urgent then notify the team immediately",
+            config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
+            available_agents=[_mid("general")],
+        )
+
+        assert isinstance(result, _WorkflowParseError)
+        assert "polling cron" in result.error
+        assert "0 9 * * *" in result.error
+
 
 @pytest.mark.asyncio
 class TestExecuteScheduledWorkflow:
@@ -586,67 +619,55 @@ class TestFixIntervalCron:
         assert _fix_interval_cron("every 2 minutes check", wrong_cron).to_cron_string() == "*/2 * * * *"
 
 
-class TestValidateConditionalSchedule:
-    """Test _validate_conditional_schedule rejects lost conditionals."""
+class TestValidateConditionalWorkflow:
+    """Test _validate_conditional_workflow rejects invalid conditional schedules."""
 
-    def _workflow(self, message: str) -> ScheduledWorkflow:
+    def _workflow(
+        self,
+        message: str,
+        *,
+        schedule_type: Literal["once", "cron"] = "cron",
+        is_conditional: bool = True,
+        cron_schedule: CronSchedule | None = None,
+    ) -> ScheduledWorkflow:
         return ScheduledWorkflow(
-            schedule_type="cron",
-            cron_schedule=CronSchedule(minute="0", hour="9"),
+            schedule_type=schedule_type,
+            is_conditional=is_conditional,
+            cron_schedule=cron_schedule or CronSchedule(minute="0", hour="9"),
             message=message,
             description="test",
         )
 
-    def test_conditional_with_empty_message_returns_error(self) -> None:
-        """Reject conditionals that lose their executable message."""
-        result = _validate_conditional_schedule(
-            "if someone mentions urgent then notify the team",
-            self._workflow(""),
-        )
+    def test_conditional_with_non_polling_cron_returns_error(self) -> None:
+        """Reject conditional schedules that do not resolve to polling cron."""
+        result = _validate_conditional_workflow(self._workflow(""))
         assert isinstance(result, _WorkflowParseError)
-        assert "condition text was not preserved" in result.error
+        assert "polling cron" in result.error
+        assert "0 9 * * *" in result.error
 
-    def test_conditional_with_whitespace_message_returns_error(self) -> None:
-        """Reject conditionals when only whitespace survives in the message."""
-        result = _validate_conditional_schedule(
-            "when server load spikes alert ops",
-            self._workflow("   "),
-        )
-        assert isinstance(result, _WorkflowParseError)
-
-    def test_conditional_with_message_passes(self) -> None:
-        """Allow conditional schedules that preserve the actionable message."""
-        result = _validate_conditional_schedule(
-            "if CPU > 80% then @ops scale up",
-            self._workflow("@ops Check CPU usage. If above 80%, scale up."),
+    def test_conditional_with_polling_cron_passes(self) -> None:
+        """Allow conditional schedules that resolve to interval polling."""
+        result = _validate_conditional_workflow(
+            self._workflow(
+                "@ops Check CPU usage. If above 80%, scale up.",
+                cron_schedule=CronSchedule(minute="*/5", hour="*", day="*", month="*", weekday="*"),
+            ),
         )
         assert result is None
 
-    def test_non_conditional_with_empty_message_passes(self) -> None:
-        """Ignore empty messages for requests that are not conditional."""
-        result = _validate_conditional_schedule(
-            "every 5 minutes check status",
-            self._workflow(""),
-        )
+    def test_non_conditional_schedule_is_ignored(self) -> None:
+        """Skip validation for normal time-based schedules."""
+        result = _validate_conditional_workflow(self._workflow("", is_conditional=False))
         assert result is None
 
-    def test_when_pattern_detected(self) -> None:
-        """Treat `when` phrasing as conditional schedule input."""
-        result = _validate_conditional_schedule("when Bitcoin drops below 40k alert me", self._workflow(""))
+    def test_conditional_once_returns_error(self) -> None:
+        """Reject one-time parses for conditional requests."""
+        result = _validate_conditional_workflow(
+            self._workflow(
+                "Check deployment status and notify me.",
+                schedule_type="once",
+                cron_schedule=None,
+            ),
+        )
         assert isinstance(result, _WorkflowParseError)
-
-    def test_whenever_pattern_detected(self) -> None:
-        """Treat `whenever` phrasing as conditional schedule input."""
-        result = _validate_conditional_schedule("whenever I get email from boss notify me", self._workflow(""))
-        assert isinstance(result, _WorkflowParseError)
-
-    def test_once_happens_pattern_detected(self) -> None:
-        """Treat `once ... happens` phrasing as conditional schedule input."""
-        result = _validate_conditional_schedule("once deployment happens run smoke tests", self._workflow(""))
-        assert isinstance(result, _WorkflowParseError)
-
-    def test_suggestion_includes_rephrasing_hint(self) -> None:
-        """Return a helpful rephrasing hint for rejected conditionals."""
-        result = _validate_conditional_schedule("if server down then restart", self._workflow(""))
-        assert isinstance(result, _WorkflowParseError)
-        assert "rephrasing" in result.suggestion.lower()
+        assert "recurring polling schedule" in result.error
