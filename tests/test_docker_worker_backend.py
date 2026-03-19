@@ -29,6 +29,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.docker import (
     DockerWorkerBackend,
     _load_docker_client_and_errors,
@@ -1219,6 +1220,53 @@ def test_docker_backend_records_failure_and_stops_container(
     container = next(iter(fake_client.containers.by_name.values()))
     assert container.stopped == 1
     assert container.status == "exited"
+
+
+def test_docker_worker_config_rejects_reserved_extra_env_names_from_env(tmp_path: Path) -> None:
+    """Docker worker env JSON should not override backend-owned control variables."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_ENV_JSON": json.dumps(
+                {
+                    "MINDROOM_RUNTIME_PATHS_JSON": "override",
+                    "MINDROOM_STORAGE_PATH": str((tmp_path / "escape").resolve()),
+                },
+            ),
+        },
+    )
+
+    with pytest.raises(
+        WorkerBackendError,
+        match="MINDROOM_RUNTIME_PATHS_JSON, MINDROOM_STORAGE_PATH",
+    ):
+        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+
+
+def test_build_dedicated_worker_runtime_paths_rejects_reserved_extra_env_names(tmp_path: Path) -> None:
+    """Dedicated worker runtime payloads should reject reserved extra env names."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
+
+    with pytest.raises(WorkerBackendError, match="MINDROOM_STORAGE_PATH"):
+        build_dedicated_worker_runtime_paths(
+            runtime_paths=runtime_paths,
+            backend_name="Docker",
+            worker_key=_TEST_UNSCOPED_WORKER_KEY,
+            config_path=Path("/app/config-host/config.yaml"),
+            dedicated_root=Path("/app/worker"),
+            local_dedicated_root=tmp_path / "worker-root",
+            worker_port=8766,
+            shared_storage_root="/app/shared-storage",
+            extra_env={"MINDROOM_STORAGE_PATH": str((tmp_path / "escape").resolve())},
+        )
 
 
 def test_docker_backend_recreates_container_when_launch_config_changes(

@@ -18,7 +18,10 @@ from mindroom.constants import (
 from mindroom.credentials import runtime_credentials_manager_key
 from mindroom.tool_system.worker_routing import worker_root_path
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends._dedicated_worker_common import build_backend_config_signature
+from mindroom.workers.backends._dedicated_worker_common import (
+    build_backend_config_signature,
+    validate_dedicated_worker_extra_env,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -45,6 +48,12 @@ _ENDPOINT_HOST_ENV = "MINDROOM_DOCKER_WORKER_ENDPOINT_HOST"
 _USER_ENV = "MINDROOM_DOCKER_WORKER_USER"
 _EXTRA_ENV_JSON_ENV = "MINDROOM_DOCKER_WORKER_ENV_JSON"
 _EXTRA_LABELS_JSON_ENV = "MINDROOM_DOCKER_WORKER_LABELS_JSON"
+_DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
+    {
+        "MINDROOM_RUNTIME_PATHS_JSON",
+        "MINDROOM_SANDBOX_PROXY_TOKEN",
+    },
+)
 
 
 def _read_env(env: Mapping[str, str], name: str, default: str = "") -> str:
@@ -172,6 +181,12 @@ class _DockerWorkerBackendConfig:
 
         publish_host = _read_env(env, _PUBLISH_HOST_ENV, _DEFAULT_PUBLISH_HOST) or _DEFAULT_PUBLISH_HOST
         endpoint_host = _read_env(env, _ENDPOINT_HOST_ENV, publish_host) or publish_host
+        extra_env = _read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV)
+        validate_dedicated_worker_extra_env(
+            extra_env,
+            backend_name="Docker",
+            extra_reserved_names=_DOCKER_RESERVED_EXTRA_ENV_NAMES,
+        )
         return cls(
             image=image,
             worker_port=_read_int_env(env, _PORT_ENV, _DEFAULT_WORKER_PORT),
@@ -185,7 +200,7 @@ class _DockerWorkerBackendConfig:
             publish_host=publish_host,
             endpoint_host=endpoint_host,
             user=_read_docker_user(env),
-            extra_env=_read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV),
+            extra_env=extra_env,
             extra_labels=_read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
         )
 

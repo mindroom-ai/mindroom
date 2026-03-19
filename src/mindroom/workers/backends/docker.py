@@ -43,6 +43,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_visible_state_roots,
     prepare_dedicated_worker_ensure_lifecycle,
     touch_dedicated_worker_lifecycle,
+    validate_dedicated_worker_extra_env,
     validate_unique_worker_visible_paths,
 )
 from mindroom.workers.backends._metadata_store import (
@@ -52,6 +53,7 @@ from mindroom.workers.backends._metadata_store import (
 )
 from mindroom.workers.backends.docker_config import (
     _DEFAULT_WORKER_PORT,
+    _DOCKER_RESERVED_EXTRA_ENV_NAMES,
     _DockerWorkerBackendConfig,
     docker_backend_config_signature,
     docker_workers_root,
@@ -262,6 +264,11 @@ class DockerWorkerBackend:
         if auth_token is None:
             msg = "A worker auth token is required for Docker workers."
             raise WorkerBackendError(msg)
+        validate_dedicated_worker_extra_env(
+            config.extra_env,
+            backend_name="Docker",
+            extra_reserved_names=_DOCKER_RESERVED_EXTRA_ENV_NAMES,
+        )
 
         self.config = config
         self.auth_token = auth_token
