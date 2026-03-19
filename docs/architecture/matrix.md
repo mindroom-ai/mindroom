@@ -89,8 +89,8 @@ Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindr
 
 Marker format:
 ```text
-Pending:   🔧 `tool_name` [N] ⏳
-Completed: 🔧 `tool_name` [N]
+🔧 `tool_name` [N] ⏳     ← pending
+🔧 `tool_name` [N]        ← completed
 ```
 
 Where `N` is 1-indexed per message and maps to `io.mindroom.tool_trace.events[N-1]`.
@@ -139,10 +139,10 @@ mid.domain    # "example.com"
 mid.full_id   # "@mindroom_assistant:example.com"
 
 # Create from agent name
-mid = MatrixID.from_agent("assistant", "example.com")
+mid = MatrixID.from_agent("assistant", "example.com", runtime_paths)
 
 # Extract agent name (returns "code" if configured, None otherwise)
-agent_name = extract_agent_name("@mindroom_code:localhost", config)
+agent_name = extract_agent_name("@mindroom_code:localhost", config, runtime_paths)
 ```
 
 ## Configuration

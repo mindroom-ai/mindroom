@@ -90,6 +90,9 @@ memory:
     config:
       model: "nomic-embed-text"  # Embedding model to use
       host: "http://localhost:11434"  # Ollama host URL
+      # api_key: null  # Optional API key (usually from env)
+      # dimensions: null  # Optional embedding dimension override
+  llm: null  # Optional LLM for memory operations (provider + config dict)
   file:
     max_entrypoint_lines: 200  # Max lines preloaded from MEMORY.md
   auto_flush:
@@ -228,6 +231,10 @@ knowledge_bases:
       repo_url: "https://github.com/org/docs.git"
       branch: main
       poll_interval_seconds: 300
+      # credentials_service: null  # CredentialsManager service for private HTTPS repos
+      # skip_hidden: true  # Skip hidden files/folders during indexing
+      # include_patterns: []  # Root-anchored glob patterns to include
+      # exclude_patterns: []  # Root-anchored glob patterns to exclude
 ```
 
 Assign knowledge bases to agents via `knowledge_bases: [engineering_docs]` in the agent config.
@@ -243,6 +250,8 @@ voice:
   stt:
     provider: openai
     model: whisper-1
+    # api_key: null  # Optional API key for STT service
+    # host: null  # Optional host URL for self-hosted STT
   intelligence:
     model: default  # Model for command recognition
 ```
@@ -281,6 +290,16 @@ matrix_room_access:
   publish_to_room_directory: false
   invite_only_rooms: []  # Room keys that stay invite-only even in multi_user mode
   reconcile_existing_rooms: false  # Reconcile existing rooms on startup
+```
+
+## Matrix Space Configuration
+
+Optionally group all managed rooms under a root Matrix Space:
+
+```yaml
+matrix_space:
+  enabled: true  # Create and maintain a root Space (default: true)
+  name: "MindRoom"  # Display name for the root Space
 ```
 
 ## Defaults Configuration

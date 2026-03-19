@@ -23,7 +23,7 @@ The frontend uses Vitest as the test runner with React Testing Library for compo
 - `src/components/Integrations/Integrations.test.tsx` - Tests for the Integrations component
 - `src/types/toolConfig.test.ts` - Tests for tool configuration types
 
-There are 180+ frontend test files covering components, hooks, and utilities.
+There are 28 frontend test files covering components, hooks, and utilities.
 
 ### Running Frontend Tests
 

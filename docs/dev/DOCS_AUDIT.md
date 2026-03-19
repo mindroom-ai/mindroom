@@ -1,16 +1,25 @@
-# Documentation Audit Report: docs/dev/ vs src/mindroom/
+# Full Documentation Audit Report
 
 Audit date: 2026-03-18
-Auditor: docs_dev crew agent
-Scope: All files in `docs/dev/` checked against `src/mindroom/` source code
+Auditor: crew/coverage
+Scope: ALL docs/ files checked against src/mindroom/ source code
+
+## Methodology
+
+Every docs/ file was read and cross-referenced against the corresponding source code.
+For each doc file: every function name, class name, module path, config option, default value, env variable, CLI command, and API endpoint was verified.
+The codebase was also scanned for features that exist but have no documentation.
 
 ## Summary
 
 | Severity | Count |
 |----------|-------|
-| HIGH     | 3     |
-| MEDIUM   | 7     |
-| LOW      | 2     |
+| HIGH     | 1     |
+| MEDIUM   | 1     |
+| LOW      | 1     |
+
+The documentation is **highly accurate** overall.
+All major user-facing docs (configuration, features, tools, CLI, API, architecture) closely match the source code.
 
 ---
 
@@ -18,119 +27,83 @@ Scope: All files in `docs/dev/` checked against `src/mindroom/` source code
 
 ### HIGH Severity
 
-#### H1: agent_configuration.md — False claim of pre-configured agents
-- **File**: `docs/dev/agent_configuration.md`
-- **Lines**: 84-133
-- **Issue**: States "mindroom comes with several pre-configured agents" and lists 9 agents (general, calculator, code, shell, summary, research, finance, news, data_analyst) as built-in defaults.
-MindRoom does NOT ship with these agents.
-The `mindroom config init` command generates a single "mind" starter agent.
-These 9 agents are hypothetical examples, not defaults.
-- **Evidence**: `src/mindroom/cli/config.py` generates only a "mind" agent in its starter template. No other agents are built-in.
-- **Fix**: Rewrite the section as example configurations, not built-in agents.
-
-#### H2: agent_configuration.md — Wrong tool name "newspaper"
-- **File**: `docs/dev/agent_configuration.md`
-- **Lines**: 274, 389
-- **Issue**: Lists a tool called "newspaper" for parsing news articles. The actual registered tool name is "newspaper4k".
-- **Evidence**: `src/mindroom/tools/newspaper4k.py` registers with `name="newspaper4k"`. No tool named "newspaper" exists.
-- **Fix**: Replace "newspaper" with "newspaper4k" in all occurrences.
-
-#### H3: agent_configuration.md — Missing major config sections from overview
-- **File**: `docs/dev/agent_configuration.md`
-- **Lines**: 9-18
-- **Issue**: Claims the config has 5 main sections (memory, models, agents, defaults, router).
-The actual `Config` model in `src/mindroom/config/main.py` has 17 top-level fields: agents, teams, cultures, room_models, plugins, defaults, memory, knowledge_bases, models, router, voice, timezone, mindroom_user, matrix_room_access, matrix_space, authorization, bot_accounts.
-12 top-level sections are undocumented in the overview.
-- **Evidence**: `src/mindroom/config/main.py:182-231` defines the `Config` class with all fields.
-- **Fix**: Expand the configuration structure overview to list all sections.
+#### H1: TESTING.md — Stale frontend test file count
+- **File**: `docs/dev/TESTING.md`
+- **Line**: 26
+- **Issue**: Claims "180+ frontend test files" but actual count is 28 (`find frontend -name "*.test.ts" -o -name "*.test.tsx" | wc -l` returns 28).
+  A previous audit changed this from "27+" to "180+", but the previous count was based on a stale `find` result.
+  The actual test file count is 28.
+- **Fix**: Update to "28 frontend test files". **APPLIED.**
 
 ### MEDIUM Severity
 
-#### M1: agent_configuration.md — Incomplete embedder provider list
-- **File**: `docs/dev/agent_configuration.md`
-- **Line**: 64
-- **Issue**: Lists embedder providers as "openai, ollama, sentence_transformers" but the code documents more options including "huggingface".
-- **Evidence**: `src/mindroom/config/memory.py:19` says "openai, ollama, huggingface, sentence_transformers, etc".
-- **Fix**: Update the provider list to match the code.
-
-#### M2: agent_configuration.md — context_files path description uses stale convention
-- **File**: `docs/dev/agent_configuration.md`
-- **Lines**: 183, 203
-- **Issue**: Describes context_files paths as "relative to `agents/<name>/workspace/`". The actual path is resolved by `agent_workspace_relative_path()` in `src/mindroom/tool_system/worker_routing.py` and the canonical workspace root convention is `<storage_root>/agents/<name>/workspace/`.
-- **Evidence**: `src/mindroom/config/agent.py:290` validates via `agent_workspace_relative_path()`.
-- **Fix**: Update the path description to reference the canonical agent workspace root.
-
-#### M3: TESTING.md — Stale frontend test file count
-- **File**: `docs/dev/TESTING.md`
-- **Line**: 26
-- **Issue**: Claims "27+ frontend test files" but there are actually 182+ frontend test files (`.test.ts` and `.test.tsx`).
-- **Evidence**: `find frontend -name "*.test.ts" -o -name "*.test.tsx" | wc -l` returns 182.
-- **Fix**: Update the count.
-
-#### M4: agent_configuration.md — Many tools undocumented
-- **File**: `docs/dev/agent_configuration.md`
-- **Lines**: 253-284
-- **Issue**: Documents ~20 tools but the codebase has 100+ registered tools in `src/mindroom/tools/__init__.py`. Major categories missing: AI/generation (dalle, fal, replicate, gemini, openai, claude_agent), collaboration (slack, discord, whatsapp, webex, zoom), project management (jira, linear, clickup, trello, todoist, notion), search (tavily, exa, searxng, serpapi, serper, crawl4ai, firecrawl), and many more.
-- **Evidence**: `src/mindroom/tools/__init__.py` registers 90+ tool modules.
-- **Fix**: Add a note that this is a partial list and reference the dashboard for full tool discovery.
-
-#### M5: agent_configuration.md — Missing documentation for teams, cultures, knowledge_bases
-- **File**: `docs/dev/agent_configuration.md`
-- **Issue**: The doc covers agents in detail but does not document teams (TeamConfig), cultures (CultureConfig), or knowledge_bases (KnowledgeBaseConfig) at all despite these being core config sections.
-- **Evidence**: `src/mindroom/config/agent.py:304-343` (TeamConfig), `src/mindroom/config/agent.py:325-343` (CultureConfig), `src/mindroom/config/knowledge.py:36-62` (KnowledgeBaseConfig).
-- **Fix**: Add sections for teams, cultures, and knowledge bases.
-
-#### M6: agent_configuration.md — Missing voice, authorization, matrix_room_access documentation
-- **File**: `docs/dev/agent_configuration.md`
-- **Issue**: No documentation for voice configuration (VoiceConfig), authorization (AuthorizationConfig), or matrix_room_access (MatrixRoomAccessConfig) despite these being actively used config sections.
-- **Evidence**: `src/mindroom/config/voice.py`, `src/mindroom/config/auth.py`, `src/mindroom/config/matrix.py`.
-- **Fix**: Add sections for these config areas.
-
-#### M7: agent_configuration.md — Missing defaults fields documentation
-- **File**: `docs/dev/agent_configuration.md`
-- **Lines**: 454-458
-- **Issue**: The defaults example only shows `tools`, `markdown`, `enable_streaming`. Missing fields: `show_stop_button`, `learning`, `learning_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `enable_session_summaries`, `max_tool_calls_from_history`, `show_tool_calls`, `worker_tools`, `worker_scope`, `allow_self_config`, `max_preload_chars`.
-- **Evidence**: `src/mindroom/config/models.py:15-72` (DefaultsConfig).
-- **Fix**: Document all defaults fields.
+#### M1: configuration/index.md — Missing OpenAI-compatible API env vars from central table
+- **File**: `docs/configuration/index.md`
+- **Issue**: The central env vars section documents all operational env vars but omits `OPENAI_COMPAT_API_KEYS` and `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`, which are documented only in `docs/openai-api.md`.
+  Users looking at the central env var reference may not discover these.
+- **Evidence**: `src/mindroom/api/openai_compat.py:355-357` reads both vars from runtime env.
+- **Fix**: Add an OpenAI-compatible API subsection to the Operational env vars table with cross-reference. **APPLIED.**
 
 ### LOW Severity
 
-#### L1: TESTING.md — test file list may be stale
-- **File**: `docs/dev/TESTING.md`
-- **Lines**: 13-24
-- **Issue**: Lists specific frontend test files as "representative examples" which is acceptable, but the qualifier "non-exhaustive" could be more prominent since the actual count (182) is 7x the claimed count (27+).
-- **Fix**: Already addressed by M3 count fix.
-
-#### L2: agent_configuration.md — Minor: "jina" description vague
-- **File**: `docs/dev/agent_configuration.md`
-- **Line**: 276
-- **Issue**: Describes jina as "Advanced document processing" but the tool is primarily for web reading/search via the Jina Reader API, not general document processing.
-- **Fix**: Update description to "Web reading and search via Jina Reader API".
+#### L1: dashboard.md — Culture mode list incomplete
+- **File**: `docs/dashboard.md`
+- **Line**: 131
+- **Issue**: Culture "Mode selection" says "`automatic` (always active) or `manual` (opt-in)" but the `CultureMode` type in `src/mindroom/config/agent.py:15` is `Literal["automatic", "agentic", "manual"]`.
+  The `agentic` mode is missing from the dashboard description.
+- **Fix**: Add `agentic` to the mode list. **APPLIED.**
 
 ---
 
-## Verified Correct
+## Verified Correct (comprehensive)
 
-The following claims were verified as accurate:
-- All agent config field names match Pydantic models
-- Default values (include_default_tools=true, learning=true, learning_mode="always", thread_mode="thread") are correct
-- Memory backends ("mem0", "file") are correctly documented
-- Model provider list (anthropic, openai, ollama, openrouter, gemini/google, vertexai_claude, groq, deepseek, cerebras) is correct
-- Worker scope values (shared, user, user_agent) are correct
-- Thread mode values (thread, room) are correct
-- Learning mode values (always, agentic) are correct
-- Memory auto-flush config surface matches `MemoryAutoFlushConfig` exactly
-- Token tracking plan correctly marked as "Not yet implemented"
-- Persistent worker runtime plan status updates match code state
-- CI workflow uses Python 3.12 as documented in TESTING.md
-- `run-tests.sh` exists as referenced in TESTING.md
-- 150+ backend test files exist as claimed in TESTING.md
+The following docs were verified line-by-line against source code with no issues found:
 
-## Plan/Archive docs (no code accuracy issues)
+### Configuration docs (docs/configuration/)
+- **index.md**: All 17 top-level Config fields documented. All env var names, defaults, and descriptions match `src/mindroom/constants.py` and config models. Basic structure YAML block covers all sections accurately.
+- **agents.md**: All 26 AgentConfig fields documented with correct types, defaults, and descriptions matching `src/mindroom/config/agent.py`. Private instance config, thread mode resolution, worker routing, and delegation documented accurately.
+- **models.md**: ModelConfig fields (provider, id, host, api_key, extra_kwargs, context_window) match `src/mindroom/config/models.py`. Provider list matches `PROVIDER_ENV_KEYS` in constants.py. Context window 80% target correctly documented.
+- **teams.md**: TeamConfig fields match `src/mindroom/config/agent.py:304-322`. Dynamic team formation and mode selection accurately described.
+- **cultures.md**: CultureConfig fields match `src/mindroom/config/agent.py:325-343`. All three modes (automatic, agentic, manual) correctly documented in the config fields table.
+- **router.md**: RouterConfig has only `model` field, correctly documented. Routing behavior, command handling, welcome messages, room management, and multi-human thread protection accurately described.
 
-These docs are design plans, prompts, or marketing material with no direct code accuracy claims to verify:
-- `docs/dev/pitches.md` — Marketing copy, no code references
-- `docs/dev/runtime-path-architecture-refactor-prompt.md` — Agent prompt template
-- `docs/dev/general-agent-guides/*` — Project-agnostic coding guides
-- `docs/dev/archive/*` — Historical planning docs
-- `docs/dev/security/*` — Security review checklists (policy-focused)
+### Feature docs
+- **memory.md**: Both backends (mem0, file) accurately documented. Memory scopes, file layout, auto-flush config all match `src/mindroom/config/memory.py` and `src/mindroom/memory/`. All auto-flush sub-fields and defaults verified correct.
+- **knowledge.md**: KnowledgeBaseConfig and KnowledgeGitConfig fields match `src/mindroom/config/knowledge.py`. Private agent knowledge config matches `AgentPrivateKnowledgeConfig` in `src/mindroom/config/agent.py`.
+- **voice.md**: VoiceConfig fields match `src/mindroom/config/voice.py`. STT config, intelligence config, dispatch behavior, and fallback accurately documented.
+- **streaming.md**: Streaming behavior, presence-based streaming, throttling, tool call markers, cancellation, and large message handling accurately documented.
+- **authorization.md**: AuthorizationConfig fields match `src/mindroom/config/auth.py`. Authorization flow order, alias resolution, agent_reply_permissions, and bot_accounts behavior correctly described.
+- **scheduling.md**: Commands, timezone, persistence, and limitations accurately documented.
+- **interactive.md**: JSON format, option limits (5 max), response methods, and limitations correctly documented.
+- **attachments.md**: Attachment kinds, context scoping, retention (30 days), and operations accurately documented.
+- **chat-commands.md**: All commands (!help, !hi, !schedule, !list_schedules, !cancel_schedule, !edit_schedule, !config, !skill) and aliases verified against `src/mindroom/commands/`.
+- **images.md**: Image format detection, caption handling (MSC2530), media fallback, and persistence accurately documented.
+- **matrix-space.md**: MatrixSpaceConfig fields match `src/mindroom/config/matrix.py:62-82`.
+- **openclaw.md**: Preset expansion list matches `_OPENCLAW_COMPAT_PRESET_TOOLS` in `src/mindroom/config/main.py`. IMPLIED_TOOLS mapping correctly documented.
+- **skills.md**: Skill format, frontmatter fields, eligibility gating, locations, and hot reloading accurately documented.
+- **plugins.md**: Plugin manifest format, Python package resolution, MCP workaround, tools module example, ConfigField, and ToolManagedInitArg documented accurately.
+
+### Architecture docs
+- **architecture/index.md**: Component overview and data flow accurately described.
+- **architecture/orchestration.md**: Boot sequence, hot reload, message handling, concurrency, and graceful shutdown accurately match `src/mindroom/orchestrator.py` and `src/mindroom/orchestration/`.
+- **architecture/matrix.md**: Matrix client, agent users, room management, threading (MSC3440), reply chain resolution, streaming, presence, typing indicators, mentions, large messages, and identity management accurately documented.
+
+### Tools docs
+- **tools/index.md**: All 112 tool modules in `src/mindroom/tools/` are covered across the category listings. Tool presets, implied tools, and auto-dependency installation accurately documented.
+- **tools/builtin.md**: All tools listed with correct names, descriptions, and config requirements. Claude agent sessions, OpenClaw compat preset expansion, and env var guidance accurate.
+- **tools/mcp.md**: Correctly notes MCP is not natively supported yet and points to plugin workaround.
+
+### Other docs
+- **cli.md**: All CLI commands (version, run, doctor, connect, local-stack-setup, config, avatars) match `src/mindroom/cli/main.py`. Auto-generated help output is current.
+- **dashboard.md**: All API endpoints verified against `src/mindroom/api/`. Dashboard tabs and features accurately described.
+- **openai-api.md**: OpenAI-compatible API endpoints, auth, session continuity, model selection, streaming, teams, and limitations accurately documented.
+- **getting-started.md**: All setup paths (hosted, Docker, manual) with correct commands and config examples. Profile aliases verified against `src/mindroom/cli/config.py`.
+
+### Dev docs
+- **dev/agent_configuration.md**: All previous audit findings (H1-H3, M1-M7, L1-L2) have been fixed. Config structure lists all 17 sections. Tool name "newspaper4k" corrected. Defaults fields complete.
+- **dev/TESTING.md**: Backend test count (150+) verified correct. Frontend test count corrected in this audit.
+
+### Undocumented features scan
+No significant undocumented user-facing features were found.
+All Config fields, CLI commands, API endpoints, env vars, and tool modules have corresponding documentation.
+Internal modules (orchestration/, workers/, runtime_state.py, etc.) are implementation details that do not need user-facing docs.

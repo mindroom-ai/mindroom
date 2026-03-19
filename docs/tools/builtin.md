@@ -14,8 +14,8 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-folder-cog: | `shell` | Execute shell commands | - |
 | :lucide-folder-cog: | `docker` | Manage Docker containers and images | - |
 | :lucide-folder-cog: | `python` | Execute Python code | - |
-| :lucide-folder-cog: | `sql` | Database query and management for SQL databases | `db_url` or connection params |
-| :lucide-folder-cog: | `postgres` | Query PostgreSQL databases - list tables, describe schemas, run SQL | Connection params |
+| :lucide-folder-cog: | `sql` | Database query and management for SQL databases | `db_url` or `db_engine`, `user`, `password`, `host`, `port`, `schema`, `dialect` |
+| :lucide-folder-cog: | `postgres` | Query PostgreSQL databases - list tables, describe schemas, run SQL | `host`, `port`, `db_name`, `user`, `password` |
 | :lucide-folder-cog: | `redshift` | Query Amazon Redshift data warehouse | Connection params |
 | :lucide-folder-cog: | `neo4j` | Query Neo4j graph databases with Cypher | `uri`, `user`, `password` |
 | :lucide-folder-cog: | `duckdb` | Query data with DuckDB | - |
@@ -34,7 +34,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | Icon | Tool | Description | Config Required |
 |------|------|-------------|-----------------|
 | :lucide-search: | `duckduckgo` | DuckDuckGo web search | - |
-| :lucide-search: | `googlesearch` | Google search via WebSearch backend | - |
+| :lucide-search: | `googlesearch` | Search Google for web results using the WebSearch backend | - |
 | :lucide-search: | `baidusearch` | Baidu search | - |
 | :lucide-search: | `tavily` | Real-time web search API | `api_key` |
 | :lucide-search: | `exa` | AI-powered web search and research | `api_key` |

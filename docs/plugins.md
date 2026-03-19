@@ -181,6 +181,11 @@ Common optional fields:
 - `dependencies`: List of required pip packages
 - `docs_url`: Link to documentation
 - `managed_init_args`: Explicit MindRoom-managed constructor kwargs such as `runtime_paths` or `credentials_manager`
+- `icon`: Icon name for the dashboard (e.g., `"FaGoogle"`, `"Home"`)
+- `icon_color`: Tailwind color class for the icon (e.g., `"text-blue-500"`)
+- `helper_text`: Markdown help text shown in the dashboard
+- `auth_provider`: OAuth provider identifier when using OAuth-based setup
+- `default_execution_target`: `ToolExecutionTarget.PRIMARY` (default) or `WORKER` — controls whether the tool runs on the primary agent or a sandbox worker
 
 ### ConfigField
 

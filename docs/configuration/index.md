@@ -72,6 +72,15 @@ See [Model Configuration — File-based Secrets](models.md#file-based-secrets) f
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner` or `kubernetes`) | `static_runner` |
 
+### OpenAI-Compatible API
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OPENAI_COMPAT_API_KEYS` | Comma-separated API keys for authenticating `/v1/*` requests | _(none — locked without this or the flag below)_ |
+| `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED` | Set to `true` to allow unauthenticated `/v1/*` access (local dev only) | _(unset — locked)_ |
+
+See [OpenAI-Compatible API](../openai-api.md) for the full auth matrix.
+
 ### Provisioning / Pairing
 
 These are set automatically by `mindroom connect` and stored in `.env`:

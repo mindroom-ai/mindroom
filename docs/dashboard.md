@@ -128,7 +128,7 @@ Configure shared culture rules that apply across agents:
 
 - **Create/edit/delete cultures** with description and mode
 - **Assign agents** to cultures
-- **Mode selection** - `automatic` (always active) or `manual` (opt-in)
+- **Mode selection** - `automatic` (always active), `agentic` (agent decides when to update), or `manual` (read-only)
 
 ### Schedules
 
