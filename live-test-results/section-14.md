@@ -41,7 +41,7 @@ The bundled dashboard serves from the same runtime at `http://localhost:9887/`.
 All static assets (CSS, JS, favicon) return HTTP 200.
 All 14 SPA tab routes serve `index.html` (HTTP 200): overview, agents, teams, models, rooms, credentials, knowledge, memory, voice, tools, skills, cultures, schedules, external-rooms.
 
-Evidence: `evidence/api-responses/ui-001-dashboard-load.json`
+Evidence: `evidence/section-14/api-responses/ui-001-dashboard-load.json`
 
 ### UI-002: Standalone Auth Mode
 
@@ -50,7 +50,7 @@ Dashboard is openly accessible without credentials (HTTP 200 on all routes).
 `/login` returns 404 (correct: no login page when auth disabled).
 All API endpoints accessible without auth headers.
 
-Evidence: `evidence/api-responses/ui-002-auth.json`
+Evidence: `evidence/section-14/api-responses/ui-002-auth.json`
 
 ### UI-003: Config Load/Save Sync
 
@@ -59,7 +59,7 @@ Evidence: `evidence/api-responses/ui-002-auth.json`
 Round-trip: reload after save preserves agent count (17).
 Save enriches config with default fields (thread_mode, context_files, etc.) — expected normalization behavior.
 
-Evidence: `evidence/api-responses/ui-003-sync.json`
+Evidence: `evidence/section-14/api-responses/ui-003-sync.json`
 
 ### UI-004: Config Validation Failure
 
@@ -68,14 +68,14 @@ Malformed JSON returns `JSON decode error`.
 Invalid agent names (hyphens) return `Agent/team names must be alphanumeric/underscore only` error.
 All validation errors include structured detail with type, location, and message.
 
-Evidence: `evidence/api-responses/ui-004-validation.json`
+Evidence: `evidence/section-14/api-responses/ui-004-validation.json`
 
 ### UI-005: Overview Tab
 
 Non-trivial config reflected: 17 agents, 2 teams, 13 models, 16 unique rooms, 1 knowledge base.
 Overview page serves correctly (HTTP 200).
 
-Evidence: `evidence/api-responses/ui-005-overview.json`
+Evidence: `evidence/section-14/api-responses/ui-005-overview.json`
 
 ### UI-006: Agent CRUD
 
@@ -83,7 +83,7 @@ Create: validation correctly rejects hyphenated names (`testagent-s14`), accepts
 Update: `PUT /api/config/agents/{id}` returns `{"success": true}`, changes verified (display_name, tools, learning flag).
 Delete: `DELETE /api/config/agents/{id}` returns `{"success": true}`, agent removed from listing.
 
-Evidence: `evidence/api-responses/ui-006-agent-crud.json`
+Evidence: `evidence/section-14/api-responses/ui-006-agent-crud.json`
 
 ### UI-007: Team CRUD
 
@@ -113,14 +113,14 @@ Per-agent room memberships listed for all 17 agents and 2 teams.
 Configured rooms include both managed room IDs and named rooms.
 Empty unconfigured_rooms (expected for namespace-isolated instance).
 
-Evidence: `evidence/api-responses/external-rooms.json`
+Evidence: `evidence/section-14/api-responses/external-rooms.json`
 
 ### UI-012: Models CRUD
 
 13 models listed with provider/id details across openai, anthropic, ollama, openrouter, google.
 Create via PUT, verify provider/id, delete via config save.
 
-Evidence: `evidence/api-responses/models.json`
+Evidence: `evidence/section-14/api-responses/models.json`
 
 ### UI-013: Memory Settings
 
@@ -135,7 +135,7 @@ Auto-flush: disabled, with all sub-settings (interval, batch, extractor) present
 Status endpoint returns file_count=0, indexed_count=0 (empty KB).
 File listing returns empty list.
 
-Evidence: `evidence/api-responses/knowledge-bases.json`
+Evidence: `evidence/section-14/api-responses/knowledge-bases.json`
 
 ### UI-015: Credentials
 
@@ -145,7 +145,7 @@ Get: returns stored credentials.
 Delete: returns `{"status": "success"}`.
 OpenAI status shows `has_credentials: true`.
 
-Evidence: `evidence/api-responses/credentials.json`
+Evidence: `evidence/section-14/api-responses/credentials.json`
 
 ### UI-016: Voice Settings
 
@@ -160,7 +160,7 @@ Google integration: not connected, no credentials.
 Home Assistant: not connected.
 Spotify: not connected.
 
-Evidence: `evidence/api-responses/tools.json`
+Evidence: `evidence/section-14/api-responses/tools.json`
 
 ### UI-018: Skills CRUD
 
@@ -170,7 +170,7 @@ Get: returns skill content.
 Update: returns success.
 Delete: returned "Skill not found" (skill may have been auto-cleaned on update cycle).
 
-Evidence: `evidence/api-responses/skills.json`
+Evidence: `evidence/section-14/api-responses/skills.json`
 
 ### UI-019: Agent Policy Preview
 

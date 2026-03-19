@@ -456,10 +456,11 @@ def _fix_interval_cron(request: str, cron: CronSchedule) -> CronSchedule:
             return CronSchedule(minute=expected_minute, hour="*", day="*", month="*", weekday="*")
     elif unit in ("hour", "hr"):
         expected_hour = f"*/{value}" if value > 1 else "*"
-        if cron.hour != expected_hour:
+        if cron.hour != expected_hour or cron.minute != "0":
             logger.info(
                 "Correcting cron for interval pattern",
                 original=cron.to_cron_string(),
+                corrected_minute="0",
                 corrected_hour=expected_hour,
                 request=request,
             )

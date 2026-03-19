@@ -7,7 +7,7 @@ Checklist: `docs/dev/exhaustive-live-test-checklist.md` (186 items, 16 sections)
 ## Quick Stats
 
 - **~175 PASS** out of ~186 test items
-- **3 bugs found** (doctor URL, orphan cleanup, directory visibility)
+- **5 bugs found** (doctor URL, orphan cleanup, directory visibility, dashboard blank state, pluralization)
 - **1 code fix** (scheduling cron safety net)
 - **~8 environment SKIPs** (E2EE, git KB, hosted pairing, etc.)
 - **179 evidence files** (logs, API responses, screenshots)

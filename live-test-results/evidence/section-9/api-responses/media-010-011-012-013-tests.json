@@ -1,5 +1,3 @@
-2026-03-19 07:42:13 [info     ] Cleaned up old events for test_agent, keeping 0 events
-2026-03-19 07:42:13 [debug    ] Tracked visible echo for event test_voice_event_1 on agent test_agent
 {
   "MEDIA-010": {
     "test_id": "MEDIA-010",

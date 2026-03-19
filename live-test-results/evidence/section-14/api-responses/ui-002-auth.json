@@ -4,5 +4,10 @@
   "health_no_auth": "200",
   "config_load_no_auth": "200",
   "agents_no_auth": "200",
-  "login_page": "{"detail":"Not found"}"
+  "login_page": {
+    "status": "404",
+    "body": {
+      "detail": "Not found"
+    }
+  }
 }

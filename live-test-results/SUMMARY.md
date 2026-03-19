@@ -3,7 +3,7 @@
 **Branch:** `live-test/validation`
 **Date:** 2026-03-19
 **Checklist:** `docs/dev/exhaustive-live-test-checklist.md` (186 items, 16 sections)
-**Infrastructure:** Docker Synapse on :8108, models via litellm (Claude Sonnet 4.6 via Vertex AI)
+**Infrastructure:** Validation run used Docker Synapse on :8108 (temporary host-port override during evidence capture); repo defaults remain :8008. Models via litellm (Claude Sonnet 4.6 via Vertex AI)
 **Test agents:** 16 Claude Code agents via Gastown (gt), one per section
 
 ## Overall Results
