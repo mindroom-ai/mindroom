@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.constants import runtime_env_values
+from mindroom.constants import runtime_env_values, serialize_public_runtime_paths
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
@@ -222,6 +222,11 @@ def kubernetes_backend_config_signature(
     extra_annotations_json = json.dumps(config.extra_annotations, sort_keys=True, separators=(",", ":"))
     resource_requests_json = json.dumps(config.resource_requests, sort_keys=True, separators=(",", ":"))
     resource_limits_json = json.dumps(config.resource_limits, sort_keys=True, separators=(",", ":"))
+    public_runtime_json = json.dumps(
+        serialize_public_runtime_paths(runtime_paths),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return (
         "kubernetes",
         config.namespace,
@@ -240,6 +245,7 @@ def kubernetes_backend_config_signature(
         config.name_prefix,
         config.node_name or "",
         str(config.colocate_with_control_plane_node),
+        public_runtime_json,
         extra_env_json,
         extra_labels_json,
         extra_annotations_json,
