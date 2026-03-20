@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom import constants
+from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import worker_dir_name
 
 if TYPE_CHECKING:
@@ -161,7 +162,7 @@ def _protected_dedicated_worker_execution_env_names(runtime_paths: RuntimePaths)
     if not runner_uses_dedicated_worker(runtime_paths):
         return frozenset()
 
-    protected_names = {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"}
+    protected_names = {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", SHARED_CREDENTIALS_PATH_ENV}
     protected_names.update(
         name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")
     )

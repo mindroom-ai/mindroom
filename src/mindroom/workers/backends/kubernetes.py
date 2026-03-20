@@ -315,7 +315,7 @@ class KubernetesWorkerBackend:
         )
 
     def shutdown(self) -> None:
-        """Delete backend-owned Kubernetes workers before manager replacement."""
+        """Delete backend-owned Kubernetes workers before discarding this manager."""
         failures: list[str] = []
         for deployment in self._resources.list_deployments():
             worker_id = str(deployment.metadata.name)
