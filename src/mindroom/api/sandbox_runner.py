@@ -105,6 +105,16 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
         if process_env.get("MINDROOM_STORAGE_PATH")
         else startup_runtime_paths.storage_root
     )
+    config_path = (
+        Path(process_env["MINDROOM_CONFIG_PATH"])
+        if process_env.get("MINDROOM_CONFIG_PATH")
+        else startup_runtime_paths.config_path
+    )
+    storage_path = (
+        Path(process_env["MINDROOM_STORAGE_PATH"])
+        if process_env.get("MINDROOM_STORAGE_PATH")
+        else startup_runtime_paths.storage_root
+    )
     resolved_runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=storage_path,
