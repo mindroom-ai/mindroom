@@ -53,6 +53,7 @@ _LABEL_MANAGED_BY_VALUE = "mindroom"
 _LABEL_NAME = "app.kubernetes.io/name"
 _LABEL_NAME_VALUE = "mindroom-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
+_LABEL_RUNTIME_NAMESPACE = "mindroom.ai/runtime-namespace"
 
 _CONTAINER_NAME = "sandbox-runner"
 _TOKEN_ENV_NAME = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
@@ -237,22 +238,40 @@ def _template_hash(template: dict[str, object]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _labels(*, extra_labels: dict[str, str], worker_id: str) -> dict[str, str]:
+def _runtime_namespace(*, config: _KubernetesWorkerBackendConfig, storage_root: Path) -> str:
+    payload = json.dumps(
+        {
+            "namespace": config.namespace,
+            "name_prefix": config.name_prefix,
+            "owner_deployment_name": config.owner_deployment_name or "",
+            "storage_pvc_name": config.storage_pvc_name,
+            "storage_subpath_prefix": config.storage_subpath_prefix,
+            "storage_root": str(storage_root.expanduser().resolve()),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _labels(*, extra_labels: dict[str, str], runtime_namespace: str, worker_id: str) -> dict[str, str]:
     labels = {
         _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
         _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
         _LABEL_NAME: _LABEL_NAME_VALUE,
+        _LABEL_RUNTIME_NAMESPACE: runtime_namespace,
     }
     labels.update(extra_labels)
     labels[_LABEL_WORKER_ID] = worker_id
     return labels
 
 
-def _list_selector(*, extra_labels: dict[str, str]) -> str:
+def _list_selector(*, extra_labels: dict[str, str], runtime_namespace: str) -> str:
     selector = {
         _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
         _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
         _LABEL_NAME: _LABEL_NAME_VALUE,
+        _LABEL_RUNTIME_NAMESPACE: runtime_namespace,
     }
     selector.update(extra_labels)
     return ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
@@ -281,6 +300,7 @@ class KubernetesResourceManager:
         self._control_plane_node_name_loaded = False
         self._owner_reference: dict[str, object] | None = None
         self._owner_reference_loaded = False
+        self.runtime_namespace = _runtime_namespace(config=self.config, storage_root=self.storage_root)
 
     @property
     def _apps(self) -> _AppsApiProtocol:
@@ -304,7 +324,10 @@ class KubernetesResourceManager:
         """List managed worker Deployments in this namespace."""
         response = self._apps.list_namespaced_deployment(
             self.config.namespace,
-            label_selector=_list_selector(extra_labels=self.config.extra_labels),
+            label_selector=_list_selector(
+                extra_labels=self.config.extra_labels,
+                runtime_namespace=self.runtime_namespace,
+            ),
         )
         return list(response.items or [])
 
@@ -501,7 +524,11 @@ class KubernetesResourceManager:
         self.api_exception_cls = cast("type[_ApiStatusError]", kubernetes_exceptions.ApiException)
 
     def _service_manifest(self, worker_id: str) -> dict[str, object]:
-        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        worker_labels = _labels(
+            extra_labels=self.config.extra_labels,
+            runtime_namespace=self.runtime_namespace,
+            worker_id=worker_id,
+        )
         metadata: dict[str, object] = {
             "name": worker_id,
             "namespace": self.config.namespace,
@@ -536,7 +563,11 @@ class KubernetesResourceManager:
         replicas: int,
         private_agent_names: frozenset[str] | None = None,
     ) -> dict[str, object]:
-        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        worker_labels = _labels(
+            extra_labels=self.config.extra_labels,
+            runtime_namespace=self.runtime_namespace,
+            worker_id=worker_id,
+        )
         template_metadata = {"labels": worker_labels}
         template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,

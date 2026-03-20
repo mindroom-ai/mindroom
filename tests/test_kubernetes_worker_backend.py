@@ -136,6 +136,7 @@ class _FakeCoreApi:
         self.services: dict[str, object] = {}
         self.pods: dict[str, object] = {}
         self.created_bodies: list[dict[str, object]] = []
+        self.deleted_names: list[str] = []
 
     def read_namespaced_service(self, name: str, namespace: str) -> object:
         _ = namespace
@@ -159,6 +160,7 @@ class _FakeCoreApi:
 
     def delete_namespaced_service(self, name: str, namespace: str) -> None:
         _ = namespace
+        self.deleted_names.append(name)
         self.services.pop(name, None)
 
     def read_namespaced_pod(self, name: str, namespace: str) -> object:
@@ -1094,6 +1096,7 @@ def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:
     """Worker discovery should stay confined to this backend's label set within a shared namespace."""
     backend, apps_api, _core_api = _backend()
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    runtime_namespace = apps_api.created_bodies[0]["metadata"]["labels"]["mindroom.ai/runtime-namespace"]
 
     unrelated_body = deepcopy(apps_api.created_bodies[0])
     unrelated_name = "mindroom-worker-unrelated"
@@ -1118,8 +1121,51 @@ def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:
         "app.kubernetes.io/managed-by=mindroom,"
         "app.kubernetes.io/name=mindroom-worker,"
         "mindroom.ai/component=worker,"
+        f"mindroom.ai/runtime-namespace={runtime_namespace},"
         "mindroom.ai/tenant=test"
     )
+
+
+def test_kubernetes_backend_shutdown_is_scoped_to_runtime_namespace() -> None:
+    """Manager shutdown should only delete Kubernetes workers owned by this runtime."""
+    backend, apps_api, core_api = _backend()
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+
+    unrelated_deployment = deepcopy(apps_api.created_bodies[0])
+    unrelated_service = deepcopy(core_api.created_bodies[0])
+    unrelated_name = "mindroom-worker-unrelated"
+    unrelated_runtime_namespace = "other-runtime"
+    unrelated_deployment["metadata"]["name"] = unrelated_name
+    unrelated_deployment["metadata"]["annotations"]["mindroom.ai/worker-key"] = _TEST_SCOPED_WORKER_KEY_B
+    unrelated_deployment["metadata"]["labels"]["mindroom.ai/runtime-namespace"] = unrelated_runtime_namespace
+    unrelated_deployment["metadata"]["labels"]["mindroom.ai/worker-id"] = unrelated_name
+    unrelated_deployment["spec"]["selector"]["matchLabels"]["mindroom.ai/runtime-namespace"] = (
+        unrelated_runtime_namespace
+    )
+    unrelated_deployment["spec"]["selector"]["matchLabels"]["mindroom.ai/worker-id"] = unrelated_name
+    unrelated_deployment["spec"]["template"]["metadata"]["labels"]["mindroom.ai/runtime-namespace"] = (
+        unrelated_runtime_namespace
+    )
+    unrelated_deployment["spec"]["template"]["metadata"]["labels"]["mindroom.ai/worker-id"] = unrelated_name
+    unrelated_deployment["spec"]["replicas"] = 1
+    unrelated = _to_namespace(unrelated_deployment)
+    unrelated.metadata.generation = 1
+    unrelated.status = SimpleNamespace(ready_replicas=1, observed_generation=1)
+    apps_api.deployments[unrelated_name] = unrelated
+
+    unrelated_service["metadata"]["name"] = unrelated_name
+    unrelated_service["metadata"]["labels"]["mindroom.ai/runtime-namespace"] = unrelated_runtime_namespace
+    unrelated_service["metadata"]["labels"]["mindroom.ai/worker-id"] = unrelated_name
+    unrelated_service["spec"]["selector"]["mindroom.ai/runtime-namespace"] = unrelated_runtime_namespace
+    unrelated_service["spec"]["selector"]["mindroom.ai/worker-id"] = unrelated_name
+    core_api.services[unrelated_name] = _to_namespace(unrelated_service)
+
+    backend.shutdown()
+
+    assert apps_api.deleted_names == [handle.worker_id]
+    assert core_api.deleted_names == [handle.worker_id]
+    assert unrelated_name in apps_api.deployments
+    assert unrelated_name in core_api.services
 
 
 def test_kubernetes_backend_touch_only_patches_deployment_metadata() -> None:

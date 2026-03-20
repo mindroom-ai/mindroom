@@ -354,17 +354,34 @@ def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
+def runtime_paths_with_config_path(runtime_paths: RuntimePaths, config_path: Path) -> RuntimePaths:
+    """Return a primary-runtime context rebased to one explicit config path."""
+    resolved_config_path = Path(config_path).expanduser().resolve()
+    if resolved_config_path == runtime_paths.config_path:
+        return _with_primary_runtime_env(runtime_paths)
+    return resolve_primary_runtime_paths(
+        config_path=resolved_config_path,
+        storage_path=runtime_paths.storage_root,
+        process_env=dict(runtime_paths.process_env),
+    )
+
+
 def runtime_paths_with_storage_root(runtime_paths: RuntimePaths, storage_root: Path) -> RuntimePaths:
     """Return a runtime context rebased to one explicit storage root."""
     resolved_storage_root = Path(storage_root).expanduser().resolve()
-    if resolved_storage_root == runtime_paths.storage_root:
+    normalized_process_env = dict(runtime_paths.process_env)
+    normalized_process_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
+    normalized_process_env["MINDROOM_STORAGE_PATH"] = str(resolved_storage_root)
+    if resolved_storage_root == runtime_paths.storage_root and normalized_process_env == dict(
+        runtime_paths.process_env,
+    ):
         return runtime_paths
     return RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
         env_path=runtime_paths.env_path,
         storage_root=resolved_storage_root,
-        process_env=runtime_paths.process_env,
+        process_env=cast("Mapping[str, str]", MappingProxyType(normalized_process_env)),
         env_file_values=runtime_paths.env_file_values,
     )
 

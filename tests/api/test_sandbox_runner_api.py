@@ -32,6 +32,7 @@ from mindroom.constants import (
     serialize_runtime_paths,
 )
 from mindroom.credentials import (
+    SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
     _reset_credentials_manager_cache,
     get_runtime_credentials_manager,
@@ -695,6 +696,7 @@ def test_prepare_execute_request_preserves_dedicated_worker_runtime_contract(
 
     assert "MINDROOM_CONFIG_PATH" not in prepared_request.execution_env
     assert "MINDROOM_STORAGE_PATH" not in prepared_request.execution_env
+    assert SHARED_CREDENTIALS_PATH_ENV not in prepared_request.execution_env
     assert "OPENAI_API_KEY_FILE" not in prepared_request.execution_env
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in prepared_request.execution_env
     assert prepared_request.runtime_paths.config_path == worker_runtime.config_path
@@ -704,6 +706,9 @@ def test_prepare_execute_request_preserves_dedicated_worker_runtime_contract(
     )
     assert prepared_request.runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS") == worker_runtime.env_value(
         "GOOGLE_APPLICATION_CREDENTIALS",
+    )
+    assert prepared_request.runtime_paths.env_value(SHARED_CREDENTIALS_PATH_ENV) == worker_runtime.env_value(
+        SHARED_CREDENTIALS_PATH_ENV,
     )
     assert subprocess_context.subprocess_env is not None
     assert "MINDROOM_CONFIG_PATH" not in subprocess_context.subprocess_env

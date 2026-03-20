@@ -1199,11 +1199,11 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
     workers_runtime_module._reset_primary_worker_manager()
 
 
-def test_docker_worker_manager_replaces_obsolete_cached_manager_after_successful_build(
+def test_docker_worker_manager_retains_obsolete_cached_manager_until_reset(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A new Docker manager signature should replace and shut down the obsolete one."""
+    """A new Docker manager signature should replace the active manager without tearing down the old one mid-flight."""
     workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -1274,9 +1274,10 @@ def test_docker_worker_manager_replaces_obsolete_cached_manager_after_successful
     assert build_order == [str(first_storage_path), str(second_storage_path)]
     assert first_manager is not second_manager
     assert second_manager is repeated_second_manager
-    assert first_manager.backend.shutdown_calls == 1
+    assert first_manager.backend.shutdown_calls == 0
     assert second_manager.backend.shutdown_calls == 0
     workers_runtime_module._reset_primary_worker_manager()
+    assert first_manager.backend.shutdown_calls == 1
     assert second_manager.backend.shutdown_calls == 1
 
 
@@ -1364,6 +1365,92 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
     assert first_manager.backend.shutdown_calls == 0
     workers_runtime_module._reset_primary_worker_manager()
     assert first_manager.backend.shutdown_calls == 1
+
+
+def test_docker_worker_manager_replacement_succeeds_even_if_previous_shutdown_would_raise(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Manager replacement should not fail user requests just because the retired backend tears down later."""
+    workers_runtime_module._reset_primary_worker_manager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+
+    class _FakeDockerBackend:
+        backend_name = "docker"
+        idle_timeout_seconds = 60.0
+
+        @classmethod
+        def from_runtime(
+            cls,
+            runtime_paths: RuntimePaths,
+            *,
+            auth_token: str | None,
+            storage_path: Path | None = None,
+        ) -> _FakeDockerBackend:
+            assert auth_token == _TEST_AUTH_TOKEN
+            assert storage_path is not None
+            assert runtime_paths.storage_root == storage_path
+            backend = cls()
+            backend.shutdown_calls = 0
+            backend.raise_on_shutdown = False
+            return backend
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            if self.raise_on_shutdown:
+                msg = "old shutdown boom"
+                raise WorkerBackendError(msg)
+
+    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "docker_backend_config_signature",
+        lambda runtime_paths, *, auth_token, storage_path=None: (
+            "docker",
+            auth_token or "",
+            str(storage_path),
+            runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") or "",
+        ),
+    )
+
+    first_storage_path = (tmp_path / "runtime-a").resolve()
+    second_storage_path = (tmp_path / "runtime-b").resolve()
+    first_runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config-a.yaml", storage_path=first_storage_path)
+    second_runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config-b.yaml",
+        storage_path=second_storage_path,
+    )
+
+    first_manager = workers_runtime_module.get_primary_worker_manager(
+        first_runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=first_storage_path,
+    )
+    first_manager.backend.raise_on_shutdown = True
+
+    second_manager = workers_runtime_module.get_primary_worker_manager(
+        second_runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=second_storage_path,
+    )
+    repeated_second_manager = workers_runtime_module.get_primary_worker_manager(
+        second_runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=second_storage_path,
+    )
+
+    assert second_manager is repeated_second_manager
+    assert first_manager.backend.shutdown_calls == 0
+    assert second_manager.backend.shutdown_calls == 0
+
+    first_manager.backend.raise_on_shutdown = False
+    workers_runtime_module._reset_primary_worker_manager()
+    assert first_manager.backend.shutdown_calls == 1
+    assert second_manager.backend.shutdown_calls == 1
 
 
 def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_changes(

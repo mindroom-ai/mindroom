@@ -18,6 +18,7 @@ import httpx
 from mindroom.constants import (
     RuntimePaths,
     resolve_primary_runtime_paths,
+    runtime_paths_with_config_path,
     runtime_paths_with_storage_root,
     serialize_public_runtime_paths,
 )
@@ -275,15 +276,18 @@ class DockerWorkerBackend:
         self.idle_timeout_seconds = config.idle_timeout_seconds
         self._storage_path = resolve_docker_storage_path(storage_path, runtime_paths=runtime_paths)
         self._workers_root = docker_workers_root(self._storage_path)
-        self._runtime_paths = (
+        base_runtime_paths = (
             resolve_primary_runtime_paths(
                 config_path=config.host_config_path,
                 storage_path=self._storage_path,
                 process_env=dict(os.environ),
             )
             if runtime_paths is None
-            else runtime_paths_with_storage_root(runtime_paths, self._storage_path)
+            else runtime_paths
         )
+        if config.host_config_path is not None:
+            base_runtime_paths = runtime_paths_with_config_path(base_runtime_paths, config.host_config_path)
+        self._runtime_paths = runtime_paths_with_storage_root(base_runtime_paths, self._storage_path)
         self._client, self._docker_errors = _load_docker_client_and_errors(runtime_paths=self._runtime_paths)
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
@@ -699,15 +703,7 @@ class DockerWorkerBackend:
             ),
         )
         mount_checks.extend(config_mount_specs)
-        return all(
-            self._container_mount_matches(
-                container,
-                host_path=host_path,
-                container_path=container_path,
-                read_only=read_only,
-            )
-            for host_path, container_path, read_only in mount_checks
-        )
+        return self._container_mount_layout_matches(container, expected_mounts=mount_checks)
 
     def _ensure_container(
         self,
@@ -1033,43 +1029,43 @@ class DockerWorkerBackend:
             compatible_hashes.add(self._compute_launch_config_hash(image_identity=self.config.image))
         return compatible_hashes
 
-    def _container_mount_matches(
+    def _container_mount_layout_matches(
         self,
         container: _DockerContainer | None,
         *,
-        host_path: Path,
-        container_path: str,
-        read_only: bool,
+        expected_mounts: list[tuple[Path, str, bool]],
     ) -> bool:
         if container is None:
             return False
 
-        expected_host_path = str(host_path.expanduser().resolve())
         attrs = container.attrs
         mounts = attrs.get("Mounts", [])
         if not isinstance(mounts, list):
             return False
 
+        actual_layout: set[tuple[str, str, bool]] = set()
         for mount in mounts:
             if not isinstance(mount, dict):
-                continue
+                return False
             mount_data = cast("dict[str, object]", mount)
+            mount_type = mount_data.get("Type")
             source = mount_data.get("Source")
             destination = mount_data.get("Destination")
-            if not isinstance(source, str) or not isinstance(destination, str):
-                continue
-            if destination != container_path:
-                continue
-            if str(Path(source).expanduser().resolve()) != expected_host_path:
-                continue
+            if mount_type != "bind" or not isinstance(source, str) or not isinstance(destination, str):
+                return False
             writable = mount_data.get("RW")
             if isinstance(writable, bool):
-                return writable == (not read_only)
-            mode = mount_data.get("Mode")
-            if isinstance(mode, str):
-                return "ro" in mode if read_only else "ro" not in mode
-            return True
-        return False
+                read_only = not writable
+            else:
+                mode = mount_data.get("Mode")
+                read_only = "ro" in mode if isinstance(mode, str) else False
+            actual_layout.add((str(Path(source).expanduser().resolve()), destination, read_only))
+
+        expected_layout = {
+            (str(host_path.expanduser().resolve()), container_path, read_only)
+            for host_path, container_path, read_only in expected_mounts
+        }
+        return actual_layout == expected_layout
 
     def _container_status(self, container: _DockerContainer) -> str | None:
         status = container.status
