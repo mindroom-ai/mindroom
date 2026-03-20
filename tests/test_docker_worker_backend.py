@@ -730,6 +730,69 @@ def test_docker_backend_from_runtime_reanchors_host_config_projection_and_runtim
     ]
 
 
+def test_docker_backend_config_signature_supports_nested_relative_host_config_paths(tmp_path: Path) -> None:
+    """Nested relative host-config paths should resolve once and remain usable during signature generation."""
+    config_dir = tmp_path / "cfg"
+    nested_dir = config_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    config_path = config_dir / "config.yaml"
+    host_config_path = nested_dir / "docker-host-config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    host_config_path.write_text("agents: {}\n", encoding="utf-8")
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH": "./nested/docker-host-config.yaml",
+        },
+    )
+
+    assert _DockerWorkerBackendConfig.from_runtime(runtime_paths).host_config_path == host_config_path.resolve()
+    signature = docker_backend_config_signature(
+        runtime_paths,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path / "storage",
+    )
+
+    assert signature[0] == "docker"
+
+
+def test_docker_backend_config_signature_keeps_primary_runtime_env_when_reanchoring_host_config(
+    tmp_path: Path,
+) -> None:
+    """Host-config rebasing should not drop Docker backend env that only exists in the primary runtime .env."""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    hostcfg_dir = tmp_path / "hostcfg"
+    hostcfg_dir.mkdir()
+    runtime_config_path = runtime_dir / "config.yaml"
+    runtime_config_path.write_text("agents: {}\n", encoding="utf-8")
+    (runtime_dir / ".env").write_text("MINDROOM_DOCKER_WORKER_IMAGE=image-from-runtime-env\n", encoding="utf-8")
+    host_config_path = hostcfg_dir / "docker-host-config.yaml"
+    host_config_path.write_text("agents: {}\n", encoding="utf-8")
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH": str(host_config_path),
+        },
+    )
+
+    signature = docker_backend_config_signature(
+        runtime_paths,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path / "storage",
+    )
+
+    assert signature[0] == "docker"
+    assert primary_worker_backend_available(runtime_paths, proxy_url=None, proxy_token=_TEST_AUTH_TOKEN)
+
+
 def test_docker_worker_config_rejects_wildcard_endpoint_host_from_publish_host(tmp_path: Path) -> None:
     """Wildcard bind hosts must not become the client-facing worker endpoint host."""
     config_path = tmp_path / "config.yaml"
