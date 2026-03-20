@@ -40,6 +40,7 @@ from mindroom.matrix.identity import (
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
+from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
 
@@ -996,6 +997,10 @@ class Config(BaseModel):
         from mindroom.matrix.rooms import resolve_room_aliases  # noqa: PLC0415
 
         configured_bots = set()
+
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        if self.matrix_space.enabled and state.space_room_id == room_id:
+            configured_bots.add(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths))
 
         # Check which agents should be in this room
         for agent_name, agent_config in self.agents.items():

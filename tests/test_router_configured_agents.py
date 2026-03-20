@@ -8,6 +8,9 @@ from mindroom.authorization import get_available_agents_in_room
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.identity import agent_username_localpart
+from mindroom.matrix.state import MatrixState
 from mindroom.thread_utils import get_configured_agents_for_room
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
@@ -150,3 +153,28 @@ class TestRouterAgentSelection:
         available_names = [mid.agent_name(config_with_router, runtime_paths) for mid in available]
         assert available_names == ["calculator"]
         assert "router" not in available_names
+
+    def test_root_space_treats_router_as_configured_bot(self) -> None:
+        """The managed root space should retain the router as a legitimate member."""
+        config = self._bind_runtime(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="Calculator",
+                        rooms=["#general:localhost"],
+                    ),
+                },
+                matrix_space={"enabled": True},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
+        )
+        runtime_paths = runtime_paths_for(config)
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        state.set_space_room_id("!space:localhost")
+        state.save(runtime_paths=runtime_paths)
+
+        configured_bots = config.get_configured_bots_for_room("!space:localhost", runtime_paths)
+
+        assert configured_bots == {
+            agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths),
+        }
