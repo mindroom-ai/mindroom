@@ -301,3 +301,76 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
             "When not in a thread, thread_id should not be None. "
             "It should be the agent's message ID for proper thread creation."
         )
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_interactive_edit_formats_and_registers_existing_message(tmp_path: Path) -> None:
+    """Edited-in-place interactive replies should render menus and register reactions."""
+    response_text = """Let me help.
+
+```interactive
+{
+    "question": "Pick a fruit",
+    "options": [
+        {"emoji": "🍎", "label": "Apple", "value": "apple"},
+        {"emoji": "🍌", "label": "Banana", "value": "banana"}
+    ]
+}
+```"""
+
+    with (
+        patch("mindroom.bot.ai_response", return_value=response_text),
+        patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
+        patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock) as mock_add_buttons,
+    ):
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General")}),
+            test_runtime_paths(tmp_path),
+        )
+        agent_user = AgentMatrixUser(
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="GeneralAgent",
+            password="test_password",  # noqa: S106
+        )
+
+        bot = AgentBot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:localhost"],
+        )
+        bot.client = AsyncMock()
+        bot.client.user_id = "@mindroom_general:localhost"
+        bot._edit_message = AsyncMock(return_value="$thinking_message")
+
+        await bot._process_and_respond(
+            room_id="!test:localhost",
+            prompt="Show the fruit menu",
+            reply_to_event_id="$user_message",
+            thread_id="$user_message",
+            thread_history=[],
+            existing_event_id="$thinking_message",
+        )
+
+    edit_args = bot._edit_message.await_args.args
+    assert edit_args[0] == "!test:localhost"
+    assert edit_args[1] == "$thinking_message"
+    assert "```interactive" not in edit_args[2]
+    assert "Pick a fruit" in edit_args[2]
+    assert "1. 🍎 Apple" in edit_args[2]
+    assert "2. 🍌 Banana" in edit_args[2]
+
+    register_args = mock_register.call_args.args
+    assert register_args[0] == "$thinking_message"
+    assert register_args[1] == "!test:localhost"
+    assert register_args[2] == "$user_message"
+    assert register_args[3] == {
+        "🍎": "apple",
+        "1": "apple",
+        "🍌": "banana",
+        "2": "banana",
+    }
+    assert register_args[4] == "general"
+    mock_add_buttons.assert_awaited_once()

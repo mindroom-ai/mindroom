@@ -1983,14 +1983,23 @@ class AgentBot:
                         )
 
                 # Either edit the thinking message or send new
+                formatted_response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
                 if message_id:
-                    await self._edit_message(room_id, message_id, response_text, thread_id)
+                    await self._edit_message(room_id, message_id, formatted_response.formatted_text, thread_id)
+                    await self._handle_interactive_question(
+                        message_id,
+                        response_text,
+                        room_id,
+                        thread_id,
+                        reply_to_event_id,
+                        agent_name="team",
+                    )
                 else:
                     assert self.client is not None
                     event_id = await self._send_response(
                         room_id,
                         reply_to_event_id,
-                        response_text,
+                        formatted_response.formatted_text,
                         thread_id,
                     )
                     # Handle interactive questions in non-streaming team responses
@@ -2207,19 +2216,25 @@ class AgentBot:
             raise
 
         response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         if existing_event_id:
             # Edit the existing message
             await self._edit_message(
                 room_id,
                 existing_event_id,
-                response_text,
+                response.formatted_text,
                 thread_id,
                 tool_trace=tool_trace if self.show_tool_calls else None,
                 extra_content=response_extra_content,
             )
+            await self._handle_interactive_question(
+                existing_event_id,
+                response_text,
+                room_id,
+                thread_id,
+                reply_to_event_id,
+            )
             return existing_event_id
-
-        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         event_id = await self._send_response(
             room_id,
             reply_to_event_id,
