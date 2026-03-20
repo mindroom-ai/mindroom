@@ -14,6 +14,7 @@ from mindroom.constants import (
     resolve_config_relative_path,
     resolve_primary_runtime_paths,
     runtime_env_values,
+    runtime_paths_with_config_path,
     runtime_paths_with_storage_root,
 )
 from mindroom.credentials import runtime_credentials_manager_key
@@ -267,9 +268,14 @@ def docker_backend_config_signature(
     storage_path: Path | None = None,
 ) -> tuple[str, ...]:
     """Return a cache signature for one concrete Docker backend config."""
+    effective_runtime_paths = runtime_paths
+    config = _DockerWorkerBackendConfig.from_runtime(effective_runtime_paths)
+    if config.host_config_path is not None:
+        effective_runtime_paths = runtime_paths_with_config_path(effective_runtime_paths, config.host_config_path)
+        config = _DockerWorkerBackendConfig.from_runtime(effective_runtime_paths)
     effective_runtime_paths = runtime_paths_with_storage_root(
-        runtime_paths,
-        resolve_docker_storage_path(storage_path, runtime_paths=runtime_paths),
+        effective_runtime_paths,
+        resolve_docker_storage_path(storage_path, runtime_paths=effective_runtime_paths),
     )
     config = _DockerWorkerBackendConfig.from_runtime(effective_runtime_paths)
     workers_root = docker_workers_root(effective_runtime_paths.storage_root)

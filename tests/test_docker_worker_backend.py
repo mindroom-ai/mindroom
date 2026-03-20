@@ -21,6 +21,7 @@ from mindroom.constants import (
     deserialize_runtime_paths,
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
+    runtime_paths_with_storage_root,
 )
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
@@ -41,6 +42,7 @@ from mindroom.workers.backends.docker_config import (
     _default_docker_user_for_os,
     _DockerWorkerBackendConfig,
     _read_docker_user,
+    docker_backend_config_signature,
 )
 from mindroom.workers.backends.docker_projection import (
     _PROJECTED_CONFIGS_DIRNAME,
@@ -599,6 +601,130 @@ def test_docker_worker_host_config_path_resolves_relative_to_runtime_config_dir(
     config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
     assert config.host_config_path == host_config_path.resolve()
+
+
+def test_runtime_paths_with_storage_root_updates_primary_path_env(tmp_path: Path) -> None:
+    """Rebased primary runtimes should keep their exported path contract internally consistent."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "runtime-a",
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+        },
+    )
+
+    rebased = runtime_paths_with_storage_root(runtime_paths, tmp_path / "runtime-b")
+
+    assert rebased.storage_root == (tmp_path / "runtime-b").resolve()
+    assert rebased.process_env["MINDROOM_CONFIG_PATH"] == str(config_path.resolve())
+    assert rebased.process_env["MINDROOM_STORAGE_PATH"] == str((tmp_path / "runtime-b").resolve())
+
+
+def test_docker_backend_config_signature_ignores_original_runtime_storage_root_when_explicit_storage_path_matches(
+    tmp_path: Path,
+) -> None:
+    """The Docker manager signature should depend on the effective backend storage root, not stale callers."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    env = {
+        "MINDROOM_WORKER_BACKEND": "docker",
+        "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+    }
+
+    first_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "runtime-a",
+        process_env=env,
+    )
+    second_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "runtime-b",
+        process_env=env,
+    )
+
+    shared_storage_path = tmp_path / "docker-storage"
+    assert docker_backend_config_signature(
+        first_runtime,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=shared_storage_path,
+    ) == docker_backend_config_signature(
+        second_runtime,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=shared_storage_path,
+    )
+
+
+def test_docker_backend_from_runtime_reanchors_host_config_projection_and_runtime_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Host-config overrides should also re-anchor relative assets and sibling .env values."""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    runtime_config_path = runtime_dir / "config.yaml"
+    runtime_config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: test-model\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (runtime_dir / ".env").write_text("BROWSER_EXECUTABLE_PATH=/runtime/browser\n", encoding="utf-8")
+
+    host_config_dir = tmp_path / "host-config"
+    host_config_dir.mkdir()
+    host_config_path = host_config_dir / "docker-host-config.yaml"
+    host_config_path.write_text(
+        "plugins:\n  - ./plugin.py\nmodels:\n  default:\n    provider: openai\n    id: test-model\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (host_config_dir / "plugin.py").write_text("PLUGIN = 1\n", encoding="utf-8")
+    (host_config_dir / ".env").write_text("BROWSER_EXECUTABLE_PATH=/hostcfg/browser\n", encoding="utf-8")
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH": str(host_config_path),
+        },
+    )
+    config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+    fake_client = _FakeDockerClient()
+    fake_client.images.by_name[config.image] = _FakeImage("sha256:image-v1")
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker._load_docker_client_and_errors",
+        lambda *_args, **_kwargs: (
+            fake_client,
+            SimpleNamespace(
+                DockerException=_FakeDockerError,
+                NotFound=_FakeNotFoundError,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker.sync_shared_credentials_to_worker",
+        _noop_sync_shared_credentials,
+    )
+
+    backend = DockerWorkerBackend(
+        config=config,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path / "storage",
+        runtime_paths=runtime_paths,
+    )
+    projection = backend._projection_manager.projected_config(
+        local_worker_state_paths_for_root(tmp_path / "workers" / "projection-test"),
+        materialize=False,
+    )
+
+    assert backend._runtime_paths.config_path == host_config_path.resolve()
+    assert backend._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") == "/hostcfg/browser"
+    assert ".mindroom-worker-assets/plugins/00-plugin.py" in projection.projected_yaml
+    assert [asset.relative_path.as_posix() for asset in projection.assets] == [
+        ".mindroom-worker-assets/plugins/00-plugin.py",
+    ]
 
 
 def test_docker_worker_config_rejects_wildcard_endpoint_host_from_publish_host(tmp_path: Path) -> None:
@@ -1983,6 +2109,35 @@ def test_docker_backend_recreates_container_when_storage_mount_does_not_match(
     existing_container.attrs["Mounts"][0]["Source"] = str(tmp_path / "wrong-root")
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    replacement_container = fake_client.containers.by_name[handle.worker_id]
+    assert replacement_container is not existing_container
+    assert existing_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+
+
+def test_docker_backend_recreates_container_when_extra_stale_mount_is_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker reuse should fail closed when a stale container keeps extra bind mounts."""
+    config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = "v1:tenant-123:user_agent:@alice:example.org:alpha"
+
+    handle = backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=10.0)
+    existing_container = fake_client.containers.by_name[handle.worker_id]
+    existing_container.attrs["Mounts"].append(
+        {
+            "Type": "bind",
+            "Source": str((tmp_path / "agents" / "beta").resolve()),
+            "Destination": "/app/shared-storage/agents/beta",
+            "Mode": "rw",
+            "RW": True,
+        },
+    )
+
+    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=20.0)
 
     replacement_container = fake_client.containers.by_name[handle.worker_id]
     assert replacement_container is not existing_container

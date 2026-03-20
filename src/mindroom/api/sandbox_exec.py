@@ -21,6 +21,7 @@ from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
+    SHARED_CREDENTIALS_PATH_ENV,
     credentials_encryption_key_value,
     is_trusted_tool_runtime_env_file_name,
     sandbox_runner_runtime_state_env,
@@ -175,7 +176,7 @@ def _protected_dedicated_worker_execution_env_names(runtime_paths: RuntimePaths)
     if not runner_uses_dedicated_worker(runtime_paths):
         return frozenset()
 
-    protected_names = {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"}
+    protected_names = {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", SHARED_CREDENTIALS_PATH_ENV}
     protected_names.update(
         name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")
     )
