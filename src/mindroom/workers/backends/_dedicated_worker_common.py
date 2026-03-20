@@ -6,11 +6,18 @@ import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+import yaml
+
+from mindroom.agent_policy import ResolvedAgentPolicy, build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import RuntimePaths, runtime_env_source_path, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
-from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
+from mindroom.tool_system.worker_routing import (
+    resolved_worker_key_scope,
+    visible_state_roots_for_worker_key,
+    worker_key_agent_name,
+)
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workspaces import copy_validated_local_file_to_root, validate_local_copy_source_path
 
@@ -111,7 +118,12 @@ def touch_dedicated_worker_lifecycle(
 ) -> DedicatedWorkerLifecycleState:
     """Refresh last-used state and revive idle workers back to ready."""
     next_status = "ready" if state.status == "idle" else state.status
-    return replace(state, last_used_at=now, status=next_status)
+    return replace(
+        state,
+        last_used_at=now,
+        status=next_status,
+        failure_reason=None if next_status != "failed" else state.failure_reason,
+    )
 
 
 def mark_dedicated_worker_ready(
@@ -136,11 +148,73 @@ def mark_dedicated_worker_idle(
 ) -> DedicatedWorkerLifecycleState:
     """Return lifecycle fields for one worker whose persisted state is being retained."""
     if not update_last_used:
-        return replace(state, status="idle")
+        return replace(state, status="idle", failure_reason=None)
     if now is None:
         msg = "now is required when update_last_used is true."
         raise ValueError(msg)
-    return replace(state, last_used_at=now, status="idle")
+    return replace(state, last_used_at=now, status="idle", failure_reason=None)
+
+
+def resolved_agent_policies_from_runtime_config(runtime_paths: RuntimePaths) -> dict[str, ResolvedAgentPolicy]:
+    """Load current agent policies from the authored runtime config when available."""
+    resolved_config_path = runtime_paths.config_path.expanduser().resolve()
+    if not resolved_config_path.is_file():
+        return {}
+    try:
+        loaded = yaml.safe_load(resolved_config_path.read_text(encoding="utf-8")) or {}
+    except OSError as exc:
+        msg = f"Failed to read runtime config for dedicated worker policy validation: {exc}"
+        raise WorkerBackendError(msg) from exc
+    except yaml.YAMLError as exc:
+        msg = f"Failed to parse runtime config for dedicated worker policy validation: {exc}"
+        raise WorkerBackendError(msg) from exc
+    if not isinstance(loaded, dict):
+        return {}
+
+    raw_agents = loaded.get("agents")
+    if not isinstance(raw_agents, dict):
+        return {}
+    agent_mappings = {
+        agent_name: cast("dict[str, object]", raw_agent)
+        for agent_name, raw_agent in raw_agents.items()
+        if isinstance(agent_name, str) and isinstance(raw_agent, dict)
+    }
+    if not agent_mappings:
+        return {}
+
+    default_worker_scope = None
+    raw_defaults = loaded.get("defaults")
+    if isinstance(raw_defaults, dict):
+        raw_worker_scope = raw_defaults.get("worker_scope")
+        if isinstance(raw_worker_scope, str) and raw_worker_scope in {"shared", "user", "user_agent"}:
+            default_worker_scope = raw_worker_scope
+
+    seeds = build_agent_policy_seeds(
+        agent_mappings,
+        default_worker_scope=default_worker_scope,
+    )
+    return resolve_agent_policy_index(seeds).policies
+
+
+def validate_private_user_agent_visibility(
+    *,
+    worker_key: str,
+    private_agent_names: frozenset[str] | None,
+    resolved_agent_policies: dict[str, ResolvedAgentPolicy],
+) -> None:
+    """Reject stale user-agent visibility snapshots for currently private agents."""
+    if resolved_worker_key_scope(worker_key) != "user_agent":
+        return
+    agent_name = worker_key_agent_name(worker_key)
+    if agent_name is None:
+        return
+    policy = resolved_agent_policies.get(agent_name)
+    if policy is None or not policy.is_private or policy.effective_execution_scope != "user_agent":
+        return
+    if private_agent_names is not None and agent_name in private_agent_names:
+        return
+    msg = f"user_agent worker key targets a private agent missing from explicit private-agent visibility: {worker_key}"
+    raise WorkerBackendError(msg)
 
 
 def mark_dedicated_worker_failed(
@@ -267,6 +341,7 @@ def plan_scoped_visible_state_roots(
     worker_visible_shared_storage_root: Path,
     private_agent_names: frozenset[str] | None,
     allow_unknown_worker_key: bool,
+    resolved_agent_policies: dict[str, ResolvedAgentPolicy] | None = None,
 ) -> tuple[ScopedVisibleStateRoot, ...]:
     """Return the durable state roots a dedicated worker may mount by default."""
     scope = resolved_worker_key_scope(worker_key)
@@ -279,6 +354,12 @@ def plan_scoped_visible_state_roots(
     if scope == "user_agent" and private_agent_names is None:
         msg = f"user_agent workers require explicit private-agent visibility: {worker_key}"
         raise WorkerBackendError(msg)
+    if resolved_agent_policies is not None:
+        validate_private_user_agent_visibility(
+            worker_key=worker_key,
+            private_agent_names=private_agent_names,
+            resolved_agent_policies=resolved_agent_policies,
+        )
 
     effective_private_agent_names = private_agent_names or frozenset()
     worker_visible_roots = visible_state_roots_for_worker_key(

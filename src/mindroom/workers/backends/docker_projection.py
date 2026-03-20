@@ -364,12 +364,17 @@ class DockerProjectionManager:
             json.dumps(projection_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"),
         ).hexdigest()[:12]
         projection_dir = self.worker_projected_configs_root(paths) / f"config-projection-{projection_hash}"
-        projection_ready = self._projection_ready(projection_dir)
         projection = _DockerProjectedConfig(
             root=projection_dir,
             projected_yaml=projected_yaml,
             assets=tuple(assets),
-            ready=projection_ready,
+            ready=False,
+        )
+        projection = _DockerProjectedConfig(
+            root=projection.root,
+            projected_yaml=projection.projected_yaml,
+            assets=projection.assets,
+            ready=self._projection_ready(projection),
         )
         if materialize:
             self._write_projected_config(projection)
@@ -386,6 +391,13 @@ class DockerProjectionManager:
         """Return the directory containing one worker root's projected config snapshots."""
         return self._projected_configs_root / paths.root.name
 
+    def current_resolved_agent_policies(self) -> dict[str, ResolvedAgentPolicy]:
+        """Return the current agent-policy view derived from the host config."""
+        host_config_path = self.config.host_config_path
+        if host_config_path is None:
+            return {}
+        return self._resolved_agent_policies(self._load_host_config_data(host_config_path))
+
     def remove_projected_configs(self, paths: LocalWorkerStatePaths) -> None:
         """Remove every projected config snapshot for one worker root."""
         projection_root = self.worker_projected_configs_root(paths)
@@ -401,11 +413,20 @@ class DockerProjectionManager:
                 continue
             _remove_path(sibling)
 
-    def _projection_ready(self, projection_root: Path) -> bool:
-        return (projection_root / _PROJECTION_READY_FILENAME).is_file()
+    def _projection_ready(self, projection: _DockerProjectedConfig) -> bool:
+        projection_root = projection.root
+        required_paths: list[tuple[Path, bool]] = [
+            (projection_root / PurePosixPath(self.config.config_path).name, False),
+            (projection_root / ".env", False),
+            (projection_root / _PROJECTION_READY_FILENAME, False),
+        ]
+        required_paths.extend(
+            (projection_root.joinpath(*asset.relative_path.parts), asset.is_directory) for asset in projection.assets
+        )
+        return all(path.is_dir() if require_directory else path.is_file() for path, require_directory in required_paths)
 
     def _write_projected_config(self, projection: _DockerProjectedConfig) -> None:
-        if self._projection_ready(projection.root):
+        if self._projection_ready(projection):
             return
 
         if projection.root.exists():
