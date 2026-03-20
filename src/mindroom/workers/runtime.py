@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import TYPE_CHECKING
 
@@ -20,8 +21,8 @@ _PRIMARY_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
 _DEDICATED_WORKER_BACKENDS = frozenset({"docker", "kubernetes"})
 _PRIMARY_WORKER_MANAGER: WorkerManager | None = None
 _PRIMARY_WORKER_MANAGER_CONFIG: tuple[str, ...] | None = None
-_RETIRED_PRIMARY_WORKER_MANAGERS: list[WorkerManager] = []
 _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 def _normalize_backend_name(raw_value: str | None) -> str:
@@ -182,37 +183,22 @@ def get_primary_worker_manager(
         _PRIMARY_WORKER_MANAGER = manager
         _PRIMARY_WORKER_MANAGER_CONFIG = config_signature
         if previous_manager is not None:
-            _RETIRED_PRIMARY_WORKER_MANAGERS.append(previous_manager)
+            try:
+                previous_manager.shutdown()
+            except WorkerBackendError:
+                logger.exception("Failed to shut down replaced primary worker manager")
         return manager
-
-
-def _shutdown_worker_managers(managers: list[WorkerManager]) -> None:
-    """Shut down one or more worker managers and aggregate teardown failures."""
-    failures: list[str] = []
-    for manager in managers:
-        try:
-            manager.shutdown()
-        except WorkerBackendError as exc:
-            failures.append(str(exc))
-    if failures:
-        failure_text = "; ".join(failures)
-        msg = f"Failed to shut down worker managers: {failure_text}"
-        raise WorkerBackendError(msg)
 
 
 def _shutdown_primary_worker_manager_locked() -> None:
     """Shut down the cached primary worker manager while the cache lock is held."""
-    global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG, _RETIRED_PRIMARY_WORKER_MANAGERS
+    global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG
 
     manager = _PRIMARY_WORKER_MANAGER
-    retired_managers = _RETIRED_PRIMARY_WORKER_MANAGERS
     _PRIMARY_WORKER_MANAGER = None
     _PRIMARY_WORKER_MANAGER_CONFIG = None
-    _RETIRED_PRIMARY_WORKER_MANAGERS = []
-    managers_to_shutdown = [manager] if manager is not None else []
-    managers_to_shutdown.extend(retired_managers)
-    if managers_to_shutdown:
-        _shutdown_worker_managers(managers_to_shutdown)
+    if manager is not None:
+        manager.shutdown()
 
 
 def _reset_primary_worker_manager() -> None:

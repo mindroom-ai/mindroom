@@ -1199,11 +1199,11 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
     workers_runtime_module._reset_primary_worker_manager()
 
 
-def test_docker_worker_manager_retains_obsolete_cached_manager_until_reset(
+def test_docker_worker_manager_replaces_obsolete_cached_manager_after_successful_build(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A new Docker manager signature should replace the active manager without tearing down the old one mid-flight."""
+    """A new Docker manager signature should replace and tear down the obsolete manager."""
     workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -1274,10 +1274,9 @@ def test_docker_worker_manager_retains_obsolete_cached_manager_until_reset(
     assert build_order == [str(first_storage_path), str(second_storage_path)]
     assert first_manager is not second_manager
     assert second_manager is repeated_second_manager
-    assert first_manager.backend.shutdown_calls == 0
+    assert first_manager.backend.shutdown_calls == 1
     assert second_manager.backend.shutdown_calls == 0
     workers_runtime_module._reset_primary_worker_manager()
-    assert first_manager.backend.shutdown_calls == 1
     assert second_manager.backend.shutdown_calls == 1
 
 
@@ -1444,7 +1443,7 @@ def test_docker_worker_manager_replacement_succeeds_even_if_previous_shutdown_wo
     )
 
     assert second_manager is repeated_second_manager
-    assert first_manager.backend.shutdown_calls == 0
+    assert first_manager.backend.shutdown_calls == 1
     assert second_manager.backend.shutdown_calls == 0
 
     first_manager.backend.raise_on_shutdown = False
