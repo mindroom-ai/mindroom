@@ -79,6 +79,7 @@ If you want worker-routed tools to run in dedicated Docker workers instead of th
 That especially includes `shell`, `file`, and `python`, plus other worker-safe tools that only need worker state or config-referenced filesystem assets.
 Dedicated Docker workers do not get a bind mount of `~/.mindroom` or the raw config-adjacent `.env` file.
 They still receive a filtered public startup-runtime env payload derived from exported env vars and allowed `.env` values.
+Proxied `shell` and `python` requests still receive their execution env from the active runtime contract, so ordinary `.env` values can remain visible to those tools even though the raw file is not mounted.
 Use credential leases or `MINDROOM_DOCKER_WORKER_ENV_JSON` for worker-specific secrets.
 Use `worker_scope: shared` when you want one persistent container per agent.
 Use `worker_scope: user_agent` when each requester should get separate per-agent containers.
