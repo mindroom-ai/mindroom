@@ -1847,33 +1847,26 @@ class AgentBot:
         )
         return f"{prompt.rstrip()}\n\n{metadata_block}"
 
-    def _format_user_turn_time_prefix(self, timestamp_ms: float | None = None) -> str:
-        """Format a lightweight time prefix in the configured timezone."""
-        tz = ZoneInfo(self.config.timezone)
-        current = datetime.now(tz) if timestamp_ms is None else datetime.fromtimestamp(timestamp_ms / 1000, tz)
-        timezone_abbrev = current.tzname() or self.config.timezone
-        return f"[{current.strftime('%H:%M')} {timezone_abbrev}]"
-
     def _prefix_user_turn_time(self, prompt: str, *, timestamp_ms: float | None = None) -> str:
         """Prefix a user turn with its local wall-clock time."""
         if not prompt.strip() or _USER_TURN_TIME_PREFIX_RE.match(prompt):
             return prompt
-        return f"{self._format_user_turn_time_prefix(timestamp_ms)} {prompt}"
-
-    def _thread_message_is_user_turn(self, message: dict[str, Any]) -> bool:
-        """Return whether a thread-history entry should be treated as a user turn."""
-        content = message.get("content")
-        if isinstance(content, dict) and isinstance(content.get(ORIGINAL_SENDER_KEY), str):
-            return True
-        sender = message.get("sender")
-        return isinstance(sender, str) and not is_agent_id(sender, self.config, self.runtime_paths)
+        tz = ZoneInfo(self.config.timezone)
+        current = datetime.now(tz) if timestamp_ms is None else datetime.fromtimestamp(timestamp_ms / 1000, tz)
+        timezone_abbrev = current.tzname() or self.config.timezone
+        return f"[{current.strftime('%H:%M')} {timezone_abbrev}] {prompt}"
 
     def _timestamp_thread_history_user_turns(self, thread_history: list[dict]) -> list[dict]:
         """Add time prefixes to user-authored thread-history entries."""
         timestamped_history: list[dict] = []
         for message in thread_history:
             body = message.get("body")
-            if not isinstance(body, str) or not self._thread_message_is_user_turn(message):
+            content = message.get("content")
+            sender = message.get("sender")
+            is_user_turn = (isinstance(content, dict) and isinstance(content.get(ORIGINAL_SENDER_KEY), str)) or (
+                isinstance(sender, str) and not is_agent_id(sender, self.config, self.runtime_paths)
+            )
+            if not isinstance(body, str) or not is_user_turn:
                 timestamped_history.append(message)
                 continue
 
@@ -1883,17 +1876,6 @@ class AgentBot:
             updated_message["body"] = self._prefix_user_turn_time(body, timestamp_ms=timestamp_ms)
             timestamped_history.append(updated_message)
         return timestamped_history
-
-    def _timestamp_prompt_context(
-        self,
-        prompt: str,
-        thread_history: list[dict],
-    ) -> tuple[str, list[dict]]:
-        """Prepare timestamped user-turn text for model and memory inputs."""
-        return (
-            self._prefix_user_turn_time(prompt),
-            self._timestamp_thread_history_user_turns(thread_history),
-        )
 
     async def _generate_team_response_helper(
         self,
@@ -1914,7 +1896,8 @@ class AgentBot:
         Returns the initial message ID if created, None otherwise.
         """
         assert self.client is not None
-        prompt, thread_history = self._timestamp_prompt_context(payload.prompt, thread_history)
+        prompt = self._prefix_user_turn_time(payload.prompt)
+        thread_history = self._timestamp_thread_history_user_turns(thread_history)
 
         # Get the appropriate model for this team and room
         model_name = select_model_for_team(self.agent_name, room_id, self.config, self.runtime_paths)
@@ -2319,7 +2302,8 @@ class AgentBot:
         assert self.client is not None
         if not prompt.strip():
             return None
-        prompt, thread_history = self._timestamp_prompt_context(prompt, thread_history)
+        prompt = self._prefix_user_turn_time(prompt)
+        thread_history = self._timestamp_thread_history_user_turns(thread_history)
 
         session_id = create_session_id(room_id, thread_id)
         model_prompt = self._append_matrix_prompt_context(
@@ -2630,7 +2614,8 @@ class AgentBot:
 
         """
         assert self.client is not None
-        prompt, thread_history = self._timestamp_prompt_context(prompt, thread_history)
+        prompt = self._prefix_user_turn_time(prompt)
+        thread_history = self._timestamp_thread_history_user_turns(thread_history)
         media_inputs = media or MediaInputs()
 
         # Prepare session id for memory storage (store after sending response)
@@ -3142,7 +3127,8 @@ class TeamBot(AgentBot):
             return None
 
         assert self.client is not None
-        prompt, thread_history = self._timestamp_prompt_context(prompt, thread_history)
+        prompt = self._prefix_user_turn_time(prompt)
+        thread_history = self._timestamp_thread_history_user_turns(thread_history)
 
         configured_mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
         materializable_agent_names = self._materializable_agent_names()
