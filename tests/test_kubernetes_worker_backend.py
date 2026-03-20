@@ -385,6 +385,50 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert local_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
 
 
+def test_kubernetes_backend_excludes_internal_file_secrets_from_worker_payload(tmp_path: Path) -> None:
+    """Dedicated Kubernetes workers must not copy control-plane or GitHub file secrets into worker startup env."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    secret_path = tmp_path / "control-secret.txt"
+    secret_path.write_text("supersecret\n", encoding="utf-8")
+    storage_mount_path = tmp_path / "worker-storage"
+    storage_mount_path.mkdir()
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={
+            "GITHUB_TOKEN_FILE": str(secret_path),
+            "MINDROOM_API_KEY_FILE": str(secret_path),
+            "MINDROOM_LOCAL_CLIENT_SECRET_FILE": str(secret_path),
+        },
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path=str(storage_mount_path),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+    worker_root = Path(env_values["MINDROOM_STORAGE_PATH"])
+    local_worker_root = runtime_paths.storage_root / "workers" / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+
+    assert committed_runtime.env_value("GITHUB_TOKEN_FILE") is None
+    assert committed_runtime.env_value("MINDROOM_API_KEY_FILE") is None
+    assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET_FILE") is None
+    assert not (local_worker_root / ".runtime" / "file-secrets" / "GITHUB_TOKEN_FILE").exists()
+    assert not (local_worker_root / ".runtime" / "file-secrets" / "MINDROOM_API_KEY_FILE").exists()
+    assert not (local_worker_root / ".runtime" / "file-secrets" / "MINDROOM_LOCAL_CLIENT_SECRET_FILE").exists()
+    assert str(worker_root).endswith(f"workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}")
+
+
 def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path: Path) -> None:
     """Dedicated worker payloads must not serialize unusable host-local ADC paths."""
     config_dir = tmp_path / "cfg"

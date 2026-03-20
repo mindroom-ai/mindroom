@@ -1150,6 +1150,53 @@ def test_docker_backend_commits_parent_runtime_env_into_worker_payload(
     assert local_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
 
 
+def test_docker_backend_excludes_internal_file_secrets_from_worker_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated Docker workers must not copy control-plane or GitHub file secrets into worker startup env."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_path.write_text(config_text, encoding="utf-8")
+    secret_path = tmp_path / "control-secret.txt"
+    secret_path.write_text("supersecret\n", encoding="utf-8")
+    runtime_storage = (tmp_path / "runtime-storage").resolve()
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=runtime_storage,
+        process_env={
+            "GITHUB_TOKEN_FILE": str(secret_path),
+            "MINDROOM_API_KEY_FILE": str(secret_path),
+            "MINDROOM_LOCAL_CLIENT_SECRET_FILE": str(secret_path),
+        },
+    )
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+        runtime_paths=runtime_paths,
+        storage_path=runtime_storage,
+        host_config_path=config_path,
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    run_call = fake_client.containers.run_calls[0]
+    env = run_call["environment"]
+    assert isinstance(env, dict)
+    committed_runtime = deserialize_runtime_paths(json.loads(env["MINDROOM_RUNTIME_PATHS_JSON"]))
+    worker_runtime_root = worker_root_path(runtime_storage, _TEST_UNSCOPED_WORKER_KEY)
+
+    assert committed_runtime.env_value("GITHUB_TOKEN_FILE") is None
+    assert committed_runtime.env_value("MINDROOM_API_KEY_FILE") is None
+    assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET_FILE") is None
+    assert not (worker_runtime_root / ".runtime" / "file-secrets" / "GITHUB_TOKEN_FILE").exists()
+    assert not (worker_runtime_root / ".runtime" / "file-secrets" / "MINDROOM_API_KEY_FILE").exists()
+    assert not (worker_runtime_root / ".runtime" / "file-secrets" / "MINDROOM_LOCAL_CLIENT_SECRET_FILE").exists()
+
+
 def test_docker_backend_commits_relative_file_backed_secrets_into_worker_payload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1194,6 +1241,71 @@ def test_docker_backend_commits_relative_file_backed_secrets_into_worker_payload
         == "/app/worker/.runtime/file-secrets/OPENAI_API_KEY_FILE/openai.key"
     )
     assert local_secret_copy.read_text(encoding="utf-8") == "sk-relative\n"
+
+
+def test_docker_backend_preserves_container_config_path_without_host_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated Docker workers without a host config mount must keep the in-container config path."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    config = _DockerWorkerBackendConfig(
+        image="ghcr.io/mindroom-ai/mindroom:latest",
+        worker_port=8766,
+        storage_mount_path="/app/worker",
+        config_path="/app/config-host/config.yaml",
+        host_config_path=None,
+        idle_timeout_seconds=60.0,
+        ready_timeout_seconds=5.0,
+        name_prefix="mindroom-worker",
+        publish_host="127.0.0.1",
+        endpoint_host="127.0.0.1",
+        user="1000:1000",
+        extra_env={},
+        extra_labels={},
+    )
+    fake_client = _FakeDockerClient()
+    fake_client.images.by_name[config.image] = _FakeImage("sha256:image-v1")
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker._load_docker_client_and_errors",
+        lambda *_args, **_kwargs: (
+            fake_client,
+            SimpleNamespace(
+                DockerException=_FakeDockerError,
+                NotFound=_FakeNotFoundError,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker.sync_shared_credentials_to_worker",
+        _noop_sync_shared_credentials,
+    )
+    backend = DockerWorkerBackend(
+        config=config,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path / "storage",
+        runtime_paths=runtime_paths,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_wait_for_ready",
+        lambda container: (f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute"),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    run_call = fake_client.containers.run_calls[0]
+    env = run_call["environment"]
+    assert isinstance(env, dict)
+    assert "MINDROOM_CONFIG_PATH" not in env
+    committed_runtime = deserialize_runtime_paths(json.loads(env["MINDROOM_RUNTIME_PATHS_JSON"]))
+    assert committed_runtime.config_path == Path("/app/config-host/config.yaml")
 
 
 def test_docker_backend_rejects_symlinked_google_application_credentials_path(
@@ -1534,6 +1646,44 @@ def test_build_dedicated_worker_runtime_paths_rejects_reserved_extra_env_names(t
         )
 
 
+def test_build_dedicated_worker_runtime_paths_rejects_secret_path_override_extra_env(tmp_path: Path) -> None:
+    """Dedicated worker extra env must not override rewritten secret-path handoff."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    secret_path = tmp_path / "secrets" / "openai.key"
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    secret_path.write_text("sk-test\n", encoding="utf-8")
+    credentials_path = tmp_path / "adc.json"
+    credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "OPENAI_API_KEY_FILE": str(secret_path),
+            "GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path),
+        },
+    )
+
+    with pytest.raises(
+        WorkerBackendError,
+        match="GOOGLE_APPLICATION_CREDENTIALS, OPENAI_API_KEY_FILE",
+    ):
+        build_dedicated_worker_runtime_paths(
+            runtime_paths=runtime_paths,
+            backend_name="Docker",
+            worker_key=_TEST_UNSCOPED_WORKER_KEY,
+            config_path=Path("/app/config-host/config.yaml"),
+            dedicated_root=Path("/app/worker"),
+            local_dedicated_root=tmp_path / "worker-root",
+            worker_port=8766,
+            shared_storage_root="/app/shared-storage",
+            extra_env={
+                "GOOGLE_APPLICATION_CREDENTIALS": "/override.json",
+                "OPENAI_API_KEY_FILE": "/override.key",
+            },
+        )
+
+
 def test_docker_projected_context_files_load_in_worker_runtime(tmp_path: Path) -> None:
     """Projected Docker context files should still load through the worker runtime."""
     config_text, _projected_paths = _projected_config_fixture(tmp_path)
@@ -1719,6 +1869,25 @@ def test_docker_backend_uses_distinct_container_names_for_different_storage_root
     assert first_handle.worker_id != second_handle.worker_id
     assert len(fake_client.containers.run_calls) == 2
     assert fake_client.containers.run_calls[0]["name"] != fake_client.containers.run_calls[1]["name"]
+
+
+def test_docker_backend_shutdown_removes_running_containers_and_keeps_idle_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Backend shutdown should remove managed containers before the manager is discarded."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    container = fake_client.containers.by_name[handle.worker_id]
+
+    backend.shutdown()
+
+    assert container.removed == 1
+    idle_handle = backend.get_worker(_TEST_UNSCOPED_WORKER_KEY, now=20.0)
+    assert idle_handle is not None
+    assert idle_handle.status == "idle"
+    assert idle_handle.failure_reason is None
 
 
 def test_docker_backend_recreates_container_when_storage_mount_does_not_match(

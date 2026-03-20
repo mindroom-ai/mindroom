@@ -170,6 +170,7 @@ def get_primary_worker_manager(
     )
     with _PRIMARY_WORKER_MANAGER_LOCK:
         if _PRIMARY_WORKER_MANAGER is None or config_signature != _PRIMARY_WORKER_MANAGER_CONFIG:
+            _shutdown_primary_worker_manager_locked()
             _PRIMARY_WORKER_MANAGER = _build_primary_worker_manager(
                 runtime_paths,
                 proxy_url=proxy_url,
@@ -180,10 +181,20 @@ def get_primary_worker_manager(
         return _PRIMARY_WORKER_MANAGER
 
 
-def _reset_primary_worker_manager() -> None:
-    """Reset the cached primary worker manager. Intended for tests."""
+def _shutdown_primary_worker_manager_locked() -> None:
+    """Shut down the cached primary worker manager while the cache lock is held."""
     global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG
 
-    with _PRIMARY_WORKER_MANAGER_LOCK:
-        _PRIMARY_WORKER_MANAGER = None
+    manager = _PRIMARY_WORKER_MANAGER
+    if manager is None:
         _PRIMARY_WORKER_MANAGER_CONFIG = None
+        return
+    manager.shutdown()
+    _PRIMARY_WORKER_MANAGER = None
+    _PRIMARY_WORKER_MANAGER_CONFIG = None
+
+
+def _reset_primary_worker_manager() -> None:
+    """Reset the cached primary worker manager. Intended for tests."""
+    with _PRIMARY_WORKER_MANAGER_LOCK:
+        _shutdown_primary_worker_manager_locked()

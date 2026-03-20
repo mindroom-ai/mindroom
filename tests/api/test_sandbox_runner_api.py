@@ -543,6 +543,48 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
     assert "CI_JOB_TOKEN" not in execution_env
 
 
+def test_sandbox_runner_execution_env_excludes_blocked_file_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Execution env should keep ordinary runtime values but exclude blocked control-plane file secrets."""
+    _set_sandbox_token(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    openai_key_path = tmp_path / "openai.key"
+    openai_key_path.write_text("sk-openai\n", encoding="utf-8")
+    github_key_path = tmp_path / "github.key"
+    github_key_path.write_text("ghp-secret\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        (
+            f"OPENAI_API_KEY_FILE={openai_key_path}\n"
+            f"GITHUB_TOKEN_FILE={github_key_path}\n"
+            f"MINDROOM_API_KEY_FILE={github_key_path}\n"
+            f"MINDROOM_LOCAL_CLIENT_SECRET_FILE={github_key_path}\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env=dict(os.environ),
+    )
+
+    execution_env = sandbox_exec_module.request_execution_env(
+        "shell",
+        None,
+        runtime_paths,
+    )
+
+    assert execution_env["OPENAI_API_KEY_FILE"] == str(openai_key_path.resolve())
+    assert "GITHUB_TOKEN_FILE" not in execution_env
+    assert "MINDROOM_API_KEY_FILE" not in execution_env
+    assert "MINDROOM_LOCAL_CLIENT_SECRET_FILE" not in execution_env
+
+
 @pytest.mark.asyncio
 async def test_execute_request_inprocess_reuses_passed_config_without_execution_env(
     monkeypatch: pytest.MonkeyPatch,

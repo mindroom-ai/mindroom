@@ -212,7 +212,8 @@ MindRoom also sanitizes the projected worker `config.yaml`, redacting sensitive 
 Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope: user_agent` snapshot only that agent's projected context files and assigned knowledge bases.
 `worker_scope: user` intentionally shares one worker across multiple agents, so it keeps the broader shared projection for that worker.
 Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
-MindRoom also masks config-adjacent `.env` inside the worker container, so primary-runtime secrets and unrelated runtime state stay local unless you pass worker-specific env vars explicitly.
+MindRoom also masks config-adjacent `.env` inside the worker container, so the raw file is not mounted into the worker.
+Proxied `shell` and `python` requests still receive their execution env from the active runtime contract, so ordinary `.env` values can remain visible to those tools unless you remove them or override `execution_env`.
 If a tool inside the worker still needs a secret that you stored directly in `config.yaml`, provide that secret through a supported worker-visible env or credential path instead of relying on the projected config copy.
 
 MindRoom auto-installs the optional `docker` extra the first time this backend is used.

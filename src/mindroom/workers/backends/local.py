@@ -169,6 +169,10 @@ class _LocalWorkerBackend:
         self._lock = threading.Lock()
         self._initialization_locks: dict[str, threading.Lock] = {}
 
+    def shutdown(self) -> None:
+        """Local worker state is persistent; manager replacement does not need extra teardown."""
+        return
+
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
         """Resolve or create one local worker."""
         timestamp = time.time() if now is None else now

@@ -26,6 +26,10 @@ class WorkerManager:
         """Return the configured backend idle timeout."""
         return self.backend.idle_timeout_seconds
 
+    def shutdown(self) -> None:
+        """Release backend-owned resources before discarding this manager."""
+        self.backend.shutdown()
+
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
         """Resolve or create a worker."""
         return self.backend.ensure_worker(spec, now=now)

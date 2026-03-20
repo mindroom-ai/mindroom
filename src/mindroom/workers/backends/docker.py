@@ -317,6 +317,36 @@ class DockerWorkerBackend:
             runtime_paths=runtime_paths,
         )
 
+    def shutdown(self) -> None:
+        """Remove backend-owned containers before discarding this Docker manager."""
+        failures: list[str] = []
+        for paths in self._metadata_paths():
+            metadata = self._load_metadata(paths)
+            if metadata is None:
+                continue
+            with self._worker_lock(metadata.worker_key):
+                metadata = self._load_metadata(paths)
+                if metadata is None:
+                    continue
+                try:
+                    self._remove_container(self._read_container(metadata.container_name))
+                except WorkerBackendError as exc:
+                    failures.append(str(exc))
+                    continue
+                self._apply_lifecycle_state(
+                    metadata,
+                    mark_dedicated_worker_idle(self._lifecycle_state(metadata)),
+                )
+                metadata.endpoint = self._endpoint_for_host_port(None)
+                metadata.host_port = None
+                metadata.container_id = None
+                metadata.launch_config_hash = None
+                self._save_metadata(paths, metadata)
+        if failures:
+            failure_text = "; ".join(failures)
+            msg = f"Failed to shut down Docker workers: {failure_text}"
+            raise WorkerBackendError(msg)
+
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
         """Resolve or start the dedicated worker container for the given worker key."""
         timestamp = time.time() if now is None else now
@@ -816,12 +846,7 @@ class DockerWorkerBackend:
         return all(actual_env.get(name) == value for name, value in expected_env.items())
 
     def _worker_runtime_config_path(self) -> Path:
-        configured_container_path = Path(self.config.config_path)
-        if self.config.host_config_path is not None:
-            return configured_container_path
-        if configured_container_path != Path("/app/config-host/config.yaml"):
-            return configured_container_path
-        return self._runtime_paths.config_path.expanduser().resolve()
+        return Path(self.config.config_path)
 
     def _worker_runtime_paths(
         self,

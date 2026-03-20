@@ -41,6 +41,13 @@ _DEDICATED_WORKER_RESERVED_ENV_NAMES = frozenset(
         SHARED_CREDENTIALS_PATH_ENV,
     },
 )
+_DEDICATED_WORKER_BLOCKED_FILE_ENV_BASE_NAMES = frozenset(
+    {
+        "GITHUB_TOKEN",
+        "MINDROOM_API_KEY",
+        "MINDROOM_LOCAL_CLIENT_SECRET",
+    },
+)
 _WORKER_FILE_SECRET_ROOT = Path(".runtime") / "file-secrets"
 
 
@@ -254,6 +261,27 @@ def validate_dedicated_worker_extra_env(
     raise WorkerBackendError(msg)
 
 
+def _blocked_worker_file_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    return frozenset(
+        env_name
+        for env_name in {*runtime_paths.process_env, *runtime_paths.env_file_values}
+        if env_name.endswith("_FILE")
+        and env_name.removesuffix("_FILE") in _DEDICATED_WORKER_BLOCKED_FILE_ENV_BASE_NAMES
+    )
+
+
+def _protected_dedicated_worker_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    protected_names = set(_blocked_worker_file_env_names(runtime_paths))
+    protected_names.update(
+        env_name
+        for env_name in {*runtime_paths.process_env, *runtime_paths.env_file_values}
+        if env_name.endswith("_FILE")
+    )
+    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
+        protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
+    return frozenset(protected_names)
+
+
 def build_backend_config_signature(
     *,
     prefix_parts: tuple[str, ...],
@@ -284,12 +312,19 @@ def build_dedicated_worker_runtime_paths(
     required_existing_storage_root: Path | None = None,
 ) -> RuntimePaths:
     """Build worker-visible runtime paths for one dedicated worker."""
-    validate_dedicated_worker_extra_env(extra_env, backend_name=backend_name)
+    validate_dedicated_worker_extra_env(
+        extra_env,
+        backend_name=backend_name,
+        extra_reserved_names=_protected_dedicated_worker_env_names(runtime_paths),
+    )
 
     process_env = dict(runtime_paths.process_env)
     process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
     env_file_values = dict(runtime_paths.env_file_values)
     env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+    for blocked_env_name in _blocked_worker_file_env_names(runtime_paths):
+        process_env.pop(blocked_env_name, None)
+        env_file_values.pop(blocked_env_name, None)
 
     if google_application_credentials := _worker_google_application_credentials_path(
         runtime_paths=runtime_paths,

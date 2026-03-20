@@ -35,7 +35,6 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
         "GOOGLE_APPLICATION_CREDENTIALS",
         "GOOGLE_CLOUD_LOCATION",
         "GOOGLE_CLOUD_PROJECT",
-        "GITHUB_TOKEN",
         "OLLAMA_HOST",
         "OPENAI_BASE_URL",
         "POD_NAMESPACE",
@@ -43,7 +42,10 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
 )
 _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
     {
+        "GITHUB_TOKEN",
+        "MINDROOM_API_KEY",
         "MINDROOM_LOCAL_CLIENT_ID",
+        "MINDROOM_LOCAL_CLIENT_SECRET",
         "MINDROOM_SANDBOX_PROXY_TOKEN",
     },
 )
@@ -368,13 +370,19 @@ def runtime_paths_with_storage_root(runtime_paths: RuntimePaths, storage_root: P
 
 
 def _is_execution_runtime_process_env_name(name: str) -> bool:
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+    if _is_execution_runtime_excluded_name(name):
         return False
     return (
         _is_public_runtime_startup_env_name(name)
         or name in PROVIDER_ENV_KEYS.values()
         or name in VERTEXAI_CLAUDE_ENV_KEYS
     )
+
+
+def _is_execution_runtime_excluded_name(name: str) -> bool:
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+        return True
+    return name.endswith("_FILE") and name.removesuffix("_FILE") in _EXECUTION_RUNTIME_EXCLUDED_NAMES
 
 
 def execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
@@ -388,7 +396,7 @@ def execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, st
     merged_env = {
         key: value
         for key, value in runtime_paths.env_file_values.items()
-        if key not in _EXECUTION_RUNTIME_EXCLUDED_NAMES
+        if not _is_execution_runtime_excluded_name(key)
     }
     merged_env.update(
         {key: value for key, value in runtime_paths.process_env.items() if _is_execution_runtime_process_env_name(key)},

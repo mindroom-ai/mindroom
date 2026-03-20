@@ -1098,6 +1098,9 @@ def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytes
                 first_init_started.set()
                 assert allow_first_init_to_finish.wait(timeout=1.0)
 
+        def shutdown(self) -> None:
+            return None
+
     def load_manager() -> None:
         try:
             managers.append(sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config))
@@ -1154,6 +1157,9 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
             built_runtime_paths.append(runtime_paths)
             return cls()
 
+        def shutdown(self) -> None:
+            return None
+
     monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
     monkeypatch.setattr(
         workers_runtime_module,
@@ -1197,7 +1203,7 @@ def test_docker_worker_manager_replaces_obsolete_cached_manager(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Only the active Docker worker manager config should stay cached."""
+    """Replacing the cached Docker manager should tear down the obsolete backend first."""
     workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -1220,7 +1226,12 @@ def test_docker_worker_manager_replaces_obsolete_cached_manager(
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
             build_order.append(str(storage_path))
-            return cls()
+            backend = cls()
+            backend.shutdown_calls = 0
+            return backend
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
 
     monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
     monkeypatch.setattr(
@@ -1268,10 +1279,14 @@ def test_docker_worker_manager_replaces_obsolete_cached_manager(
     )
 
     assert build_order == [str(first_storage_path), str(second_storage_path), str(first_storage_path)]
+    assert first_manager.backend.shutdown_calls == 1
+    assert second_manager.backend.shutdown_calls == 1
+    assert rebuilt_first_manager.backend.shutdown_calls == 0
     assert first_manager is not second_manager
     assert second_manager is repeated_second_manager
     assert rebuilt_first_manager is not first_manager
     workers_runtime_module._reset_primary_worker_manager()
+    assert rebuilt_first_manager.backend.shutdown_calls == 1
 
 
 def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_changes(
@@ -1301,6 +1316,9 @@ def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_cha
             assert storage_path == tmp_path.resolve()
             built_shared_paths.append(runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH"))
             return cls()
+
+        def shutdown(self) -> None:
+            return None
 
     monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
 
@@ -1370,6 +1388,9 @@ def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
             built_browser_paths.append(runtime_paths.env_value("BROWSER_EXECUTABLE_PATH"))
             return cls()
 
+        def shutdown(self) -> None:
+            return None
+
     monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
 
     config_path = tmp_path / "config.yaml"
@@ -1434,6 +1455,9 @@ def test_kubernetes_worker_manager_rebuilds_when_committed_runtime_env_changes(
             assert storage_root == tmp_path.resolve()
             built_browser_paths.append(runtime_paths.env_value("BROWSER_EXECUTABLE_PATH"))
             return cls()
+
+        def shutdown(self) -> None:
+            return None
 
     monkeypatch.setattr(workers_runtime_module, "KubernetesWorkerBackend", _FakeKubernetesBackend)
 

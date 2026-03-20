@@ -78,6 +78,21 @@ class KubernetesWorkerBackend:
             storage_root=storage_root,
         )
 
+    def shutdown(self) -> None:
+        """Delete backend-owned Kubernetes workers before manager replacement."""
+        failures: list[str] = []
+        for deployment in self._resources.list_deployments():
+            worker_id = str(deployment.metadata.name)
+            try:
+                self._resources.delete_service(worker_id)
+                self._resources.delete_deployment(worker_id)
+            except WorkerBackendError as exc:
+                failures.append(str(exc))
+        if failures:
+            failure_text = "; ".join(failures)
+            msg = f"Failed to shut down Kubernetes workers: {failure_text}"
+            raise WorkerBackendError(msg)
+
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
         """Resolve or start the worker backing the given worker key."""
         with self._worker_lock(spec.worker_key):
