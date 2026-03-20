@@ -314,6 +314,24 @@ class KubernetesWorkerBackend:
             worker_grantable_credentials=worker_grantable_credentials,
         )
 
+    def shutdown(self) -> None:
+        """Delete backend-owned Kubernetes workers before manager replacement."""
+        failures: list[str] = []
+        for deployment in self._resources.list_deployments():
+            worker_id = str(deployment.metadata.name)
+            try:
+                self._resources.delete_service(worker_id)
+                self._resources.delete_deployment(worker_id)
+            except WorkerBackendError as exc:
+                failures.append(str(exc))
+        with self._progress_sinks_lock:
+            self._progress_sinks.clear()
+            self._progress_snapshots.clear()
+        if failures:
+            failure_text = "; ".join(failures)
+            msg = f"Failed to shut down Kubernetes workers: {failure_text}"
+            raise WorkerBackendError(msg)
+
     def _register_progress_sink(self, worker_key: str, progress_sink: ProgressSink) -> None:
         with self._progress_sinks_lock:
             self._progress_sinks.setdefault(worker_key, []).append(progress_sink)

@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, cast
 
 import yaml
 
-from mindroom.agent_policy import ResolvedAgentPolicy, build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import RuntimePaths, runtime_env_source_path, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
@@ -24,6 +23,7 @@ from mindroom.workspaces import copy_validated_local_file_to_root, validate_loca
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.workers.models import WorkerHandle, WorkerStatus
 
 
@@ -39,6 +39,13 @@ _DEDICATED_WORKER_RESERVED_ENV_NAMES = frozenset(
         "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT",
         "MINDROOM_STORAGE_PATH",
         SHARED_CREDENTIALS_PATH_ENV,
+    },
+)
+_DEDICATED_WORKER_BLOCKED_FILE_ENV_BASE_NAMES = frozenset(
+    {
+        "GITHUB_TOKEN",
+        "MINDROOM_API_KEY",
+        "MINDROOM_LOCAL_CLIENT_SECRET",
     },
 )
 _WORKER_FILE_SECRET_ROOT = Path(".runtime") / "file-secrets"
@@ -189,6 +196,8 @@ def resolved_agent_policies_from_runtime_config(runtime_paths: RuntimePaths) -> 
         if isinstance(raw_worker_scope, str) and raw_worker_scope in {"shared", "user", "user_agent"}:
             default_worker_scope = raw_worker_scope
 
+    from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
+
     seeds = build_agent_policy_seeds(
         agent_mappings,
         default_worker_scope=default_worker_scope,
@@ -254,6 +263,27 @@ def validate_dedicated_worker_extra_env(
     raise WorkerBackendError(msg)
 
 
+def _blocked_worker_file_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    return frozenset(
+        env_name
+        for env_name in {*runtime_paths.process_env, *runtime_paths.env_file_values}
+        if env_name.endswith("_FILE")
+        and env_name.removesuffix("_FILE") in _DEDICATED_WORKER_BLOCKED_FILE_ENV_BASE_NAMES
+    )
+
+
+def _protected_dedicated_worker_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    protected_names = set(_blocked_worker_file_env_names(runtime_paths))
+    protected_names.update(
+        env_name
+        for env_name in {*runtime_paths.process_env, *runtime_paths.env_file_values}
+        if env_name.endswith("_FILE")
+    )
+    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
+        protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
+    return frozenset(protected_names)
+
+
 def build_backend_config_signature(
     *,
     prefix_parts: tuple[str, ...],
@@ -284,12 +314,19 @@ def build_dedicated_worker_runtime_paths(
     required_existing_storage_root: Path | None = None,
 ) -> RuntimePaths:
     """Build worker-visible runtime paths for one dedicated worker."""
-    validate_dedicated_worker_extra_env(extra_env, backend_name=backend_name)
+    validate_dedicated_worker_extra_env(
+        extra_env,
+        backend_name=backend_name,
+        extra_reserved_names=_protected_dedicated_worker_env_names(runtime_paths),
+    )
 
     process_env = dict(runtime_paths.process_env)
     process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
     env_file_values = dict(runtime_paths.env_file_values)
     env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+    for blocked_env_name in _blocked_worker_file_env_names(runtime_paths):
+        process_env.pop(blocked_env_name, None)
+        env_file_values.pop(blocked_env_name, None)
 
     if google_application_credentials := _worker_google_application_credentials_path(
         runtime_paths=runtime_paths,
