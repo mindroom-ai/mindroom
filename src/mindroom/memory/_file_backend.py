@@ -20,6 +20,7 @@ from ._policy import (
     resolve_file_memory_resolution,
     storage_paths_for_scope_user_id,
 )
+from ._prompting import strip_user_turn_time_prefix
 from ._shared import (
     FILE_MEMORY_DAILY_DIR,
     FILE_MEMORY_DEFAULT_DIRNAME,
@@ -746,7 +747,7 @@ def store_file_conversation_memory(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Persist condensed conversation text to file-backed memory scopes."""
-    condensed_prompt = " ".join(prompt.strip().split())
+    condensed_prompt = " ".join(strip_user_turn_time_prefix(prompt).strip().split())
     if not condensed_prompt:
         return
 

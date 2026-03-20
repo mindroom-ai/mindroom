@@ -17,6 +17,7 @@ from agno.session.agent import AgentSession
 from mindroom.agents import create_session_storage
 from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
+from mindroom.memory._prompting import strip_user_turn_time_prefix
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -398,6 +399,8 @@ def _select_recent_chat_lines(
         content = message.content
         if not isinstance(content, str):
             continue
+        if role == "user":
+            content = strip_user_turn_time_prefix(content)
         cleaned = " ".join(content.split())
         if not cleaned:
             continue

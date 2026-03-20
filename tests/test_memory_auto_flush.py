@@ -15,6 +15,7 @@ from mindroom.memory.auto_flush import (
     MemoryAutoFlushWorker,
     _build_existing_memory_context,
     _load_agent_session,
+    _select_recent_chat_lines,
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
 )
@@ -185,6 +186,24 @@ def test_mark_dirty_skips_per_agent_mem0_override(tmp_path: Path, config: Config
     )
 
     assert not (storage_path / "memory_flush_state.json").exists()
+
+
+def test_select_recent_chat_lines_strips_user_timestamp_prefix() -> None:
+    """Auto-flush excerpts should not include bot-injected user timestamps."""
+    session = _FakeSession(
+        updated_at=100,
+        messages=[
+            _FakeMessage(role="user", content="[2026-03-20 08:15 PDT] Remember my preferred editor is vim"),
+            _FakeMessage(role="assistant", content="Noted."),
+        ],
+    )
+
+    lines = _select_recent_chat_lines(session, max_messages=5, max_chars=1000)
+
+    assert lines == [
+        "user: Remember my preferred editor is vim",
+        "assistant: Noted.",
+    ]
 
 
 @pytest.mark.asyncio
