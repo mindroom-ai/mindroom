@@ -25,6 +25,7 @@ from mindroom.constants import (
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
     worker_root_path,
@@ -1737,6 +1738,80 @@ def test_docker_projected_context_files_load_in_worker_runtime(tmp_path: Path) -
     assert loaded[0].kind == "personality"
     assert loaded[0].title == "00-context.md"
     assert loaded[0].body == "# Context"
+
+
+@pytest.mark.parametrize("worker_scope", ["shared", "unscoped"])
+def test_docker_projection_accepts_normalized_agent_names_in_worker_keys(
+    tmp_path: Path,
+    worker_scope: str,
+) -> None:
+    """Projection should match configured agents by the same normalized name used in worker keys."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            """
+agents:
+  My Agent:
+    display_name: Test
+    role: Test
+    model: default
+"""
+            + ("    worker_scope: shared\n" if worker_scope == "shared" else "")
+            + """
+models:
+  default:
+    provider: openai
+    id: test-model
+router:
+  model: default
+"""
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
+    config = _DockerWorkerBackendConfig(
+        image="ghcr.io/mindroom-ai/mindroom:latest",
+        worker_port=8766,
+        storage_mount_path="/app/worker",
+        config_path="/app/config-host/config.yaml",
+        host_config_path=config_path,
+        idle_timeout_seconds=60.0,
+        ready_timeout_seconds=5.0,
+        name_prefix="mindroom-worker",
+        publish_host="127.0.0.1",
+        endpoint_host="127.0.0.1",
+        user="1000:1000",
+        extra_env={},
+        extra_labels={},
+    )
+    manager = DockerProjectionManager(
+        config=config,
+        projected_configs_root=tmp_path / _PROJECTED_CONFIGS_DIRNAME,
+        runtime_paths=runtime_paths,
+    )
+    worker_paths = local_worker_state_paths_for_root(tmp_path / "workers" / f"normalized-{worker_scope}")
+    if worker_scope == "shared":
+        worker_key = resolve_worker_key(
+            "shared",
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="My Agent",
+                requester_id=None,
+                room_id="!room:example.org",
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+                tenant_id="default",
+            ),
+            agent_name="My Agent",
+        )
+    else:
+        worker_key = resolve_unscoped_worker_key("My Agent")
+
+    projection = manager.projected_config(worker_paths, worker_key=worker_key, materialize=False)
+    projected_config = yaml.safe_load(projection.projected_yaml)
+
+    assert list(projected_config["agents"]) == ["My Agent"]
 
 
 def test_docker_backend_recreates_container_when_launch_config_changes(

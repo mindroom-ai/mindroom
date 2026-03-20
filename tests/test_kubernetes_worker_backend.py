@@ -634,8 +634,8 @@ def test_kubernetes_backend_rejects_symlinked_google_application_credentials_des
     assert victim_path.read_text(encoding="utf-8") == "victim\n"
 
 
-def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:
-    """Dedicated worker payloads should keep the primary runtime config path when no ConfigMap is mounted."""
+def test_kubernetes_backend_uses_worker_visible_config_path_without_configmap(tmp_path: Path) -> None:
+    """Dedicated worker payloads should serialize the pod-visible config path when no ConfigMap is mounted."""
     config_path = tmp_path / "workspace-config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -651,7 +651,7 @@ def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_
     env_values = {env["name"]: env.get("value") for env in container["env"]}
     committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
 
-    assert committed_runtime.config_path == config_path.resolve()
+    assert committed_runtime.config_path == Path("/app/config.yaml")
 
 
 def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:

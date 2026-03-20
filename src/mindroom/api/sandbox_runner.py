@@ -12,6 +12,7 @@ import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -71,9 +72,19 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
     process_env.update(
         {key: value for key, value in os.environ.items() if key not in {_RUNNER_TOKEN_ENV, _STARTUP_RUNTIME_PATHS_ENV}},
     )
+    config_path = (
+        Path(process_env["MINDROOM_CONFIG_PATH"])
+        if process_env.get("MINDROOM_CONFIG_PATH")
+        else startup_runtime_paths.config_path
+    )
+    storage_path = (
+        Path(process_env["MINDROOM_STORAGE_PATH"])
+        if process_env.get("MINDROOM_STORAGE_PATH")
+        else startup_runtime_paths.storage_root
+    )
     resolved_runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=startup_runtime_paths.config_path,
-        storage_path=startup_runtime_paths.storage_root,
+        config_path=config_path,
+        storage_path=storage_path,
         process_env=process_env,
     )
     env_file_values = dict(startup_runtime_paths.env_file_values)

@@ -146,10 +146,24 @@ def request_execution_env(
 ) -> dict[str, str]:
     """Return the effective runtime-scoped execution env for one request."""
     if execution_env:
-        return dict(execution_env)
+        protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
+        return {key: value for key, value in execution_env.items() if key not in protected_env_names}
     if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return {}
     return dict(constants.execution_runtime_env_values(runtime_paths))
+
+
+def _protected_dedicated_worker_execution_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return execution env names that a dedicated worker must keep worker-local."""
+    if not runner_uses_dedicated_worker(runtime_paths):
+        return frozenset()
+
+    protected_names = {
+        name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")
+    }
+    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
+        protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
+    return frozenset(protected_names)
 
 
 def runtime_paths_with_execution_env(
@@ -160,10 +174,12 @@ def runtime_paths_with_execution_env(
     if not execution_env:
         return runtime_paths
 
+    protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
+    overlay_env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
     process_env = dict(runtime_paths.process_env)
-    process_env.update(execution_env)
+    process_env.update(overlay_env)
     env_file_values = dict(runtime_paths.env_file_values)
-    env_file_values.update(execution_env)
+    env_file_values.update(overlay_env)
     return constants.RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,

@@ -18,8 +18,7 @@ if TYPE_CHECKING:
 
 _PRIMARY_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
 _DEDICATED_WORKER_BACKENDS = frozenset({"docker", "kubernetes"})
-_PRIMARY_WORKER_MANAGER: WorkerManager | None = None
-_PRIMARY_WORKER_MANAGER_CONFIG: tuple[str, ...] | None = None
+_PRIMARY_WORKER_MANAGERS: dict[tuple[str, ...], WorkerManager] = {}
 _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
 
 
@@ -160,8 +159,6 @@ def get_primary_worker_manager(
     storage_root: Path | None = None,
 ) -> WorkerManager:
     """Return the primary-runtime worker manager for the current backend config."""
-    global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG
-
     config_signature = _primary_worker_backend_config_signature(
         runtime_paths,
         proxy_url=proxy_url,
@@ -169,29 +166,26 @@ def get_primary_worker_manager(
         storage_root=storage_root,
     )
     with _PRIMARY_WORKER_MANAGER_LOCK:
-        if _PRIMARY_WORKER_MANAGER is None or config_signature != _PRIMARY_WORKER_MANAGER_CONFIG:
-            _shutdown_primary_worker_manager_locked()
-            _PRIMARY_WORKER_MANAGER = _build_primary_worker_manager(
-                runtime_paths,
-                proxy_url=proxy_url,
-                proxy_token=proxy_token,
-                storage_root=storage_root,
-            )
-            _PRIMARY_WORKER_MANAGER_CONFIG = config_signature
-        return _PRIMARY_WORKER_MANAGER
+        cached_manager = _PRIMARY_WORKER_MANAGERS.get(config_signature)
+        if cached_manager is not None:
+            return cached_manager
+
+        manager = _build_primary_worker_manager(
+            runtime_paths,
+            proxy_url=proxy_url,
+            proxy_token=proxy_token,
+            storage_root=storage_root,
+        )
+        _PRIMARY_WORKER_MANAGERS[config_signature] = manager
+        return manager
 
 
 def _shutdown_primary_worker_manager_locked() -> None:
     """Shut down the cached primary worker manager while the cache lock is held."""
-    global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG
-
-    manager = _PRIMARY_WORKER_MANAGER
-    if manager is None:
-        _PRIMARY_WORKER_MANAGER_CONFIG = None
-        return
-    manager.shutdown()
-    _PRIMARY_WORKER_MANAGER = None
-    _PRIMARY_WORKER_MANAGER_CONFIG = None
+    managers = list(_PRIMARY_WORKER_MANAGERS.values())
+    _PRIMARY_WORKER_MANAGERS.clear()
+    for manager in managers:
+        manager.shutdown()
 
 
 def _reset_primary_worker_manager() -> None:

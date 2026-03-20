@@ -360,7 +360,7 @@ Each lease is consumed on use and expires after the configured TTL.
 ### Sandbox-runner API endpoints
 
 These endpoints are served by the sandbox-runner process, not the primary MindRoom runtime.
-All requests require the `MINDROOM_SANDBOX_PROXY_TOKEN` as a Bearer token.
+All requests require the `MINDROOM_SANDBOX_PROXY_TOKEN` in the `x-mindroom-sandbox-token` header.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|

@@ -401,6 +401,13 @@ def execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, st
     merged_env.update(
         {key: value for key, value in runtime_paths.process_env.items() if _is_execution_runtime_process_env_name(key)},
     )
+    for name in tuple(merged_env):
+        if name != "GOOGLE_APPLICATION_CREDENTIALS" and not name.endswith("_FILE"):
+            continue
+        source_path = runtime_env_source_path(runtime_paths, name)
+        if source_path is None:
+            continue
+        merged_env[name] = str(source_path.resolve())
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
     return cast("Mapping[str, str]", MappingProxyType(merged_env))

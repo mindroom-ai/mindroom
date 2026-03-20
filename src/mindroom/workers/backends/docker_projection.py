@@ -18,7 +18,12 @@ import yaml
 
 from mindroom.agent_policy import ResolvedAgentPolicy, build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import config_relative_path, resolve_config_relative_path
-from mindroom.tool_system.worker_routing import resolve_agent_owned_path, resolved_worker_key_scope
+from mindroom.tool_system.worker_routing import (
+    _normalize_worker_key_part,
+    resolve_agent_owned_path,
+    resolved_worker_key_scope,
+    worker_key_agent_name,
+)
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
@@ -696,13 +701,13 @@ class DockerProjectionManager:
         agent_name: str,
         worker_scope: WorkerScope | None,
     ) -> bool:
-        if worker_scope is None:
-            return worker_key.endswith(f":unscoped:{agent_name}")
-        if worker_scope == "shared":
-            return worker_key.endswith(f":shared:{agent_name}")
-        if worker_scope == "user_agent":
-            return ":user_agent:" in worker_key and worker_key.endswith(f":{agent_name}")
-        return False
+        expected_scope = "unscoped" if worker_scope is None else worker_scope
+        if resolved_worker_key_scope(worker_key) != expected_scope:
+            return False
+        encoded_agent_name = worker_key_agent_name(worker_key)
+        if encoded_agent_name is None:
+            return False
+        return encoded_agent_name == _normalize_worker_key_part(agent_name)
 
     def _rewrite_projected_plugin_paths(
         self,

@@ -677,11 +677,7 @@ class KubernetesResourceManager:
         dedicated_root: Path,
         local_dedicated_root: Path,
     ) -> RuntimePaths:
-        config_path = (
-            Path(self.config.config_path)
-            if self.config.config_map_name is not None
-            else self.runtime_paths.config_path.expanduser().resolve()
-        )
+        config_path = Path(self.config.config_path)
         return build_dedicated_worker_runtime_paths(
             runtime_paths=self.runtime_paths,
             backend_name="Kubernetes",
