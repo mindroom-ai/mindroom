@@ -16,7 +16,7 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 from pydantic import ValidationError
 
 from mindroom import agent_prompts
-from mindroom.agents import _CULTURE_MANAGER_CACHE, _PRIVATE_CULTURE_MANAGER_CACHE, create_agent
+from mindroom.agents import _CULTURE_MANAGER_CACHE, _PRIVATE_CULTURE_MANAGER_CACHE, _load_context_files, create_agent
 from mindroom.config.agent import (
     AgentConfig,
     AgentPrivateConfig,
@@ -1443,6 +1443,34 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     assert not canonical_soul.exists()
     assert "Canonical soul context." not in deleted_agent.role
     assert "Updated canonical soul context." not in deleted_agent.role
+
+
+def test_load_context_files_prefers_real_agent_workspace_paths_over_projected_asset_prefixes(
+    tmp_path: Path,
+) -> None:
+    """Workspace context files should keep their normal semantics even when their names match projected assets."""
+    storage_path = tmp_path / "storage"
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(storage_path, config_path=config_path)
+    workspace_context = agent_workspace_root_path(storage_path, "general") / ".mindroom-worker-assets" / "note.md"
+    workspace_context.parent.mkdir(parents=True, exist_ok=True)
+    workspace_context.write_text("workspace\n", encoding="utf-8")
+    projected_context = config_dir / ".mindroom-worker-assets" / "note.md"
+    projected_context.parent.mkdir(parents=True, exist_ok=True)
+    projected_context.write_text("config\n", encoding="utf-8")
+
+    loaded = _load_context_files(
+        [".mindroom-worker-assets/note.md"],
+        runtime_paths,
+        agent_name="general",
+        storage_path=storage_path,
+    )
+
+    assert len(loaded) == 1
+    assert loaded[0].body == "workspace"
 
 
 @patch("mindroom.agents.SqliteDb")

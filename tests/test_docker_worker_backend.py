@@ -1398,7 +1398,7 @@ def test_docker_backend_redacts_projected_config_secrets_and_support_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Projected worker config should redact secrets and strip unrelated runtime state."""
+    """Projected worker config should omit live secrets and strip unrelated runtime state."""
     config_text, _projected_paths = _projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
 
@@ -1409,8 +1409,8 @@ def test_docker_backend_redacts_projected_config_secrets_and_support_state(
     projection_root = _projection_root(volumes)
     projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
 
-    assert projected_config["models"]["default"]["api_key"] == "__REDACTED__"
-    assert projected_config["voice"]["stt"]["api_key"] == "__REDACTED__"
+    assert "api_key" not in projected_config["models"]["default"]
+    assert "api_key" not in projected_config["voice"]["stt"]
     assert projected_config["teams"] == {}
     assert projected_config["cultures"] == {}
     assert projected_config["authorization"] == {}
@@ -2647,7 +2647,7 @@ def test_docker_backend_redacts_authorization_headers_in_projected_model_extra_k
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Projected config should redact auth headers nested under model extra_kwargs."""
+    """Projected config should drop auth headers nested under model extra_kwargs."""
     backend, fake_client, _sync_calls = _backend(
         monkeypatch,
         tmp_path,
@@ -2676,8 +2676,39 @@ models:
     projection_root = _projection_root(volumes)
     projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
 
-    assert projected_config["models"]["default"]["extra_kwargs"]["headers"]["Authorization"] == "__REDACTED__"
+    assert "Authorization" not in projected_config["models"]["default"]["extra_kwargs"]["headers"]
     assert projected_config["models"]["default"]["extra_kwargs"]["headers"]["X-Trace-Id"] == "keep-me"
+
+
+def test_docker_backend_reconciles_missing_container_metadata_without_stale_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Missing containers should not keep advertising a stale published endpoint."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    container_name = next(iter(fake_client.containers.by_name))
+    del fake_client.containers.by_name[container_name]
+
+    handles = backend.list_workers(include_idle=True, now=100.0)
+
+    assert [worker.worker_key for worker in handles] == [_TEST_UNSCOPED_WORKER_KEY]
+    assert handles[0].status == "idle"
+    assert handles[0].endpoint == "/api/sandbox-runner/execute"
+    assert handle.endpoint != handles[0].endpoint
+
+    metadata_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["host_port"] is None
+    assert metadata["container_id"] is None
+
+    cleaned = backend.cleanup_idle_workers(now=1000.0)
+
+    assert cleaned == []
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["host_port"] is None
+    assert metadata["container_id"] is None
 
 
 def test_docker_projection_hash_is_stable_across_hash_seeds(tmp_path: Path) -> None:

@@ -643,11 +643,11 @@ def test_sandbox_runner_execution_env_resolves_relative_file_secret_paths(
     assert execution_env["GOOGLE_APPLICATION_CREDENTIALS"] == str(credentials_path.resolve())
 
 
-def test_prepare_execute_request_preserves_dedicated_worker_secret_paths(
+def test_prepare_execute_request_preserves_dedicated_worker_runtime_contract(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Dedicated worker request prep should not reapply host-side file secret paths over worker-local copies."""
+    """Dedicated worker request prep should not overwrite worker-local control paths or copied secrets."""
     _set_sandbox_token(monkeypatch)
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -691,15 +691,23 @@ def test_prepare_execute_request_preserves_dedicated_worker_secret_paths(
         ),
         worker_runtime,
     )
+    subprocess_context = sandbox_runner_module._prepare_subprocess_context(prepared_request)
 
+    assert "MINDROOM_CONFIG_PATH" not in prepared_request.execution_env
+    assert "MINDROOM_STORAGE_PATH" not in prepared_request.execution_env
     assert "OPENAI_API_KEY_FILE" not in prepared_request.execution_env
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in prepared_request.execution_env
+    assert prepared_request.runtime_paths.config_path == worker_runtime.config_path
+    assert prepared_request.runtime_paths.storage_root == worker_runtime.storage_root
     assert prepared_request.runtime_paths.env_value("OPENAI_API_KEY_FILE") == worker_runtime.env_value(
         "OPENAI_API_KEY_FILE",
     )
     assert prepared_request.runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS") == worker_runtime.env_value(
         "GOOGLE_APPLICATION_CREDENTIALS",
     )
+    assert subprocess_context.subprocess_env is not None
+    assert "MINDROOM_CONFIG_PATH" not in subprocess_context.subprocess_env
+    assert "MINDROOM_STORAGE_PATH" not in subprocess_context.subprocess_env
 
 
 @pytest.mark.asyncio

@@ -44,7 +44,9 @@ _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
-_LOCAL_ONLY_SANDBOX_TOOLS = frozenset(SHARED_ONLY_INTEGRATION_NAMES - {"google", "spotify"})
+_LOCAL_ONLY_SANDBOX_TOOLS = frozenset(
+    (SHARED_ONLY_INTEGRATION_NAMES | {"config_manager", "self_config"}) - {"google", "spotify"},
+)
 _EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 
 

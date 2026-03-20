@@ -158,9 +158,10 @@ def _protected_dedicated_worker_execution_env_names(runtime_paths: RuntimePaths)
     if not runner_uses_dedicated_worker(runtime_paths):
         return frozenset()
 
-    protected_names = {
+    protected_names = {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"}
+    protected_names.update(
         name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")
-    }
+    )
     if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
         protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
     return frozenset(protected_names)
