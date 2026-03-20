@@ -82,6 +82,7 @@ def _worker_manager(request: Request) -> WorkerManager:
         proxy_token=proxy_config.proxy_token,
     ):
         raise HTTPException(status_code=503, detail="Worker backend is not configured.")
+
     kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
     if primary_worker_backend_name(runtime_paths) == "kubernetes":
         kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(

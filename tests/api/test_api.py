@@ -1118,12 +1118,12 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
                 ),
             ]
 
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
     monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(
-        workers_api,
-        "get_primary_worker_manager",
-        lambda *_args, **_kwargs: _FakeWorkerManager(),
-    )
+    monkeypatch.setattr(workers_api, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
+    monkeypatch.setattr(workers_api, "get_primary_worker_manager", lambda *_args, **_kwargs: _FakeWorkerManager())
 
     response = test_client.post("/api/workers/cleanup")
 

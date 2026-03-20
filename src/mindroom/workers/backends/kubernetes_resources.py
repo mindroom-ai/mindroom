@@ -374,8 +374,6 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None = None,
     ) -> DeploymentApplyResult:
         """Create-or-patch one worker Deployment."""
-    ) -> DeploymentApplyResult:
-        """Create-or-patch one worker Deployment."""
         manifest = self._deployment_manifest(
             worker_key=worker_key,
             worker_id=worker_id,
