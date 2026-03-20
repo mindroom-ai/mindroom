@@ -1445,10 +1445,10 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     assert "Updated canonical soul context." not in deleted_agent.role
 
 
-def test_load_context_files_prefers_real_agent_workspace_paths_over_projected_asset_prefixes(
+def test_load_context_files_prefers_projected_assets_over_workspace_shadows(
     tmp_path: Path,
 ) -> None:
-    """Workspace context files should keep their normal semantics even when their names match projected assets."""
+    """Projected worker assets should stay authoritative even if writable workspace state shadows the same path."""
     storage_path = tmp_path / "storage"
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -1470,7 +1470,7 @@ def test_load_context_files_prefers_real_agent_workspace_paths_over_projected_as
     )
 
     assert len(loaded) == 1
-    assert loaded[0].body == "workspace"
+    assert loaded[0].body == "config"
 
 
 @patch("mindroom.agents.SqliteDb")
