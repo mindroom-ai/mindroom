@@ -360,7 +360,7 @@ type _TextDispatchEvent = nio.RoomMessageText | _SyntheticTextEvent
 
 type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
 
-_USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[\d{2}:\d{2} [^\]]+\]\s")
+_USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
 
 
 def _merge_response_extra_content(
@@ -1848,13 +1848,13 @@ class AgentBot:
         return f"{prompt.rstrip()}\n\n{metadata_block}"
 
     def _prefix_user_turn_time(self, prompt: str, *, timestamp_ms: float | None = None) -> str:
-        """Prefix a user turn with its local wall-clock time."""
+        """Prefix a user turn with its local date and wall-clock time."""
         if not prompt.strip() or _USER_TURN_TIME_PREFIX_RE.match(prompt):
             return prompt
         tz = ZoneInfo(self.config.timezone)
         current = datetime.now(tz) if timestamp_ms is None else datetime.fromtimestamp(timestamp_ms / 1000, tz)
         timezone_abbrev = current.tzname() or self.config.timezone
-        return f"[{current.strftime('%H:%M')} {timezone_abbrev}] {prompt}"
+        return f"[{current.strftime('%Y-%m-%d %H:%M')} {timezone_abbrev}] {prompt}"
 
     def _timestamp_thread_history_user_turns(self, thread_history: list[dict]) -> list[dict]:
         """Add time prefixes to user-authored thread-history entries."""

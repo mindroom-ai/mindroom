@@ -1404,12 +1404,12 @@ class TestAgentBot:
         assert mock_ai.call_args.kwargs["prompt"].endswith("Use research skill")
 
     @pytest.mark.asyncio
-    async def test_generate_response_prefixes_user_turns_with_local_time(
+    async def test_generate_response_prefixes_user_turns_with_local_datetime(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Top-level response generation should timestamp the live user turn and prior user history."""
+        """Top-level response generation should prefix user turns with local date and time."""
 
         def discard_background_task(coro: object, *, _name: str) -> None:
             close = getattr(coro, "close", None)
@@ -1429,8 +1429,8 @@ class TestAgentBot:
         bot._process_and_respond = AsyncMock(return_value="$response")
         bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
 
-        prior_user_time = datetime(2026, 3, 20, 8, 10, tzinfo=ZoneInfo("America/Los_Angeles"))
-        prior_agent_time = datetime(2026, 3, 20, 8, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
+        prior_user_time = datetime(2026, 3, 10, 8, 10, tzinfo=ZoneInfo("America/Los_Angeles"))
+        prior_agent_time = datetime(2026, 3, 10, 8, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
         thread_history = [
             {
                 "sender": "@alice:localhost",
@@ -1464,8 +1464,8 @@ class TestAgentBot:
             )
 
         process_args = bot._process_and_respond.await_args.args
-        assert process_args[1] == "[08:15 PDT] What time is it?"
-        assert process_args[4][0]["body"] == "[08:10 PDT] Earlier user question"
+        assert process_args[1] == "[2026-03-20 08:15 PDT] What time is it?"
+        assert process_args[4][0]["body"] == "[2026-03-10 08:10 PDT] Earlier user question"
         assert process_args[4][1]["body"] == "Existing agent reply"
 
     @pytest.mark.asyncio
