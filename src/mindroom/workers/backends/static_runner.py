@@ -57,6 +57,11 @@ class StaticSandboxRunnerBackend:
         self._lock = threading.Lock()
         self._workers: dict[str, _StaticWorkerMetadata] = {}
 
+    def shutdown(self) -> None:
+        """Drop cached shared-runner worker handles before manager replacement."""
+        with self._lock:
+            self._workers.clear()
+
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
         """Resolve or create one worker handle for the shared sandbox runner."""
         if not self.api_root:

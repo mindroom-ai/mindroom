@@ -21,6 +21,7 @@ def _runtime_paths(
     *,
     shared_credentials_dir: Path | None = None,
 ) -> constants_mod.RuntimePaths:
+    storage_root.mkdir(parents=True, exist_ok=True)
     config_path = storage_root / "config.yaml"
     config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
     process_env = dict(os.environ)
@@ -192,6 +193,22 @@ class TestCredentialsSync:
         # Verify only valid key was synced
         assert cm.get_api_key("openai") == "valid-key"
         assert cm.get_api_key("anthropic") is None
+
+    def test_sync_env_to_credentials_uses_runtime_storage_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Env sync should write into the explicit runtime storage root."""
+        runtime_storage = (tmp_path / "runtime-storage").resolve()
+        monkeypatch.setenv("OPENAI_API_KEY", "runtime-key")
+        runtime_paths = _runtime_paths(runtime_storage)
+
+        sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        manager = CredentialsManager(base_path=runtime_storage / "credentials")
+        assert manager.base_path == runtime_storage / "credentials"
+        assert manager.get_api_key("openai") == "runtime-key"
 
     def test_sync_env_seeds_github_private_from_github_token(
         self,
