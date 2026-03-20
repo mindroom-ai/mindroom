@@ -359,8 +359,8 @@ class KubernetesResourceManager:
         annotations: dict[str, str],
         replicas: int,
         private_agent_names: frozenset[str] | None = None,
-    ) -> None:
-        """Create-or-patch one worker Deployment."""
+    ) -> bool:
+        """Create-or-patch one worker Deployment and report whether it was recreated."""
         manifest = self._deployment_manifest(
             worker_key=worker_key,
             worker_id=worker_id,
@@ -376,7 +376,7 @@ class KubernetesResourceManager:
             desired_annotations = cast("dict[str, str]", desired_metadata.get("annotations", {}))
             if existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]:
                 self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
-                return
+                return True
         self._apply_object(
             read_fn=self._apps.read_namespaced_deployment,
             create_fn=self._apps.create_namespaced_deployment,
@@ -384,6 +384,7 @@ class KubernetesResourceManager:
             resource_name=worker_id,
             manifest=manifest,
         )
+        return False
 
     def patch_deployment(
         self,

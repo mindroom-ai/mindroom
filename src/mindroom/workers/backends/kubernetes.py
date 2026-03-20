@@ -121,7 +121,7 @@ class KubernetesWorkerBackend:
                 credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
             )
             self._resources.apply_service(worker_id)
-            self._resources.apply_deployment(
+            deployment_recreated = self._resources.apply_deployment(
                 worker_key=worker_key,
                 worker_id=worker_id,
                 state_subpath=state_subpath,
@@ -129,6 +129,13 @@ class KubernetesWorkerBackend:
                 replicas=1,
                 private_agent_names=spec.private_agent_names,
             )
+            if deployment_recreated and not should_restart:
+                lifecycle = prepare_dedicated_worker_ensure_lifecycle(
+                    dedicated_worker_lifecycle_from_handle(current_handle, now=timestamp),
+                    now=timestamp,
+                    should_restart=True,
+                    keep_starting_status=True,
+                )
             try:
                 deployment = self._resources.wait_for_ready(
                     worker_id,

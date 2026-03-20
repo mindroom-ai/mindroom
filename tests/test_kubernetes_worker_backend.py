@@ -1197,6 +1197,26 @@ def test_kubernetes_backend_reuses_ready_deployment_without_incrementing_startup
     assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "ready"
 
 
+def test_kubernetes_backend_recreated_ready_deployment_records_a_new_start() -> None:
+    """Template-drift recreation should count as a real restart in lifecycle metadata."""
+    backend, apps_api, _core_api = _backend()
+    first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    backend.config.extra_env["EXTRA_FLAG"] = "1"
+    second = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+
+    deployment = apps_api.deployments[first.worker_id]
+    assert apps_api.deleted_names == [first.worker_id]
+    assert len(apps_api.created_bodies) == 2
+    assert second.worker_id == first.worker_id
+    assert second.startup_count == 2
+    assert second.last_started_at == 20.0
+    assert deployment.metadata.annotations["mindroom.ai/startup-count"] == "2"
+    assert deployment.metadata.annotations["mindroom.ai/last-started-at"] == "20.0"
+    assert deployment.metadata.annotations["mindroom.ai/last-used-at"] == "20.0"
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "ready"
+
+
 def test_kubernetes_backend_pins_workers_to_control_plane_node(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
