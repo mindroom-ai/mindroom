@@ -1551,6 +1551,47 @@ class TestDoctor:
         assert result.exit_code == 0
         assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
 
+    def test_memory_llm_openai_base_url_used_when_host_absent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor uses openai_base_url from mem0 LLM config when host is absent."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n"
+            "  llm:\n"
+            "    provider: openai\n"
+            "    config:\n"
+            "      model: gpt-oss-low\n"
+            "      openai_base_url: http://localllm:9292/v1\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        called_urls: list[str] = []
+
+        def _mock_check(url: str, _headers: dict[str, str] | None = None) -> tuple[bool, str]:
+            called_urls.append(url)
+            return True, ""
+
+        monkeypatch.setattr("mindroom.cli.doctor._http_check", _mock_check)
+        monkeypatch.setattr(
+            "mindroom.cli.doctor._validate_provider_key",
+            lambda _prov, _key, base_url=None: (called_urls.append(base_url or "NO_BASE_URL") or (True, "")),
+        )
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+        assert result.exit_code == 0
+        assert "http://localllm:9292/v1" in called_urls, (
+            f"Expected openai_base_url to be passed as base_url, got: {called_urls}"
+        )
+
     def test_memory_openai_embedder_host_runs_embeddings_smoke_test(
         self,
         tmp_path: Path,

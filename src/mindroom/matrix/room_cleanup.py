@@ -66,6 +66,13 @@ async def _cleanup_orphaned_bots_in_room(
         List of bot usernames that were kicked
 
     """
+    # Never evict bots from the root space — the router is the creator/admin
+    # and no agents are explicitly configured for it, so every bot looks orphaned.
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    if state.space_room_id and room_id == state.space_room_id:
+        logger.debug(f"Skipping root space {room_id} cleanup")
+        return []
+
     # When DM mode is enabled, check if this is actually a DM room
     if await is_dm_room(client, room_id):
         logger.debug(f"Skipping DM room {room_id} cleanup")

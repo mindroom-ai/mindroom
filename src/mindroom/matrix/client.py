@@ -411,6 +411,7 @@ async def _set_room_directory_visibility(
         return True
 
     error_text = await response.text()
+    response.release()
     hint = (
         "Ensure the service account is a room moderator/admin; Synapse requires sufficient "
         "power in the room to edit directory entries."

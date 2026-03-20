@@ -67,6 +67,7 @@ class TestEventDrivenScheduling:
         # Create expected workflow response
         expected_workflow = ScheduledWorkflow(
             schedule_type="cron",
+            is_conditional=True,
             cron_schedule=CronSchedule(minute="*/2", hour="*", day="*", month="*", weekday="*"),
             message="@email_assistant Check for emails containing 'urgent' in subject or body. If found, @phone_agent please call the user immediately about the urgent email.",
             description="Monitor for urgent emails and alert",
@@ -110,6 +111,7 @@ class TestEventDrivenScheduling:
 
         expected_workflow = ScheduledWorkflow(
             schedule_type="cron",
+            is_conditional=True,
             cron_schedule=CronSchedule(minute="*/5", hour="*", day="*", month="*", weekday="*"),
             message="@crypto_agent Check Bitcoin price. If below $40,000, @notification_agent alert the user about the price drop.",
             description="Monitor Bitcoin price threshold",
@@ -146,6 +148,7 @@ class TestEventDrivenScheduling:
 
         expected_workflow = ScheduledWorkflow(
             schedule_type="cron",
+            is_conditional=True,
             cron_schedule=CronSchedule(minute="*", hour="*", day="*", month="*", weekday="*"),
             message="@monitoring_agent Check server CPU usage. If above 80%, @ops_agent scale up the servers immediately.",
             description="Monitor CPU and auto-scale",
@@ -182,6 +185,7 @@ class TestEventDrivenScheduling:
 
         expected_workflow = ScheduledWorkflow(
             schedule_type="cron",
+            is_conditional=True,
             cron_schedule=CronSchedule(minute="*/5", hour="*", day="*", month="*", weekday="*"),
             message="@ci_agent Check the latest build status. If failed, @ticket_agent create a high-priority ticket with the failure details.",
             description="Monitor builds and create failure tickets",
@@ -218,6 +222,7 @@ class TestEventDrivenScheduling:
 
         expected_workflow = ScheduledWorkflow(
             schedule_type="cron",
+            is_conditional=True,
             cron_schedule=CronSchedule(minute="*/10", hour="*", day="*", month="*", weekday="*"),
             message="@reddit_agent Check for new mentions of our product. If found, @analyst analyze the sentiment and key points of the discussions.",
             description="Monitor Reddit mentions and analyze",
@@ -254,6 +259,7 @@ class TestEventDrivenScheduling:
 
         expected_workflow = ScheduledWorkflow(
             schedule_type="cron",
+            is_conditional=True,
             cron_schedule=CronSchedule(minute="*", hour="*", day="*", month="*", weekday="*"),
             message="@email_assistant Check for new emails from boss. If any found, @notification_agent alert the user immediately.",
             description="Monitor for boss emails",
@@ -308,13 +314,12 @@ class TestEventDrivenScheduling:
             available_agents=[_mid("test_agent")],
         )
 
-        # Verify the prompt contains event-driven guidance
+        # Verify the prompt contains generic event-driven guidance
         call_args = mock_agent.arun.call_args[0][0]
 
-        # Check for event-driven keywords in prompt
-        assert "if" in call_args.lower()
-        assert "when" in call_args.lower()
-        assert "whenever" in call_args.lower()
+        # Check for schema-driven event guidance rather than trigger words
+        assert "is_conditional=true" in call_args
+        assert "is_conditional=false" in call_args
         assert "event" in call_args.lower()
         assert "condition" in call_args.lower()
         assert "polling" in call_args.lower()

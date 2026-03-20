@@ -81,11 +81,21 @@ const NAV_ITEMS: NavItem[] = [
 ];
 
 const NAV_GROUPS: NavItem['group'][] = ['Workspace', 'Configuration'];
+const DEFAULT_TAB = NAV_ITEMS[0].value;
+const NAV_VALUES = new Set(NAV_ITEMS.map(item => item.value));
 
 const TAB_TRIGGER_CLASS =
   'inline-flex items-center gap-1.5 rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap';
 const NAV_OVERFLOW_ENTER_PX = 1;
 const NAV_OVERFLOW_EXIT_BUFFER_PX = 24;
+
+export function resolveCurrentTab(pathname: string): string {
+  const [firstSegment] = pathname.split('/').filter(Boolean);
+  if (firstSegment && NAV_VALUES.has(firstSegment)) {
+    return firstSegment;
+  }
+  return DEFAULT_TAB;
+}
 
 function AppContent() {
   const {
@@ -105,7 +115,7 @@ function AppContent() {
   const compactNavEnteredWidthRef = useRef<number | null>(null);
 
   // Get the current tab from URL or default to 'dashboard'
-  const currentTab = location.pathname.slice(1) || 'dashboard';
+  const currentTab = resolveCurrentTab(location.pathname);
   const currentNavItem = NAV_ITEMS.find(item => item.value === currentTab) || NAV_ITEMS[0];
   const CurrentNavIcon = currentNavItem.icon;
   const globalDiagnostics = getGlobalConfigDiagnostics(diagnostics);

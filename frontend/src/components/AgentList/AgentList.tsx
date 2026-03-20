@@ -1,6 +1,7 @@
 import { useConfigStore } from '@/store/configStore';
 import type { Agent } from '@/types/config';
 import { Bot, MapPin } from 'lucide-react';
+import { pluralize } from '@/lib/utils';
 import { ListPanel, ListItem } from '@/components/shared/ListPanel';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
 
@@ -31,12 +32,12 @@ export function AgentList() {
   const renderAgent = (agent: AgentListItem, isSelected: boolean) => {
     const badges: ItemCardBadge[] = [
       {
-        content: `${agent.tools.length} tools`,
+        content: pluralize(agent.tools.length, 'tool'),
         variant: 'secondary' as const,
         icon: Bot,
       },
       {
-        content: `${agent.rooms.length} rooms`,
+        content: pluralize(agent.rooms.length, 'room'),
         variant: 'secondary' as const,
         icon: MapPin,
       },
