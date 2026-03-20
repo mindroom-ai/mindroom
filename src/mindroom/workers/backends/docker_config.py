@@ -134,6 +134,14 @@ def validate_docker_mount_layout(*, storage_mount_path: str, config_path: str) -
         raise WorkerBackendError(msg)
 
 
+def validate_docker_endpoint_host(*, endpoint_host: str) -> None:
+    """Reject unusable endpoint hosts for worker health checks and returned handles."""
+    if endpoint_host != "0.0.0.0":  # noqa: S104 - explicit wildcard bind host validation
+        return
+    msg = "Docker worker endpoint_host cannot be 0.0.0.0; set a reachable endpoint host explicitly."
+    raise WorkerBackendError(msg)
+
+
 def _read_host_config_path(runtime_paths: RuntimePaths, env: Mapping[str, str]) -> Path | None:
     configured = _read_env(env, _HOST_CONFIG_PATH_ENV)
     if configured:
@@ -212,6 +220,7 @@ class _DockerWorkerBackendConfig:
             storage_mount_path=self.storage_mount_path,
             config_path=self.config_path,
         )
+        validate_docker_endpoint_host(endpoint_host=self.endpoint_host)
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> _DockerWorkerBackendConfig:
