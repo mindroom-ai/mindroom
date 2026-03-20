@@ -128,25 +128,24 @@ def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
 
 
 def _get_datetime_context(timezone_str: str) -> str:
-    """Generate current date and time context for the agent.
+    """Generate current date context for the agent.
 
     Args:
         timezone_str: Timezone string (e.g., 'America/New_York', 'UTC')
 
     Returns:
-        Formatted string with current date and time information
+        Formatted string with current date and timezone information
 
     """
     tz = ZoneInfo(timezone_str)
     now = datetime.now(tz)
 
-    # Format the datetime in a clear, readable way
     date_str = now.strftime("%A, %B %d, %Y")
-    time_str = now.strftime("%H:%M %Z")  # 24-hour format
+    timezone_abbrev = now.tzname() or timezone_str
 
     return f"""## Current Date and Time
 Today is {date_str}.
-The current time is {time_str} ({timezone_str} timezone).
+Timezone: {timezone_str} ({timezone_abbrev})
 
 """
 
@@ -828,7 +827,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         model_id=model_id,
     )
 
-    # Add current date and time context with user's configured timezone
+    # Add current date context with the user's configured timezone
     datetime_context = _get_datetime_context(config.timezone)
 
     # Combine identity and datetime contexts

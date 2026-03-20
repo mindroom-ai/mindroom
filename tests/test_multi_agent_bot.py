@@ -7,9 +7,11 @@ import os
 import signal
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import httpx
 import nio
@@ -923,7 +925,8 @@ class TestAgentBot:
             mock_stream_agent_response.assert_called_once()
             stream_kwargs = mock_stream_agent_response.call_args.kwargs
             assert stream_kwargs["agent_name"] == "calculator"
-            assert stream_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
+            assert stream_kwargs["prompt"].endswith(f"{mention_id}: What's 2+2?")
+            assert stream_kwargs["prompt"].startswith("[")
             assert stream_kwargs["session_id"] == "!test:localhost:$thread_root_id"
             assert stream_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert stream_kwargs["config"] == config
@@ -943,7 +946,8 @@ class TestAgentBot:
             mock_ai_response.assert_called_once()
             ai_kwargs = mock_ai_response.call_args.kwargs
             assert ai_kwargs["agent_name"] == "calculator"
-            assert ai_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
+            assert ai_kwargs["prompt"].endswith(f"{mention_id}: What's 2+2?")
+            assert ai_kwargs["prompt"].startswith("[")
             assert ai_kwargs["session_id"] == "!test:localhost:$thread_root_id"
             assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
@@ -1396,6 +1400,73 @@ class TestAgentBot:
             )
 
         assert mock_ai.call_args.kwargs["show_tool_calls"] is True
+        assert mock_ai.call_args.kwargs["prompt"].startswith("[")
+        assert mock_ai.call_args.kwargs["prompt"].endswith("Use research skill")
+
+    @pytest.mark.asyncio
+    async def test_generate_response_prefixes_user_turns_with_local_time(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Top-level response generation should timestamp the live user turn and prior user history."""
+
+        def discard_background_task(coro: object, *, _name: str) -> None:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function(None)
+            return "$response"
+
+        config = self._config_for_storage(tmp_path)
+        config.timezone = "America/Los_Angeles"
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._process_and_respond = AsyncMock(return_value="$response")
+        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
+
+        prior_user_time = datetime(2026, 3, 20, 8, 10, tzinfo=ZoneInfo("America/Los_Angeles"))
+        prior_agent_time = datetime(2026, 3, 20, 8, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
+        thread_history = [
+            {
+                "sender": "@alice:localhost",
+                "body": "Earlier user question",
+                "timestamp": int(prior_user_time.timestamp() * 1000),
+                "event_id": "$user1",
+            },
+            {
+                "sender": mock_agent_user.user_id,
+                "body": "Existing agent reply",
+                "timestamp": int(prior_agent_time.timestamp() * 1000),
+                "event_id": "$agent1",
+            },
+        ]
+
+        with (
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.create_background_task", side_effect=discard_background_task),
+            patch("mindroom.bot.datetime") as mock_datetime,
+        ):
+            mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
+            mock_datetime.fromtimestamp.side_effect = lambda seconds, tz: datetime.fromtimestamp(seconds, tz)
+
+            await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="What time is it?",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=thread_history,
+                user_id="@alice:localhost",
+            )
+
+        process_args = bot._process_and_respond.await_args.args
+        assert process_args[1] == "[08:15 PDT] What time is it?"
+        assert process_args[4][0]["body"] == "[08:10 PDT] Earlier user question"
+        assert process_args[4][1]["body"] == "Existing agent reply"
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
