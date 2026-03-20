@@ -801,9 +801,20 @@ def test_kubernetes_backend_user_agent_mounts_private_root_from_worker_spec() ->
     assert f"/app/worker/private_instances/{worker_dir_name(worker_key)}" not in mount_paths
 
 
-def test_kubernetes_backend_recreates_user_agent_deployment_when_private_visibility_changes() -> None:
-    """Changing private visibility should recreate the Deployment instead of relying on patch semantics."""
-    backend, apps_api, _core_api = _backend()
+def test_kubernetes_backend_rejects_private_user_agent_deployment_without_target_visibility(
+    tmp_path: Path,
+) -> None:
+    """Private user-agent workers must fail closed until the targeted private agent is explicitly visible."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "agents:\n  mind:\n    private:\n      per: user_agent\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
     worker_key = resolve_worker_key(
         "user_agent",
         ToolExecutionIdentity(
@@ -819,14 +830,15 @@ def test_kubernetes_backend_recreates_user_agent_deployment_when_private_visibil
         agent_name="mind",
     )
 
-    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
+    with pytest.raises(WorkerBackendError, match="missing from explicit private-agent visibility"):
+        backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
+    assert apps_api.created_bodies == []
+
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=20.0)
 
-    assert len(apps_api.created_bodies) == 2
-    recreated_worker_id = apps_api.created_bodies[-1]["metadata"]["name"]
-    assert apps_api.deleted_names == [recreated_worker_id]
-    recreated = apps_api.created_bodies[-1]
-    volume_mounts = recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    assert len(apps_api.created_bodies) == 1
+    created = apps_api.created_bodies[0]
+    volume_mounts = created["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
     expected_private_root = str(
         _private_instance_state_root_path(
@@ -859,9 +871,10 @@ def test_kubernetes_backend_waits_for_deployment_deletion_before_recreate() -> N
         agent_name="mind",
     )
 
-    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
+    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=10.0)
     worker_id = apps_api.created_bodies[0]["metadata"]["name"]
     apps_api.delete_read_lag_by_name[worker_id] = 1
+    apps_api.deployments[worker_id].metadata.annotations["mindroom.ai/template-hash"] = "stale"
 
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=20.0)
 
@@ -1010,6 +1023,27 @@ def test_kubernetes_backend_preserving_evict_deletes_service_but_keeps_deploymen
     assert handle.worker_id in apps_api.deployments
     assert apps_api.deployments[handle.worker_id].spec.replicas == 0
     assert handle.worker_id not in core_api.services
+
+
+def test_kubernetes_backend_preserving_evict_clears_stale_failure_reason() -> None:
+    """Workers that leave the failed state should not keep stale failure annotations."""
+    backend, apps_api, core_api = _backend()
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+
+    backend.record_failure(_TEST_SCOPED_WORKER_KEY_A, "boom", now=1.0)
+    evicted = backend.evict_worker(_TEST_SCOPED_WORKER_KEY_A, preserve_state=True, now=5.0)
+
+    assert evicted is not None
+    assert evicted.status == "idle"
+    assert evicted.failure_reason is None
+    assert handle.worker_id in apps_api.deployments
+    assert handle.worker_id not in core_api.services
+    assert "mindroom.ai/failure-reason" not in apps_api.deployments[handle.worker_id].metadata.annotations
+
+    touched = backend.get_worker(_TEST_SCOPED_WORKER_KEY_A, now=6.0)
+    assert touched is not None
+    assert touched.status == "idle"
+    assert touched.failure_reason is None
 
 
 def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:

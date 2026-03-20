@@ -17,6 +17,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     DedicatedWorkerLifecycleState,
     build_dedicated_worker_runtime_paths,
     plan_scoped_visible_state_roots,
+    resolved_agent_policies_from_runtime_config,
     validate_unique_worker_visible_paths,
 )
 
@@ -804,6 +805,7 @@ class KubernetesResourceManager:
                 worker_visible_shared_storage_root=mounted_storage_root,
                 private_agent_names=private_agent_names,
                 allow_unknown_worker_key=False,
+                resolved_agent_policies=resolved_agent_policies_from_runtime_config(self.runtime_paths),
             )
         ]
         mounts.append(

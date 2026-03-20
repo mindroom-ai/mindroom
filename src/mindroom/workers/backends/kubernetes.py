@@ -290,6 +290,8 @@ class KubernetesWorkerBackend:
         lifecycle: DedicatedWorkerLifecycleState,
     ) -> dict[str, str]:
         updated_annotations = dict(annotations)
+        if lifecycle.failure_reason is None:
+            updated_annotations.pop(resources.ANNOTATION_FAILURE_REASON, None)
         updated_annotations.update(
             resources.metadata_annotations(
                 worker_key=worker_key,

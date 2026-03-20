@@ -603,6 +603,47 @@ def test_docker_worker_host_config_path_resolves_relative_to_runtime_config_dir(
     assert config.host_config_path == host_config_path.resolve()
 
 
+def test_docker_worker_config_rejects_wildcard_endpoint_host_from_publish_host(tmp_path: Path) -> None:
+    """Wildcard bind hosts must not become the client-facing worker endpoint host."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_PUBLISH_HOST": "0.0.0.0",  # noqa: S104 - wildcard bind is the scenario under test
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match="endpoint_host cannot be 0.0.0.0"):
+        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+
+
+def test_docker_worker_config_allows_explicit_endpoint_host_with_wildcard_publish_host(tmp_path: Path) -> None:
+    """Operators may bind broadly as long as the returned worker endpoint is explicit and reachable."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_PUBLISH_HOST": "0.0.0.0",  # noqa: S104 - wildcard bind is the scenario under test
+            "MINDROOM_DOCKER_WORKER_ENDPOINT_HOST": "127.0.0.1",
+        },
+    )
+
+    config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert config.publish_host == "0.0.0.0"  # noqa: S104 - wildcard bind is the scenario under test
+    assert config.endpoint_host == "127.0.0.1"
+
+
 @pytest.mark.parametrize(
     ("label_name"),
     [
@@ -1423,6 +1464,27 @@ def test_docker_backend_records_failure_and_stops_container(
     container = next(iter(fake_client.containers.by_name.values()))
     assert container.stopped == 1
     assert container.status == "exited"
+
+
+def test_docker_backend_preserving_evict_clears_stale_failure_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Workers that leave the failed state should not keep advertising the old failure message."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    backend.record_failure(_TEST_UNSCOPED_WORKER_KEY, "boom", now=11.0)
+
+    evicted = backend.evict_worker(_TEST_UNSCOPED_WORKER_KEY, preserve_state=True, now=12.0)
+    assert evicted is not None
+    assert evicted.status == "idle"
+    assert evicted.failure_reason is None
+
+    touched = backend.touch_worker(_TEST_UNSCOPED_WORKER_KEY, now=13.0)
+    assert touched is not None
+    assert touched.status == "idle"
+    assert touched.failure_reason is None
 
 
 def test_docker_worker_config_rejects_reserved_extra_env_names_from_env(tmp_path: Path) -> None:
@@ -2299,11 +2361,11 @@ def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
     assert all(spec["bind"] != "/app/shared-storage/agents/alpha" for spec in volumes.values())
 
 
-def test_docker_backend_recreates_user_agent_container_when_private_visibility_changes(
+def test_docker_backend_rejects_private_user_agent_container_without_target_visibility(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Changing user-agent private visibility should recreate the container."""
+    """Private user-agent workers must fail closed until the targeted private agent is explicitly visible."""
     config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
     worker_key = resolve_worker_key(
@@ -2321,22 +2383,20 @@ def test_docker_backend_recreates_user_agent_container_when_private_visibility_c
         agent_name="alpha",
     )
 
-    first_handle = backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
-    first_container = fake_client.containers.by_name[first_handle.worker_id]
+    with pytest.raises(WorkerBackendError, match="missing from explicit private-agent visibility"):
+        backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
+    assert fake_client.containers.run_calls == []
 
-    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=20.0)
-
-    replacement_container = fake_client.containers.by_name[first_handle.worker_id]
-    assert replacement_container is not first_container
-    assert first_container.removed == 1
-    assert len(fake_client.containers.run_calls) == 2
-    second_volumes = fake_client.containers.run_calls[-1]["volumes"]
+    handle = backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=20.0)
+    assert len(fake_client.containers.run_calls) == 1
+    second_volumes = fake_client.containers.run_calls[0]["volumes"]
     assert isinstance(second_volumes, dict)
     expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key) / "alpha").resolve()
     assert second_volumes[str(expected_private_root)] == {
         "bind": f"/app/shared-storage/private_instances/{worker_dir_name(worker_key)}/alpha",
         "mode": "rw",
     }
+    assert handle.status == "ready"
 
 
 def test_docker_backend_redacts_authorization_headers_in_projected_model_extra_kwargs(
@@ -2614,6 +2674,35 @@ def test_docker_backend_rebuilds_incomplete_projection_snapshot(
     rebuilt_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
     assert "broken: true" not in rebuilt_config
     assert "plugins:" in rebuilt_config
+
+
+def test_docker_backend_rebuilds_corrupted_ready_projection_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A leftover ready marker must not make the backend trust a projection missing required files."""
+    config_text, _projected_paths = _projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    existing_container = fake_client.containers.by_name[handle.worker_id]
+    first_volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(first_volumes, dict)
+    projection_root = _projection_root(first_volumes)
+
+    (projection_root / "config.yaml").unlink()
+    assert (projection_root / ".projection-ready").is_file()
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    replacement_container = fake_client.containers.by_name[handle.worker_id]
+    assert replacement_container is not existing_container
+    assert existing_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+    assert (projection_root / ".projection-ready").read_text(encoding="utf-8") == "ready\n"
+    rebuilt_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
+    assert "plugins:" in rebuilt_config
+    assert "memory:" in rebuilt_config
 
 
 def test_docker_backend_disambiguates_colliding_projected_knowledge_base_ids(

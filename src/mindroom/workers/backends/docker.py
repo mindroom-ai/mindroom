@@ -886,6 +886,7 @@ class DockerWorkerBackend:
                 worker_visible_shared_storage_root=Path(_CONTAINER_SHARED_STORAGE_ROOT),
                 private_agent_names=private_agent_names,
                 allow_unknown_worker_key=False,
+                resolved_agent_policies=self._projection_manager.current_resolved_agent_policies(),
             )
         ]
         validate_unique_worker_visible_paths(
