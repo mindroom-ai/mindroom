@@ -433,6 +433,7 @@ class DockerWorkerBackend:
         if metadata is None:
             return None
         container = self._read_container(metadata.container_name)
+        metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
         return self._to_handle(metadata, container, now=timestamp, paths=paths)
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
@@ -447,8 +448,10 @@ class DockerWorkerBackend:
                 metadata,
                 touch_dedicated_worker_lifecycle(self._lifecycle_state(metadata), now=timestamp),
             )
+            container = self._read_container(metadata.container_name)
+            metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
             self._save_metadata(paths, metadata)
-            return self._to_handle(metadata, self._read_container(metadata.container_name), now=timestamp, paths=paths)
+            return self._to_handle(metadata, container, now=timestamp, paths=paths)
 
     def list_workers(self, *, include_idle: bool = True, now: float | None = None) -> list[WorkerHandle]:
         """List workers known to this backend."""
@@ -458,9 +461,11 @@ class DockerWorkerBackend:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 continue
+            container = self._read_container(metadata.container_name)
+            metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
             handle = self._to_handle(
                 metadata,
-                self._read_container(metadata.container_name),
+                container,
                 now=timestamp,
                 paths=paths,
             )
@@ -484,6 +489,7 @@ class DockerWorkerBackend:
                 return None
 
             container = self._read_container(metadata.container_name)
+            metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
             if preserve_state:
                 self._stop_container(container)
                 self._apply_lifecycle_state(
@@ -516,6 +522,7 @@ class DockerWorkerBackend:
                 if metadata is None:
                     continue
                 container = self._read_container(metadata.container_name)
+                metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
                 handle = self._to_handle(metadata, container, now=timestamp, paths=paths)
                 if handle.status != "idle" or not self._container_is_running(container):
                     continue
@@ -627,6 +634,22 @@ class DockerWorkerBackend:
             ensure_root=True,
             lock=self._metadata_lock,
         )
+
+    def _reconcile_missing_container_metadata(
+        self,
+        paths: LocalWorkerStatePaths,
+        metadata: _DockerWorkerMetadata,
+        container: _DockerContainer | None,
+    ) -> _DockerWorkerMetadata:
+        if container is not None:
+            return metadata
+        if metadata.host_port is None and metadata.container_id is None:
+            return metadata
+        metadata.endpoint = self._endpoint_for_host_port(None)
+        metadata.host_port = None
+        metadata.container_id = None
+        self._save_metadata(paths, metadata)
+        return metadata
 
     def _read_container(self, container_name: str) -> _DockerContainer | None:
         try:

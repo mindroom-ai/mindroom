@@ -390,6 +390,7 @@ def _resolve_user_agent_worker_payload(
         raise RuntimeError(msg)
     return worker_key, worker_target.private_agent_names
 
+
 def _get_worker_manager(
     runtime_paths: RuntimePaths,
     proxy_config: SandboxProxyConfig,
@@ -609,7 +610,7 @@ def _sandbox_proxy_enabled_for_tool(
     return primary_worker_backend_is_dedicated(runtime_paths)
 
 
-def _call_proxy_sync(  # noqa: C901
+def _call_proxy_sync(  # noqa: C901, PLR0912
     *,
     runtime_paths: RuntimePaths,
     tool_name: str,

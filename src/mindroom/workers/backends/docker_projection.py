@@ -43,7 +43,6 @@ _PROJECTED_ASSETS_DIRNAME = ".mindroom-worker-assets"
 _PROJECTED_CONFIGS_DIRNAME = ".mindroom-worker-config-projections"
 _WORKER_CONFIG_STATE_DIRNAME = ".mindroom-worker-config-state"
 _PROJECTION_READY_FILENAME = ".projection-ready"
-_REDACTED_CONFIG_VALUE = "__REDACTED__"
 _SENSITIVE_CONFIG_KEYS = frozenset(
     {
         "access_token",
@@ -137,7 +136,7 @@ def _header_key_is_sensitive(raw_key: str) -> bool:
     return normalized_key in _SENSITIVE_HEADER_KEYS or _config_key_is_sensitive(raw_key)
 
 
-def _redact_sensitive_config_values(value: object, *, parent_key: str | None = None) -> object:
+def _strip_sensitive_config_values(value: object, *, parent_key: str | None = None) -> object:
     if isinstance(value, dict):
         redacted: dict[object, object] = {}
         inside_header_mapping = _config_key_is_header_container(parent_key)
@@ -145,12 +144,11 @@ def _redact_sensitive_config_values(value: object, *, parent_key: str | None = N
             if isinstance(key, str) and (
                 _header_key_is_sensitive(key) if inside_header_mapping else _config_key_is_sensitive(key)
             ):
-                redacted[key] = _REDACTED_CONFIG_VALUE
                 continue
-            redacted[key] = _redact_sensitive_config_values(item, parent_key=key if isinstance(key, str) else None)
+            redacted[key] = _strip_sensitive_config_values(item, parent_key=key if isinstance(key, str) else None)
         return redacted
     if isinstance(value, list):
-        return [_redact_sensitive_config_values(item, parent_key=parent_key) for item in value]
+        return [_strip_sensitive_config_values(item, parent_key=parent_key) for item in value]
     return value
 
 
@@ -581,7 +579,7 @@ class DockerProjectionManager:
         config_data["matrix_space"] = {}
         config_data["mindroom_user"] = None
 
-        redacted_data = _redact_sensitive_config_values(config_data)
+        redacted_data = _strip_sensitive_config_values(config_data)
         config_data.clear()
         config_data.update(cast("dict[str, object]", redacted_data))
 
