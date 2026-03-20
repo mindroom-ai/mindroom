@@ -43,7 +43,11 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_state import get_runtime_state
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
-from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_backend_available
+from mindroom.workers.runtime import (
+    lease_primary_worker_manager,
+    primary_worker_backend_available,
+    shutdown_primary_worker_manager,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -141,20 +145,20 @@ def _cleanup_workers_once(runtime_paths: constants.RuntimePaths) -> int:
     ):
         return 0
 
-    worker_manager = get_primary_worker_manager(
+    with lease_primary_worker_manager(
         runtime_paths,
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=runtime_paths.storage_root,
-    )
-    cleaned_workers = worker_manager.cleanup_idle_workers()
-    if cleaned_workers:
-        logger.info(
-            "Cleaned idle workers",
-            count=len(cleaned_workers),
-            backend=worker_manager.backend_name,
-        )
-    return len(cleaned_workers)
+    ) as worker_manager:
+        cleaned_workers = worker_manager.cleanup_idle_workers()
+        if cleaned_workers:
+            logger.info(
+                "Cleaned idle workers",
+                count=len(cleaned_workers),
+                backend=worker_manager.backend_name,
+            )
+        return len(cleaned_workers)
 
 
 async def _worker_cleanup_loop(stop_event: asyncio.Event, runtime_paths: constants.RuntimePaths) -> None:
@@ -309,6 +313,10 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await watch_task
     with suppress(asyncio.CancelledError):
         await worker_cleanup_task
+    try:
+        await asyncio.to_thread(shutdown_primary_worker_manager)
+    except Exception:
+        logger.exception("Failed to shut down primary worker manager")
 
 
 app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)

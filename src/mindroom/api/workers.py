@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
-from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_backend_available
+from mindroom.workers.runtime import lease_primary_worker_manager, primary_worker_backend_available
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from mindroom.workers.manager import WorkerManager
     from mindroom.workers.models import WorkerHandle
 
@@ -67,7 +70,8 @@ def _serialize_worker(worker: WorkerHandle) -> WorkerResponse:
     )
 
 
-def _worker_manager(request: Request) -> WorkerManager:
+@contextmanager
+def _worker_manager_lease(request: Request) -> Iterator[WorkerManager]:
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
     runtime_paths = api_runtime_paths(request)
@@ -78,28 +82,29 @@ def _worker_manager(request: Request) -> WorkerManager:
         proxy_token=proxy_config.proxy_token,
     ):
         raise HTTPException(status_code=503, detail="Worker backend is not configured.")
-    return get_primary_worker_manager(
+    with lease_primary_worker_manager(
         runtime_paths,
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=runtime_paths.storage_root,
-    )
+    ) as worker_manager:
+        yield worker_manager
 
 
 @router.get("", response_model=WorkerListResponse)
 async def list_workers(request: Request, include_idle: bool = True) -> WorkerListResponse:
     """List known workers from the configured primary-runtime backend."""
-    worker_manager = _worker_manager(request)
-    workers = [_serialize_worker(worker) for worker in worker_manager.list_workers(include_idle=include_idle)]
-    return WorkerListResponse(workers=workers)
+    with _worker_manager_lease(request) as worker_manager:
+        workers = [_serialize_worker(worker) for worker in worker_manager.list_workers(include_idle=include_idle)]
+        return WorkerListResponse(workers=workers)
 
 
 @router.post("/cleanup", response_model=WorkerCleanupResponse)
 async def cleanup_idle_workers(request: Request) -> WorkerCleanupResponse:
     """Run one idle-worker cleanup pass on the configured backend."""
-    worker_manager = _worker_manager(request)
-    cleaned_workers = [_serialize_worker(worker) for worker in worker_manager.cleanup_idle_workers()]
-    return WorkerCleanupResponse(
-        idle_timeout_seconds=worker_manager.idle_timeout_seconds,
-        cleaned_workers=cleaned_workers,
-    )
+    with _worker_manager_lease(request) as worker_manager:
+        cleaned_workers = [_serialize_worker(worker) for worker in worker_manager.cleanup_idle_workers()]
+        return WorkerCleanupResponse(
+            idle_timeout_seconds=worker_manager.idle_timeout_seconds,
+            cleaned_workers=cleaned_workers,
+        )
