@@ -1,4 +1,5 @@
 import { Agent, Room, Team } from '@/types/config';
+import { pluralize } from '@/lib/utils';
 import { Bot, Home, Users, Link, Activity, Trophy, Zap, BarChart3, X } from 'lucide-react';
 import { getSelectionStyles } from '@/components/shared/styles';
 
@@ -149,7 +150,7 @@ export function NetworkGraph({
                   {mostActiveAgent.display_name}
                 </div>
                 <div className="text-sm text-amber-700 dark:text-amber-300">
-                  {mostActiveAgent.tools.length} tools
+                  {pluralize(mostActiveAgent.tools.length, 'tool')}
                 </div>
               </div>
             </div>

@@ -488,7 +488,11 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
         return 0, 0, 1
 
     llm_provider = config.memory.llm.provider
-    llm_host = config.memory.llm.config.get("host")
+    llm_host = (
+        config.memory.llm.config.get("host")
+        or config.memory.llm.config.get("openai_base_url")
+        or config.memory.llm.config.get("base_url")
+    )
     if llm_provider == "ollama":
         host = llm_host or _get_ollama_host(config, runtime_paths=runtime_paths)
         valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")

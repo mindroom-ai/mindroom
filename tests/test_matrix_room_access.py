@@ -359,6 +359,61 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(
 
 
 @pytest.mark.asyncio
+async def test_configure_managed_room_access_partial_failure_surfaces_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partial failure should log an error with actionable detail, not just a boolean summary."""
+    config = _config_with_runtime_paths(
+        Path(),
+        matrix_room_access={
+            "mode": "multi_user",
+            "multi_user_join_rule": "public",
+            "publish_to_room_directory": True,
+        },
+    )
+    mock_client = AsyncMock()
+    monkeypatch.setattr(matrix_rooms, "ensure_room_join_rule", AsyncMock(return_value=True))
+    monkeypatch.setattr(matrix_rooms, "ensure_room_directory_visibility", AsyncMock(return_value=False))
+
+    error_log = MagicMock()
+    monkeypatch.setattr(matrix_rooms.logger, "error", error_log)
+
+    result = await matrix_rooms._configure_managed_room_access(
+        client=mock_client,
+        room_key="lobby",
+        room_id="!lobby:example.com",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        context="test",
+    )
+
+    assert result is False
+    error_log.assert_called_once()
+    _, kwargs = error_log.call_args
+    assert kwargs["directory_visibility_success"] is False
+    assert kwargs["join_rule_success"] is True
+    assert "directory_visibility" in str(kwargs["failed_components"])
+    assert "hint" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_set_room_directory_visibility_releases_response_on_error() -> None:
+    """Error responses should be released to avoid connection leaks."""
+    mock_client = AsyncMock()
+    mock_client.access_token = TEST_ACCESS_TOKEN
+    response = _FakeHttpResponse(
+        status=403,
+        body='{"errcode":"M_FORBIDDEN","error":"Not allowed"}',
+    )
+    mock_client.send.return_value = response
+
+    result = await matrix_client._set_room_directory_visibility(mock_client, "!room:example.com", "public")
+
+    assert result is False
+    assert response.released is True
+
+
+@pytest.mark.asyncio
 async def test_existing_room_reconciliation_runs_after_later_join(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

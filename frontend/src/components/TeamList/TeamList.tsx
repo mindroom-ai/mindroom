@@ -1,5 +1,6 @@
 import { useConfigStore } from '@/store/configStore';
 import { Users, Bot, Settings } from 'lucide-react';
+import { pluralize } from '@/lib/utils';
 import { ListPanel, ListItem } from '@/components/shared/ListPanel';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
 
@@ -28,7 +29,7 @@ export function TeamList() {
   const renderTeam = (team: TeamListItem, isSelected: boolean) => {
     const badges: ItemCardBadge[] = [
       {
-        content: `${team.agents.length} agents`,
+        content: pluralize(team.agents.length, 'agent'),
         variant: 'secondary' as const,
         icon: Bot,
       },

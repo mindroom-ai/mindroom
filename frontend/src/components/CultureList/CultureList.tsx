@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { Sparkles, Bot, Settings2 } from 'lucide-react';
+import { pluralize } from '@/lib/utils';
 import { ListPanel, ListItem } from '@/components/shared/ListPanel';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
 
@@ -33,7 +34,7 @@ export function CultureList() {
   const renderCulture = (culture: CultureListItem, isSelected: boolean) => {
     const badges: ItemCardBadge[] = [
       {
-        content: `${culture.agents.length} agents`,
+        content: pluralize(culture.agents.length, 'agent'),
         variant: 'secondary' as const,
         icon: Bot,
       },
