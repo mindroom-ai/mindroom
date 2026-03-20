@@ -153,6 +153,9 @@ def request_execution_env(
     """Return the effective runtime-scoped execution env for one request."""
     if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return {}
+    if execution_env:
+        protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
+        return {key: value for key, value in execution_env.items() if key not in protected_env_names}
     if tool_name == "shell":
         source_env = execution_env or runtime_paths.process_env
         return dict(
@@ -167,6 +170,19 @@ def request_execution_env(
     return dict(constants.execution_tool_runtime_env_values(runtime_paths))
 
 
+def _protected_dedicated_worker_execution_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return execution env names that a dedicated worker must keep worker-local."""
+    if not runner_uses_dedicated_worker(runtime_paths):
+        return frozenset()
+
+    protected_names = {
+        name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")
+    }
+    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
+        protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
+    return frozenset(protected_names)
+
+
 def tool_runtime_paths_with_request_env(
     runtime_paths: RuntimePaths,
     execution_env: dict[str, str],
@@ -176,9 +192,11 @@ def tool_runtime_paths_with_request_env(
     trusted_env_overlay: Mapping[str, str] | None = None,
 ) -> RuntimePaths:
     """Return runtime paths overlaid with one tool-request env snapshot."""
+    protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
+    overlay_env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
     process_env = dict(constants.trusted_tool_runtime_env_values(runtime_paths)) if include_base_execution_env else {}
     process_env.update(sandbox_runner_runtime_state_env(runtime_paths.process_env))
-    process_env.update(execution_env)
+    process_env.update(overlay_env)
     env_file_values = (
         {
             key: value
@@ -188,7 +206,7 @@ def tool_runtime_paths_with_request_env(
         if include_base_execution_env
         else {}
     )
-    env_file_values.update(execution_env)
+    env_file_values.update(overlay_env)
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
         process_env.update(trusted_env_overlay)
