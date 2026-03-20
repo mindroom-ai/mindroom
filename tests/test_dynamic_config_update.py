@@ -274,6 +274,83 @@ class TestDynamicConfigUpdate:
         mock_setup.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
+    async def test_removed_agent_reload_cleans_up_orphaned_room_memberships(self, tmp_path: Path) -> None:
+        """Removing an agent should trigger router-driven orphan cleanup after reload."""
+        initial_config = Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Primary assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+                "helper": {
+                    "display_name": "Helper",
+                    "role": "Secondary helper",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+        )
+        updated_config = Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Primary assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+        )
+
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator.config = initial_config
+
+        assistant_bot = MagicMock(spec=AgentBot)
+        assistant_bot.config = initial_config
+        assistant_bot.enable_streaming = True
+        assistant_bot._set_presence_with_model_info = AsyncMock()
+
+        helper_bot = MagicMock(spec=AgentBot)
+        helper_bot.config = initial_config
+        helper_bot.enable_streaming = True
+        helper_bot._set_presence_with_model_info = AsyncMock()
+        helper_bot.cleanup = AsyncMock()
+
+        router_bot = MagicMock(spec=AgentBot)
+        router_bot.config = initial_config
+        router_bot.client = AsyncMock()
+        router_bot.enable_streaming = True
+        router_bot._set_presence_with_model_info = AsyncMock()
+
+        orchestrator.agent_bots = {
+            "assistant": assistant_bot,
+            "helper": helper_bot,
+            ROUTER_AGENT_NAME: router_bot,
+        }
+
+        with (
+            patch("mindroom.orchestrator.load_config", return_value=updated_config),
+            patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
+            patch("mindroom.orchestrator.cleanup_all_orphaned_bots", new=AsyncMock()) as mock_cleanup,
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        ):
+            updated = await orchestrator.update_config()
+
+        assert updated is True
+        mock_setup.assert_not_awaited()
+        helper_bot.cleanup.assert_awaited_once()
+        mock_cleanup.assert_awaited_once_with(
+            router_bot.client,
+            updated_config,
+            orchestrator.runtime_paths,
+        )
+        assert "helper" not in orchestrator.agent_bots
+
+    @pytest.mark.asyncio
     async def test_authorization_change_reconciles_invitations_without_restarts(self, tmp_path: Path) -> None:
         """Changing authorization should trigger room/invitation reconciliation on config reload."""
         initial_config = Config(

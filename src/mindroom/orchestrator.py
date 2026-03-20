@@ -26,6 +26,7 @@ from mindroom.matrix.client import (
     invite_to_room,
 )
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
+from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -597,10 +598,18 @@ class MultiAgentOrchestrator:
         bots_to_setup = self._running_bots_for_entities(changed_entities)
         if bots_to_setup or plan.mindroom_user_changed or plan.matrix_room_access_changed or plan.authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
-            return
-        if plan.matrix_space_changed:
+        elif plan.matrix_space_changed:
             room_ids = await self._ensure_rooms_exist()
             await self._ensure_root_space(room_ids)
+
+        if not plan.removed_entities:
+            return
+
+        router_bot = self._router_bot()
+        if router_bot is None:
+            return
+        assert router_bot.client is not None
+        await cleanup_all_orphaned_bots(router_bot.client, self._require_config(), self.runtime_paths)
 
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
