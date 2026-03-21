@@ -38,14 +38,10 @@ def _build_conversation_messages(
     for message in thread_history:
         role = "user" if message.get("sender", "") == user_id else "assistant"
         body = message.get("body", "").strip()
-        if role == "user":
-            body = strip_user_turn_time_prefix(body).strip()
         if not body:
             continue
         messages.append({"role": role, "content": body})
-    current_content = strip_user_turn_time_prefix(current_prompt).strip()
-    if current_content:
-        messages.append({"role": "user", "content": current_content})
+    messages.append({"role": "user", "content": current_prompt})
     return messages
 
 
@@ -53,5 +49,4 @@ def build_memory_messages(prompt: str, thread_history: list[dict] | None, user_i
     """Convert prompt and optional thread history into memory-save messages."""
     if thread_history and user_id:
         return _build_conversation_messages(thread_history, prompt, user_id)
-    content = strip_user_turn_time_prefix(prompt).strip()
-    return [{"role": "user", "content": content}] if content else []
+    return [{"role": "user", "content": prompt}]

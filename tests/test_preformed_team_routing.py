@@ -212,6 +212,7 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
     store_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     seen_requesters: list[str | None] = []
     scheduled_tasks: list[asyncio.Task[Any]] = []
+    thread_history = [{"sender": "@bob:localhost", "body": "Earlier note", "event_id": "$bob1"}]
 
     async def fake_store_conversation_memory(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
         identity = get_tool_execution_identity()
@@ -237,7 +238,7 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
             prompt="@team remember this",
             reply_to_event_id="$evt1",
             thread_id=None,
-            thread_history=[],
+            thread_history=thread_history,
             user_id="@user:localhost",
         )
 
@@ -246,7 +247,9 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
 
     bot._generate_team_response_helper.assert_awaited_once()
     assert len(store_calls) == 1
+    assert store_calls[0][0][0] == "@team remember this"
     assert store_calls[0][0][1] == ["a1", "a2"]
+    assert store_calls[0][0][6] == thread_history
     assert seen_requesters == ["@user:localhost"]
 
 

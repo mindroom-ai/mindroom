@@ -73,7 +73,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
     from pathlib import Path
 
 
@@ -1411,16 +1411,26 @@ class TestAgentBot:
     ) -> None:
         """Top-level response generation should prefix user turns with local date and time."""
 
-        def discard_background_task(coro: object, *, _name: str) -> None:
-            close = getattr(coro, "close", None)
-            if callable(close):
-                close()
-
         async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
             response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
             response_function = response_kwargs["response_function"]
             await response_function(None)
             return "$response"
+
+        scheduled_tasks: list[asyncio.Task[None]] = []
+
+        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        def schedule_background_task(
+            coro: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            error_handler: object | None = None,  # noqa: ARG001
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+            scheduled_tasks.append(task)
+            return task
 
         config = self._config_for_storage(tmp_path)
         config.timezone = "America/Los_Angeles"
@@ -1448,7 +1458,8 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.bot.create_background_task", side_effect=discard_background_task),
+            patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             patch("mindroom.bot.datetime") as mock_datetime,
         ):
             mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -1463,10 +1474,108 @@ class TestAgentBot:
                 user_id="@alice:localhost",
             )
 
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
         process_args = bot._process_and_respond.await_args.args
         assert process_args[1] == "[2026-03-20 08:15 PDT] What time is it?"
         assert process_args[4][0]["body"] == "[2026-03-10 08:10 PDT] Earlier user question"
         assert process_args[4][1]["body"] == "Existing agent reply"
+
+    @pytest.mark.asyncio
+    async def test_generate_response_keeps_memory_inputs_unprefixed(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Memory storage should receive the raw conversation, not the model-prefixed version."""
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function(None)
+            return "$response"
+
+        scheduled_tasks: list[asyncio.Task[None]] = []
+        stored_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        async def fake_store_conversation_memory(*args: object, **kwargs: object) -> None:
+            stored_calls.append((args, kwargs))
+
+        def schedule_background_task(
+            coro: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            error_handler: object | None = None,  # noqa: ARG001
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+            scheduled_tasks.append(task)
+            return task
+
+        config = self._config_for_storage(tmp_path)
+        config.memory.backend = "mem0"
+        config.timezone = "America/Los_Angeles"
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._process_and_respond = AsyncMock(return_value="$response")
+        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
+
+        bob_time = datetime(2026, 3, 10, 8, 10, tzinfo=ZoneInfo("America/Los_Angeles"))
+        alice_time = datetime(2026, 3, 10, 8, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
+        agent_time = datetime(2026, 3, 10, 8, 14, tzinfo=ZoneInfo("America/Los_Angeles"))
+        thread_history = [
+            {
+                "sender": "@bob:localhost",
+                "body": "Bob question",
+                "timestamp": int(bob_time.timestamp() * 1000),
+                "event_id": "$bob1",
+            },
+            {
+                "sender": "@alice:localhost",
+                "body": "Alice earlier",
+                "timestamp": int(alice_time.timestamp() * 1000),
+                "event_id": "$alice1",
+            },
+            {
+                "sender": mock_agent_user.user_id,
+                "body": "Existing agent reply",
+                "timestamp": int(agent_time.timestamp() * 1000),
+                "event_id": "$agent1",
+            },
+        ]
+
+        with (
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
+            patch("mindroom.bot.datetime") as mock_datetime,
+        ):
+            mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
+            mock_datetime.fromtimestamp.side_effect = lambda seconds, tz: datetime.fromtimestamp(seconds, tz)
+
+            await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="What time is it?",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=thread_history,
+                user_id="@alice:localhost",
+            )
+
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+        process_args = bot._process_and_respond.await_args.args
+        assert process_args[1] == "[2026-03-20 08:15 PDT] What time is it?"
+        assert process_args[4][0]["body"] == "[2026-03-10 08:10 PDT] Bob question"
+        assert process_args[4][1]["body"] == "[2026-03-10 08:12 PDT] Alice earlier"
+        assert process_args[4][2]["body"] == "Existing agent reply"
+
+        assert len(stored_calls) == 1
+        store_args, _ = stored_calls[0]
+        assert store_args[0] == "What time is it?"
+        assert store_args[6] == thread_history
+        assert store_args[7] == "@alice:localhost"
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:

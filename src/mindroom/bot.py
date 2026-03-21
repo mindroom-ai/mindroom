@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
@@ -43,6 +42,7 @@ from mindroom.matrix.users import (
     login_agent_user,
 )
 from mindroom.memory import store_conversation_memory
+from mindroom.memory._prompting import strip_user_turn_time_prefix
 from mindroom.memory.auto_flush import (
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
@@ -359,8 +359,6 @@ class _SyntheticTextEvent:
 type _TextDispatchEvent = nio.RoomMessageText | _SyntheticTextEvent
 
 type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
-
-_USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
 
 
 def _merge_response_extra_content(
@@ -1849,7 +1847,7 @@ class AgentBot:
 
     def _prefix_user_turn_time(self, prompt: str, *, timestamp_ms: float | None = None) -> str:
         """Prefix a user turn with its local date and wall-clock time."""
-        if not prompt.strip() or _USER_TURN_TIME_PREFIX_RE.match(prompt):
+        if not prompt.strip() or strip_user_turn_time_prefix(prompt) != prompt:
             return prompt
         tz = ZoneInfo(self.config.timezone)
         current = datetime.now(tz) if timestamp_ms is None else datetime.fromtimestamp(timestamp_ms / 1000, tz)
@@ -1877,6 +1875,10 @@ class AgentBot:
             timestamped_history.append(updated_message)
         return timestamped_history
 
+    def _timestamp_model_user_context(self, prompt: str, thread_history: list[dict]) -> tuple[str, list[dict]]:
+        """Return model-facing prompt/history with local timestamps added to user turns."""
+        return self._prefix_user_turn_time(prompt), self._timestamp_thread_history_user_turns(thread_history)
+
     async def _generate_team_response_helper(
         self,
         room_id: str,
@@ -1896,8 +1898,7 @@ class AgentBot:
         Returns the initial message ID if created, None otherwise.
         """
         assert self.client is not None
-        prompt = self._prefix_user_turn_time(payload.prompt)
-        thread_history = self._timestamp_thread_history_user_turns(thread_history)
+        prompt, thread_history = self._timestamp_model_user_context(payload.prompt, thread_history)
 
         # Get the appropriate model for this team and room
         model_name = select_model_for_team(self.agent_name, room_id, self.config, self.runtime_paths)
@@ -2302,8 +2303,9 @@ class AgentBot:
         assert self.client is not None
         if not prompt.strip():
             return None
-        prompt = self._prefix_user_turn_time(prompt)
-        thread_history = self._timestamp_thread_history_user_turns(thread_history)
+        memory_prompt = prompt
+        memory_thread_history = thread_history
+        prompt, thread_history = self._timestamp_model_user_context(prompt, thread_history)
 
         session_id = create_session_id(room_id, thread_id)
         model_prompt = self._append_matrix_prompt_context(
@@ -2409,13 +2411,13 @@ class AgentBot:
             if self.config.get_agent_memory_backend(agent_name) == "mem0":
                 create_background_task(
                     store_conversation_memory(
-                        prompt,
+                        memory_prompt,
                         agent_name,
                         self.storage_path,
                         session_id,
                         self.config,
                         self.runtime_paths,
-                        thread_history,
+                        memory_thread_history,
                         user_id,
                         execution_identity=execution_identity,
                     ),
@@ -2614,8 +2616,9 @@ class AgentBot:
 
         """
         assert self.client is not None
-        prompt = self._prefix_user_turn_time(prompt)
-        thread_history = self._timestamp_thread_history_user_turns(thread_history)
+        memory_prompt = prompt
+        memory_thread_history = thread_history
+        prompt, thread_history = self._timestamp_model_user_context(prompt, thread_history)
         media_inputs = media or MediaInputs()
 
         # Prepare session id for memory storage (store after sending response)
@@ -2700,13 +2703,13 @@ class AgentBot:
             if self.config.get_agent_memory_backend(self.agent_name) == "mem0":
                 create_background_task(
                     store_conversation_memory(
-                        prompt,
+                        memory_prompt,
                         self.agent_name,
                         self.storage_path,
                         session_id,
                         self.config,
                         self.runtime_paths,
-                        thread_history,
+                        memory_thread_history,
                         user_id,
                         execution_identity=execution_identity,
                     ),
@@ -3127,8 +3130,9 @@ class TeamBot(AgentBot):
             return None
 
         assert self.client is not None
-        prompt = self._prefix_user_turn_time(prompt)
-        thread_history = self._timestamp_thread_history_user_turns(thread_history)
+        memory_prompt = prompt
+        memory_thread_history = thread_history
+        prompt, thread_history = self._timestamp_model_user_context(prompt, thread_history)
 
         configured_mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
         materializable_agent_names = self._materializable_agent_names()
@@ -3169,13 +3173,13 @@ class TeamBot(AgentBot):
         with tool_execution_identity(execution_identity):
             create_background_task(
                 store_conversation_memory(
-                    prompt,
+                    memory_prompt,
                     agent_names,  # Pass list of agent names for team storage
                     self.storage_path,
                     session_id,
                     self.config,
                     self.runtime_paths,
-                    thread_history,
+                    memory_thread_history,
                     user_id,
                     execution_identity=execution_identity,
                 ),

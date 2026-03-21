@@ -451,7 +451,7 @@ class TestMemoryFacade:
     async def test_store_conversation_memory(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             await store_conversation_memory(
-                "[2026-03-20 08:15 PDT] What is 2+2?",
+                "What is 2+2?",
                 "calculator",
                 storage_path,
                 "session123",
@@ -477,24 +477,6 @@ class TestMemoryFacade:
         mock_memory.add.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_store_conversation_memory_timestamp_only_prompt_is_ignored(
-        self,
-        mock_memory: AsyncMock,
-        storage_path: Path,
-        config: Config,
-    ) -> None:
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
-            await store_conversation_memory(
-                "[2026-03-20 08:15 PDT]   ",
-                "agent",
-                storage_path,
-                "session123",
-                config,
-            )
-
-        mock_memory.add.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_store_conversation_memory_with_empty_response(
         self,
         mock_memory: AsyncMock,
@@ -516,14 +498,14 @@ class TestMemoryFacade:
         config: Config,
     ) -> None:
         thread_history = [
-            {"sender": "@user:matrix.org", "body": "[2026-03-10 08:10 PDT] I need help with math"},
+            {"sender": "@user:matrix.org", "body": "I need help with math"},
             {"sender": "@router:matrix.org", "body": "@calculator can help with that"},
-            {"sender": "@user:matrix.org", "body": "[2026-03-10 08:12 PDT] Yes please"},
+            {"sender": "@user:matrix.org", "body": "Yes please"},
         ]
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             await store_conversation_memory(
-                "[2026-03-20 08:15 PDT] What is 2+2?",
+                "What is 2+2?",
                 "calculator",
                 storage_path,
                 "session123",
@@ -539,27 +521,6 @@ class TestMemoryFacade:
             {"role": "user", "content": "Yes please"},
             {"role": "user", "content": "What is 2+2?"},
         ]
-
-    @pytest.mark.asyncio
-    async def test_store_conversation_memory_file_backend_strips_user_timestamp_prefix(
-        self,
-        storage_path: Path,
-        config: Config,
-    ) -> None:
-        config.memory.backend = "file"
-        config.memory.file.path = str(storage_path / "memory-files")
-
-        await store_conversation_memory(
-            "[2026-03-20 08:15 PDT] What is 2+2?",
-            "calculator",
-            storage_path,
-            "session123",
-            config,
-        )
-
-        memories = await list_all_agent_memories("calculator", storage_path, config)
-        assert len(memories) == 1
-        assert memories[0]["memory"] == "What is 2+2?"
 
     @pytest.mark.asyncio
     async def test_store_conversation_memory_for_team(
