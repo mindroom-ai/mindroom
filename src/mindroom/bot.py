@@ -1879,6 +1879,15 @@ class AgentBot:
         """Return model-facing prompt/history with local timestamps added to user turns."""
         return self._prefix_user_turn_time(prompt), self._timestamp_thread_history_user_turns(thread_history)
 
+    def _prepare_memory_and_model_context(
+        self,
+        prompt: str,
+        thread_history: list[dict],
+    ) -> tuple[str, list[dict], str, list[dict]]:
+        """Return raw memory inputs alongside timestamped model-facing context."""
+        model_prompt, model_thread_history = self._timestamp_model_user_context(prompt, thread_history)
+        return prompt, thread_history, model_prompt, model_thread_history
+
     async def _generate_team_response_helper(
         self,
         room_id: str,
@@ -2303,9 +2312,10 @@ class AgentBot:
         assert self.client is not None
         if not prompt.strip():
             return None
-        memory_prompt = prompt
-        memory_thread_history = thread_history
-        prompt, thread_history = self._timestamp_model_user_context(prompt, thread_history)
+        memory_prompt, memory_thread_history, prompt, thread_history = self._prepare_memory_and_model_context(
+            prompt,
+            thread_history,
+        )
 
         session_id = create_session_id(room_id, thread_id)
         model_prompt = self._append_matrix_prompt_context(
@@ -2616,9 +2626,10 @@ class AgentBot:
 
         """
         assert self.client is not None
-        memory_prompt = prompt
-        memory_thread_history = thread_history
-        prompt, thread_history = self._timestamp_model_user_context(prompt, thread_history)
+        memory_prompt, memory_thread_history, prompt, thread_history = self._prepare_memory_and_model_context(
+            prompt,
+            thread_history,
+        )
         media_inputs = media or MediaInputs()
 
         # Prepare session id for memory storage (store after sending response)
@@ -3130,9 +3141,10 @@ class TeamBot(AgentBot):
             return None
 
         assert self.client is not None
-        memory_prompt = prompt
-        memory_thread_history = thread_history
-        prompt, thread_history = self._timestamp_model_user_context(prompt, thread_history)
+        memory_prompt, memory_thread_history, prompt, thread_history = self._prepare_memory_and_model_context(
+            prompt,
+            thread_history,
+        )
 
         configured_mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
         materializable_agent_names = self._materializable_agent_names()
