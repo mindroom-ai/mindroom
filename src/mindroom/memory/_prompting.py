@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ._shared import MemoryResult
+
+_USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
 
 
 def _format_memories_as_context(memories: list[MemoryResult], context_type: str = "agent") -> str:
@@ -21,6 +24,11 @@ def _format_memories_as_context(memories: list[MemoryResult], context_type: str 
     return "\n".join(context_parts)
 
 
+def strip_user_turn_time_prefix(text: str) -> str:
+    """Remove bot-injected timestamp metadata from a user turn."""
+    return _USER_TURN_TIME_PREFIX_RE.sub("", text, count=1)
+
+
 def _build_conversation_messages(
     thread_history: list[dict],
     current_prompt: str,
@@ -28,10 +36,10 @@ def _build_conversation_messages(
 ) -> list[dict]:
     messages: list[dict] = []
     for message in thread_history:
+        role = "user" if message.get("sender", "") == user_id else "assistant"
         body = message.get("body", "").strip()
         if not body:
             continue
-        role = "user" if message.get("sender", "") == user_id else "assistant"
         messages.append({"role": role, "content": body})
     messages.append({"role": "user", "content": current_prompt})
     return messages

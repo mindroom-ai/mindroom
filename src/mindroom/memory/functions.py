@@ -346,6 +346,8 @@ async def store_conversation_memory(
         return
 
     messages = build_memory_messages(prompt, thread_history, user_id)
+    if not messages:
+        return
     await store_mem0_conversation_memory(
         messages,
         agent_name,
