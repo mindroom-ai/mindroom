@@ -31,6 +31,7 @@ class ToolRuntimeContext:
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom | None = None
     reply_to_event_id: str | None = None
+    event_id: str | None = None
     storage_path: Path | None = None
     attachment_ids: tuple[str, ...] = field(default_factory=tuple)
     runtime_attachment_ids: list[str] = field(default_factory=list)

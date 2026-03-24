@@ -19,6 +19,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
+from mindroom.thread_resolution import THREAD_RESOLUTION_EVENT_TYPE
 
 logger = get_logger(__name__)
 
@@ -30,6 +31,9 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
         "M_INVALID_USERNAME",
     },
 )
+_POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
+_THREAD_RESOLUTION_POWER_LEVEL = 0
+_DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 
 
 class PermanentMatrixStartupError(ValueError):
@@ -238,15 +242,20 @@ async def create_room(
     if topic:
         room_config["topic"] = topic
 
+    power_level_content: dict[str, Any] = {
+        "state_default": _DEFAULT_STATE_EVENT_POWER_LEVEL,
+        "events": {
+            THREAD_RESOLUTION_EVENT_TYPE: _THREAD_RESOLUTION_POWER_LEVEL,
+        },
+    }
+    users: dict[str, int] = {}
     if power_users:
-        power_level_content: dict[str, Any] = {
-            "users": dict.fromkeys(power_users, 50),
-            "state_default": 50,  # Set default required power for state events
-        }
-        # Ensure the creator is an admin
-        if client.user_id:
-            power_level_content["users"][client.user_id] = 100
-        room_config["initial_state"] = [{"type": "m.room.power_levels", "content": power_level_content}]
+        users.update(dict.fromkeys(power_users, 50))
+    if client.user_id:
+        users[client.user_id] = 100
+    if users:
+        power_level_content["users"] = users
+    room_config["initial_state"] = [{"type": _POWER_LEVELS_EVENT_TYPE, "content": power_level_content}]
 
     response = await client.room_create(**room_config)
     if isinstance(response, nio.RoomCreateResponse):
@@ -263,6 +272,70 @@ async def create_room(
         return room_id
     logger.error(f"Failed to create room {name}: {response}")
     return None
+
+
+def _with_thread_resolution_power_level(power_levels_content: dict[str, Any]) -> dict[str, Any]:
+    """Return power-level content with the thread-resolution override applied."""
+    next_content = dict(power_levels_content)
+    existing_events = power_levels_content.get("events")
+    next_events = dict(existing_events) if isinstance(existing_events, dict) else {}
+    next_events[THREAD_RESOLUTION_EVENT_TYPE] = _THREAD_RESOLUTION_POWER_LEVEL
+    next_content["events"] = next_events
+    return next_content
+
+
+async def ensure_thread_resolution_power_level(
+    client: nio.AsyncClient,
+    room_id: str,
+) -> bool:
+    """Ensure managed rooms allow PL0 users to send the thread-resolution state event."""
+    current_response = await client.room_get_state_event(room_id, _POWER_LEVELS_EVENT_TYPE)
+    if not isinstance(current_response, nio.RoomGetStateEventResponse):
+        logger.error(
+            "Failed to read room power levels for thread resolution reconciliation",
+            room_id=room_id,
+            error=_describe_matrix_response_error(current_response),
+        )
+        return False
+    if not isinstance(current_response.content, dict):
+        logger.error(
+            "Room power levels state has unexpected content shape",
+            room_id=room_id,
+            content=current_response.content,
+        )
+        return False
+
+    desired_content = _with_thread_resolution_power_level(current_response.content)
+    if desired_content == current_response.content:
+        logger.debug(
+            "Thread resolution power level already configured",
+            room_id=room_id,
+            event_type=THREAD_RESOLUTION_EVENT_TYPE,
+            power_level=_THREAD_RESOLUTION_POWER_LEVEL,
+        )
+        return True
+
+    response = await client.room_put_state(
+        room_id=room_id,
+        event_type=_POWER_LEVELS_EVENT_TYPE,
+        content=desired_content,
+    )
+    if isinstance(response, nio.RoomPutStateResponse):
+        logger.info(
+            "Updated room power levels for thread resolution",
+            room_id=room_id,
+            event_type=THREAD_RESOLUTION_EVENT_TYPE,
+            power_level=_THREAD_RESOLUTION_POWER_LEVEL,
+        )
+        return True
+
+    logger.error(
+        "Failed to update room power levels for thread resolution",
+        room_id=room_id,
+        error=_describe_matrix_response_error(response),
+        hint="Ensure the service account is joined and can update m.room.power_levels.",
+    )
+    return False
 
 
 async def create_space(
