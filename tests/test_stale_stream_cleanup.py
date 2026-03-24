@@ -65,6 +65,7 @@ def _make_message_event(
     sender: str = BOT_USER_ID,
     room_id: str = ROOM_ID,
     relates_to: dict[str, object] | None = None,
+    extra_content: dict[str, object] | None = None,
     new_content: dict[str, object] | None = None,
 ) -> nio.RoomMessageText:
     content: dict[str, object] = {
@@ -73,6 +74,8 @@ def _make_message_event(
     }
     if relates_to is not None:
         content["m.relates_to"] = relates_to
+    if extra_content is not None:
+        content.update(extra_content)
     if new_content is not None:
         content["m.new_content"] = new_content
 
@@ -173,6 +176,14 @@ async def _run_cleanup(
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+
+
+def _assert_preserved_edit_payload(content: dict[str, object], expected_keys: dict[str, object]) -> None:
+    """Assert io.mindroom.* keys are present in both edit payload layers."""
+    new_content = cast("dict[str, object]", content["m.new_content"])
+    for key, value in expected_keys.items():
+        assert content[key] == value
+        assert new_content[key] == value
 
 
 @pytest.mark.asyncio
@@ -815,6 +826,107 @@ async def test_cleanup_skips_restart_marked_streaming_message(tmp_path: Path) ->
     assert cleaned == 0
     assert interrupted == []
     mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preserves_tool_trace_and_ai_run_metadata(tmp_path: Path) -> None:
+    """Cleanup edits should preserve Cinny-facing run metadata in both edit payload layers."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$message",
+            body="Partial answer ⋯",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            extra_content={
+                "io.mindroom.tool_trace": {"version": 1, "events": [{"tool": "shell"}]},
+                "io.mindroom.ai_run": {"version": 1, "run_id": "run-123"},
+            },
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
+
+    cleaned = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    _assert_preserved_edit_payload(
+        sent_content,
+        {
+            "io.mindroom.tool_trace": {"version": 1, "events": [{"tool": "shell"}]},
+            "io.mindroom.ai_run": {"version": 1, "run_id": "run-123"},
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preserves_multiple_mindroom_metadata_keys(tmp_path: Path) -> None:
+    """Cleanup edits should preserve every io.mindroom.* key, not just one special case."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+    expected_keys = {
+        "io.mindroom.stream_status": "streaming",
+        "io.mindroom.compaction": {"version": 1, "compacted": False},
+        "io.mindroom.thread_summary": {"version": 1, "summary": "Draft summary"},
+    }
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$message",
+            body="More streaming output ⋯",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            extra_content=expected_keys,
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
+
+    cleaned = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    _assert_preserved_edit_payload(sent_content, expected_keys)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_prefers_latest_mindroom_metadata_from_edit_chain(tmp_path: Path) -> None:
+    """Cleanup should use the canonical io.mindroom.* keys from the newest edit's m.new_content."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+    original = _make_message_event(
+        event_id="$original",
+        body="Initial partial ⋯",
+        timestamp_ms=NOW_MS - (STALE_AGE_MS + 5_000),
+        extra_content={
+            "io.mindroom.tool_trace": {"version": 1, "events": [{"tool": "search"}]},
+            "io.mindroom.ai_run": {"version": 1, "run_id": "run-old"},
+        },
+    )
+    latest_keys = {
+        "io.mindroom.tool_trace": {"version": 2, "events": [{"tool": "shell"}]},
+        "io.mindroom.ai_run": {"version": 1, "run_id": "run-new"},
+        "io.mindroom.stream_status": "streaming",
+    }
+    edit = _make_message_event(
+        event_id="$edit-1",
+        body="* Updated partial",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$original"},
+        new_content={"body": "Updated partial ⋯", "msgtype": "m.text", **latest_keys},
+    )
+    client.room_messages.return_value = _room_messages_response(original, edit)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
+
+    cleaned = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    _assert_preserved_edit_payload(sent_content, latest_keys)
+    assert sent_content["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$original"}
 
 
 @pytest.mark.asyncio

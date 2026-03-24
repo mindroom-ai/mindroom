@@ -1236,6 +1236,7 @@ async def edit_message(
     event_id: str,
     new_content: dict[str, Any],
     new_text: str,
+    extra_content: dict[str, Any] | None = None,
 ) -> str | None:
     """Edit an existing Matrix message.
 
@@ -1248,19 +1249,24 @@ async def edit_message(
         event_id: The event ID of the message to edit
         new_content: The new content dictionary (from format_message_with_mentions)
         new_text: The new text (plain text version)
+        extra_content: Optional extra keys to merge into both edit payload layers
 
     Returns:
         The event ID of the edit message, or None if editing failed
 
     """
+    replacement_content = dict(new_content)
     edit_content = {
         "msgtype": "m.text",
         "body": f"* {new_text}",
         "format": "org.matrix.custom.html",
         "formatted_body": new_content.get("formatted_body", new_text),
-        "m.new_content": new_content,
+        "m.new_content": replacement_content,
         "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
     }
+    if extra_content:
+        replacement_content.update(extra_content)
+        edit_content.update(extra_content)
 
     # send_message will handle large messages, including the lower threshold for edits
     return await send_message(client, room_id, edit_content)
