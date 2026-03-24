@@ -424,6 +424,7 @@ async def send_streaming_response(
             existing_event_id,
         )
 
+    sc = config.defaults.streaming
     streaming = streaming_cls(
         room_id=room_id,
         reply_to_event_id=reply_to_event_id,
@@ -435,6 +436,9 @@ async def send_streaming_response(
         room_mode=room_mode,
         show_tool_calls=show_tool_calls,
         extra_content=extra_content,
+        update_interval=sc.update_interval,
+        min_update_interval=sc.min_update_interval,
+        interval_ramp_seconds=sc.interval_ramp_seconds,
     )
 
     # Ensure the first chunk triggers an initial send immediately

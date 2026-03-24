@@ -12,6 +12,22 @@ AgentLearningMode = Literal["always", "agentic"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 
 
+class StreamingConfig(BaseModel):
+    """Timing parameters for streaming response edits."""
+
+    update_interval: float = Field(
+        default=5.0,
+        gt=0,
+        description="Steady-state seconds between message edits during LLM streaming",
+    )
+    min_update_interval: float = Field(default=0.5, gt=0, description="Fast edit interval at stream start")
+    interval_ramp_seconds: float = Field(
+        default=15.0,
+        ge=0,
+        description="Seconds to ramp from min to steady-state interval (0 disables ramp)",
+    )
+
+
 class DefaultsConfig(BaseModel):
     """Default configuration values for agents."""
 
@@ -68,6 +84,14 @@ class DefaultsConfig(BaseModel):
         default=50000,
         ge=1,
         description="Hard cap for extra role preload context loaded from context_files",
+    )
+    streaming: StreamingConfig = Field(
+        default_factory=StreamingConfig,
+        description="Streaming response timing parameters",
+    )
+    thread_summary_model: str | None = Field(
+        default=None,
+        description="Model config name for generating thread summaries (e.g., 'haiku'). Uses 'default' if not set.",
     )
 
     @model_validator(mode="before")
