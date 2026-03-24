@@ -6,6 +6,7 @@ import ast
 import asyncio
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
@@ -18,7 +19,12 @@ import mindroom.tools  # noqa: F401
 import mindroom.tools.shell as shell_tool_module
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths, shell_extra_env_values
+from mindroom.constants import (
+    RuntimePaths,
+    resolve_runtime_paths,
+    shell_execution_runtime_env_values,
+    shell_extra_env_values,
+)
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.metadata import ToolInitOverrideError, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -427,80 +433,38 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
     assert ast.literal_eval(run_result) == expected
 
 
-@pytest.mark.asyncio
-def test_shell_subprocess_path_prepends_wrapper_for_empty_path(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Shell PATH normalization should restore the wrapper dir even for PATH=''."""
-    wrapper_dir = tmp_path / "run" / "wrappers" / "bin"
-    wrapper_dir.mkdir(parents=True)
-    monkeypatch.setattr(shell_tool_module, "_NIXOS_SUDO_WRAPPER_DIR", str(wrapper_dir))
-
-    assert shell_tool_module._shell_subprocess_path("") == str(wrapper_dir)
+def test_shell_subprocess_path_keeps_existing_path_without_prepend() -> None:
+    """Shell PATH normalization should preserve the base PATH when nothing is prepended."""
+    assert shell_tool_module._shell_subprocess_path("/usr/local/bin:/usr/bin:/bin") == "/usr/local/bin:/usr/bin:/bin"
 
 
-def test_shell_subprocess_path_prepends_wrapper_for_unset_path(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Shell PATH normalization should restore the wrapper dir even for PATH=None."""
-    wrapper_dir = tmp_path / "run" / "wrappers" / "bin"
-    wrapper_dir.mkdir(parents=True)
-    monkeypatch.setattr(shell_tool_module, "_NIXOS_SUDO_WRAPPER_DIR", str(wrapper_dir))
-
-    assert shell_tool_module._shell_subprocess_path(None) == str(wrapper_dir)
-
-
-def test_shell_subprocess_path_keeps_existing_wrapper_first_without_duplication(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Shell PATH normalization should be idempotent when the wrapper is already first."""
-    wrapper_dir = tmp_path / "run" / "wrappers" / "bin"
-    wrapper_dir.mkdir(parents=True)
-    monkeypatch.setattr(shell_tool_module, "_NIXOS_SUDO_WRAPPER_DIR", str(wrapper_dir))
-    current_path = os.pathsep.join((str(wrapper_dir), "/usr/bin", "/bin"))
-
-    assert shell_tool_module._shell_subprocess_path(current_path) == current_path
-
-
-def test_shell_subprocess_path_prepends_wrapper_when_missing_from_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Shell PATH normalization should prepend the wrapper when PATH omits it."""
-    monkeypatch.setattr(shell_tool_module, "_NIXOS_SUDO_WRAPPER_DIR", "/run/wrappers/bin")
-    monkeypatch.setattr(
-        shell_tool_module.Path,
-        "is_dir",
-        lambda self: str(self) == shell_tool_module._NIXOS_SUDO_WRAPPER_DIR,
-    )
-
-    assert shell_tool_module._shell_subprocess_path("/usr/bin:/bin") == ("/run/wrappers/bin:/usr/bin:/bin")
-
-
-def test_shell_subprocess_path_promotes_wrapper_from_non_first_position(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Shell PATH normalization should promote the wrapper to the first position."""
-    monkeypatch.setattr(shell_tool_module, "_NIXOS_SUDO_WRAPPER_DIR", "/run/wrappers/bin")
-    monkeypatch.setattr(
-        shell_tool_module.Path,
-        "is_dir",
-        lambda self: str(self) == shell_tool_module._NIXOS_SUDO_WRAPPER_DIR,
-    )
-
-    assert shell_tool_module._shell_subprocess_path("/usr/bin:/run/wrappers/bin:/bin") == (
-        "/run/wrappers/bin:/usr/bin:/bin"
+def test_shell_subprocess_path_uses_only_prepend_entries_for_empty_path() -> None:
+    """Configured path entries should still be available when PATH is empty."""
+    assert (
+        shell_tool_module._shell_subprocess_path(
+            "",
+            prepend_entries=("/opt/custom/bin", "/opt/worker/bin"),
+        )
+        == "/opt/custom/bin:/opt/worker/bin"
     )
 
 
-def test_shell_subprocess_env_path_passthrough_when_wrapper_dir_absent(
+def test_shell_subprocess_path_prepends_configured_entries_and_dedupes() -> None:
+    """Configured path entries should stay first without duplicating existing PATH entries."""
+    assert (
+        shell_tool_module._shell_subprocess_path(
+            "/usr/bin:/opt/existing/bin:/bin",
+            prepend_entries=("/opt/custom/bin", "/opt/existing/bin"),
+        )
+        == "/opt/custom/bin:/opt/existing/bin:/usr/bin:/bin"
+    )
+
+
+def test_shell_subprocess_env_path_passthrough_without_prepend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Shell PATH normalization should be a no-op when the wrapper dir does not exist."""
-    monkeypatch.setattr(shell_tool_module, "_NIXOS_SUDO_WRAPPER_DIR", str(tmp_path / "missing-wrapper"))
+    """Shell PATH normalization should preserve the runtime PATH by default."""
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -513,10 +477,12 @@ def test_shell_subprocess_env_path_passthrough_when_wrapper_dir_absent(
         process_env={},
     )
 
-    assert shell_tool_module._shell_subprocess_env(runtime_paths)["PATH"] == "/usr/local/bin:/usr/bin"
+    runtime_env = dict(shell_execution_runtime_env_values(runtime_paths))
+
+    assert shell_tool_module._shell_subprocess_env(runtime_env)["PATH"] == "/usr/local/bin:/usr/bin"
 
 
-async def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path) -> None:
+def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path) -> None:
     """Direct shell execution should inherit committed runtime env values from the runtime `.env`."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -534,7 +500,13 @@ async def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path:
     entrypoint = tool.functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
-    result = entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
+    result = entrypoint(
+        [
+            sys.executable,
+            "-c",
+            'import os, sys; sys.stdout.write(os.environ.get("TEST_EXECUTION_ENV", ""))',
+        ],
+    )
 
     assert result == "visible-in-shell"
 
@@ -613,6 +585,45 @@ def test_local_shell_does_not_expose_extra_parent_env_without_configuration(
     assert result == "|visible-in-shell"
 
 
+def test_local_shell_prepends_configured_path_entries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Direct shell execution should prepend configured PATH entries without losing runtime PATH."""
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "storage",
+        process_env=dict(os.environ),
+    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    save_scoped_credentials(
+        "shell",
+        {"shell_path_prepend": "/opt/custom/bin, /opt/worker/bin"},
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+
+    shell_tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
+    shell_entrypoint = shell_tool.functions["run_shell_command"].entrypoint
+    assert shell_entrypoint is not None
+    result = shell_entrypoint(
+        [
+            sys.executable,
+            "-c",
+            'import os, sys; sys.stdout.write(os.environ.get("PATH", ""))',
+        ],
+    )
+
+    assert result.startswith("/opt/custom/bin:/opt/worker/bin:")
+    assert result.endswith("/usr/local/bin:/usr/bin:/bin")
+
+
 def test_proxy_forwards_configured_shell_execution_env_only_for_execution_tools(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -646,7 +657,10 @@ def test_proxy_forwards_configured_shell_execution_env_only_for_execution_tools(
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     save_scoped_credentials(
         "shell",
-        {"extra_env_passthrough": "GITEA_*"},
+        {
+            "extra_env_passthrough": "GITEA_*",
+            "shell_path_prepend": "/opt/custom/bin",
+        },
         credentials_manager=credentials_manager,
         worker_target=None,
     )
@@ -658,8 +672,9 @@ def test_proxy_forwards_configured_shell_execution_env_only_for_execution_tools(
 
     assert result == "sandbox-result"
     assert captured["json"]["extra_env_passthrough"] == "GITEA_*"
+    assert captured["json"]["tool_init_overrides"]["shell_path_prepend"] == "/opt/custom/bin"
     assert captured["json"]["execution_env"]["TEST_EXECUTION_ENV"] == "visible-in-shell"
-    assert captured["json"]["execution_env"]["GITEA_TOKEN"] == "visible-gitea-token"
+    assert captured["json"]["execution_env"]["GITEA_TOKEN"] == "visible-gitea-token"  # noqa: S105
     assert "CI_JOB_TOKEN" not in captured["json"]["execution_env"]
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in captured["json"]["execution_env"]
 
@@ -731,6 +746,66 @@ def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild(
     )
 
     assert result == "visible-gitea-token||visible-in-shell"
+
+
+def test_proxy_shell_path_prepend_survives_sandbox_runner_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Configured shell_path_prepend should survive proxy forwarding and runner rebuilds."""
+    _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="all",
+        credential_policy={},
+    )
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "storage",
+        process_env=dict(os.environ),
+    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    save_scoped_credentials(
+        "shell",
+        {"shell_path_prepend": "/opt/custom/bin, /opt/worker/bin"},
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+
+    def responder(_url: str, payload: dict[str, Any]) -> dict[str, object]:
+        response = sandbox_runner_module._execute_request_subprocess_sync(
+            sandbox_runner_module.SandboxRunnerExecuteRequest.model_validate(payload),
+            runtime_paths,
+            runner_token=_TEST_AUTH_TOKEN,
+        )
+        return response.model_dump(mode="json")
+
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(responder=responder),
+    )
+
+    shell_tool = get_tool_by_name("shell", runtime_paths, worker_target=None)
+    shell_entrypoint = shell_tool.functions["run_shell_command"].entrypoint
+    assert shell_entrypoint is not None
+    result = shell_entrypoint(
+        [
+            sys.executable,
+            "-c",
+            'import os, sys; sys.stdout.write(os.environ.get("PATH", ""))',
+        ],
+    )
+
+    assert result.startswith("/opt/custom/bin:/opt/worker/bin:")
+    assert result.endswith("/usr/local/bin:/usr/bin:/bin")
 
 
 @pytest.mark.asyncio

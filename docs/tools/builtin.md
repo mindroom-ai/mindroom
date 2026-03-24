@@ -11,7 +11,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | Icon | Tool | Description | Config Required |
 |------|------|-------------|-----------------|
 | :lucide-folder-cog: | `file` | Read, write, list, search, and manage local files | - |
-| :lucide-folder-cog: | `shell` | Execute shell commands | - |
+| :lucide-folder-cog: | `shell` | Execute shell commands | `base_dir` (optional), `extra_env_passthrough` (optional), `shell_path_prepend` (optional) |
 | :lucide-folder-cog: | `docker` | Manage Docker containers and images | - |
 | :lucide-folder-cog: | `python` | Execute Python code | - |
 | :lucide-folder-cog: | `sql` | Database query and management for SQL databases | `db_url` or `db_engine`, `user`, `password`, `host`, `port`, `schema`, `dialect` |
@@ -320,5 +320,7 @@ Configure tools through the dashboard credentials store, persisted tool configur
 
 Execution tools do not use env vars as constructor-time configuration.
 `shell` still receives the committed runtime env as explicit execution context.
+Additional process env must be opted into with `extra_env_passthrough`.
+If shell execution needs extra PATH entries such as wrapper directories, configure `shell_path_prepend` instead of relying on host-specific defaults.
 `python` should not rely on in-process runtime env emulation.
 If Python code needs runtime-scoped env, run it through sandbox/worker subprocess execution instead.

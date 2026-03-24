@@ -584,6 +584,39 @@ def test_sandbox_runner_applies_tool_init_overrides(
     assert "USER.md" in data["result"]
 
 
+def test_sandbox_runner_applies_shell_path_prepend_override(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sandbox runner should allow shell_path_prepend for shell execution."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [
+                [
+                    sys.executable,
+                    "-c",
+                    'import os, sys; sys.stdout.write(os.environ.get("PATH", ""))',
+                ],
+            ],
+            "kwargs": {},
+            "tool_init_overrides": {"shell_path_prepend": "/opt/custom/bin, /opt/worker/bin"},
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["result"].startswith("/opt/custom/bin:/opt/worker/bin:")
+    assert data["result"].endswith("/usr/local/bin:/usr/bin:/bin")
+
+
 def test_resolve_entrypoint_loads_persisted_tool_credentials(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

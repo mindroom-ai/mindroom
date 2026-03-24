@@ -62,17 +62,6 @@ _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
         "MINDROOM_RUNTIME_PATHS_JSON",
     },
 )
-_SHELL_EXTRA_ENV_DEFAULT_KEYS = frozenset(
-    {
-        "CALDAV_URL",
-        "CALENDAR_URL",
-        "ICAL_URL",
-        "ICS_URL",
-        "RAG_URL",
-        "TTS_URL",
-        "WHISPER_URL",
-    },
-)
 _SHELL_EXTRA_ENV_EXCLUDED_NAMES = frozenset({*_EXECUTION_RUNTIME_EXCLUDED_NAMES, "CI_JOB_TOKEN"})
 # Suffixes that mark env vars as too sensitive for shell passthrough even when
 # matched by a user-supplied glob.  Narrower than _RUNTIME_STARTUP_SECRET_SUFFIXES
@@ -396,7 +385,7 @@ def shell_extra_env_values(
             continue
         if key.endswith(_SHELL_EXTRA_ENV_SECRET_SUFFIXES):
             continue
-        if key in _SHELL_EXTRA_ENV_DEFAULT_KEYS or any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns):
+        if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns):
             selected_env[key] = value
 
     return cast("Mapping[str, str]", MappingProxyType(selected_env))

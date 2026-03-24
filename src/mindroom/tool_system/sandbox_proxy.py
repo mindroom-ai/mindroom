@@ -658,6 +658,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
     Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this).
     """
+    del runtime_overrides
+
     if not _sandbox_proxy_enabled_for_tool(
         tool_name,
         runtime_paths=runtime_paths,

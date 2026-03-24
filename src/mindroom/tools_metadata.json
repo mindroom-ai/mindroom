@@ -4317,6 +4317,17 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "default": null,
+          "description": "Comma or newline-separated path entries to prepend to PATH for shell execution.",
+          "label": "Shell PATH Prepend",
+          "name": "shell_path_prepend",
+          "options": null,
+          "placeholder": "/opt/custom/bin, /run/wrappers/bin",
+          "required": false,
+          "type": "text",
+          "validation": null
         }
       ],
       "default_execution_target": "worker",
