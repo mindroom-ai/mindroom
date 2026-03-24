@@ -22,13 +22,18 @@ class SchedulerTools(Toolkit):
             tools=[self.schedule, self.edit_schedule, self.list_schedules, self.cancel_schedule],
         )
 
-    async def schedule(self, request: str) -> str:
+    async def schedule(self, request: str, new_thread: bool = False) -> str:
         """Schedule a task using natural language.
 
         This uses the exact same scheduling backend as the `!schedule` command.
+        By default, the task posts back into the current scope.
+        Set `new_thread=True` to schedule a future room-level root message instead.
 
         Args:
             request: The scheduling request, e.g. "in 5 minutes remind me to check logs"
+            new_thread: When `False`, post in the current room/thread scope.
+                When `True`, schedule a future room-level root message that can become
+                its own thread when someone replies later.
 
         Returns:
             The scheduling result message.
@@ -47,6 +52,7 @@ class SchedulerTools(Toolkit):
             config=context.config,
             runtime_paths=context.runtime_paths,
             room=context.room,
+            new_thread=new_thread,
         )
         return response_text
 

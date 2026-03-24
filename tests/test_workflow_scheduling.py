@@ -357,7 +357,7 @@ class TestExecuteScheduledWorkflow:
     """Test execute_scheduled_workflow function."""
 
     async def test_execute_workflow_with_agents(self) -> None:
-        """Test executing a workflow that mentions agents."""
+        """Current-scope workflow execution should keep the automated threaded wrapper."""
         client = AsyncMock()
         config = _runtime_bound_config(
             Config(
@@ -378,23 +378,67 @@ class TestExecuteScheduledWorkflow:
             created_by="@user:server",
         )
 
-        await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config))
-
-        # Verify message was sent
-
-        with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
+        with (
+            patch(
+                "mindroom.scheduling.get_latest_thread_event_id_if_needed",
+                new=AsyncMock(return_value="$latest456"),
+            ) as mock_latest_thread,
+            patch("mindroom.scheduling.send_message", new=AsyncMock(return_value="$event123")) as mock_send,
+        ):
             await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config))
-            mock_send.assert_called_once()
 
-            # Check the message content
-            call_args = mock_send.call_args
-            assert call_args[0][0] == client  # client
-            assert call_args[0][1] == "!room:server"  # room_id
-            content = call_args[0][2]
-            assert config.get_ids(runtime_paths_for(config))["research"].full_id in content["body"]
-            assert config.get_ids(runtime_paths_for(config))["analyst"].full_id in content["body"]
-            assert content["m.relates_to"]["event_id"] == "$thread123"
-            assert content[ORIGINAL_SENDER_KEY] == "@user:server"
+        mock_latest_thread.assert_awaited_once_with(client, "!room:server", "$thread123")
+        mock_send.assert_awaited_once()
+        call_args = mock_send.await_args
+        assert call_args.args[0] == client
+        assert call_args.args[1] == "!room:server"
+        content = call_args.args[2]
+        assert content["body"].startswith("⏰ [Automated Task]\n")
+        assert config.get_ids(runtime_paths_for(config))["research"].full_id in content["body"]
+        assert config.get_ids(runtime_paths_for(config))["analyst"].full_id in content["body"]
+        assert content["m.relates_to"]["event_id"] == "$thread123"
+        assert content[ORIGINAL_SENDER_KEY] == "@user:server"
+
+    async def test_execute_workflow_new_thread_posts_room_level_message(self) -> None:
+        """New-thread workflow execution should post a plain room-level message."""
+        client = AsyncMock()
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "research": AgentConfig(display_name="Research"),
+                    "analyst": AgentConfig(display_name="Analyst"),
+                },
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
+        )
+        workflow = ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=datetime.now(UTC),
+            message="@research @analyst Please analyze the latest AI trends",
+            description="AI trend analysis",
+            thread_id=None,
+            room_id="!room:server",
+            created_by="@user:server",
+            new_thread=True,
+        )
+
+        with (
+            patch(
+                "mindroom.scheduling.get_latest_thread_event_id_if_needed",
+                new=AsyncMock(),
+            ) as mock_latest_thread,
+            patch("mindroom.scheduling.send_message", new=AsyncMock(return_value="$event456")) as mock_send,
+        ):
+            await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config))
+
+        mock_latest_thread.assert_not_awaited()
+        mock_send.assert_awaited_once()
+        content = mock_send.await_args.args[2]
+        assert "⏰ [Automated Task]" not in content["body"]
+        assert config.get_ids(runtime_paths_for(config))["research"].full_id in content["body"]
+        assert config.get_ids(runtime_paths_for(config))["analyst"].full_id in content["body"]
+        assert "m.relates_to" not in content
+        assert content[ORIGINAL_SENDER_KEY] == "@user:server"
 
     async def test_execute_workflow_simple_reminder(self) -> None:
         """Test executing a simple reminder without agents."""
@@ -408,13 +452,13 @@ class TestExecuteScheduledWorkflow:
             room_id="!room:server",
         )
 
-        with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
+        with patch("mindroom.scheduling.send_message", new=AsyncMock(return_value="$event789")) as mock_send:
             await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config))
-            mock_send.assert_called_once()
+            mock_send.assert_awaited_once()
 
             # Check the message content
-            call_args = mock_send.call_args
-            content = call_args[0][2]
+            content = mock_send.await_args.args[2]
+            assert content["body"].startswith("⏰ [Automated Task]\n")
             assert "Check the server status" in content["body"]
             assert "m.relates_to" not in content  # No thread
             assert ORIGINAL_SENDER_KEY not in content
@@ -433,7 +477,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         # Mock send_message to raise an error only on the first call
-        mock_send = AsyncMock(side_effect=[Exception("Send failed"), None])
+        mock_send = AsyncMock(side_effect=[Exception("Send failed"), "$error123"])
 
         with patch("mindroom.scheduling.send_message", new=mock_send):
             # Should not raise, but log error
@@ -446,6 +490,34 @@ class TestExecuteScheduledWorkflow:
             error_call = mock_send.call_args_list[1]
             error_content = error_call[0][2]
             assert "failed" in error_content["body"].lower()
+
+    async def test_execute_workflow_send_message_returning_none_is_failure(self) -> None:
+        """send_message returning None should trigger failure handling instead of success logging."""
+        client = AsyncMock()
+        config = _runtime_bound_config(Config())
+        workflow = ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=datetime.now(UTC),
+            message="Check the queue depth",
+            description="Queue check",
+            room_id="!room:server",
+            thread_id="$thread123",
+        )
+
+        with (
+            patch(
+                "mindroom.scheduling.get_latest_thread_event_id_if_needed",
+                new=AsyncMock(return_value="$latest123"),
+            ),
+            patch("mindroom.scheduling.send_message", new=AsyncMock(side_effect=[None, "$error456"])) as mock_send,
+            patch("mindroom.scheduling.logger.info") as mock_info,
+        ):
+            await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config))
+
+        assert mock_send.await_count == 2
+        mock_info.assert_not_called()
+        error_content = mock_send.await_args_list[1].args[2]
+        assert "Scheduled task failed" in error_content["body"]
 
     async def test_execute_workflow_no_room_id(self) -> None:
         """Test that workflow without room_id doesn't execute."""
@@ -475,8 +547,9 @@ class TestWorkflowSerialization:
             message="@finance Daily report",
             description="Daily finance report",
             room_id="!room:server",
-            thread_id="$thread123",
+            thread_id=None,
             created_by="@user:server",
+            new_thread=True,
         )
 
         # Serialize to JSON
@@ -491,6 +564,23 @@ class TestWorkflowSerialization:
         assert restored.message == workflow.message
         assert restored.description == workflow.description
         assert restored.room_id == workflow.room_id
+        assert restored.new_thread is True
+
+    def test_workflow_old_payload_defaults_new_thread_false(self) -> None:
+        """Older persisted workflows should deserialize with new_thread=False."""
+        data = {
+            "schedule_type": "once",
+            "execute_at": datetime(2026, 2, 1, 10, 0, tzinfo=UTC).isoformat(),
+            "message": "Check deployment",
+            "description": "Deployment check",
+            "room_id": "!room:server",
+            "thread_id": "$thread123",
+            "created_by": "@user:server",
+        }
+
+        restored = ScheduledWorkflow(**data)
+
+        assert restored.new_thread is False
 
 
 @pytest.mark.asyncio

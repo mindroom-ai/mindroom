@@ -18,6 +18,8 @@ def _task(
     cron_fields: dict[str, str] | None = None,
     message: str = "@mindroom_test_agent ping",
     description: str = "Ping task",
+    thread_id: str | None = "$thread123",
+    new_thread: bool = False,
 ) -> ScheduledTaskRecord:
     cron_schedule = None
     if cron_fields:
@@ -29,9 +31,10 @@ def _task(
         cron_schedule=cron_schedule,
         message=message,
         description=description,
-        thread_id="$thread123",
+        thread_id=thread_id,
         room_id=room_id,
         created_by="@user:localhost",
+        new_thread=new_thread,
     )
     return ScheduledTaskRecord(
         task_id=task_id,
@@ -73,6 +76,8 @@ def test_list_schedules_success(test_client: TestClient) -> None:
             cron_fields={"minute": "0", "hour": "9", "day": "*", "month": "*", "weekday": "*"},
             execute_at=None,
             description="Daily task",
+            thread_id=None,
+            new_thread=True,
         ),
     ]
 
@@ -89,7 +94,10 @@ def test_list_schedules_success(test_client: TestClient) -> None:
     assert len(data["tasks"]) == 2
     tasks_by_id = {task["task_id"]: task for task in data["tasks"]}
     assert tasks_by_id["once1234"]["schedule_type"] == "once"
+    assert tasks_by_id["once1234"]["new_thread"] is False
     assert tasks_by_id["cron1234"]["cron_expression"] == "0 9 * * *"
+    assert tasks_by_id["cron1234"]["new_thread"] is True
+    assert tasks_by_id["cron1234"]["thread_id"] is None
 
 
 def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> None:
@@ -127,6 +135,8 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
         execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC),
         description="Original description",
         message="@mindroom_test_agent original",
+        thread_id=None,
+        new_thread=True,
     )
     updated_workflow = ScheduledWorkflow(
         schedule_type="once",
@@ -136,6 +146,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
         thread_id=existing_task.workflow.thread_id,
         room_id="test_room",
         created_by=existing_task.workflow.created_by,
+        new_thread=existing_task.workflow.new_thread,
     )
     updated_task = ScheduledTaskRecord(
         task_id="abc12345",
@@ -170,10 +181,12 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     assert data["message"] == "@mindroom_test_agent updated"
     assert data["description"] == "Updated description"
     assert data["execute_at"] == "2026-03-01T10:00:00Z"
+    assert data["new_thread"] is True
     save_mock.assert_awaited_once()
     assert save_mock.await_args.kwargs["task_id"] == "abc12345"
     assert save_mock.await_args.kwargs["room_id"] == "test_room"
     assert save_mock.await_args.kwargs["restart_task"] is False
+    assert save_mock.await_args.kwargs["workflow"].new_thread is True
 
 
 def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> None:
@@ -243,6 +256,8 @@ def test_update_schedule_once_to_cron(test_client: TestClient) -> None:
     existing_task = _task(
         "switch01",
         execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC),
+        thread_id=None,
+        new_thread=True,
     )
     save_mock = AsyncMock()
 

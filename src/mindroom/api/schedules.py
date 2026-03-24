@@ -50,6 +50,7 @@ class ScheduledTaskResponse(BaseModel):
     description: str
     message: str
     thread_id: str | None = None
+    new_thread: bool
     created_by: str | None = None
     created_at: datetime | None = None
 
@@ -147,6 +148,7 @@ def _to_response_task(
         description=workflow.description,
         message=workflow.message,
         thread_id=workflow.thread_id,
+        new_thread=workflow.new_thread,
         created_by=workflow.created_by,
         created_at=task.created_at,
     )
@@ -225,6 +227,7 @@ def _build_updated_workflow(
         created_by=existing_workflow.created_by,
         thread_id=existing_workflow.thread_id,
         room_id=resolved_room_id,
+        new_thread=existing_workflow.new_thread,
     )
 
 

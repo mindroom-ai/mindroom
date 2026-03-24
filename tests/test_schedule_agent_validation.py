@@ -303,13 +303,18 @@ async def test_schedule_with_multiple_agents_validation() -> None:
 
 @pytest.mark.asyncio
 async def test_schedule_with_no_agent_mentions() -> None:
-    """Test that schedules without agent mentions work fine."""
+    """new_thread schedules without mentions should use room-scope agents and skip thread history."""
     config = _runtime_bound_config(
         Config(
             agents={
                 "assistant": AgentConfig(
                     display_name="Assistant",
                     role="General assistance",
+                    rooms=["test_room"],
+                ),
+                "researcher": AgentConfig(
+                    display_name="Researcher",
+                    role="Research support",
                     rooms=["test_room"],
                 ),
             },
@@ -323,7 +328,10 @@ async def test_schedule_with_no_agent_mentions() -> None:
     # Create a mock room - use the actual domain from config
     room = create_mock_room(
         "test_room",
-        [f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}"],
+        [
+            f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}",
+            f"@mindroom_researcher:{config.get_domain(runtime_paths_for(config))}",
+        ],
     )
 
     # Mock workflow without any agent mentions
@@ -334,6 +342,73 @@ async def test_schedule_with_no_agent_mentions() -> None:
         description="Deployment reminder",
     )
 
+    with (
+        patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse,
+        patch("mindroom.scheduling.fetch_thread_history") as mock_fetch_history,
+    ):
+        mock_parse.return_value = mock_workflow
+
+        task_id, response = await schedule_task(
+            client=client,
+            room_id="test_room",
+            thread_id="$thread123",
+            scheduled_by="@user:localhost",
+            full_text="in 5 minutes remind me about deployment",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            room=room,
+            new_thread=True,
+        )
+
+    assert task_id is not None
+    assert "✅ Scheduled" in response
+    assert "New room-level thread root" in response
+    mock_fetch_history.assert_not_called()
+    available_agents = mock_parse.await_args.args[3]
+    expected_agents = [
+        config.get_ids(runtime_paths_for(config))["assistant"],
+        config.get_ids(runtime_paths_for(config))["researcher"],
+    ]
+    assert available_agents == expected_agents
+
+
+@pytest.mark.asyncio
+async def test_schedule_validation_respects_sender_reply_permissions() -> None:
+    """Explicit mentions should validate against sender-permitted room agents, not raw membership."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    role="General assistance",
+                    rooms=["test_room"],
+                ),
+                "calculator": AgentConfig(
+                    display_name="Calculator",
+                    role="Math calculations",
+                    rooms=["test_room"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+            authorization={"agent_reply_permissions": {"calculator": ["@allowed:localhost"]}},
+        ),
+    )
+
+    client = AsyncMock()
+    room = create_mock_room(
+        "test_room",
+        [
+            f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}",
+            f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}",
+        ],
+    )
+    mock_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="@calculator please calculate 2+2",
+        description="Calculate something",
+    )
+
     with patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
 
@@ -341,16 +416,17 @@ async def test_schedule_with_no_agent_mentions() -> None:
             client=client,
             room_id="test_room",
             thread_id=None,
-            scheduled_by="@user:localhost",
-            full_text="in 5 minutes remind me about deployment",
+            scheduled_by="@blocked:localhost",
+            full_text="in 5 minutes ask calculator to calculate",
             config=config,
             runtime_paths=runtime_paths_for(config),
             room=room,
         )
 
-        # Should succeed - no agents to validate
-        assert task_id is not None
-        assert "✅ Scheduled" in response
+    assert task_id is None
+    calculator_matrix_id = config.get_ids(runtime_paths_for(config))["calculator"].full_id
+    assert calculator_matrix_id in response
+    assert "not available in this room" in response
 
 
 @pytest.mark.asyncio

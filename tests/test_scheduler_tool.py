@@ -80,18 +80,33 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         tool_runtime_context(context),
     ):
         result = await tools.schedule("tomorrow at 3pm check deployment")
+        new_thread_result = await tools.schedule("tomorrow at 4pm check deployment", new_thread=True)
 
     assert result == "✅ Scheduled"
-    mock_schedule.assert_awaited_once_with(
-        client=context.client,
-        room_id=context.room_id,
-        thread_id=context.resolved_thread_id,
-        scheduled_by=context.requester_id,
-        full_text="tomorrow at 3pm check deployment",
-        config=context.config,
-        runtime_paths=context.runtime_paths,
-        room=context.room,
-    )
+    assert new_thread_result == "✅ Scheduled"
+    assert mock_schedule.await_count == 2
+    assert mock_schedule.await_args_list[0].kwargs == {
+        "client": context.client,
+        "room_id": context.room_id,
+        "thread_id": context.resolved_thread_id,
+        "scheduled_by": context.requester_id,
+        "full_text": "tomorrow at 3pm check deployment",
+        "config": context.config,
+        "runtime_paths": context.runtime_paths,
+        "room": context.room,
+        "new_thread": False,
+    }
+    assert mock_schedule.await_args_list[1].kwargs == {
+        "client": context.client,
+        "room_id": context.room_id,
+        "thread_id": context.resolved_thread_id,
+        "scheduled_by": context.requester_id,
+        "full_text": "tomorrow at 4pm check deployment",
+        "config": context.config,
+        "runtime_paths": context.runtime_paths,
+        "room": context.room,
+        "new_thread": True,
+    }
 
 
 @pytest.mark.asyncio
