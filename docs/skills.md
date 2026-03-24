@@ -12,7 +12,7 @@ A skill is a directory containing:
 
 ```
 my-skill/
-├── SKILL.md         # Required: frontmatter + instructions
+├── SKILL.md         # Required: instructions; YAML frontmatter is recommended
 ├── scripts/         # Optional: executable scripts
 │   └── audit.sh
 └── references/      # Optional: reference documents
@@ -45,13 +45,16 @@ Notes:
 
 - `metadata` can be a JSON5 string (shown above) or a YAML mapping.
 - `user-invocable`, `disable-model-invocation`, and `command-*` also accept snake_case names.
+- If `name` is omitted, MindRoom falls back to the skill directory name.
+- If `description` is omitted or blank, MindRoom falls back to the resolved skill name.
+- If YAML frontmatter is omitted entirely, the skill still loads with those same name/description fallbacks. Frontmatter is still recommended for clearer listings and for command metadata such as `user-invocable` or `command-dispatch`.
 
 ## Frontmatter fields
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `name` | string | Unique skill identifier |
-| `description` | string | Brief summary shown to users/models |
+| `description` | string | Brief summary shown to users/models; defaults to the skill name when omitted or blank |
 | `metadata` | mapping or JSON5 string | OpenClaw metadata and custom fields |
 | `user-invocable` | bool | Allow `!skill` (default: true) |
 | `disable-model-invocation` | bool | Prevent model invocation (default: false) |
@@ -77,13 +80,16 @@ Skills without `metadata.openclaw` are always eligible.
 
 ## Skill locations and precedence
 
-MindRoom loads skills from these locations, in this order:
+MindRoom resolves skills for each agent from these locations, in this order:
 
 1. Bundled skills: `skills/` at the repository root (if present)
 2. Plugin-provided skill directories (see [Plugins](plugins.md))
 3. User skills: `~/.mindroom/skills/`
+4. Agent workspace skills: `<storage>/agents/<agent>/workspace/skills/`
 
-If multiple skills share the same name, the last one wins (user > plugin > bundled).
+If multiple skills share the same name, the last one wins (agent workspace > user > plugin > bundled).
+
+Agent workspace skills are only available to the owning agent at runtime. They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
 
 ## Configuring skills
 
