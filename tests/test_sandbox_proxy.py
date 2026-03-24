@@ -1920,3 +1920,16 @@ def test_shell_extra_env_excludes_api_key_suffixes() -> None:
     assert "MY_SERVICE_PASSWORD" not in result
     assert "WEBHOOK_SECRET" not in result
     assert "CI_JOB_TOKEN" not in result  # also in _SHELL_EXTRA_ENV_EXCLUDED_NAMES
+
+
+def test_shell_extra_env_requires_explicit_patterns_for_service_urls() -> None:
+    """extra_env_passthrough should not auto-include unrelated service URLs."""
+    env = {
+        "GITEA_TOKEN": "gitea-token",
+        "WHISPER_URL": "https://whisper.example",
+    }
+
+    result = dict(shell_extra_env_values(extra_env_passthrough="GITEA_*", process_env=env))
+
+    assert result == {"GITEA_TOKEN": "gitea-token"}
+    assert "WHISPER_URL" not in result

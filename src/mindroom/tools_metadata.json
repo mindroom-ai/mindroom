@@ -4313,7 +4313,7 @@
           "label": "Extra Env Passthrough",
           "name": "extra_env_passthrough",
           "options": null,
-          "placeholder": "WHISPER_URL, TTS_URL, CALDAV_*",
+          "placeholder": "MY_SERVICE_URL, MY_SERVICE_*",
           "required": false,
           "type": "text",
           "validation": null

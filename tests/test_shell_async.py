@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tools.shell import _process_registry, shell_tools
 
@@ -477,6 +477,40 @@ async def test_handle_check_then_kill_across_instances(tmp_path: Path) -> None:
         await asyncio.sleep(0.1)
 
     assert "FINISHED" in status
+
+
+@pytest.mark.asyncio
+async def test_handle_isolation_blocks_cross_runtime_access(tmp_path: Path) -> None:
+    """A handle from one runtime should not be visible to a different runtime root."""
+    runtime_a = tmp_path / "runtime-a"
+    runtime_b = tmp_path / "runtime-b"
+    runtime_a.mkdir()
+    runtime_b.mkdir()
+
+    tool_a = _get_toolkit(runtime_a)
+    tool_b = _get_toolkit(runtime_b)
+    run_a = tool_a.async_functions["run_shell_command"].entrypoint
+    check_b = tool_b.functions["check_shell_command"].entrypoint
+    kill_b = tool_b.functions["kill_shell_command"].entrypoint
+    kill_a = tool_a.functions["kill_shell_command"].entrypoint
+    assert run_a is not None
+    assert check_b is not None
+    assert kill_b is not None
+    assert kill_a is not None
+
+    result = await run_a(["sleep", "300"], timeout=0)
+    assert "Handle:" in result
+    handle = result.split("Handle: ")[1].split("\n")[0]
+
+    try:
+        check_result = check_b(handle)
+        assert "Unknown handle" in check_result
+
+        kill_result = kill_b(handle, force=True)
+        assert "Unknown handle" in kill_result
+    finally:
+        kill_a(handle, force=True)
+        await asyncio.sleep(0.1)
 
 
 # ---------------------------------------------------------------------------

@@ -372,12 +372,7 @@ def shell_extra_env_values(
     extra_env_passthrough: str | None = None,
     process_env: Mapping[str, str] | None = None,
 ) -> Mapping[str, str]:
-    """Return explicit extra env values that shell execution may inherit.
-
-    When *extra_env_passthrough* is set, ``_SHELL_EXTRA_ENV_DEFAULT_KEYS``
-    (common service URLs like ``WHISPER_URL``, ``TTS_URL``, etc.) are always
-    included alongside the caller-specified patterns.
-    """
+    """Return explicit extra env values that shell execution may inherit."""
     patterns = _shell_extra_env_patterns(extra_env_passthrough)
     if not patterns:
         return cast("Mapping[str, str]", MappingProxyType({}))

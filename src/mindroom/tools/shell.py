@@ -188,7 +188,7 @@ class _ProcessRecord:
             type="text",
             required=False,
             default=None,
-            placeholder="WHISPER_URL, TTS_URL, CALDAV_*",
+            placeholder="MY_SERVICE_URL, MY_SERVICE_*",
             description=(
                 "Comma or newline-separated env var names or glob patterns to expose to shell "
                 "execution in addition to the committed runtime env."

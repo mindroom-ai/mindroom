@@ -780,6 +780,69 @@ def test_sandbox_runner_executes_tool_call_in_subprocess_mode(
     assert '"result": 3' in data["result"]
 
 
+def test_sandbox_runner_shell_handles_survive_requests_in_subprocess_mode(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shell background handles should keep working across requests in subprocess runner mode."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
+
+    run_response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["sleep", "3"]],
+            "kwargs": {"timeout": 0},
+        },
+    )
+    assert run_response.status_code == 200
+    run_data = run_response.json()
+    assert run_data["ok"] is True
+    assert "Handle: " in run_data["result"]
+    handle = run_data["result"].split("Handle: ")[1].split("\n")[0]
+
+    check_response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "check_shell_command",
+            "args": [handle],
+            "kwargs": {},
+        },
+    )
+    assert check_response.status_code == 200
+    check_data = check_response.json()
+    assert check_data["ok"] is True
+    assert "Unknown handle" not in check_data["result"]
+
+    kill_response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "kill_shell_command",
+            "args": [handle],
+            "kwargs": {"force": True},
+        },
+    )
+    assert kill_response.status_code == 200
+    kill_data = kill_response.json()
+    assert kill_data["ok"] is True
+    assert "Unknown handle" not in kill_data["result"]
+
+
 def test_sandbox_runner_rejects_missing_token(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Sandbox runner should require the shared token when configured."""
     _set_sandbox_token(monkeypatch)
@@ -1799,6 +1862,37 @@ def test_sandbox_runner_worker_python_supports_matrix_scoped_worker_keys(
     assert ":" not in worker_dir
     expected_prefix = worker_root / worker_dir / "venv"
     assert str(expected_prefix) in data["result"]
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_sandbox_runner_worker_shell_uses_worker_home_and_venv(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker-routed shell execution should inherit the worker runtime env."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["bash", "-lc", 'printf \'%s|%s|%s\' "$HOME" "$VIRTUAL_ENV" "$PWD"']],
+            "kwargs": {},
+            "worker_key": "worker-a",
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+
+    worker_root = storage_root / "workers" / worker_dir_name("worker-a")
+    expected_result = f"{worker_root}|{worker_root / 'venv'}|{worker_root / 'workspace'}"
+    assert data["result"] == expected_result
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
