@@ -18,7 +18,7 @@ import mindroom.tools  # noqa: F401
 import mindroom.tools.shell as shell_tool_module
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths, shell_extra_env_values
+from mindroom.constants import RuntimePaths, resolve_runtime_paths, shell_execution_runtime_env_values, shell_extra_env_values
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.metadata import ToolInitOverrideError, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -426,8 +426,6 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
     assert ast.literal_eval(save_result) == expected
     assert ast.literal_eval(run_result) == expected
 
-
-@pytest.mark.asyncio
 def test_shell_subprocess_path_prepends_wrapper_for_empty_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -513,9 +511,11 @@ def test_shell_subprocess_env_path_passthrough_when_wrapper_dir_absent(
         process_env={},
     )
 
-    assert shell_tool_module._shell_subprocess_env(runtime_paths)["PATH"] == "/usr/local/bin:/usr/bin"
+    runtime_env = dict(shell_execution_runtime_env_values(runtime_paths))
+    assert shell_tool_module._shell_subprocess_env(runtime_env)["PATH"] == "/usr/local/bin:/usr/bin"
 
 
+@pytest.mark.asyncio
 async def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path) -> None:
     """Direct shell execution should inherit committed runtime env values from the runtime `.env`."""
     config_path = tmp_path / "config.yaml"
@@ -531,15 +531,16 @@ async def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path:
     )
 
     tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
-    entrypoint = tool.functions["run_shell_command"].entrypoint
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
-    result = entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
+    result = await entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
 
     assert result == "visible-in-shell"
 
 
-def test_local_shell_exposes_configured_extra_parent_env_without_leaking_control_secrets(
+@pytest.mark.asyncio
+async def test_local_shell_exposes_configured_extra_parent_env_without_leaking_control_secrets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -572,10 +573,10 @@ def test_local_shell_exposes_configured_extra_parent_env_without_leaking_control
         disable_sandbox_proxy=True,
         worker_target=None,
     )
-    entrypoint = tool.functions["run_shell_command"].entrypoint
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
-    result = entrypoint(
+    result = await entrypoint(
         [
             "bash",
             "-lc",
@@ -586,7 +587,8 @@ def test_local_shell_exposes_configured_extra_parent_env_without_leaking_control
     assert result == "visible-gitea-token|||visible-in-shell"
 
 
-def test_local_shell_does_not_expose_extra_parent_env_without_configuration(
+@pytest.mark.asyncio
+async def test_local_shell_does_not_expose_extra_parent_env_without_configuration(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -605,15 +607,16 @@ def test_local_shell_does_not_expose_extra_parent_env_without_configuration(
     )
 
     tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
-    entrypoint = tool.functions["run_shell_command"].entrypoint
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
-    result = entrypoint(["bash", "-lc", "printf '%s' \"$WHISPER_URL|$TEST_EXECUTION_ENV\""])
+    result = await entrypoint(["bash", "-lc", "printf '%s' \"$WHISPER_URL|$TEST_EXECUTION_ENV\""])
 
     assert result == "|visible-in-shell"
 
 
-def test_proxy_forwards_configured_shell_execution_env_only_for_execution_tools(
+@pytest.mark.asyncio
+async def test_proxy_forwards_configured_shell_execution_env_only_for_execution_tools(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -652,9 +655,9 @@ def test_proxy_forwards_configured_shell_execution_env_only_for_execution_tools(
     )
 
     shell_tool = get_tool_by_name("shell", runtime_paths, worker_target=None)
-    shell_entrypoint = shell_tool.functions["run_shell_command"].entrypoint
+    shell_entrypoint = shell_tool.async_functions["run_shell_command"].entrypoint
     assert shell_entrypoint is not None
-    result = shell_entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
+    result = await shell_entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
 
     assert result == "sandbox-result"
     assert captured["json"]["extra_env_passthrough"] == "GITEA_*"
@@ -672,7 +675,8 @@ def test_proxy_forwards_configured_shell_execution_env_only_for_execution_tools(
     assert "execution_env" not in captured["json"]
 
 
-def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild(
+@pytest.mark.asyncio
+async def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -720,9 +724,9 @@ def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild(
     )
 
     shell_tool = get_tool_by_name("shell", runtime_paths, worker_target=None)
-    shell_entrypoint = shell_tool.functions["run_shell_command"].entrypoint
+    shell_entrypoint = shell_tool.async_functions["run_shell_command"].entrypoint
     assert shell_entrypoint is not None
-    result = shell_entrypoint(
+    result = await shell_entrypoint(
         [
             "bash",
             "-lc",
@@ -1355,7 +1359,8 @@ def test_kubernetes_backend_keeps_wrapping_when_proxy_token_is_missing(monkeypat
     )
 
 
-def test_kubernetes_backend_misconfiguration_raises_instead_of_running_locally(
+@pytest.mark.asyncio
+async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_locally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Misconfigured Kubernetes worker routing should raise rather than executing in the primary runtime."""
@@ -1375,11 +1380,11 @@ def test_kubernetes_backend_misconfiguration_raises_instead_of_running_locally(
         worker_tools_override=["shell"],
         worker_target=_worker_target(runtime_paths, None, "code", None),
     )
-    entrypoint = tool.functions["run_shell_command"].entrypoint
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
     with pytest.raises(WorkerBackendError, match="MINDROOM_KUBERNETES_WORKER_IMAGE"):
-        entrypoint("pwd")
+        await entrypoint("pwd")
 
 
 class TestWorkerToolsOverride:

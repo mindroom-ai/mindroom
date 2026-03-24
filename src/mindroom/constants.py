@@ -62,6 +62,10 @@ _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
         "MINDROOM_RUNTIME_PATHS_JSON",
     },
 )
+# Keys always included when ``extra_env_passthrough`` is set (even to a single
+# pattern like ``"MY_VAR"``).  These service URLs are safe to expose and are
+# commonly needed by shell-invoked helper scripts, so they are bundled
+# automatically rather than requiring every agent config to list them.
 _SHELL_EXTRA_ENV_DEFAULT_KEYS = frozenset(
     {
         "CALDAV_URL",
@@ -383,7 +387,12 @@ def shell_extra_env_values(
     extra_env_passthrough: str | None = None,
     process_env: Mapping[str, str] | None = None,
 ) -> Mapping[str, str]:
-    """Return explicit extra env values that shell execution may inherit."""
+    """Return explicit extra env values that shell execution may inherit.
+
+    When *extra_env_passthrough* is set, ``_SHELL_EXTRA_ENV_DEFAULT_KEYS``
+    (common service URLs like ``WHISPER_URL``, ``TTS_URL``, etc.) are always
+    included alongside the caller-specified patterns.
+    """
     patterns = _shell_extra_env_patterns(extra_env_passthrough)
     if not patterns:
         return cast("Mapping[str, str]", MappingProxyType({}))
