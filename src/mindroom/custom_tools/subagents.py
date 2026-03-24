@@ -249,7 +249,7 @@ def _in_scope(entry: dict[str, Any], context: ToolRuntimeContext) -> bool:
     )
 
 
-def _resolve_by_label(context: ToolRuntimeContext, label: str) -> str | None:
+def _resolve_by_label(context: ToolRuntimeContext, label: str) -> tuple[str, dict[str, Any]] | None:
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
 
@@ -262,7 +262,7 @@ def _resolve_by_label(context: ToolRuntimeContext, label: str) -> str | None:
         return None
 
     candidates.sort(key=lambda item: (_entry_recency(item[1]), item[0]), reverse=True)
-    return candidates[0][0]
+    return candidates[0]
 
 
 def _lookup_target_agent(context: ToolRuntimeContext, session_key: str) -> str | None:
@@ -322,7 +322,7 @@ class SubAgentsTools(Toolkit):
         if label and not session_key:
             resolved = await asyncio.to_thread(_resolve_by_label, context, label)
             if resolved:
-                target_session = resolved
+                target_session = resolved[0]
 
         target_room_id, target_thread_id = _session_key_to_room_thread(target_session)
         target_agent = agent_id or await asyncio.to_thread(_lookup_target_agent, context, target_session)
@@ -390,6 +390,20 @@ class SubAgentsTools(Toolkit):
             return _payload("sessions_spawn", "error", message="Task cannot be empty.")
 
         target_agent = agent_id or context.agent_name
+
+        if label:
+            resolved = await asyncio.to_thread(_resolve_by_label, context, label)
+            if resolved is not None:
+                existing_key, entry = resolved
+                return _payload(
+                    "sessions_spawn",
+                    "ok",
+                    session_key=existing_key,
+                    event_id=entry.get("thread_id"),
+                    target_agent=entry.get("target_agent", target_agent),
+                    reused=True,
+                )
+
         if _agent_thread_mode(context, target_agent) == "room":
             return _payload(
                 "sessions_spawn",
