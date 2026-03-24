@@ -410,6 +410,108 @@ def test_load_registry_returns_existing_dict_without_migration(tmp_path: Path) -
     assert registry == old_data
 
 
+@pytest.mark.asyncio
+async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should return existing session when label already exists in scope."""
+    send_mock = AsyncMock(return_value="$event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    ctx = _make_context(tmp_path)
+
+    # First spawn creates the session
+    with tool_runtime_context(ctx):
+        first = json.loads(await SubAgentsTools().sessions_spawn(task="do thing", label="work"))
+    assert first["status"] == "ok"
+    assert "reused" not in first
+    send_mock.assert_awaited_once()
+
+    send_mock.reset_mock()
+
+    # Second spawn with same label should reuse, no Matrix message sent
+    with tool_runtime_context(ctx):
+        second = json.loads(await SubAgentsTools().sessions_spawn(task="do thing again", label="work"))
+    assert second["status"] == "ok"
+    assert second["reused"] is True
+    assert second["session_key"] == first["session_key"]
+    assert second["target_agent"] == first["target_agent"]
+    send_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_no_label_skips_dedup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should always spawn new session when label is None."""
+    send_mock = AsyncMock(return_value="$event1")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        first = json.loads(await SubAgentsTools().sessions_spawn(task="do thing"))
+    assert first["status"] == "ok"
+
+    send_mock.return_value = "$event2"
+
+    with tool_runtime_context(ctx):
+        second = json.loads(await SubAgentsTools().sessions_spawn(task="do thing again"))
+    assert second["status"] == "ok"
+    assert "reused" not in second
+    assert send_mock.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_dedup_scoped_by_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn with same label but different scope should spawn new session."""
+    send_mock = AsyncMock(return_value="$event1")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    ctx1 = _make_context(tmp_path, requester_id="@alice:localhost")
+
+    with tool_runtime_context(ctx1):
+        first = json.loads(await SubAgentsTools().sessions_spawn(task="do thing", label="work"))
+    assert first["status"] == "ok"
+
+    send_mock.return_value = "$event2"
+    ctx2 = _make_context(tmp_path, requester_id="@bob:localhost")
+
+    with tool_runtime_context(ctx2):
+        second = json.loads(await SubAgentsTools().sessions_spawn(task="do thing", label="work"))
+    assert second["status"] == "ok"
+    assert "reused" not in second
+    assert second["session_key"] != first["session_key"]
+    assert send_mock.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_dedup_scoped_by_room(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn with same label but different room should spawn new session."""
+    send_mock = AsyncMock(return_value="$event1")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    ctx1 = _make_context(tmp_path, room_id="!room_a:localhost")
+
+    with tool_runtime_context(ctx1):
+        first = json.loads(await SubAgentsTools().sessions_spawn(task="do thing", label="work"))
+    assert first["status"] == "ok"
+
+    send_mock.return_value = "$event2"
+    ctx2 = _make_context(tmp_path, room_id="!room_b:localhost")
+
+    with tool_runtime_context(ctx2):
+        second = json.loads(await SubAgentsTools().sessions_spawn(task="do thing", label="work"))
+    assert second["status"] == "ok"
+    assert "reused" not in second
+    assert second["session_key"] != first["session_key"]
+    assert send_mock.await_count == 2
+
+
 def test_record_session_updates_existing_entry_fields(tmp_path: Path) -> None:
     """_record_session should update mutable fields without dropping existing target_agent."""
     ctx = _make_context(tmp_path)
