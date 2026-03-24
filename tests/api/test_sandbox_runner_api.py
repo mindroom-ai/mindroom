@@ -169,6 +169,7 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     tmp_path: Path,
 ) -> None:
     """Startup runtime should recover trusted env from real process env while keeping runner auth separate."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -424,6 +425,7 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
 ) -> None:
     """Execution env should carry committed runtime values without leaking control secrets or arbitrary host env."""
     _set_sandbox_token(monkeypatch)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
     monkeypatch.setenv("MINDROOM_API_KEY", "dashboard-secret")
     config_path = tmp_path / "config.yaml"

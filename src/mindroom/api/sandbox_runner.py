@@ -140,6 +140,32 @@ def _request_private_agent_names(request: SandboxRunnerExecuteRequest) -> frozen
     return frozenset(request.private_agent_names)
 
 
+def _request_runtime_overrides(
+    request: SandboxRunnerExecuteRequest,
+    prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None,
+) -> dict[str, object] | None:
+    """Return runtime overrides for one runner-side tool rebuild."""
+    runtime_overrides = sandbox_worker_prep.ready_runtime_overrides(
+        prepared_worker.runtime_overrides if prepared_worker is not None else None,
+    )
+    if request.tool_name != "shell" or request.extra_env_passthrough is None:
+        return runtime_overrides
+
+    # Pre-resolve passthrough patterns against only the client's env snapshot
+    # to prevent cross-runtime secret leakage via glob patterns that match
+    # runner-only env vars.
+    resolved = constants.shell_extra_env_values(
+        extra_env_passthrough=request.extra_env_passthrough,
+        process_env=request.execution_env,
+    )
+    if not resolved:
+        return runtime_overrides
+
+    merged_runtime_overrides = dict(runtime_overrides or {})
+    merged_runtime_overrides["extra_env_passthrough"] = ",".join(resolved.keys())
+    return merged_runtime_overrides
+
+
 class SandboxRunnerExecuteRequest(BaseModel):
     """Tool call payload forwarded from a primary runtime to the sandbox runtime.
 
@@ -163,6 +189,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
     execution_env: dict[str, str] = Field(default_factory=dict)
+    extra_env_passthrough: str | None = None
 
 
 class SandboxRunnerLeaseRequest(BaseModel):
@@ -360,9 +387,7 @@ async def _execute_request_inprocess(
         )
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:
         return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
-    runtime_overrides = sandbox_worker_prep.ready_runtime_overrides(
-        prepared.runtime_overrides if prepared is not None else None,
-    )
+    runtime_overrides = _request_runtime_overrides(request, prepared)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
         execution_env,
@@ -631,6 +656,8 @@ async def execute_tool_call(  # noqa: C901
     payload.credential_overrides = credential_overrides
     if payload.execution_env and payload.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES:
         raise HTTPException(status_code=400, detail="execution_env is only supported for execution tools.")
+    if payload.extra_env_passthrough is not None and payload.tool_name != "shell":
+        raise HTTPException(status_code=400, detail="extra_env_passthrough is only supported for shell.")
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None
     if payload.worker_key is not None:
         try:

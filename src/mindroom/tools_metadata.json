@@ -4306,6 +4306,17 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "default": null,
+          "description": "Comma or newline-separated env var names or glob patterns to expose to shell execution in addition to the committed runtime env.",
+          "label": "Extra Env Passthrough",
+          "name": "extra_env_passthrough",
+          "options": null,
+          "placeholder": "WHISPER_URL, TTS_URL, CALDAV_*",
+          "required": false,
+          "type": "text",
+          "validation": null
         }
       ],
       "default_execution_target": "worker",

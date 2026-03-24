@@ -12,11 +12,13 @@ from typing import TYPE_CHECKING, Any, Self
 
 import pytest
 
+import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
+import mindroom.tools.shell as shell_tool_module
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths, shell_extra_env_values
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.metadata import ToolInitOverrideError, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -425,7 +427,96 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
     assert ast.literal_eval(run_result) == expected
 
 
-def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+def test_shell_subprocess_path_prepends_wrapper_for_empty_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shell PATH normalization should restore the wrapper dir even for PATH=''."""
+    wrapper_dir = tmp_path / "run" / "wrappers" / "bin"
+    wrapper_dir.mkdir(parents=True)
+    monkeypatch.setattr(shell_tool_module, "_NIXOS_SUDO_WRAPPER_DIR", str(wrapper_dir))
+
+    assert shell_tool_module._shell_subprocess_path("") == str(wrapper_dir)
+
+
+def test_shell_subprocess_path_prepends_wrapper_for_unset_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shell PATH normalization should restore the wrapper dir even for PATH=None."""
+    wrapper_dir = tmp_path / "run" / "wrappers" / "bin"
+    wrapper_dir.mkdir(parents=True)
+    monkeypatch.setattr(shell_tool_module, "_NIXOS_SUDO_WRAPPER_DIR", str(wrapper_dir))
+
+    assert shell_tool_module._shell_subprocess_path(None) == str(wrapper_dir)
+
+
+def test_shell_subprocess_path_keeps_existing_wrapper_first_without_duplication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shell PATH normalization should be idempotent when the wrapper is already first."""
+    wrapper_dir = tmp_path / "run" / "wrappers" / "bin"
+    wrapper_dir.mkdir(parents=True)
+    monkeypatch.setattr(shell_tool_module, "_NIXOS_SUDO_WRAPPER_DIR", str(wrapper_dir))
+    current_path = os.pathsep.join((str(wrapper_dir), "/usr/bin", "/bin"))
+
+    assert shell_tool_module._shell_subprocess_path(current_path) == current_path
+
+
+def test_shell_subprocess_path_prepends_wrapper_when_missing_from_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell PATH normalization should prepend the wrapper when PATH omits it."""
+    monkeypatch.setattr(shell_tool_module, "_NIXOS_SUDO_WRAPPER_DIR", "/run/wrappers/bin")
+    monkeypatch.setattr(
+        shell_tool_module.Path,
+        "is_dir",
+        lambda self: str(self) == shell_tool_module._NIXOS_SUDO_WRAPPER_DIR,
+    )
+
+    assert shell_tool_module._shell_subprocess_path("/usr/bin:/bin") == ("/run/wrappers/bin:/usr/bin:/bin")
+
+
+def test_shell_subprocess_path_promotes_wrapper_from_non_first_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell PATH normalization should promote the wrapper to the first position."""
+    monkeypatch.setattr(shell_tool_module, "_NIXOS_SUDO_WRAPPER_DIR", "/run/wrappers/bin")
+    monkeypatch.setattr(
+        shell_tool_module.Path,
+        "is_dir",
+        lambda self: str(self) == shell_tool_module._NIXOS_SUDO_WRAPPER_DIR,
+    )
+
+    assert shell_tool_module._shell_subprocess_path("/usr/bin:/run/wrappers/bin:/bin") == (
+        "/run/wrappers/bin:/usr/bin:/bin"
+    )
+
+
+def test_shell_subprocess_env_path_passthrough_when_wrapper_dir_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shell PATH normalization should be a no-op when the wrapper dir does not exist."""
+    monkeypatch.setattr(shell_tool_module, "_NIXOS_SUDO_WRAPPER_DIR", str(tmp_path / "missing-wrapper"))
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    assert shell_tool_module._shell_subprocess_env(runtime_paths)["PATH"] == "/usr/local/bin:/usr/bin"
+
+
+async def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path) -> None:
     """Direct shell execution should inherit committed runtime env values from the runtime `.env`."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -448,11 +539,12 @@ def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path)
     assert result == "visible-in-shell"
 
 
-def test_local_shell_does_not_inherit_filtered_process_env(
+def test_local_shell_exposes_configured_extra_parent_env_without_leaking_control_secrets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Direct shell execution should not leak filtered process env outside the committed runtime."""
+    """Direct shell execution should allow explicit extra passthrough without leaking control secrets."""
+    monkeypatch.setenv("GITEA_TOKEN", "visible-gitea-token")
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "runner-secret")
     monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
     config_path = tmp_path / "config.yaml"
@@ -464,10 +556,22 @@ def test_local_shell_does_not_inherit_filtered_process_env(
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={},
+        process_env=dict(os.environ),
+    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    save_scoped_credentials(
+        "shell",
+        {"extra_env_passthrough": "GITEA_*, MINDROOM_*"},
+        credentials_manager=credentials_manager,
+        worker_target=None,
     )
 
-    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
     entrypoint = tool.functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
@@ -475,18 +579,45 @@ def test_local_shell_does_not_inherit_filtered_process_env(
         [
             "bash",
             "-lc",
-            "printf '%s' \"$MINDROOM_SANDBOX_PROXY_TOKEN|$CI_JOB_TOKEN|$TEST_EXECUTION_ENV\"",
+            "printf '%s' \"$GITEA_TOKEN|$MINDROOM_SANDBOX_PROXY_TOKEN|$CI_JOB_TOKEN|$TEST_EXECUTION_ENV\"",
         ],
     )
 
-    assert result == "||visible-in-shell"
+    assert result == "visible-gitea-token|||visible-in-shell"
 
 
-def test_proxy_forwards_execution_env_only_for_execution_tools(
+def test_local_shell_does_not_expose_extra_parent_env_without_configuration(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Sandbox proxy should forward execution env only for shell/python-style execution tools."""
+    """Direct shell execution should not expose extra parent env without explicit config."""
+    monkeypatch.setenv("WHISPER_URL", "https://whisper.example")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env=dict(os.environ),
+    )
+
+    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
+    entrypoint = tool.functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = entrypoint(["bash", "-lc", "printf '%s' \"$WHISPER_URL|$TEST_EXECUTION_ENV\""])
+
+    assert result == "|visible-in-shell"
+
+
+def test_proxy_forwards_configured_shell_execution_env_only_for_execution_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sandbox proxy should forward shell execution env and passthrough config from stored tool settings."""
     captured: dict[str, Any] = {}
     _configure_proxy_runtime(
         monkeypatch,
@@ -499,6 +630,7 @@ def test_proxy_forwards_execution_env_only_for_execution_tools(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(captured=captured),
     )
+    monkeypatch.setenv("GITEA_TOKEN", "visible-gitea-token")
     monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -511,6 +643,13 @@ def test_proxy_forwards_execution_env_only_for_execution_tools(
         storage_path=config_path.parent / "storage",
         process_env=dict(os.environ),
     )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    save_scoped_credentials(
+        "shell",
+        {"extra_env_passthrough": "GITEA_*"},
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
 
     shell_tool = get_tool_by_name("shell", runtime_paths, worker_target=None)
     shell_entrypoint = shell_tool.functions["run_shell_command"].entrypoint
@@ -518,7 +657,9 @@ def test_proxy_forwards_execution_env_only_for_execution_tools(
     result = shell_entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
 
     assert result == "sandbox-result"
+    assert captured["json"]["extra_env_passthrough"] == "GITEA_*"
     assert captured["json"]["execution_env"]["TEST_EXECUTION_ENV"] == "visible-in-shell"
+    assert captured["json"]["execution_env"]["GITEA_TOKEN"] == "visible-gitea-token"
     assert "CI_JOB_TOKEN" not in captured["json"]["execution_env"]
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in captured["json"]["execution_env"]
 
@@ -529,6 +670,110 @@ def test_proxy_forwards_execution_env_only_for_execution_tools(
     calculator_entrypoint(1, 2)
 
     assert "execution_env" not in captured["json"]
+
+
+def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Configured shell passthrough should survive proxy forwarding and runner subprocess rebuilds."""
+    _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="all",
+        credential_policy={},
+    )
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    monkeypatch.setenv("GITEA_TOKEN", "visible-gitea-token")
+    monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    config_path.with_name(".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "storage",
+        process_env=dict(os.environ),
+    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    save_scoped_credentials(
+        "shell",
+        {"extra_env_passthrough": "GITEA_*"},
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+
+    def responder(_url: str, payload: dict[str, Any]) -> dict[str, object]:
+        response = sandbox_runner_module._execute_request_subprocess_sync(
+            sandbox_runner_module.SandboxRunnerExecuteRequest.model_validate(payload),
+            runtime_paths,
+            runner_token=_TEST_AUTH_TOKEN,
+        )
+        return response.model_dump(mode="json")
+
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(responder=responder),
+    )
+
+    shell_tool = get_tool_by_name("shell", runtime_paths, worker_target=None)
+    shell_entrypoint = shell_tool.functions["run_shell_command"].entrypoint
+    assert shell_entrypoint is not None
+    result = shell_entrypoint(
+        [
+            "bash",
+            "-lc",
+            "printf '%s' \"$GITEA_TOKEN|$CI_JOB_TOKEN|$TEST_EXECUTION_ENV\"",
+        ],
+    )
+
+    assert result == "visible-gitea-token||visible-in-shell"
+
+
+@pytest.mark.asyncio
+async def test_inprocess_runner_shell_uses_request_scoped_extra_env_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """In-process runner rebuilds should source shell passthrough from request-scoped runtime env."""
+    monkeypatch.setenv("GITEA_TOKEN", "ambient-gitea-token")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    config_path.with_name(".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "storage",
+        process_env={},
+    )
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        args=[
+            [
+                "bash",
+                "-lc",
+                "printf '%s' \"$GITEA_TOKEN|$TEST_EXECUTION_ENV\"",
+            ],
+        ],
+        execution_env={"GITEA_TOKEN": "request-gitea-token"},
+        extra_env_passthrough="GITEA_*",
+    )
+
+    response = await sandbox_runner_module._execute_request_inprocess(
+        request,
+        runtime_paths,
+        config,
+    )
+
+    assert response.ok is True
+    assert response.result == "request-gitea-token|visible-in-shell"
 
 
 def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_context(
@@ -1519,3 +1764,77 @@ class TestWorkerToolsOverride:
         assert captured["json"]["tool_init_overrides"] == {
             "base_dir": str(unrelated_base_dir),
         }
+
+
+@pytest.mark.asyncio
+async def test_inprocess_runner_blocks_cross_runtime_secret_leakage(
+    tmp_path: Path,
+) -> None:
+    """Runner-only env vars must not leak via glob passthrough patterns."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    config_path.with_name(".env").write_text("", encoding="utf-8")
+
+    # Runner has a secret env var that matches the passthrough pattern.
+    runner_process_env = {"WHISPER_API_TOKEN": "runner-only-secret"}
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "storage",
+        process_env=runner_process_env,
+    )
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+
+    # Client sends a request with WHISPER_* passthrough but only WHISPER_URL
+    # in its execution_env.  The runner-only WHISPER_API_TOKEN must NOT leak.
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        args=[
+            ["bash", "-lc", "printf '%s' \"$WHISPER_URL|$WHISPER_API_TOKEN\""],
+        ],
+        execution_env={"WHISPER_URL": "https://whisper.example"},
+        extra_env_passthrough="WHISPER_*",
+    )
+
+    response = await sandbox_runner_module._execute_request_inprocess(
+        request,
+        runtime_paths,
+        config,
+    )
+
+    assert response.ok is True
+    # WHISPER_URL from execution_env should be visible; WHISPER_API_TOKEN should not.
+    assert response.result == "https://whisper.example|"
+
+
+def test_shell_extra_env_excludes_api_key_suffixes() -> None:
+    """Wildcard passthrough must not expose vars ending with secret suffixes."""
+    env = {
+        "ANTHROPIC_API_KEY": "sk-ant-secret",
+        "OPENAI_API_KEY": "sk-oai-secret",
+        "GOOGLE_API_KEY": "goog-secret",
+        "MY_SERVICE_PASSWORD": "pass-secret",
+        "WEBHOOK_SECRET": "hook-secret",
+        "CI_JOB_TOKEN": "ci-token",
+        "GITEA_TOKEN": "gitea-token",
+        "WHISPER_URL": "https://whisper.example",
+        "GITEA_HOST": "gitea.local",
+    }
+    result = dict(shell_extra_env_values(extra_env_passthrough="*", process_env=env))
+
+    # Safe non-secret vars should be present
+    assert result["WHISPER_URL"] == "https://whisper.example"
+    assert result["GITEA_HOST"] == "gitea.local"
+    # _TOKEN suffix is allowed (common for service tokens like GITEA_TOKEN)
+    assert result["GITEA_TOKEN"] == "gitea-token"  # noqa: S105
+
+    # Provider API keys and passwords/secrets must be excluded
+    assert "ANTHROPIC_API_KEY" not in result
+    assert "OPENAI_API_KEY" not in result
+    assert "GOOGLE_API_KEY" not in result
+    assert "MY_SERVICE_PASSWORD" not in result
+    assert "WEBHOOK_SECRET" not in result
+    assert "CI_JOB_TOKEN" not in result  # also in _SHELL_EXTRA_ENV_EXCLUDED_NAMES
