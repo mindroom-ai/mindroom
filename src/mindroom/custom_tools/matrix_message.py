@@ -37,6 +37,7 @@ class MatrixMessageTools(Toolkit):
     _MAX_ATTACHMENTS_PER_CALL: ClassVar[int] = 5
     _DEFAULT_READ_LIMIT: ClassVar[int] = 20
     _MAX_READ_LIMIT: ClassVar[int] = 50
+    _ROOM_TIMELINE_SENTINEL: ClassVar[str] = "room"
     _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset(
         {"send", "thread-reply", "reply", "react", "read", "thread-list", "edit", "context"},
     )
@@ -484,6 +485,7 @@ class MatrixMessageTools(Toolkit):
         *,
         room_id: str,
         thread_id: str | None,
+        allow_context_fallback: bool = True,
     ) -> str | None:
         """Return thread_id only when it belongs to the target room.
 
@@ -491,9 +493,11 @@ class MatrixMessageTools(Toolkit):
         thread_id is invalid there, so we only fall back to it for the
         same room.
         """
+        if thread_id == MatrixMessageTools._ROOM_TIMELINE_SENTINEL:
+            return None
         if thread_id is not None:
             return thread_id
-        if room_id == context.room_id:
+        if allow_context_fallback and room_id == context.room_id:
             return context.resolved_thread_id
         return None
 
@@ -510,6 +514,7 @@ class MatrixMessageTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
+            allow_context_fallback=True,
         )
         if room_id and not room_access_allowed(context, resolved_room_id):
             return self._payload(
@@ -543,9 +548,13 @@ class MatrixMessageTools(Toolkit):
         limit: int | None,
     ) -> str:
         if action in {"send", "thread-reply", "reply"}:
-            effective_thread_id = thread_id
-            if action in {"thread-reply", "reply"}:
-                effective_thread_id = self._safe_thread_id(context, room_id=room_id, thread_id=thread_id)
+            allow_context_fallback = action in {"thread-reply", "reply"}
+            effective_thread_id = self._safe_thread_id(
+                context,
+                room_id=room_id,
+                thread_id=thread_id,
+                allow_context_fallback=allow_context_fallback,
+            )
             return await self._message_send_or_reply(
                 context,
                 action=action,
@@ -613,6 +622,7 @@ class MatrixMessageTools(Toolkit):
           local file paths (`attachment_file_paths`).
         - react: React to target event ID with message text as emoji (defaults to 👍).
         - read: Read latest messages from room or current thread.
+          Use `thread_id="room"` to force the room timeline even when current context is inside a thread.
         - thread-list: List messages in a thread and include edit options by event ID.
         - edit: Edit a previously sent message by setting `target` to the original event ID.
         - context: Return runtime room/thread/event metadata for tool targeting.
