@@ -941,6 +941,10 @@ defaults:
   tools: [scheduler]               # Default: ["scheduler"] (added to every agent; set [] to disable)
   markdown: true                   # Default: true
   enable_streaming: true           # Default: true (stream responses via message edits)
+  streaming:
+    update_interval: 5.0           # Default: 5.0 (steady-state seconds between streamed edits)
+    min_update_interval: 0.5       # Default: 0.5 (fast-start seconds between early edits)
+    interval_ramp_seconds: 15.0    # Default: 15.0 (set 0 to disable interval ramping)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
@@ -957,6 +961,7 @@ defaults:
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
+# defaults.streaming is also global-only and controls streamed message edit cadence.
 
 # Memory system configuration (optional)
 memory:
@@ -1476,6 +1481,10 @@ defaults:
   num_history_runs: null                # Number of prior runs to include (null = all)
   num_history_messages: null            # Max messages from history (null = use num_history_runs)
   enable_streaming: true                # Stream agent responses via progressive message edits
+  streaming:
+    update_interval: 5.0                # Steady-state seconds between streamed edits
+    min_update_interval: 0.5            # Fast-start seconds between early edits
+    interval_ramp_seconds: 15.0         # Set 0 to disable interval ramping
   compress_tool_results: true           # Compress tool results in history to save context
   enable_session_summaries: false       # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
@@ -1484,6 +1493,8 @@ defaults:
   worker_scope: null                     # Worker runtime reuse for proxied tools (shared, user, user_agent)
   allow_self_config: false               # Allow agents to read/modify their own config at runtime
 ```
+
+`defaults.streaming` is global-only and controls the timing of progressive message edits for streaming responses.
 
 To opt out a specific agent:
 
@@ -4228,6 +4239,19 @@ defaults:
 
 `enable_streaming` is a global-only setting under `defaults` and cannot be overridden per agent.
 
+Tune the streaming edit cadence globally under `defaults.streaming`:
+
+```
+defaults:
+  enable_streaming: true
+  streaming:
+    update_interval: 5.0         # Default: 5.0 steady-state seconds between edits
+    min_update_interval: 0.5     # Default: 0.5 fast-start seconds between early edits
+    interval_ramp_seconds: 15.0  # Default: 15.0; set 0 to disable ramping
+```
+
+These timing settings are global-only. Agents inherit them from `defaults` and cannot override them individually.
+
 ## Presence-Based Streaming
 
 Even when streaming is enabled, MindRoom only streams to users who are currently online. This is checked via `should_use_streaming()` which queries the Matrix presence API.
@@ -4257,9 +4281,10 @@ If no text has arrived yet, a `Thinking...` placeholder is shown with the marker
 
 MindRoom throttles edits to avoid overwhelming the Matrix homeserver:
 
-- **Time-based**: Edits are spaced by a configurable interval (default: 5 seconds steady-state).
+- **Time-based**: `defaults.streaming.update_interval` sets the steady-state interval between edits (default: 5 seconds).
 - **Character-based**: An edit is also triggered when enough new characters have accumulated. The character threshold ramps from 48 characters (fast start) to 240 characters (steady-state) over the ramp-up period.
-- **Ramp-up**: Early in the stream, both time intervals and character thresholds start low and ramp up to steady-state values over 15 seconds (time intervals from 0.5s to 5s, character threshold from 48 to 240).
+- **Ramp-up**: `defaults.streaming.min_update_interval` and `defaults.streaming.interval_ramp_seconds` control how quickly the time-based interval ramps from a fast start to the steady-state value. By default it ramps from 0.5s to 5s over 15 seconds. Setting `interval_ramp_seconds: 0` disables the ramp and uses the steady-state interval immediately.
+- **Shared ramp window**: The same ramp window also controls the built-in character threshold ramp from 48 characters (fast start) to 240 characters (steady-state).
 - **Minimum interval**: A hard floor (0.35s) prevents edit spam even when character thresholds are met.
 
 ## Tool Calls During Streaming

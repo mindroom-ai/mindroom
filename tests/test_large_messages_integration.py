@@ -10,6 +10,7 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
+from mindroom.config.models import DefaultsConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.client import edit_message, send_message
 from mindroom.matrix.large_messages import _NORMAL_MESSAGE_LIMIT, prepare_large_message
@@ -61,6 +62,7 @@ class MockConfig:
 
     def __init__(self) -> None:
         self.agents = {}
+        self.defaults = DefaultsConfig()
 
 
 def _runtime_paths() -> RuntimePaths:

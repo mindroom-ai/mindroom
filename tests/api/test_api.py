@@ -1470,6 +1470,11 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
         "tools": ["scheduler"],
         "markdown": True,
         "enable_streaming": True,
+        "streaming": {
+            "update_interval": 5.0,
+            "min_update_interval": 0.5,
+            "interval_ramp_seconds": 15.0,
+        },
         "show_stop_button": True,
         "learning": True,
         "learning_mode": "always",

@@ -39,6 +39,19 @@ defaults:
 
 `enable_streaming` is a global-only setting under `defaults` and cannot be overridden per agent.
 
+Tune the streaming edit cadence globally under `defaults.streaming`:
+
+```
+defaults:
+  enable_streaming: true
+  streaming:
+    update_interval: 5.0         # Default: 5.0 steady-state seconds between edits
+    min_update_interval: 0.5     # Default: 0.5 fast-start seconds between early edits
+    interval_ramp_seconds: 15.0  # Default: 15.0; set 0 to disable ramping
+```
+
+These timing settings are global-only. Agents inherit them from `defaults` and cannot override them individually.
+
 ## Presence-Based Streaming
 
 Even when streaming is enabled, MindRoom only streams to users who are currently online. This is checked via `should_use_streaming()` which queries the Matrix presence API.
@@ -68,9 +81,10 @@ If no text has arrived yet, a `Thinking...` placeholder is shown with the marker
 
 MindRoom throttles edits to avoid overwhelming the Matrix homeserver:
 
-- **Time-based**: Edits are spaced by a configurable interval (default: 5 seconds steady-state).
+- **Time-based**: `defaults.streaming.update_interval` sets the steady-state interval between edits (default: 5 seconds).
 - **Character-based**: An edit is also triggered when enough new characters have accumulated. The character threshold ramps from 48 characters (fast start) to 240 characters (steady-state) over the ramp-up period.
-- **Ramp-up**: Early in the stream, both time intervals and character thresholds start low and ramp up to steady-state values over 15 seconds (time intervals from 0.5s to 5s, character threshold from 48 to 240).
+- **Ramp-up**: `defaults.streaming.min_update_interval` and `defaults.streaming.interval_ramp_seconds` control how quickly the time-based interval ramps from a fast start to the steady-state value. By default it ramps from 0.5s to 5s over 15 seconds. Setting `interval_ramp_seconds: 0` disables the ramp and uses the steady-state interval immediately.
+- **Shared ramp window**: The same ramp window also controls the built-in character threshold ramp from 48 characters (fast start) to 240 characters (steady-state).
 - **Minimum interval**: A hard floor (0.35s) prevents edit spam even when character thresholds are met.
 
 ## Tool Calls During Streaming
