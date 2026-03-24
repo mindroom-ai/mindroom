@@ -387,6 +387,10 @@ async def _execute_request_inprocess(
         )
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:
         return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+    if request.tool_name == "shell" and prepared is not None:
+        worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
+        worker_execution_env.update(execution_env)
+        execution_env = worker_execution_env
     runtime_overrides = _request_runtime_overrides(request, prepared)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
@@ -670,7 +674,10 @@ async def execute_tool_call(  # noqa: C901
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if sandbox_exec.runner_uses_subprocess(runtime_paths):
+    # Shell background handles live in the long-lived runner process, so shell
+    # must stay on the in-process path even when the runner defaults to
+    # per-request subprocess execution.
+    if payload.tool_name != "shell" and sandbox_exec.runner_uses_subprocess(runtime_paths):
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
@@ -691,7 +698,7 @@ async def execute_tool_call(  # noqa: C901
     # Worker-routed execution stays on the subprocess path so the per-worker
     # virtualenv and worker-specific process environment remain authoritative,
     # even when this pod is itself a dedicated worker runtime.
-    if payload.worker_key is not None:
+    if payload.tool_name != "shell" and payload.worker_key is not None:
         return await _execute_request_subprocess(
             payload,
             runtime_paths,

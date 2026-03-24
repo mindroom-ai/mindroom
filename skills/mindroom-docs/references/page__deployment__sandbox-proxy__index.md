@@ -200,6 +200,8 @@ The `shell` tool still receives the committed runtime env as explicit execution 
 
 If proxied shell commands need extra PATH entries such as wrapper directories, configure `shell_path_prepend`. This prepends the configured entries ahead of the runtime PATH while preserving the existing PATH order and removing duplicates. That keeps PATH handling deployment-specific instead of baking host-specific directories into the shell tool itself.
 
+Shell commands that exceed their timeout return a background handle. Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process. These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts. To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE=subprocess`.
+
 ## Credential leases
 
 Some proxied tools need credentials (e.g., a `shell` tool that runs `git push` and needs an SSH key). Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease** — a short-lived, single-use token that the runner exchanges for credentials during execution.
