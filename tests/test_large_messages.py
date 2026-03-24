@@ -5,7 +5,7 @@ import json
 import nio
 import pytest
 
-from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, ORIGINAL_SENDER_KEY
 from mindroom.matrix.large_messages import (
     _NORMAL_MESSAGE_LIMIT,
     _calculate_event_size,
@@ -265,6 +265,37 @@ async def test_prepare_large_message_preserves_ai_run_metadata() -> None:
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
     assert uploaded_payload[AI_RUN_METADATA_KEY]["usage"]["total_tokens"] == 1234
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_preserves_original_sender_metadata() -> None:
+    """Original sender metadata should remain on large preview events for self-resume."""
+
+    class MockClient:
+        rooms: dict = {}  # noqa: RUF012
+        uploaded_data: bytes | None = None
+
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
+            data_provider = kwargs.get("data_provider")
+            if data_provider:
+                data = data_provider(None, None)
+                self.uploaded_data = data.read()
+            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file1001"})
+            return response, None
+
+    client = MockClient()
+    content = {
+        "body": "n" * 100000,
+        "msgtype": "m.text",
+        ORIGINAL_SENDER_KEY: "@user:localhost",
+    }
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    assert result[ORIGINAL_SENDER_KEY] == "@user:localhost"
+    assert client.uploaded_data is not None
+    uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
+    assert uploaded_payload[ORIGINAL_SENDER_KEY] == "@user:localhost"
 
 
 @pytest.mark.asyncio

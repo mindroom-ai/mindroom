@@ -6,11 +6,12 @@ import json
 import time
 from collections import defaultdict, deque
 from threading import Lock
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import nio
 from agno.tools import Toolkit
 
+from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.custom_tools.attachment_helpers import (
     normalize_str_list,
     resolve_context_thread_id,
@@ -164,6 +165,7 @@ class MatrixMessageTools(Toolkit):
         room_id: str,
         text: str,
         thread_id: str | None,
+        ignore_mentions: bool,
     ) -> str | None:
         formatted_text = parse_and_format_interactive(text, extract_mapping=False).formatted_text
         latest_thread_event_id = await get_latest_thread_event_id_if_needed(
@@ -171,6 +173,11 @@ class MatrixMessageTools(Toolkit):
             room_id,
             thread_id,
         )
+        extra_content: dict[str, Any] = {}
+        if ignore_mentions:
+            extra_content["com.mindroom.skip_mentions"] = True
+        elif context.requester_id != context.client.user_id:
+            extra_content[ORIGINAL_SENDER_KEY] = context.requester_id
         content = format_message_with_mentions(
             context.config,
             context.runtime_paths,
@@ -178,6 +185,7 @@ class MatrixMessageTools(Toolkit):
             sender_domain=context.config.get_domain(context.runtime_paths),
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
+            extra_content=extra_content or None,
         )
         return await send_message(context.client, room_id, content)
 
@@ -221,6 +229,7 @@ class MatrixMessageTools(Toolkit):
         attachment_file_paths: list[str],
         room_id: str,
         effective_thread_id: str | None,
+        ignore_mentions: bool,
     ) -> str:
         if action in {"thread-reply", "reply"} and effective_thread_id is None:
             return self._payload("error", action=action, message="thread_id is required for replies.")
@@ -242,6 +251,7 @@ class MatrixMessageTools(Toolkit):
                 room_id=room_id,
                 text=text,
                 thread_id=effective_thread_id,
+                ignore_mentions=ignore_mentions,
             )
         if text is not None and event_id is None:
             return self._payload(
@@ -570,6 +580,7 @@ class MatrixMessageTools(Toolkit):
         room_id: str,
         target: str | None,
         thread_id: str | None,
+        ignore_mentions: bool,
         limit: int | None,
     ) -> str:
         if action in {"send", "thread-reply", "reply"}:
@@ -589,6 +600,7 @@ class MatrixMessageTools(Toolkit):
                 attachment_file_paths=attachment_file_paths,
                 room_id=room_id,
                 effective_thread_id=effective_thread_id,
+                ignore_mentions=ignore_mentions,
             )
         if action == "react":
             return await self._message_react(
@@ -652,6 +664,7 @@ class MatrixMessageTools(Toolkit):
         room_id: str | None = None,
         target: str | None = None,
         thread_id: str | None = None,
+        ignore_mentions: bool = True,
         limit: int | None = None,
     ) -> str:
         """Send/read/react/reply in Matrix with current room/thread defaults.
@@ -667,6 +680,11 @@ class MatrixMessageTools(Toolkit):
         - thread-list: List messages in a thread and include edit options by event ID.
         - edit: Edit a previously sent message by setting `target` to the original event ID.
         - context: Return runtime room/thread/event metadata for tool targeting.
+
+        `ignore_mentions` only affects text sends for `send`, `reply`, and `thread-reply`.
+        Leave it at `True` to suppress agent mention handling on tool-posted messages.
+        Set it to `False` only when you need the mentioned agent to respond.
+        `False` also relays the trusted original requester so authorization checks apply to the real user, not the sending bot.
 
         """
         context = get_tool_runtime_context()
@@ -731,5 +749,6 @@ class MatrixMessageTools(Toolkit):
             room_id=resolved_room_id,
             target=target,
             thread_id=thread_id,
+            ignore_mentions=ignore_mentions,
             limit=limit,
         )
