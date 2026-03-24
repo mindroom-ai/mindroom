@@ -208,6 +208,10 @@ defaults:
   tools: [scheduler]               # Default: ["scheduler"] (added to every agent; set [] to disable)
   markdown: true                   # Default: true
   enable_streaming: true           # Default: true (stream responses via message edits)
+  streaming:
+    update_interval: 5.0           # Default: 5.0 (steady-state seconds between streamed edits)
+    min_update_interval: 0.5       # Default: 0.5 (fast-start seconds between early edits)
+    interval_ramp_seconds: 15.0    # Default: 15.0 (set 0 to disable interval ramping)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
@@ -224,6 +228,7 @@ defaults:
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
+# defaults.streaming is also global-only and controls streamed message edit cadence.
 
 # Memory system configuration (optional)
 memory:

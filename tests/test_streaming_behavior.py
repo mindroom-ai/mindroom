@@ -15,7 +15,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import (
@@ -863,3 +863,96 @@ class TestStreamingBehavior:
         assert final_text.startswith("**[Response interrupted by an error:")
         assert "provider stream failed" in final_text
         assert IN_PROGRESS_MARKER not in final_text
+
+
+class TestStreamingConfig:
+    """Tests for StreamingConfig and its wiring into send_streaming_response."""
+
+    def test_streaming_config_defaults_match_hardcoded(self) -> None:
+        """StreamingConfig defaults must match StreamingResponse dataclass field defaults."""
+        sc = StreamingConfig()
+        sr = StreamingResponse.__dataclass_fields__
+        assert sc.update_interval == sr["update_interval"].default
+        assert sc.min_update_interval == sr["min_update_interval"].default
+        assert sc.interval_ramp_seconds == sr["interval_ramp_seconds"].default
+
+    @pytest.mark.asyncio
+    async def test_streaming_config_applied(self) -> None:
+        """Custom StreamingConfig values should propagate to the StreamingResponse instance."""
+        sc = StreamingConfig(update_interval=2.0, min_update_interval=0.3, interval_ramp_seconds=10.0)
+        config = Config(
+            agents={"a": AgentConfig(display_name="A", rooms=["!r:localhost"])},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            router=RouterConfig(model="default"),
+            defaults={"streaming": sc.model_dump()},
+        )
+        runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+        config = bind_runtime_paths(config, runtime_paths)
+
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$cfg_test"
+        mock_client.room_send.return_value = mock_response
+
+        async def empty_stream() -> AsyncIterator[str]:
+            yield "hello"
+
+        captured: list[StreamingResponse] = []
+        original_cls = StreamingResponse
+
+        class CapturingStreamingResponse(original_cls):
+            def __init__(self, **kwargs: object) -> None:
+                super().__init__(**kwargs)
+                captured.append(self)
+
+        with patch("mindroom.streaming.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)):
+            event_id, text = await send_streaming_response(
+                client=mock_client,
+                room_id="!r:localhost",
+                reply_to_event_id="$orig",
+                thread_id=None,
+                sender_domain="localhost",
+                config=config,
+                runtime_paths=runtime_paths,
+                response_stream=empty_stream(),
+                streaming_cls=CapturingStreamingResponse,
+                room_mode=True,
+            )
+
+        assert event_id == "$cfg_test"
+        assert text == "hello"
+        assert len(captured) == 1
+        sr = captured[0]
+        assert sr.update_interval == 2.0
+        assert sr.min_update_interval == 0.3
+        assert sr.interval_ramp_seconds == 10.0
+
+    def test_streaming_config_partial_override(self) -> None:
+        """Setting only update_interval via Config should keep other fields at defaults."""
+        config = Config(
+            agents={"a": AgentConfig(display_name="A", rooms=["!r:localhost"])},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            router=RouterConfig(model="default"),
+            defaults={"streaming": {"update_interval": 2.0}},
+        )
+        sc = config.defaults.streaming
+        assert sc.update_interval == 2.0
+        assert sc.min_update_interval == 0.5
+        assert sc.interval_ramp_seconds == 15.0
+
+    def test_streaming_config_validation(self) -> None:
+        """Reject invalid values: update_interval <= 0, min_update_interval <= 0, interval_ramp_seconds < 0."""
+        with pytest.raises(ValueError, match="greater than 0"):
+            StreamingConfig(update_interval=0)
+        with pytest.raises(ValueError, match="greater than 0"):
+            StreamingConfig(update_interval=-1)
+        with pytest.raises(ValueError, match="greater than 0"):
+            StreamingConfig(min_update_interval=0)
+        with pytest.raises(ValueError, match="greater than 0"):
+            StreamingConfig(min_update_interval=-0.5)
+        with pytest.raises(ValueError, match="greater than or equal to 0"):
+            StreamingConfig(interval_ramp_seconds=-1)
+        # interval_ramp_seconds=0 should be valid (disables ramp)
+        sc = StreamingConfig(interval_ramp_seconds=0)
+        assert sc.interval_ramp_seconds == 0

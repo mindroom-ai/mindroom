@@ -362,6 +362,10 @@ defaults:
   num_history_runs: null                # Number of prior runs to include (null = all)
   num_history_messages: null            # Max messages from history (null = use num_history_runs)
   enable_streaming: true                # Stream agent responses via progressive message edits
+  streaming:
+    update_interval: 5.0                # Steady-state seconds between streamed edits
+    min_update_interval: 0.5            # Fast-start seconds between early edits
+    interval_ramp_seconds: 15.0         # Set 0 to disable interval ramping
   compress_tool_results: true           # Compress tool results in history to save context
   enable_session_summaries: false       # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
@@ -370,6 +374,8 @@ defaults:
   worker_scope: null                     # Worker runtime reuse for proxied tools (shared, user, user_agent)
   allow_self_config: false               # Allow agents to read/modify their own config at runtime
 ```
+
+`defaults.streaming` is global-only and controls the timing of progressive message edits for streaming responses.
 
 To opt out a specific agent:
 
