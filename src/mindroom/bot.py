@@ -533,6 +533,13 @@ class AgentBot:
         """Get or create the StopManager for this agent."""
         return StopManager()
 
+    def in_flight_response_count(self) -> int:
+        """Return the number of active response tasks for this bot."""
+        stop_manager = vars(self).get("stop_manager")
+        if stop_manager is None:
+            return 0
+        return stop_manager.active_message_count()
+
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
         assert self.client is not None
@@ -2106,16 +2113,32 @@ class AgentBot:
             "thinking_message and existing_event_id are mutually exclusive"
         )
 
+        # Track in-flight work from the very start so config reload drains
+        # never see a zero count during the initial _send_response() await.
+        outer_task = asyncio.current_task()
+        assert outer_task is not None
+        pre_track_id = f"__pre_response__:{id(outer_task)}"
+        self.stop_manager.set_current(pre_track_id, room_id, outer_task, None)
+
         # Send initial thinking message if not editing an existing message
         initial_message_id = None
-        if thinking_message:
-            assert not existing_event_id  # Redundant but makes the logic clear
-            initial_message_id = await self._send_response(
-                room_id,
-                reply_to_event_id,
-                f"{thinking_message} {IN_PROGRESS_MARKER}",
-                thread_id,
-            )
+        try:
+            if thinking_message:
+                assert not existing_event_id  # Redundant but makes the logic clear
+                initial_message_id = await self._send_response(
+                    room_id,
+                    reply_to_event_id,
+                    f"{thinking_message} {IN_PROGRESS_MARKER}",
+                    thread_id,
+                )
+        except BaseException:
+            self.stop_manager.tracked_messages.pop(pre_track_id, None)
+            raise
+
+        # Remove the sentinel now that we're past the initial send.
+        # No await between here and set_current() below, so no coroutine
+        # can observe a zero count in this gap.
+        self.stop_manager.tracked_messages.pop(pre_track_id, None)
 
         # Determine which message ID to use
         message_id = existing_event_id or initial_message_id
@@ -2123,13 +2146,15 @@ class AgentBot:
         # Create cancellable task by calling the function with the message ID
         task: asyncio.Task[None] = asyncio.create_task(response_function(message_id))  # type: ignore[operator]
 
-        # Track for stop button (only if we have a message to track)
+        # Always track the task so config reload drains can see in-flight work even
+        # before we have a Matrix event ID to attach UI controls to.
         message_to_track = existing_event_id or initial_message_id
+        tracked_message_id = message_to_track or f"__pending_response__:{id(task)}"
         show_stop_button = False  # Default to not showing
 
-        if message_to_track:
-            self.stop_manager.set_current(message_to_track, room_id, task, None)
+        self.stop_manager.set_current(tracked_message_id, room_id, task, None)
 
+        if message_to_track:
             # Add stop button if configured AND user is online
             # This uses the same logic as streaming to determine if user is online
             show_stop_button = self.config.defaults.show_stop_button
@@ -2151,20 +2176,19 @@ class AgentBot:
         try:
             await task
         except asyncio.CancelledError:
-            self.logger.info("Response cancelled by user", message_id=message_to_track)
+            self.logger.info("Response cancelled", message_id=message_to_track or tracked_message_id)
         except Exception as e:
             self.logger.exception("Error during response generation", error=str(e))
             raise
         finally:
-            if message_to_track:
-                tracked = self.stop_manager.tracked_messages.get(message_to_track)
-                button_already_removed = tracked is None or tracked.reaction_event_id is None
+            tracked = self.stop_manager.tracked_messages.get(tracked_message_id)
+            button_already_removed = tracked is None or tracked.reaction_event_id is None
 
-                self.stop_manager.clear_message(
-                    message_to_track,
-                    client=self.client,
-                    remove_button=show_stop_button and not button_already_removed,
-                )
+            self.stop_manager.clear_message(
+                tracked_message_id,
+                client=self.client,
+                remove_button=show_stop_button and not button_already_removed,
+            )
 
         return initial_message_id
 

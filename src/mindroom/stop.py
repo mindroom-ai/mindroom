@@ -59,6 +59,10 @@ class StopManager:
             total_tracked=len(self.tracked_messages),
         )
 
+    def active_message_count(self) -> int:
+        """Return the number of still-running response tasks."""
+        return sum(1 for tracked in self.tracked_messages.values() if not tracked.task.done())
+
     def clear_message(
         self,
         message_id: str,

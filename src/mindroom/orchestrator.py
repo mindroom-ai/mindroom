@@ -86,6 +86,11 @@ logger = get_logger(__name__)
 
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
+_CONFIG_RELOAD_DEBOUNCE_SECONDS = 2.0
+_CONFIG_RELOAD_IDLE_POLL_SECONDS = 0.5
+_CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS = 30.0
+_CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
+_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS = 120.0
 
 
 class _SignalAwareUvicornServer(uvicorn.Server):
@@ -118,6 +123,8 @@ class MultiAgentOrchestrator:
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _knowledge_refresh_task: asyncio.Task | None = field(default=None, init=False)
+    _config_reload_task: asyncio.Task | None = field(default=None, init=False)
+    _config_reload_requested_at: float | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Store canonical derived paths from the explicit runtime context."""
@@ -214,6 +221,13 @@ class MultiAgentOrchestrator:
         """Cancel any in-flight background knowledge refresh task."""
         task = self._knowledge_refresh_task
         self._knowledge_refresh_task = None
+        await cancel_task(task, suppress_exceptions=(asyncio.CancelledError, Exception))
+
+    async def _cancel_config_reload_task(self) -> None:
+        """Cancel any queued config reload task."""
+        task = self._config_reload_task
+        self._config_reload_task = None
+        self._config_reload_requested_at = None
         await cancel_task(task, suppress_exceptions=(asyncio.CancelledError, Exception))
 
     async def _cancel_bot_start_task(self, entity_name: str) -> None:
@@ -344,6 +358,111 @@ class MultiAgentOrchestrator:
             name="knowledge_refresh",
             failure_message="Background knowledge refresh failed",
         )
+
+    def in_flight_response_count(self) -> int:
+        """Return the number of active response tasks across all managed bots."""
+        return sum(bot.in_flight_response_count() for bot in self.agent_bots.values())
+
+    def request_config_reload(self) -> None:
+        """Queue a debounced config reload for the running orchestrator."""
+        if not self.running:
+            logger.info("Ignoring config change while startup is still in progress")
+            return
+        self._config_reload_requested_at = asyncio.get_running_loop().time()
+        if self._config_reload_task is not None and not self._config_reload_task.done():
+            logger.info("Configuration reload already queued; extending debounce window")
+            return
+        logger.info("Queued configuration reload")
+        self._config_reload_task = create_logged_task(
+            self._run_config_reload_loop(),
+            name="config_reload",
+            failure_message="Queued config reload failed",
+        )
+
+    async def _run_config_reload_loop(self) -> None:  # noqa: C901, PLR0915
+        """Apply queued config reloads after debounce and response drain."""
+        current_task = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        waiting_for_idle = False
+        drain_wait_started_at: float | None = None
+        last_drain_warning_at: float | None = None
+        try:
+            while self.running and self._config_reload_requested_at is not None:
+                requested_at = self._config_reload_requested_at
+                reload_at = requested_at + _CONFIG_RELOAD_DEBOUNCE_SECONDS
+                delay_seconds = reload_at - loop.time()
+                if delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
+                if self._config_reload_requested_at != requested_at:
+                    # A newer config change superseded the current one.
+                    # Reset drain state so the new change gets a full drain window.
+                    waiting_for_idle = False
+                    drain_wait_started_at = None
+                    last_drain_warning_at = None
+                    continue
+
+                active_response_count = self.in_flight_response_count()
+                force_reload = False
+                if active_response_count > 0:
+                    now = loop.time()
+                    if not waiting_for_idle:
+                        logger.info(
+                            "Deferring configuration reload until active responses finish",
+                            active_response_count=active_response_count,
+                        )
+                        waiting_for_idle = True
+                        drain_wait_started_at = now
+                        last_drain_warning_at = None
+                    elif (
+                        drain_wait_started_at is not None
+                        and now - drain_wait_started_at >= _CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS
+                        and (
+                            last_drain_warning_at is None
+                            or now - last_drain_warning_at >= _CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS
+                        )
+                    ):
+                        logger.warning(
+                            "Configuration reload still waiting for active responses to finish",
+                            active_response_count=active_response_count,
+                            drain_wait_seconds=round(now - drain_wait_started_at, 1),
+                        )
+                        last_drain_warning_at = now
+                    if (
+                        drain_wait_started_at is not None
+                        and now - drain_wait_started_at >= _CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS
+                    ):
+                        logger.error(
+                            "Forcing configuration reload while responses are still active",
+                            active_response_count=active_response_count,
+                            drain_wait_seconds=round(now - drain_wait_started_at, 1),
+                            timeout_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
+                        )
+                        force_reload = True
+                    if not force_reload:
+                        await asyncio.sleep(_CONFIG_RELOAD_IDLE_POLL_SECONDS)
+                        continue
+
+                if waiting_for_idle and not force_reload:
+                    logger.info("Active responses finished; applying queued configuration reload")
+                if waiting_for_idle:
+                    waiting_for_idle = False
+                    drain_wait_started_at = None
+                    last_drain_warning_at = None
+
+                self._config_reload_requested_at = None
+                logger.info("Configuration file changed, checking for updates...")
+                try:
+                    updated = await self.update_config()
+                except Exception:
+                    logger.exception("Configuration update failed; will retry if a new change is queued")
+                    continue
+                if updated:
+                    logger.info("Configuration update applied to affected agents")
+                else:
+                    logger.info("No agent changes detected in configuration update")
+        finally:
+            if self._config_reload_task is current_task:
+                self._config_reload_task = None
 
     async def _refresh_knowledge_for_runtime(
         self,
@@ -896,6 +1015,7 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
+        await self._cancel_config_reload_task()
         await self._stop_memory_auto_flush_worker()
         await self._cancel_knowledge_refresh_task()
         await self._cancel_bot_start_tasks()
@@ -916,15 +1036,8 @@ class MultiAgentOrchestrator:
 
 async def _handle_config_change(orchestrator: MultiAgentOrchestrator) -> None:
     """Handle configuration file changes."""
-    logger.info("Configuration file changed, checking for updates...")
-    if orchestrator.running:
-        updated = await orchestrator.update_config()
-        if updated:
-            logger.info("Configuration update applied to affected agents")
-        else:
-            logger.info("No agent changes detected in configuration update")
-        return
-    logger.info("Ignoring config change while startup is still in progress")
+    logger.info("Configuration file changed; queueing hot reload")
+    orchestrator.request_config_reload()
 
 
 async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestrator) -> None:
