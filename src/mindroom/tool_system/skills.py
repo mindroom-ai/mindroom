@@ -20,6 +20,7 @@ from agno.skills.skill import Skill
 from mindroom.constants import runtime_env_values
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -105,9 +106,12 @@ def build_agent_skills(
     if not agent_config.skills:
         return None
 
-    roots = list(skill_roots or _get_default_skill_roots())
     loader = _MindroomSkillsLoader(
-        roots=roots,
+        roots=_resolve_agent_skill_roots(
+            runtime_paths,
+            agent_name,
+            skill_roots=skill_roots,
+        ),
         config=config,
         runtime_paths=runtime_paths,
         allowlist=agent_config.skills,
@@ -150,7 +154,16 @@ class _SkillListing:
     origin: str
 
 
-def resolve_skill_command_spec(  # noqa: C901
+@dataclass(frozen=True)
+class _ResolvedSkillFrontmatter:
+    """Normalized skill metadata parsed from SKILL.md."""
+
+    name: str
+    description: str
+    frontmatter: Mapping[str, Any]
+
+
+def resolve_skill_command_spec(
     skill_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -177,32 +190,29 @@ def resolve_skill_command_spec(  # noqa: C901
     config_data = config.model_dump()
 
     resolved: _SkillCommandSpec | None = None
-    roots = list(skill_roots or _get_default_skill_roots())
-    for root in _unique_paths(roots):
+    for root in _resolve_agent_skill_roots(
+        runtime_paths,
+        agent_name,
+        skill_roots=skill_roots,
+    ):
         for skill_dir in _iter_skill_dirs(root):
-            frontmatter = _read_skill_frontmatter(skill_dir / _SKILL_FILENAME)
-            if frontmatter is None:
+            resolved_frontmatter = _resolve_skill_frontmatter(
+                skill_dir,
+                allow_missing_frontmatter=True,
+            )
+            if resolved_frontmatter is None:
+                continue
+            if resolved_frontmatter.name.lower() != requested_name.lower():
                 continue
 
-            name = frontmatter.get("name", skill_dir.name)
-            description = frontmatter.get("description", "")
-            if not isinstance(name, str) or not name.strip():
-                logger.warning("Skill missing name", path=str(skill_dir))
-                continue
-            if not isinstance(description, str) or not description.strip():
-                logger.warning("Skill missing description", name=name, path=str(skill_dir))
-                continue
-
-            if name.strip().lower() != requested_name.lower():
-                continue
-
+            frontmatter = resolved_frontmatter.frontmatter
             metadata = _parse_metadata(frontmatter.get("metadata"), path=str(skill_dir))
             if metadata is None:
                 continue
 
             skill = Skill(
-                name=name.strip(),
-                description=description.strip(),
+                name=resolved_frontmatter.name,
+                description=resolved_frontmatter.description,
                 instructions="",
                 source_path=str(skill_dir),
                 metadata=metadata,
@@ -223,10 +233,10 @@ def resolve_skill_command_spec(  # noqa: C901
                 _get_frontmatter_value(frontmatter, "disable-model-invocation", "disable_model_invocation"),
                 default=False,
             )
-            dispatch = _parse_command_dispatch(frontmatter, name.strip(), skill_dir)
+            dispatch = _parse_command_dispatch(frontmatter, resolved_frontmatter.name, skill_dir)
             resolved = _SkillCommandSpec(
-                name=name.strip(),
-                description=description.strip(),
+                name=resolved_frontmatter.name,
+                description=resolved_frontmatter.description,
                 source_path=skill_dir,
                 user_invocable=user_invocable,
                 disable_model_invocation=disable_model_invocation,
@@ -267,6 +277,22 @@ def _get_default_skill_roots() -> list[Path]:
     return _unique_paths([_get_bundled_skills_dir(), *_PLUGIN_SKILL_ROOTS, get_user_skills_dir()])
 
 
+def _resolve_agent_skill_roots(
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    *,
+    skill_roots: Sequence[Path] | None = None,
+) -> list[Path]:
+    """Return skill roots for one agent while keeping explicit roots highest priority."""
+    roots = list(skill_roots) if skill_roots is not None else _get_default_skill_roots()
+    workspace_skills = agent_workspace_root_path(runtime_paths.storage_root, agent_name) / "skills"
+    if skill_roots is None:
+        roots.append(workspace_skills)
+    else:
+        roots.insert(0, workspace_skills)
+    return _unique_paths(roots)
+
+
 def list_skill_listings(roots: Sequence[Path] | None = None) -> list[_SkillListing]:
     """Return skill listings with precedence rules applied."""
     roots = list(roots or _get_default_skill_roots())
@@ -278,20 +304,16 @@ def list_skill_listings(roots: Sequence[Path] | None = None) -> list[_SkillListi
     for root in _unique_paths(roots):
         origin = _root_origin(root, bundled_root, user_root, plugin_roots)
         for skill_dir in _iter_skill_dirs(root):
-            frontmatter = _read_skill_frontmatter(skill_dir / _SKILL_FILENAME)
-            if frontmatter is None:
-                continue
-
-            name = frontmatter.get("name", skill_dir.name)
-            description = frontmatter.get("description", "")
-            if not isinstance(name, str) or not name.strip():
-                continue
-            if not isinstance(description, str) or not description.strip():
+            resolved_frontmatter = _resolve_skill_frontmatter(
+                skill_dir,
+                allow_missing_frontmatter=True,
+            )
+            if resolved_frontmatter is None:
                 continue
 
             listing = _SkillListing(
-                name=name.strip(),
-                description=description.strip(),
+                name=resolved_frontmatter.name,
+                description=resolved_frontmatter.description,
                 path=skill_dir / _SKILL_FILENAME,
                 origin=origin,
             )
@@ -368,7 +390,11 @@ def _iter_skill_dirs(root: Path) -> list[Path]:
     return sorted(skill_dirs)
 
 
-def _read_skill_frontmatter(skill_path: Path) -> dict[str, Any] | None:
+def _read_skill_frontmatter(
+    skill_path: Path,
+    *,
+    allow_missing: bool = False,
+) -> dict[str, Any] | None:
     try:
         content = skill_path.read_text(encoding="utf-8")
     except Exception as exc:
@@ -377,6 +403,8 @@ def _read_skill_frontmatter(skill_path: Path) -> dict[str, Any] | None:
 
     match = _FRONTMATTER_PATTERN.match(content)
     if not match:
+        if allow_missing:
+            return {}
         logger.warning("Skill missing frontmatter", path=str(skill_path))
         return None
 
@@ -392,6 +420,50 @@ def _read_skill_frontmatter(skill_path: Path) -> dict[str, Any] | None:
         return None
 
     return frontmatter
+
+
+def _normalize_skill_identity(
+    name: object,
+    description: object,
+    *,
+    path: str,
+) -> tuple[str, str] | None:
+    if not isinstance(name, str) or not name.strip():
+        logger.warning("Skill missing name", path=path)
+        return None
+
+    normalized_name = name.strip()
+    if not isinstance(description, str) or not description.strip():
+        return normalized_name, normalized_name
+    return normalized_name, description.strip()
+
+
+def _resolve_skill_frontmatter(
+    skill_dir: Path,
+    *,
+    allow_missing_frontmatter: bool = False,
+) -> _ResolvedSkillFrontmatter | None:
+    frontmatter = _read_skill_frontmatter(
+        skill_dir / _SKILL_FILENAME,
+        allow_missing=allow_missing_frontmatter,
+    )
+    if frontmatter is None:
+        return None
+
+    normalized = _normalize_skill_identity(
+        frontmatter.get("name", skill_dir.name),
+        frontmatter.get("description", ""),
+        path=str(skill_dir),
+    )
+    if normalized is None:
+        return None
+
+    name, description = normalized
+    return _ResolvedSkillFrontmatter(
+        name=name,
+        description=description,
+        frontmatter=frontmatter,
+    )
 
 
 def _get_frontmatter_value(frontmatter: Mapping[str, object], *keys: str) -> object | None:
@@ -473,15 +545,15 @@ def _load_root_skills(root: Path) -> list[Skill]:
 
 
 def _normalize_skill(skill: Skill) -> Skill | None:
-    if not isinstance(skill.name, str) or not skill.name.strip():
-        logger.warning("Skill missing name", path=str(skill.source_path))
-        return None
-    if not isinstance(skill.description, str) or not skill.description.strip():
-        logger.warning("Skill missing description", name=skill.name, path=str(skill.source_path))
+    normalized = _normalize_skill_identity(
+        skill.name,
+        skill.description,
+        path=str(skill.source_path),
+    )
+    if normalized is None:
         return None
 
-    skill.name = skill.name.strip()
-    skill.description = skill.description.strip()
+    skill.name, skill.description = normalized
 
     metadata = _parse_metadata(skill.metadata, path=skill.source_path)
     if metadata is None:

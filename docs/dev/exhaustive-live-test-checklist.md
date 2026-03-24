@@ -393,7 +393,7 @@ Expected outcome: Dirty-session reprioritization and later flushes stay isolated
 
 Source anchors: `src/mindroom/tool_system/skills.py`, `src/mindroom/tool_system/plugins.py`, `src/mindroom/tool_system/runtime_context.py`, `src/mindroom/tool_system/sandbox_proxy.py`, `src/mindroom/tool_system/dependencies.py`, `src/mindroom/tool_system/metadata.py`, `src/mindroom/api/tools.py`, `src/mindroom/api/skills.py`, `src/mindroom/api/workers.py`, `src/mindroom/api/sandbox_runner.py`.
 
-- [ ] `TOOL-001` Load a skill from a bundled skill location, a plugin skill directory, and a user skill directory.
+- [ ] `TOOL-001` Load a skill from a bundled skill location, a plugin skill directory, a user skill directory, and an agent workspace `workspace/skills/` directory.
 Expected outcome: Skill precedence, allowlisting, and eligibility gating all match the implemented load order and rules.
 
 - [ ] `TOOL-002` Edit a `SKILL.md` file while the runtime is active.

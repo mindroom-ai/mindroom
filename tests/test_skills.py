@@ -944,3 +944,195 @@ async def test_skill_command_tool_dispatch_loads_worker_scoped_config_field_cred
         TOOL_METADATA.update(original_metadata)
 
     assert result == "worker-key:skill:dispatch:hello"
+
+
+def test_workspace_skills_dir_discovered(tmp_path: Path) -> None:
+    """Skills in the agent workspace skills/ dir should be discovered."""
+    storage = tmp_path / "storage"
+    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_skills.mkdir(parents=True)
+    _write_skill(workspace_skills, "ws-skill", "Workspace skill")
+
+    config = _base_config(["ws-skill"])
+    skills = build_agent_skills(
+        "code",
+        config,
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "empty"],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(skills) == ["ws-skill"]
+
+
+def test_workspace_skills_reload_after_dir_created_late(tmp_path: Path) -> None:
+    """Reload should discover workspace skills created after agent startup."""
+    storage = tmp_path / "storage"
+    config = _base_config(["later"])
+    skills = build_agent_skills(
+        "code",
+        config,
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "empty"],
+        env_vars={},
+        credential_keys=set(),
+    )
+
+    assert skills is not None
+    assert _skill_names(skills) == []
+
+    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_skills.mkdir(parents=True)
+    _write_skill(workspace_skills, "later", "Later workspace skill")
+
+    skills.reload()
+
+    assert _skill_names(skills) == ["later"]
+
+
+def test_workspace_skills_do_not_override_explicit_roots(tmp_path: Path) -> None:
+    """Explicit skill roots should win over workspace duplicates."""
+    explicit_root = tmp_path / "explicit"
+    explicit_root.mkdir()
+    _write_skill(explicit_root, "alpha", "Explicit alpha")
+
+    storage = tmp_path / "storage"
+    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_skills.mkdir(parents=True)
+    _write_skill(workspace_skills, "alpha", "Workspace alpha")
+
+    config = _base_config(["alpha"])
+    skills = build_agent_skills(
+        "code",
+        config,
+        _runtime_paths(storage),
+        skill_roots=[explicit_root],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert skills is not None
+    assert _skill_names(skills) == ["alpha"]
+    assert skills.get_skill("alpha").description == "Explicit alpha"
+
+    spec = resolve_skill_command_spec(
+        "alpha",
+        config,
+        _runtime_paths(storage),
+        "code",
+        skill_roots=[explicit_root],
+        env_vars={},
+        credential_keys=set(),
+    )
+
+    assert spec is not None
+    assert spec.description == "Explicit alpha"
+    assert spec.source_path == explicit_root / "alpha"
+
+
+def test_workspace_skill_command_spec_is_discovered(tmp_path: Path) -> None:
+    """Skill command resolution should discover workspace-only skills."""
+    storage = tmp_path / "storage"
+    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_skills.mkdir(parents=True)
+    _write_skill(workspace_skills, "ws-skill", "Workspace skill")
+
+    config = _base_config(["ws-skill"])
+    spec = resolve_skill_command_spec(
+        "ws-skill",
+        config,
+        _runtime_paths(storage),
+        "code",
+        skill_roots=[tmp_path / "empty"],
+        env_vars={},
+        credential_keys=set(),
+    )
+
+    assert spec is not None
+    assert spec.description == "Workspace skill"
+    assert spec.source_path == workspace_skills / "ws-skill"
+
+
+def test_skill_listings_use_name_fallback_for_missing_description(tmp_path: Path) -> None:
+    """Skills missing description should still appear in listings."""
+    skill_dir = tmp_path / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\n\n# Body\n", encoding="utf-8")
+
+    listings = skills_module.list_skill_listings([tmp_path])
+
+    assert [(listing.name, listing.description) for listing in listings] == [("alpha", "alpha")]
+    listing = skills_module.resolve_skill_listing("alpha", [tmp_path])
+    assert listing is not None
+    assert listing.description == "alpha"
+
+
+def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(tmp_path: Path) -> None:
+    """Skills without YAML frontmatter should still resolve consistently."""
+    skill_dir = tmp_path / "mindroom-dev"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# MindRoom Dev\n\nJust markdown, no frontmatter.\n")
+
+    config = _base_config(["mindroom-dev"])
+    skills = build_agent_skills(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        skill_roots=[tmp_path],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(skills) == ["mindroom-dev"]
+    skill = skills.get_skill("mindroom-dev")
+    assert skill.description == "mindroom-dev"
+
+    spec = resolve_skill_command_spec(
+        "mindroom-dev",
+        config,
+        _runtime_paths(tmp_path),
+        "code",
+        skill_roots=[tmp_path],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert spec is not None
+    assert spec.description == "mindroom-dev"
+    assert spec.user_invocable is True
+    assert spec.disable_model_invocation is False
+    assert spec.dispatch is None
+
+    listing = skills_module.resolve_skill_listing("mindroom-dev", [tmp_path])
+    assert listing is not None
+    assert listing.description == "mindroom-dev"
+
+
+def test_skill_with_mindroom_prefix_loads(tmp_path: Path) -> None:
+    """Skills with 'mindroom' in the name should load without issues."""
+    _write_skill(tmp_path, "mindroom-helper", "MindRoom helper skill")
+
+    config = _base_config(["mindroom-helper"])
+    skills = build_agent_skills(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        skill_roots=[tmp_path],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(skills) == ["mindroom-helper"]
+
+
+def test_skill_with_empty_scripts_dir_loads(tmp_path: Path) -> None:
+    """Skills with an empty scripts/ directory should load fine."""
+    _write_skill(tmp_path, "empty-scripts", "Has empty scripts dir")
+    (tmp_path / "empty-scripts" / "scripts").mkdir()
+
+    config = _base_config(["empty-scripts"])
+    skills = build_agent_skills(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        skill_roots=[tmp_path],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(skills) == ["empty-scripts"]
