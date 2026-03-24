@@ -22,6 +22,7 @@ from mindroom.scheduling import (
     get_scheduled_tasks_for_room,
     list_scheduled_tasks,
     save_edited_scheduled_task,
+    schedule_task,
 )
 
 
@@ -79,6 +80,25 @@ async def test_list_scheduled_tasks_real_implementation() -> None:
         room_id="!test:server",
     )
 
+    workflow4 = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(hours=2),
+        message="Room-level current-scope task",
+        description="Room-level task",
+        thread_id=None,
+        room_id="!test:server",
+    )
+
+    workflow5 = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(hours=3),
+        message="Future room-level thread root",
+        description="New thread task",
+        thread_id=None,
+        room_id="!test:server",
+        new_thread=True,
+    )
+
     # Create a proper RoomGetStateResponse with scheduled tasks
     mock_response = nio.RoomGetStateResponse.from_dict(
         [
@@ -119,11 +139,33 @@ async def test_list_scheduled_tasks_real_implementation() -> None:
                 "type": "com.mindroom.scheduled.task",
                 "state_key": "task4",
                 "content": {
-                    "status": "completed",  # This one is completed, should not appear
+                    "workflow": workflow4.model_dump_json(),
+                    "status": "pending",
                 },
                 "event_id": "$state_task4",
                 "sender": "@system:server",
                 "origin_server_ts": 1234567893,
+            },
+            {
+                "type": "com.mindroom.scheduled.task",
+                "state_key": "task5",
+                "content": {
+                    "workflow": workflow5.model_dump_json(),
+                    "status": "pending",
+                },
+                "event_id": "$state_task5",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567894,
+            },
+            {
+                "type": "com.mindroom.scheduled.task",
+                "state_key": "task6",
+                "content": {
+                    "status": "completed",  # This one is completed, should not appear
+                },
+                "event_id": "$state_task6",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567895,
             },
         ],
         room_id="!test:server",
@@ -134,27 +176,37 @@ async def test_list_scheduled_tasks_real_implementation() -> None:
     # Test listing tasks for thread123
     result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123", config=None)
 
-    # Should show 2 tasks from thread123, not task2 (different thread) or task4 (completed)
+    current_section, _, new_thread_section = result.partition("**New Room-Level Thread Roots:**")
+
+    # Should show thread123 tasks plus room-level current-scope tasks, but not new_thread tasks in the main section.
     assert "**Scheduled Tasks:**" in result
-    assert "task1" in result
-    assert "Test task 1" in result
-    assert "Test message 1" in result
-    assert "task3" in result
-    assert "Test task 3" in result
-    assert "Test message 3" in result
-    assert "task2" not in result  # Different thread
-    assert "task4" not in result  # Completed
+    assert "task1" in current_section
+    assert "Test task 1" in current_section
+    assert "Test message 1" in current_section
+    assert "task3" in current_section
+    assert "Test task 3" in current_section
+    assert "Test message 3" in current_section
+    assert "task4" in current_section
+    assert "Room-level task" in current_section
+    assert "task2" not in current_section  # Different thread
+    assert "task5" not in current_section  # New-thread task is listed separately
+    assert "task6" not in result  # Completed
+    assert "task5" in new_thread_section
+    assert "New thread task" in new_thread_section
+    assert "1 task(s) scheduled in other threads" in result
 
     # Test listing tasks for thread456
     result2 = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread456", config=None)
+    current_section2, _, new_thread_section2 = result2.partition("**New Room-Level Thread Roots:**")
 
-    # Should only show task2
     assert "**Scheduled Tasks:**" in result2
-    assert "task2" in result2
-    assert "Test task 2" in result2
-    assert "Test message 2" in result2
-    assert "task1" not in result2
-    assert "task3" not in result2
+    assert "task2" in current_section2
+    assert "Test task 2" in current_section2
+    assert "Test message 2" in current_section2
+    assert "task4" in current_section2
+    assert "task1" not in current_section2
+    assert "task3" not in current_section2
+    assert "task5" in new_thread_section2
 
 
 @pytest.mark.asyncio
@@ -636,10 +688,56 @@ async def test_edit_scheduled_task_reuses_existing_thread() -> None:
     assert call_kwargs["full_text"] == "tomorrow at 9am updated task"
     assert call_kwargs["config"] is config
     assert call_kwargs["room"] is room
+    assert call_kwargs["new_thread"] is False
     assert call_kwargs["task_id"] == "task123"
     assert call_kwargs["restart_task"] is False
     assert call_kwargs["existing_task"].task_id == "task123"
     assert call_kwargs["existing_task"].workflow.thread_id == "$original_thread"
+
+
+@pytest.mark.asyncio
+async def test_edit_scheduled_task_preserves_new_thread_mode() -> None:
+    """Editing a new-thread schedule should not repopulate thread_id from the editor context."""
+    client = AsyncMock()
+    room = MagicMock()
+    config = MagicMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="Initial message",
+        description="Initial task",
+        thread_id=None,
+        room_id="!test:server",
+        new_thread=True,
+    )
+    state_response = nio.RoomGetStateEventResponse(
+        content={"status": "pending", "workflow": workflow.model_dump_json()},
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
+        state_key="task123",
+        room_id="!test:server",
+    )
+    client.room_get_state_event = AsyncMock(return_value=state_response)
+
+    with patch(
+        "mindroom.scheduling.schedule_task",
+        new=AsyncMock(return_value=("task123", "✅ Scheduled")),
+    ) as mock_schedule:
+        result = await edit_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="task123",
+            full_text="tomorrow at 9am updated task",
+            scheduled_by="@user:server",
+            config=config,
+            runtime_paths=_runtime_paths(),
+            room=room,
+            thread_id="$fallback_thread",
+        )
+
+    assert "✅ Updated task `task123`." in result
+    call_kwargs = mock_schedule.await_args.kwargs
+    assert call_kwargs["thread_id"] is None
+    assert call_kwargs["new_thread"] is True
 
 
 @pytest.mark.asyncio
@@ -756,3 +854,68 @@ async def test_save_edited_scheduled_task_rejects_schedule_type_change() -> None
         )
 
     client.room_put_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_schedule_task_returns_error_when_sender_blocked_from_all_agents() -> None:
+    """Scheduling should return a user-facing error when no agents are visible to the sender."""
+    client = AsyncMock()
+    room = MagicMock()
+    config = MagicMock()
+
+    with (
+        patch(
+            "mindroom.scheduling.get_available_agents_for_sender",
+            return_value=[],
+        ),
+        patch(
+            "mindroom.scheduling._extract_mentioned_agents_from_text",
+            return_value=[],
+        ),
+    ):
+        task_id, message = await schedule_task(
+            client=client,
+            room_id="!test:server",
+            thread_id=None,
+            scheduled_by="@blocked:server",
+            full_text="remind me in 5 minutes to check logs",
+            config=config,
+            runtime_paths=_runtime_paths(),
+            room=room,
+        )
+
+    assert task_id is None
+    assert "No agents" in message
+
+
+@pytest.mark.asyncio
+async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
+    """new_thread mode should also return a clean error when the sender has no visible agents."""
+    client = AsyncMock()
+    room = MagicMock()
+    config = MagicMock()
+
+    with (
+        patch(
+            "mindroom.scheduling.get_available_agents_for_sender",
+            return_value=[],
+        ),
+        patch(
+            "mindroom.scheduling._extract_mentioned_agents_from_text",
+            return_value=[],
+        ),
+    ):
+        task_id, message = await schedule_task(
+            client=client,
+            room_id="!test:server",
+            thread_id=None,
+            scheduled_by="@blocked:server",
+            full_text="remind me in 5 minutes",
+            config=config,
+            runtime_paths=_runtime_paths(),
+            room=room,
+            new_thread=True,
+        )
+
+    assert task_id is None
+    assert "No agents" in message

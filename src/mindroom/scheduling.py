@@ -19,7 +19,7 @@ from croniter import croniter
 from pydantic import BaseModel, Field
 
 from mindroom.ai import get_model_instance
-from mindroom.authorization import get_available_agents_in_room
+from mindroom.authorization import get_available_agents_for_sender
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
@@ -99,6 +99,7 @@ class ScheduledWorkflow(BaseModel):
     created_by: str | None = None
     thread_id: str | None = None
     room_id: str | None = None
+    new_thread: bool = False
 
 
 class _WorkflowParseError(BaseModel):
@@ -556,26 +557,44 @@ async def _execute_scheduled_workflow(
         return
 
     try:
-        automated_message = (
-            f"⏰ [Automated Task]\n{workflow.message}\n\n_Note: Automated task - no follow-up expected._"
-        )
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            client,
-            workflow.room_id,
-            workflow.thread_id,
-        )
-        content = format_message_with_mentions(
-            config,
-            runtime_paths,
-            automated_message,
-            sender_domain=config.get_domain(runtime_paths),
-            thread_event_id=workflow.thread_id,
-            latest_thread_event_id=latest_thread_event_id,
-        )
+        if workflow.new_thread:
+            content = format_message_with_mentions(
+                config,
+                runtime_paths,
+                workflow.message,
+                sender_domain=config.get_domain(runtime_paths),
+                thread_event_id=None,
+            )
+        else:
+            automated_message = (
+                f"⏰ [Automated Task]\n{workflow.message}\n\n_Note: Automated task - no follow-up expected._"
+            )
+            latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+                client,
+                workflow.room_id,
+                workflow.thread_id,
+            )
+            content = format_message_with_mentions(
+                config,
+                runtime_paths,
+                automated_message,
+                sender_domain=config.get_domain(runtime_paths),
+                thread_event_id=workflow.thread_id,
+                latest_thread_event_id=latest_thread_event_id,
+            )
         if workflow.created_by:
             content[ORIGINAL_SENDER_KEY] = workflow.created_by
-        await send_message(client, workflow.room_id, content)
-        logger.info("Executed scheduled workflow", description=workflow.description, thread_id=workflow.thread_id)
+        event_id = await send_message(client, workflow.room_id, content)
+        if event_id is None:
+            msg = "Failed to send scheduled workflow message to Matrix"
+            raise RuntimeError(msg)
+        logger.info(
+            "Executed scheduled workflow",
+            description=workflow.description,
+            thread_id=workflow.thread_id,
+            new_thread=workflow.new_thread,
+            event_id=event_id,
+        )
     except Exception as e:
         logger.exception("Failed to execute scheduled workflow")
         if workflow.room_id:
@@ -752,7 +771,7 @@ async def _run_once_task(  # noqa: C901
 
 async def _validate_agent_mentions(
     message: str,
-    room: nio.MatrixRoom,
+    allowed_agents: list[MatrixID],
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _AgentValidationResult:
@@ -760,7 +779,7 @@ async def _validate_agent_mentions(
 
     Args:
         message: The message that may contain @agent mentions
-        room: The Matrix room object
+        allowed_agents: Agents the sender may target in this room
         config: Application configuration
         runtime_paths: Explicit runtime context for mention resolution
 
@@ -775,9 +794,8 @@ async def _validate_agent_mentions(
     valid_agents: list[MatrixID] = []
     invalid_agents: list[MatrixID] = []
 
-    room_agents = get_available_agents_in_room(room, config, runtime_paths)
     for mid in mentioned_agents:
-        if mid in room_agents:
+        if mid in allowed_agents:
             valid_agents.append(mid)
         else:
             invalid_agents.append(mid)
@@ -835,7 +853,7 @@ def _extract_mentioned_agents_from_text(
     return mentioned_agents
 
 
-async def schedule_task(  # noqa: C901, PLR0912, PLR0915
+async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str | None,
@@ -844,6 +862,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     config: Config,
     runtime_paths: RuntimePaths,
     room: nio.MatrixRoom,
+    new_thread: bool = False,
     mentioned_agents: list[MatrixID] | None = None,
     task_id: str | None = None,
     existing_task: ScheduledTaskRecord | None = None,
@@ -858,22 +877,27 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     if mentioned_agents is None:
         mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
 
-    # Get agents that are available in the thread
+    sender_visible_room_agents = get_available_agents_for_sender(room, scheduled_by, config, runtime_paths)
+
     available_agents: list[MatrixID] = []
-    if thread_id:
-        # Get agents already participating in the thread
-        thread_history = await fetch_thread_history(client, room_id, thread_id)
-        available_agents = get_agents_in_thread(thread_history, config, runtime_paths)
+    if new_thread:
+        available_agents = list(sender_visible_room_agents)
+    else:
+        if thread_id:
+            thread_history = await fetch_thread_history(client, room_id, thread_id)
+            thread_agents = get_agents_in_thread(thread_history, config, runtime_paths)
+            available_agents = [agent for agent in thread_agents if agent in sender_visible_room_agents]
 
-    # Add any agents mentioned in the command itself
-    if mentioned_agents:
-        for mid in mentioned_agents:
-            if mid not in available_agents:
-                available_agents.append(mid)
+        if mentioned_agents:
+            for mid in mentioned_agents:
+                if mid not in available_agents and mid in sender_visible_room_agents:
+                    available_agents.append(mid)
 
-    # If no agents found in thread or mentions, fall back to agents in the room
+        if not available_agents:
+            available_agents = list(sender_visible_room_agents)
+
     if not available_agents:
-        available_agents = get_available_agents_in_room(room, config, runtime_paths)
+        return (None, "❌ No agents in this room are allowed to reply to you.")
 
     # Parse the workflow request with available agents
     workflow_result = await _parse_workflow_schedule(full_text, config, runtime_paths, available_agents)
@@ -892,14 +916,17 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         return (None, "❌ Failed to schedule: Recurring task missing cron schedule")
 
     # Validate that all mentioned agents are accessible
-    validation_result = await _validate_agent_mentions(workflow_result.message, room, config, runtime_paths)
+    validation_result = await _validate_agent_mentions(
+        workflow_result.message,
+        sender_visible_room_agents,
+        config,
+        runtime_paths,
+    )
 
     if not validation_result.all_valid:
+        scope = "room" if new_thread or not thread_id else "thread"
         error_msg = "❌ Failed to schedule: The following agents are not available in this "
-        if thread_id:
-            error_msg += "thread"
-        else:
-            error_msg += "room"
+        error_msg += scope
         error_msg += f": {', '.join(agent.full_id for agent in validation_result.invalid_agents)}"
 
         # Provide helpful suggestions
@@ -908,7 +935,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
             agent_name = agent.agent_name(config, runtime_paths)
             if agent_name:
                 # Agent exists but not available in this room/thread
-                suggestions.append(f"{agent.full_id} is not available in this {'thread' if thread_id else 'room'}")
+                suggestions.append(f"{agent.full_id} is not available in this {scope}")
             else:
                 suggestions.append(f"{agent.full_id} does not exist")
 
@@ -919,8 +946,9 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
 
     # Add metadata to workflow
     workflow_result.created_by = scheduled_by
-    workflow_result.thread_id = thread_id
+    workflow_result.thread_id = None if new_thread else thread_id
     workflow_result.room_id = room_id
+    workflow_result.new_thread = new_thread
 
     # Create task ID for new tasks (or reuse existing ID when editing)
     task_id = task_id or (existing_task.task_id if existing_task else str(uuid.uuid4())[:8])
@@ -929,7 +957,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         "Storing workflow task in Matrix state",
         task_id=task_id,
         room_id=room_id,
-        thread_id=thread_id,
+        thread_id=workflow_result.thread_id,
+        new_thread=new_thread,
         schedule_type=workflow_result.schedule_type,
     )
 
@@ -976,6 +1005,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
 
     success_msg += f"\n**Task:** {workflow_result.description}\n"
     success_msg += f"**Will post:** {workflow_result.message}\n"
+    if new_thread:
+        success_msg += "**Delivery:** New room-level thread root\n"
     success_msg += f"\n**Task ID:** `{task_id}`"
 
     return (task_id, success_msg)
@@ -999,8 +1030,8 @@ async def edit_scheduled_task(
     if existing_task.status != "pending":
         return f"❌ Task `{task_id}` cannot be edited because it is `{existing_task.status}`."
 
-    # Keep the task in its original thread when possible.
-    target_thread_id = existing_task.workflow.thread_id or thread_id
+    target_new_thread = existing_task.workflow.new_thread
+    target_thread_id = None if target_new_thread else existing_task.workflow.thread_id or thread_id
 
     edited_task_id, response_text = await schedule_task(
         client=client,
@@ -1011,6 +1042,7 @@ async def edit_scheduled_task(
         config=config,
         runtime_paths=runtime_paths,
         room=room,
+        new_thread=target_new_thread,
         task_id=task_id,
         existing_task=existing_task,
         restart_task=False,
@@ -1022,7 +1054,7 @@ async def edit_scheduled_task(
     return f"✅ Updated task `{task_id}`.\n\n{response_text}"
 
 
-async def list_scheduled_tasks(
+async def list_scheduled_tasks(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str | None = None,
@@ -1039,17 +1071,23 @@ async def list_scheduled_tasks(
 
     tasks: list[ScheduledTaskRecord] = []
     tasks_in_other_threads: list[ScheduledTaskRecord] = []
+    new_thread_tasks: list[ScheduledTaskRecord] = []
 
     for record in task_records:
-        if thread_id and record.workflow.thread_id and record.workflow.thread_id != thread_id:
-            tasks_in_other_threads.append(record)
+        if thread_id:
+            if record.workflow.new_thread:
+                new_thread_tasks.append(record)
+            elif record.workflow.thread_id and record.workflow.thread_id != thread_id:
+                tasks_in_other_threads.append(record)
+            else:
+                tasks.append(record)
         else:
             tasks.append(record)
 
-    if not tasks and not tasks_in_other_threads:
+    if not tasks and not tasks_in_other_threads and not new_thread_tasks:
         return "No scheduled tasks found."
 
-    if not tasks and tasks_in_other_threads:
+    if not tasks and tasks_in_other_threads and not new_thread_tasks:
         return f"No scheduled tasks in this thread.\n\n📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use !list_schedules in those threads to see details."
 
     # Sort by execution time (one-time tasks) or put recurring tasks at the end
@@ -1058,20 +1096,38 @@ async def list_scheduled_tasks(
         return (t is None, t or datetime.max.replace(tzinfo=UTC))
 
     tasks.sort(key=_sort_key)
+    new_thread_tasks.sort(key=_sort_key)
 
-    lines = ["**Scheduled Tasks:**"]
-    for record in tasks:
-        workflow = record.workflow
-        if workflow.schedule_type == "once" and workflow.execute_at:
-            timezone = config.timezone if config else "UTC"
-            time_str = _format_scheduled_time(workflow.execute_at, timezone)
-        else:
-            time_str = workflow.cron_schedule.to_natural_language() if workflow.cron_schedule else "recurring"
+    def _append_task_lines(lines: list[str], records: list[ScheduledTaskRecord]) -> None:
+        for record in records:
+            workflow = record.workflow
+            if workflow.schedule_type == "once" and workflow.execute_at:
+                timezone = config.timezone if config else "UTC"
+                time_str = _format_scheduled_time(workflow.execute_at, timezone)
+            else:
+                time_str = workflow.cron_schedule.to_natural_language() if workflow.cron_schedule else "recurring"
 
-        msg_preview = workflow.message[:_MESSAGE_PREVIEW_LENGTH] + (
-            "..." if len(workflow.message) > _MESSAGE_PREVIEW_LENGTH else ""
+            msg_preview = workflow.message[:_MESSAGE_PREVIEW_LENGTH] + (
+                "..." if len(workflow.message) > _MESSAGE_PREVIEW_LENGTH else ""
+            )
+            lines.append(f'• `{record.task_id}` - {time_str}\n  {workflow.description}\n  Message: "{msg_preview}"')
+
+    if tasks:
+        lines = ["**Scheduled Tasks:**"]
+        _append_task_lines(lines, tasks)
+    else:
+        lines = ["No scheduled tasks in this thread."]
+
+    if new_thread_tasks:
+        lines.append("")
+        lines.append("**New Room-Level Thread Roots:**")
+        _append_task_lines(lines, new_thread_tasks)
+
+    if tasks_in_other_threads:
+        lines.append("")
+        lines.append(
+            f"📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use !list_schedules in those threads to see details.",
         )
-        lines.append(f'• `{record.task_id}` - {time_str}\n  {workflow.description}\n  Message: "{msg_preview}"')
 
     return "\n".join(lines)
 
