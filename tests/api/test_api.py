@@ -240,6 +240,45 @@ def test_api_lifespan_syncs_env_credentials_on_startup(
     assert watch_calls == ["watch"]
 
 
+def test_api_lifespan_shuts_down_primary_worker_manager(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """API shutdown should run the primary worker-manager shutdown hook."""
+    shutdown_calls: list[float] = []
+    main.initialize_api_app(
+        main.app,
+        constants.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        ),
+    )
+
+    async def _fake_watch_config(
+        stop_event: asyncio.Event,
+        _app: FastAPI,
+        _runtime_paths: constants.RuntimePaths,
+    ) -> None:
+        await stop_event.wait()
+
+    def _fake_sync_env_to_credentials(*, runtime_paths: constants.RuntimePaths) -> None:
+        _ = runtime_paths
+
+    monkeypatch.setattr(main, "sync_env_to_credentials", _fake_sync_env_to_credentials)
+    monkeypatch.setattr(main, "_watch_config", _fake_watch_config)
+    monkeypatch.setattr(
+        main,
+        "shutdown_primary_worker_manager",
+        lambda *, timeout_seconds=5.0: shutdown_calls.append(timeout_seconds),
+    )
+
+    with TestClient(main.app) as client:
+        assert client.get("/api/health").status_code == 200
+
+    assert shutdown_calls == [5.0]
+
+
 def test_exported_api_app_has_initialized_runtime_paths() -> None:
     """The exported module app should be runnable without separate initialization."""
     assert isinstance(main._app_runtime_paths(main.app), constants.RuntimePaths)
@@ -493,8 +532,15 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
                 ),
             ]
 
+    class _FakeLease:
+        def __enter__(self) -> _FakeWorkerManager:
+            return _FakeWorkerManager()
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
     monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(main, "get_primary_worker_manager", lambda *_args, **_kwargs: _FakeWorkerManager())
+    monkeypatch.setattr(main, "lease_primary_worker_manager", lambda *_args, **_kwargs: _FakeLease())
 
     assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 1
 
@@ -519,11 +565,18 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
                 ),
             ]
 
+    class _FakeLease:
+        def __enter__(self) -> _FakeWorkerManager:
+            return _FakeWorkerManager()
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
     monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         workers_api,
-        "get_primary_worker_manager",
-        lambda *_args, **_kwargs: _FakeWorkerManager(),
+        "lease_primary_worker_manager",
+        lambda *_args, **_kwargs: _FakeLease(),
     )
 
     response = test_client.get("/api/workers")
@@ -553,11 +606,18 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
                 ),
             ]
 
+    class _FakeLease:
+        def __enter__(self) -> _FakeWorkerManager:
+            return _FakeWorkerManager()
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
     monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         workers_api,
-        "get_primary_worker_manager",
-        lambda *_args, **_kwargs: _FakeWorkerManager(),
+        "lease_primary_worker_manager",
+        lambda *_args, **_kwargs: _FakeLease(),
     )
 
     response = test_client.post("/api/workers/cleanup")

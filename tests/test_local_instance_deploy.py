@@ -252,6 +252,61 @@ def test_compose_loads_shared_env_before_instance_env() -> None:
     ]
 
 
+def test_compose_builds_from_repo_root() -> None:
+    """Local compose builds must use the repo root so Dockerfile copies resolve."""
+    compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
+
+    assert compose["services"]["mindroom"]["build"] == {
+        "context": "../../..",
+        "dockerfile": "local/instances/deploy/Dockerfile.mindroom",
+    }
+    assert compose["services"]["sandbox-runner"]["build"] == {
+        "context": "../../..",
+        "dockerfile": "local/instances/deploy/Dockerfile.mindroom",
+    }
+
+
+def test_matrix_compose_files_publish_localhost_ports() -> None:
+    """Matrix overlays should publish the allocated host port described by the CLI and docs."""
+    tuwunel_compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.tuwunel.yml").read_text())
+    synapse_compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.synapse.yml").read_text())
+
+    assert tuwunel_compose["services"]["tuwunel"]["ports"] == ["${MATRIX_PORT:-8448}:6167"]
+    assert synapse_compose["services"]["synapse"]["ports"] == ["${MATRIX_PORT:-8448}:8008"]
+
+
+def test_copy_config_to_instance_uses_repo_root_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Instance config seeding should read the repo-root config file."""
+    instance = _instance("alpha", matrix_type=None, data_root=tmp_path)
+    target_config = Path(instance.data_dir) / "config" / "config.yaml"
+    target_config.parent.mkdir(parents=True)
+    repo_root = tmp_path / "repo-root"
+    repo_root.mkdir()
+    (repo_root / "config.yaml").write_text("models: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    monkeypatch.setattr(deploy, "REPO_ROOT", repo_root)
+
+    deploy._copy_config_to_instance(instance)
+
+    assert target_config.read_text(encoding="utf-8") == "models: {}\nrouter:\n  model: default\n"
+
+
+def test_setup_tuwunel_directory_preserves_matching_server_name(
+    tmp_path: Path,
+) -> None:
+    """Matching MATRIX_SERVER_NAME values must not wipe an existing Tuwunel database."""
+    instance = _instance("alpha", matrix_type=deploy.MatrixType.TUWUNEL, data_root=tmp_path)
+    tuwunel_dir = Path(instance.data_dir) / "tuwunel"
+    tuwunel_dir.mkdir(parents=True)
+    marker = tuwunel_dir / "db.sqlite"
+    marker.write_text("existing", encoding="utf-8")
+    env_file = tmp_path / "alpha.env"
+    env_file.write_text("MATRIX_SERVER_NAME=m-alpha.localhost\n", encoding="utf-8")
+
+    deploy._setup_tuwunel_directory(instance, env_file)
+
+    assert marker.exists()
+
+
 def test_remove_instance_preserves_state_when_teardown_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

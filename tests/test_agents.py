@@ -16,7 +16,7 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 from pydantic import ValidationError
 
 from mindroom import agent_prompts
-from mindroom.agents import _CULTURE_MANAGER_CACHE, _PRIVATE_CULTURE_MANAGER_CACHE, create_agent
+from mindroom.agents import _CULTURE_MANAGER_CACHE, _PRIVATE_CULTURE_MANAGER_CACHE, _load_context_files, create_agent
 from mindroom.config.agent import (
     AgentConfig,
     AgentPrivateConfig,
@@ -1445,6 +1445,34 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     assert "Updated canonical soul context." not in deleted_agent.role
 
 
+def test_load_context_files_prefers_projected_assets_over_workspace_shadows(
+    tmp_path: Path,
+) -> None:
+    """Projected worker assets should stay authoritative even if writable workspace state shadows the same path."""
+    storage_path = tmp_path / "storage"
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(storage_path, config_path=config_path)
+    workspace_context = agent_workspace_root_path(storage_path, "general") / ".mindroom-worker-assets" / "note.md"
+    workspace_context.parent.mkdir(parents=True, exist_ok=True)
+    workspace_context.write_text("workspace\n", encoding="utf-8")
+    projected_context = config_dir / ".mindroom-worker-assets" / "note.md"
+    projected_context.parent.mkdir(parents=True, exist_ok=True)
+    projected_context.write_text("config\n", encoding="utf-8")
+
+    loaded = _load_context_files(
+        [".mindroom-worker-assets/note.md"],
+        runtime_paths,
+        agent_name="general",
+        storage_path=storage_path,
+    )
+
+    assert len(loaded) == 1
+    assert loaded[0].body == "config"
+
+
 @patch("mindroom.agents.SqliteDb")
 def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_root(
     _mock_storage: MagicMock,  # noqa: PT019
@@ -1675,6 +1703,24 @@ def test_bind_runtime_paths_rejects_private_template_dir_with_symlinked_content(
     secret_file = tmp_path / "secret.txt"
     secret_file.write_text("secret\n", encoding="utf-8")
     (template_dir / "linked.txt").symlink_to(secret_file)
+
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./mind_template",
+    )
+
+    with pytest.raises(ValueError, match=re.escape("invalid private.template_dir")):
+        _bind_runtime_paths(config, _runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
+
+
+def test_bind_runtime_paths_rejects_private_template_dir_when_template_root_is_symlink(tmp_path: Path) -> None:
+    """Private templates must reject symlinked template roots before dereferencing them."""
+    real_template_dir = tmp_path / "real_template"
+    real_template_dir.mkdir(parents=True, exist_ok=True)
+    (real_template_dir / "README.md").write_text("template\n", encoding="utf-8")
+    (tmp_path / "mind_template").symlink_to(real_template_dir, target_is_directory=True)
 
     config = _test_config()
     config.agents["general"].private = AgentPrivateConfig(
