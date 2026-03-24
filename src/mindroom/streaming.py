@@ -36,11 +36,11 @@ logger = get_logger(__name__)
 
 # Global constant for the in-progress marker
 IN_PROGRESS_MARKER = " ⋯"
-_PROGRESS_PLACEHOLDER = "Thinking..."
-_CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
+PROGRESS_PLACEHOLDER = "Thinking..."
+CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
-_IN_PROGRESS_MESSAGE_PATTERN = re.compile(rf"{re.escape(IN_PROGRESS_MARKER)}\.*$")
+IN_PROGRESS_MESSAGE_PATTERN = re.compile(rf"{re.escape(IN_PROGRESS_MARKER)}\.*$")
 
 
 def _format_stream_error_note(error: Exception) -> str:
@@ -57,7 +57,7 @@ def is_in_progress_message(text: object) -> bool:
     """Return True when a message ends with an in-progress marker."""
     if not isinstance(text, str):
         return False
-    return bool(_IN_PROGRESS_MESSAGE_PATTERN.search(text))
+    return bool(IN_PROGRESS_MESSAGE_PATTERN.search(text))
 
 
 def _longest_common_prefix_len(first: list[ToolTraceEntry], second: list[ToolTraceEntry]) -> int:
@@ -207,7 +207,7 @@ class StreamingResponse:
         elif cancelled:
             stripped_text = self.accumulated_text.rstrip()
             self.accumulated_text = (
-                f"{stripped_text}\n\n{_CANCELLED_RESPONSE_NOTE}" if stripped_text else _CANCELLED_RESPONSE_NOTE
+                f"{stripped_text}\n\n{CANCELLED_RESPONSE_NOTE}" if stripped_text else CANCELLED_RESPONSE_NOTE
             )
 
         # When a placeholder message exists but no real text arrived,
@@ -231,7 +231,7 @@ class StreamingResponse:
         effective_thread_id = None if self.room_mode else self.thread_id if self.thread_id else self.reply_to_event_id
 
         # Add in-progress marker during streaming (not on final update)
-        text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
+        text_to_send = self.accumulated_text if self.accumulated_text.strip() else PROGRESS_PLACEHOLDER
         if not is_final:
             marker_suffix = "." * (self.in_progress_update_count % 3)
             text_to_send += f"{IN_PROGRESS_MARKER}{marker_suffix}"
