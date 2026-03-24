@@ -4306,6 +4306,28 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "default": null,
+          "description": "Comma or newline-separated env var names or glob patterns to expose to shell execution in addition to the committed runtime env.",
+          "label": "Extra Env Passthrough",
+          "name": "extra_env_passthrough",
+          "options": null,
+          "placeholder": "WHISPER_URL, TTS_URL, CALDAV_*",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Comma or newline-separated path entries to prepend to PATH for shell execution.",
+          "label": "Shell PATH Prepend",
+          "name": "shell_path_prepend",
+          "options": null,
+          "placeholder": "/opt/custom/bin, /run/wrappers/bin",
+          "required": false,
+          "type": "text",
+          "validation": null
         }
       ],
       "default_execution_target": "worker",

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from mindroom.credentials import CredentialsManager
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
-_SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir"})
+_SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
 
 
 class ToolInitOverrideError(ValueError):
@@ -51,6 +51,15 @@ def _sanitize_safe_tool_init_override_value(
         if isinstance(value, os.PathLike):
             return os.fspath(value)
         msg = f"Unsupported value for tool init override '{tool_name}.{field_name}': expected a string path or null."
+        raise ToolInitOverrideError(msg)
+
+    if field_name == "shell_path_prepend":
+        if value is None or isinstance(value, str):
+            return value
+        msg = (
+            f"Unsupported value for tool init override '{tool_name}.{field_name}': "
+            "expected a comma or newline-separated string path list or null."
+        )
         raise ToolInitOverrideError(msg)
 
     return value
@@ -194,6 +203,11 @@ def _build_tool_instance(
         tool_init_overrides=safe_tool_init_overrides,
         runtime_overrides=runtime_overrides,
     )
+    extra_env_passthrough = init_kwargs.get("extra_env_passthrough")
+    proxy_tool_init_overrides = dict(safe_tool_init_overrides or {})
+    shell_path_prepend = init_kwargs.get("shell_path_prepend")
+    if tool_name == "shell" and isinstance(shell_path_prepend, str):
+        proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
     init_kwargs.update(
         _build_managed_tool_init_kwargs(
             metadata,
@@ -211,7 +225,9 @@ def _build_tool_instance(
         toolkit,
         runtime_paths=runtime_paths,
         credentials_manager=resolved_credentials_manager,
-        tool_init_overrides=safe_tool_init_overrides,
+        tool_init_overrides=proxy_tool_init_overrides or None,
+        runtime_overrides=runtime_overrides,
+        extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
         worker_tools_override=worker_tools_override,
         shared_storage_root_path=shared_storage_root_path,
         worker_target=worker_target,

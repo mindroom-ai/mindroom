@@ -169,6 +169,7 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     tmp_path: Path,
 ) -> None:
     """Startup runtime should recover trusted env from real process env while keeping runner auth separate."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -424,6 +425,7 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
 ) -> None:
     """Execution env should carry committed runtime values without leaking control secrets or arbitrary host env."""
     _set_sandbox_token(monkeypatch)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
     monkeypatch.setenv("MINDROOM_API_KEY", "dashboard-secret")
     config_path = tmp_path / "config.yaml"
@@ -580,6 +582,39 @@ def test_sandbox_runner_applies_tool_init_overrides(
     data = response.json()
     assert data["ok"] is True
     assert "USER.md" in data["result"]
+
+
+def test_sandbox_runner_applies_shell_path_prepend_override(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sandbox runner should allow shell_path_prepend for shell execution."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [
+                [
+                    sys.executable,
+                    "-c",
+                    'import os, sys; sys.stdout.write(os.environ.get("PATH", ""))',
+                ],
+            ],
+            "kwargs": {},
+            "tool_init_overrides": {"shell_path_prepend": "/opt/custom/bin, /opt/worker/bin"},
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["result"].startswith("/opt/custom/bin:/opt/worker/bin:")
+    assert data["result"].endswith("/usr/local/bin:/usr/bin:/bin")
 
 
 def test_resolve_entrypoint_loads_persisted_tool_credentials(

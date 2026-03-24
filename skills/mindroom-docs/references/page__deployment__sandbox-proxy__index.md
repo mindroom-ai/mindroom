@@ -194,6 +194,12 @@ When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker e
 | `off` / `local` / `disabled` | Proxy disabled even if URL is set                                                                          |
 | *(unset)*                    | If `MINDROOM_SANDBOX_PROXY_TOOLS` is `*` or unset, proxies all tools; if set to a list, proxies only those |
 
+## Shell env and PATH
+
+The `shell` tool still receives the committed runtime env as explicit execution context when it runs through the sandbox proxy. Additional process env is not forwarded implicitly: configure `extra_env_passthrough` with exact names or glob patterns for the variables you want shell execution to inherit.
+
+If proxied shell commands need extra PATH entries such as wrapper directories, configure `shell_path_prepend`. This prepends the configured entries ahead of the runtime PATH while preserving the existing PATH order and removing duplicates. That keeps PATH handling deployment-specific instead of baking host-specific directories into the shell tool itself.
+
 ## Credential leases
 
 Some proxied tools need credentials (e.g., a `shell` tool that runs `git push` and needs an SSH key). Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease** — a short-lived, single-use token that the runner exchanges for credentials during execution.

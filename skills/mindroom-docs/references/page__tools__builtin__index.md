@@ -4,26 +4,26 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## File & System
 
-| Icon                | Tool              | Description                                                                 | Config Required                                                                  |
-| ------------------- | ----------------- | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| :lucide-folder-cog: | `file`            | Read, write, list, search, and manage local files                           | -                                                                                |
-| :lucide-folder-cog: | `shell`           | Execute shell commands                                                      | -                                                                                |
-| :lucide-folder-cog: | `docker`          | Manage Docker containers and images                                         | -                                                                                |
-| :lucide-folder-cog: | `python`          | Execute Python code                                                         | -                                                                                |
-| :lucide-folder-cog: | `sql`             | Database query and management for SQL databases                             | `db_url` or `db_engine`, `user`, `password`, `host`, `port`, `schema`, `dialect` |
-| :lucide-folder-cog: | `postgres`        | Query PostgreSQL databases - list tables, describe schemas, run SQL         | `host`, `port`, `db_name`, `user`, `password`                                    |
-| :lucide-folder-cog: | `redshift`        | Query Amazon Redshift data warehouse                                        | Connection params                                                                |
-| :lucide-folder-cog: | `neo4j`           | Query Neo4j graph databases with Cypher                                     | `uri`, `user`, `password`                                                        |
-| :lucide-folder-cog: | `duckdb`          | Query data with DuckDB                                                      | -                                                                                |
-| :lucide-folder-cog: | `pandas`          | Data manipulation with Pandas                                               | -                                                                                |
-| :lucide-folder-cog: | `csv`             | CSV file analysis and querying with SQL support                             | -                                                                                |
-| :lucide-folder-cog: | `calculator`      | Mathematical calculations                                                   | -                                                                                |
-| :lucide-folder-cog: | `reasoning`       | Step-by-step reasoning scratchpad for structured problem solving            | -                                                                                |
-| :lucide-folder-cog: | `file_generation` | Generate JSON, CSV, PDF, and text files from data                           | -                                                                                |
-| :lucide-folder-cog: | `visualization`   | Create bar, line, pie charts, scatter plots, and histograms                 | -                                                                                |
-| :lucide-folder-cog: | `coding`          | Advanced code-oriented file operations (precise edits, grep, and discovery) | `base_dir` (optional)                                                            |
-| :lucide-folder-cog: | `self_config`     | Allow an agent to read and modify its own configuration                     | -                                                                                |
-| :lucide-folder-cog: | `sleep`           | Pause execution                                                             | -                                                                                |
+| Icon                | Tool              | Description                                                                 | Config Required                                                                            |
+| ------------------- | ----------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| :lucide-folder-cog: | `file`            | Read, write, list, search, and manage local files                           | -                                                                                          |
+| :lucide-folder-cog: | `shell`           | Execute shell commands                                                      | `base_dir` (optional), `extra_env_passthrough` (optional), `shell_path_prepend` (optional) |
+| :lucide-folder-cog: | `docker`          | Manage Docker containers and images                                         | -                                                                                          |
+| :lucide-folder-cog: | `python`          | Execute Python code                                                         | -                                                                                          |
+| :lucide-folder-cog: | `sql`             | Database query and management for SQL databases                             | `db_url` or `db_engine`, `user`, `password`, `host`, `port`, `schema`, `dialect`           |
+| :lucide-folder-cog: | `postgres`        | Query PostgreSQL databases - list tables, describe schemas, run SQL         | `host`, `port`, `db_name`, `user`, `password`                                              |
+| :lucide-folder-cog: | `redshift`        | Query Amazon Redshift data warehouse                                        | Connection params                                                                          |
+| :lucide-folder-cog: | `neo4j`           | Query Neo4j graph databases with Cypher                                     | `uri`, `user`, `password`                                                                  |
+| :lucide-folder-cog: | `duckdb`          | Query data with DuckDB                                                      | -                                                                                          |
+| :lucide-folder-cog: | `pandas`          | Data manipulation with Pandas                                               | -                                                                                          |
+| :lucide-folder-cog: | `csv`             | CSV file analysis and querying with SQL support                             | -                                                                                          |
+| :lucide-folder-cog: | `calculator`      | Mathematical calculations                                                   | -                                                                                          |
+| :lucide-folder-cog: | `reasoning`       | Step-by-step reasoning scratchpad for structured problem solving            | -                                                                                          |
+| :lucide-folder-cog: | `file_generation` | Generate JSON, CSV, PDF, and text files from data                           | -                                                                                          |
+| :lucide-folder-cog: | `visualization`   | Create bar, line, pie charts, scatter plots, and histograms                 | -                                                                                          |
+| :lucide-folder-cog: | `coding`          | Advanced code-oriented file operations (precise edits, grep, and discovery) | `base_dir` (optional)                                                                      |
+| :lucide-folder-cog: | `self_config`     | Allow an agent to read and modify its own configuration                     | -                                                                                          |
+| :lucide-folder-cog: | `sleep`           | Pause execution                                                             | -                                                                                          |
 
 ## Web Search & Research
 
@@ -306,4 +306,4 @@ Tool integrations should not rely on tool-specific env vars such as `CLICKUP_API
 
 Configure tools through the dashboard credentials store, persisted tool configuration, or explicit runtime overrides instead.
 
-Execution tools do not use env vars as constructor-time configuration. `shell` still receives the committed runtime env as explicit execution context. `python` should not rely on in-process runtime env emulation. If Python code needs runtime-scoped env, run it through sandbox/worker subprocess execution instead.
+Execution tools do not use env vars as constructor-time configuration. `shell` still receives the committed runtime env as explicit execution context. Additional process env must be opted into with `extra_env_passthrough`. If shell execution needs extra PATH entries such as wrapper directories, configure `shell_path_prepend` instead of relying on host-specific defaults. `python` should not rely on in-process runtime env emulation. If Python code needs runtime-scoped env, run it through sandbox/worker subprocess execution instead.

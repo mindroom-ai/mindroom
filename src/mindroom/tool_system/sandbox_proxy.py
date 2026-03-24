@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from mindroom.constants import execution_runtime_env_values
+from mindroom.constants import execution_runtime_env_values, shell_execution_runtime_env_values
 from mindroom.credentials import load_scoped_credentials
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
@@ -372,10 +372,19 @@ def _execution_env_payload(
     tool_name: str,
     *,
     runtime_paths: RuntimePaths,
+    extra_env_passthrough: str | None = None,
 ) -> dict[str, str] | None:
     """Return explicit execution env only for tools that intentionally support it."""
     if tool_name not in _EXECUTION_ENV_TOOL_NAMES:
         return None
+    if tool_name == "shell":
+        return dict(
+            shell_execution_runtime_env_values(
+                runtime_paths,
+                extra_env_passthrough=extra_env_passthrough,
+                process_env=runtime_paths.process_env,
+            ),
+        )
     return dict(execution_runtime_env_values(runtime_paths))
 
 
@@ -476,6 +485,8 @@ def _call_proxy_sync(  # noqa: C901
     credentials_manager: CredentialsManager | None,
     shared_storage_root_path: Path | None = None,
     tool_init_overrides: dict[str, object] | None = None,
+    execution_env: dict[str, str] | None = None,
+    extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> object:
     proxy_config = sandbox_proxy_config(runtime_paths)
@@ -492,8 +503,10 @@ def _call_proxy_sync(  # noqa: C901
         worker_target=worker_target,
     )
     payload.update(worker_payload)
-    if execution_env := _execution_env_payload(tool_name, runtime_paths=runtime_paths):
+    if execution_env:
         payload["execution_env"] = execution_env
+    if extra_env_passthrough is not None:
+        payload["extra_env_passthrough"] = extra_env_passthrough
     if worker_handle is None and proxy_config.proxy_url is None:
         msg = "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)
@@ -563,6 +576,8 @@ def _wrap_sync_function(
     credentials_manager: CredentialsManager | None,
     shared_storage_root_path: Path | None = None,
     tool_init_overrides: dict[str, object] | None = None,
+    execution_env: dict[str, str] | None = None,
+    extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
@@ -579,6 +594,8 @@ def _wrap_sync_function(
             credentials_manager=credentials_manager,
             shared_storage_root_path=shared_storage_root_path,
             tool_init_overrides=tool_init_overrides,
+            execution_env=execution_env,
+            extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
         )
 
@@ -595,6 +612,8 @@ def _wrap_async_function(
     credentials_manager: CredentialsManager | None,
     shared_storage_root_path: Path | None = None,
     tool_init_overrides: dict[str, object] | None = None,
+    execution_env: dict[str, str] | None = None,
+    extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
@@ -612,6 +631,8 @@ def _wrap_async_function(
             credentials_manager=credentials_manager,
             shared_storage_root_path=shared_storage_root_path,
             tool_init_overrides=tool_init_overrides,
+            execution_env=execution_env,
+            extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
         )
 
@@ -627,6 +648,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     credentials_manager: CredentialsManager | None,
     shared_storage_root_path: Path | None = None,
     tool_init_overrides: dict[str, object] | None = None,
+    runtime_overrides: dict[str, object] | None = None,
+    extra_env_passthrough: str | None = None,
     worker_tools_override: list[str] | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> Toolkit:
@@ -635,6 +658,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
     Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this).
     """
+    del runtime_overrides
+
     if not _sandbox_proxy_enabled_for_tool(
         tool_name,
         runtime_paths=runtime_paths,
@@ -643,6 +668,11 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     ):
         return toolkit
 
+    execution_env = _execution_env_payload(
+        tool_name,
+        runtime_paths=runtime_paths,
+        extra_env_passthrough=extra_env_passthrough,
+    )
     toolkit.functions = {
         function_name: _wrap_sync_function(
             function,
@@ -652,6 +682,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             credentials_manager=credentials_manager,
             shared_storage_root_path=shared_storage_root_path,
             tool_init_overrides=tool_init_overrides,
+            execution_env=execution_env,
+            extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
         )
         for function_name, function in toolkit.functions.items()
@@ -665,6 +697,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             credentials_manager=credentials_manager,
             shared_storage_root_path=shared_storage_root_path,
             tool_init_overrides=tool_init_overrides,
+            execution_env=execution_env,
+            extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
         )
         for function_name, function in toolkit.async_functions.items()

@@ -5,6 +5,7 @@ to avoid circular imports. It does not import anything from the internal
 codebase.
 """
 
+import fnmatch
 import os
 import re
 import shutil
@@ -61,6 +62,13 @@ _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
         "MINDROOM_RUNTIME_PATHS_JSON",
     },
 )
+_SHELL_EXTRA_ENV_EXCLUDED_NAMES = frozenset({*_EXECUTION_RUNTIME_EXCLUDED_NAMES, "CI_JOB_TOKEN"})
+# Suffixes that mark env vars as too sensitive for shell passthrough even when
+# matched by a user-supplied glob.  Narrower than _RUNTIME_STARTUP_SECRET_SUFFIXES
+# because _TOKEN is a common suffix for legitimately passthrough-worthy service
+# tokens (e.g. GITEA_TOKEN) while _API_KEY/_PASSWORD/_SECRET reliably identify
+# provider credentials that should never leak to shell commands.
+_SHELL_EXTRA_ENV_SECRET_SUFFIXES = ("_API_KEY", "_API_KEYS", "_PASSWORD", "_SECRET")
 
 
 @dataclass(frozen=True)
@@ -353,6 +361,36 @@ def _is_execution_runtime_process_env_name(name: str) -> bool:
     )
 
 
+def _shell_extra_env_patterns(extra_env_passthrough: str | None) -> tuple[str, ...]:
+    if extra_env_passthrough is None:
+        return ()
+    return tuple(part for part in re.split(r"[\s,]+", extra_env_passthrough.strip()) if part)
+
+
+def shell_extra_env_values(
+    *,
+    extra_env_passthrough: str | None = None,
+    process_env: Mapping[str, str] | None = None,
+) -> Mapping[str, str]:
+    """Return explicit extra env values that shell execution may inherit."""
+    patterns = _shell_extra_env_patterns(extra_env_passthrough)
+    if not patterns:
+        return cast("Mapping[str, str]", MappingProxyType({}))
+
+    selected_env: dict[str, str] = {}
+    source_env = os.environ if process_env is None else process_env
+
+    for key, value in source_env.items():
+        if key in _SHELL_EXTRA_ENV_EXCLUDED_NAMES:
+            continue
+        if key.endswith(_SHELL_EXTRA_ENV_SECRET_SUFFIXES):
+            continue
+        if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns):
+            selected_env[key] = value
+
+    return cast("Mapping[str, str]", MappingProxyType(selected_env))
+
+
 def execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     """Return the runtime env that execution tools may observe.
 
@@ -371,6 +409,23 @@ def execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, st
     )
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
+    return cast("Mapping[str, str]", MappingProxyType(merged_env))
+
+
+def shell_execution_runtime_env_values(
+    runtime_paths: RuntimePaths,
+    *,
+    extra_env_passthrough: str | None = None,
+    process_env: Mapping[str, str] | None = None,
+) -> Mapping[str, str]:
+    """Return the env visible to shell execution after explicit passthrough is applied."""
+    merged_env = dict(
+        shell_extra_env_values(
+            extra_env_passthrough=extra_env_passthrough,
+            process_env=process_env,
+        ),
+    )
+    merged_env.update(execution_runtime_env_values(runtime_paths))
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
