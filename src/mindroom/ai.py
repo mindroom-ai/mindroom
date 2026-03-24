@@ -47,6 +47,12 @@ from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_enhanced_prompt
+from mindroom.streaming import (
+    _STREAM_ERROR_RESPONSE_NOTE,
+    CANCELLED_RESPONSE_NOTE,
+    IN_PROGRESS_MESSAGE_PATTERN,
+    PROGRESS_PLACEHOLDER,
+)
 from mindroom.tool_system.events import (
     complete_pending_tool_block,
     extract_tool_completed_info,
@@ -667,6 +673,35 @@ def build_prompt_with_thread_history(prompt: str, thread_history: list[dict[str,
     return _format_messages_context(thread_history, "Previous conversation in this thread:", prompt)
 
 
+_PARTIAL_REPLY_MAX_CHARS = 4000
+
+
+def _is_agent_partial_reply(body: str | None) -> bool:
+    """Return True if the message body is an in-progress or cancelled agent reply."""
+    if not body:
+        return False
+    return (
+        bool(IN_PROGRESS_MESSAGE_PATTERN.search(body))
+        or CANCELLED_RESPONSE_NOTE in body
+        or _STREAM_ERROR_RESPONSE_NOTE in body
+    )
+
+
+def _clean_partial_reply_body(body: str) -> str:
+    """Strip streaming markers and truncate a partial reply for context injection."""
+    cleaned = IN_PROGRESS_MESSAGE_PATTERN.sub("", body)
+    cleaned = cleaned.replace(CANCELLED_RESPONSE_NOTE, "")
+    # Strip variable-length error notes: "**[Response interrupted by an error: ...]**"
+    if _STREAM_ERROR_RESPONSE_NOTE in cleaned:
+        cleaned = cleaned.split(_STREAM_ERROR_RESPONSE_NOTE, 1)[0]
+    cleaned = cleaned.strip()
+    if cleaned == PROGRESS_PLACEHOLDER or not cleaned or not any(c.isalnum() for c in cleaned):
+        return ""
+    if len(cleaned) > _PARTIAL_REPLY_MAX_CHARS:
+        cleaned = "[... earlier content truncated ...]\n" + cleaned[-_PARTIAL_REPLY_MAX_CHARS:]
+    return cleaned
+
+
 def _get_unseen_messages(
     thread_history: list[dict[str, Any]],
     agent_name: str,
@@ -674,42 +709,63 @@ def _get_unseen_messages(
     runtime_paths: RuntimePaths,
     seen_event_ids: set[str],
     current_event_id: str | None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     """Filter thread_history to messages not yet consumed by this agent.
 
     Excludes:
-    - Messages from this agent (by Matrix user ID)
+    - Completed messages from this agent (by Matrix user ID)
     - Messages whose event_id is in seen_event_ids
     - The current triggering message (current_event_id)
+
+    Includes partial/cancelled self-messages with cleaned body text.
+
+    Returns:
+        Tuple of (unseen_messages, has_partial_replies).
+
     """
     matrix_id = config.get_ids(runtime_paths).get(agent_name)
     agent_sender_id = matrix_id.full_id if matrix_id else None
     unseen: list[dict[str, Any]] = []
+    has_partial_replies = False
     for msg in thread_history:
         event_id = msg.get("event_id")
         sender = msg.get("sender")
-        # Skip messages from this agent
-        if agent_sender_id and sender == agent_sender_id:
-            continue
-        # Skip already-seen messages
+        # Skip already-seen messages (applies to all senders, including self)
         if event_id and event_id in seen_event_ids:
+            continue
+        # Handle messages from this agent
+        if agent_sender_id and sender == agent_sender_id:
+            body = msg.get("body", "")
+            if _is_agent_partial_reply(body):
+                cleaned = _clean_partial_reply_body(body)
+                if cleaned:
+                    has_partial_replies = True
+                    unseen.append({**msg, "body": cleaned})
             continue
         # Skip the current triggering message
         if current_event_id and event_id == current_event_id:
             continue
         unseen.append(msg)
-    return unseen
+    return unseen, has_partial_replies
 
 
-def _build_prompt_with_unseen(prompt: str, unseen_messages: list[dict[str, Any]]) -> str:
+def _build_prompt_with_unseen(
+    prompt: str,
+    unseen_messages: list[dict[str, Any]],
+    *,
+    has_partial_replies: bool = False,
+) -> str:
     """Prepend unseen messages from other participants to the prompt."""
     if not unseen_messages:
         return prompt
-    return _format_messages_context(
-        unseen_messages,
-        "Messages from other participants since your last response:",
-        prompt,
-    )
+    if has_partial_replies:
+        header = (
+            "Messages from other participants since your last response:\n"
+            "(Note: includes your own interrupted/in-progress reply text)"
+        )
+    else:
+        header = "Messages from other participants since your last response:"
+    return _format_messages_context(unseen_messages, header, prompt)
 
 
 def _build_run_metadata(reply_to_event_id: str | None, unseen_event_ids: list[str]) -> dict[str, Any] | None:
@@ -940,7 +996,7 @@ async def _prepare_agent_and_prompt(
         assert session is not None
         assert thread_history is not None
         seen_ids = get_seen_event_ids(session)
-        unseen = _get_unseen_messages(
+        unseen, has_partial_replies = _get_unseen_messages(
             thread_history,
             agent_name,
             config,
@@ -949,7 +1005,7 @@ async def _prepare_agent_and_prompt(
             reply_to_event_id,
         )
         unseen_event_ids = [msg["event_id"] for msg in unseen if msg.get("event_id")]
-        full_prompt = _build_prompt_with_unseen(enhanced_prompt, unseen)
+        full_prompt = _build_prompt_with_unseen(enhanced_prompt, unseen, has_partial_replies=has_partial_replies)
     elif has_prior_runs and not reply_to_event_id:
         # Non-Matrix path (OpenAI-compat): Agno replays history natively.
         # No unseen detection (thread_history entries lack event_id fields).
