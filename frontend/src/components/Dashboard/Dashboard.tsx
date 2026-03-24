@@ -536,7 +536,10 @@ export function Dashboard() {
                         key={agent.id}
                         id={agent.id}
                         title={agent.display_name}
-                        description={`Model: ${agent.model || 'Default'} • ${pluralize(agent.rooms.length, 'room')} • ${pluralize(agent.tools.length, 'tool')}`}
+                        description={`Model: ${agent.model || 'Default'} • ${pluralize(
+                          agent.rooms.length,
+                          'room'
+                        )} • ${pluralize(agent.tools.length, 'tool')}`}
                         isSelected={selectedAgentId === agent.id}
                         onClick={id => {
                           selectAgent(id);

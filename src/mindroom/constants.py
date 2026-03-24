@@ -62,21 +62,6 @@ _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
         "MINDROOM_RUNTIME_PATHS_JSON",
     },
 )
-# Keys always included when ``extra_env_passthrough`` is set (even to a single
-# pattern like ``"MY_VAR"``).  These service URLs are safe to expose and are
-# commonly needed by shell-invoked helper scripts, so they are bundled
-# automatically rather than requiring every agent config to list them.
-_SHELL_EXTRA_ENV_DEFAULT_KEYS = frozenset(
-    {
-        "CALDAV_URL",
-        "CALENDAR_URL",
-        "ICAL_URL",
-        "ICS_URL",
-        "RAG_URL",
-        "TTS_URL",
-        "WHISPER_URL",
-    },
-)
 _SHELL_EXTRA_ENV_EXCLUDED_NAMES = frozenset({*_EXECUTION_RUNTIME_EXCLUDED_NAMES, "CI_JOB_TOKEN"})
 # Suffixes that mark env vars as too sensitive for shell passthrough even when
 # matched by a user-supplied glob.  Narrower than _RUNTIME_STARTUP_SECRET_SUFFIXES
@@ -387,12 +372,7 @@ def shell_extra_env_values(
     extra_env_passthrough: str | None = None,
     process_env: Mapping[str, str] | None = None,
 ) -> Mapping[str, str]:
-    """Return explicit extra env values that shell execution may inherit.
-
-    When *extra_env_passthrough* is set, ``_SHELL_EXTRA_ENV_DEFAULT_KEYS``
-    (common service URLs like ``WHISPER_URL``, ``TTS_URL``, etc.) are always
-    included alongside the caller-specified patterns.
-    """
+    """Return explicit extra env values that shell execution may inherit."""
     patterns = _shell_extra_env_patterns(extra_env_passthrough)
     if not patterns:
         return cast("Mapping[str, str]", MappingProxyType({}))
@@ -405,7 +385,7 @@ def shell_extra_env_values(
             continue
         if key.endswith(_SHELL_EXTRA_ENV_SECRET_SUFFIXES):
             continue
-        if key in _SHELL_EXTRA_ENV_DEFAULT_KEYS or any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns):
+        if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns):
             selected_env[key] = value
 
     return cast("Mapping[str, str]", MappingProxyType(selected_env))

@@ -18,7 +18,12 @@ import mindroom.tools  # noqa: F401
 import mindroom.tools.shell as shell_tool_module
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths, shell_execution_runtime_env_values, shell_extra_env_values
+from mindroom.constants import (
+    RuntimePaths,
+    resolve_runtime_paths,
+    shell_execution_runtime_env_values,
+    shell_extra_env_values,
+)
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.metadata import ToolInitOverrideError, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -426,6 +431,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
     assert ast.literal_eval(save_result) == expected
     assert ast.literal_eval(run_result) == expected
 
+
 def test_shell_subprocess_path_prepends_wrapper_for_empty_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -662,7 +668,7 @@ async def test_proxy_forwards_configured_shell_execution_env_only_for_execution_
     assert result == "sandbox-result"
     assert captured["json"]["extra_env_passthrough"] == "GITEA_*"
     assert captured["json"]["execution_env"]["TEST_EXECUTION_ENV"] == "visible-in-shell"
-    assert captured["json"]["execution_env"]["GITEA_TOKEN"] == "visible-gitea-token"
+    assert captured["json"]["execution_env"]["GITEA_TOKEN"] == "visible-gitea-token"  # noqa: S105
     assert "CI_JOB_TOKEN" not in captured["json"]["execution_env"]
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in captured["json"]["execution_env"]
 
@@ -1843,3 +1849,16 @@ def test_shell_extra_env_excludes_api_key_suffixes() -> None:
     assert "MY_SERVICE_PASSWORD" not in result
     assert "WEBHOOK_SECRET" not in result
     assert "CI_JOB_TOKEN" not in result  # also in _SHELL_EXTRA_ENV_EXCLUDED_NAMES
+
+
+def test_shell_extra_env_requires_explicit_patterns_for_service_urls() -> None:
+    """extra_env_passthrough should not auto-include unrelated service URLs."""
+    env = {
+        "GITEA_TOKEN": "gitea-token",
+        "WHISPER_URL": "https://whisper.example",
+    }
+
+    result = dict(shell_extra_env_values(extra_env_passthrough="GITEA_*", process_env=env))
+
+    assert result == {"GITEA_TOKEN": "gitea-token"}
+    assert "WHISPER_URL" not in result

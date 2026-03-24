@@ -37,15 +37,19 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
         "LC_CTYPE",
         "NO_PROXY",
         "PATH",
+        "PIP_CACHE_DIR",
         "PYTHONPATH",
+        "PYTHONPYCACHEPREFIX",
         "REQUESTS_CA_BUNDLE",
         "SSL_CERT_DIR",
         "SSL_CERT_FILE",
         "SHELL",
         "TERM",
         "TMPDIR",
+        "UV_CACHE_DIR",
         "USER",
         "VIRTUAL_ENV",
+        "XDG_CACHE_HOME",
         "http_proxy",
         "https_proxy",
         "no_proxy",
@@ -74,9 +78,17 @@ def _shell_subprocess_path(current_path: str | None) -> str | None:
     return os.pathsep.join([_NIXOS_SUDO_WRAPPER_DIR, *path_entries])
 
 
-def _shell_subprocess_env(runtime_env: dict[str, str]) -> dict[str, str]:
+def _shell_subprocess_env(
+    runtime_env: dict[str, str],
+    *,
+    process_env_overrides: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Build the env passed to shell subprocesses."""
     env = {key: value for key, value in os.environ.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS}
+    if process_env_overrides is not None:
+        env.update(
+            {key: value for key, value in process_env_overrides.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS},
+        )
     env.update(runtime_env)
 
     path_value = _shell_subprocess_path(env.get("PATH"))
@@ -87,10 +99,18 @@ def _shell_subprocess_env(runtime_env: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def _handle_namespace(*, runtime_paths: RuntimePaths, base_dir: Path | None) -> str:
+    """Return the namespace that owns one shell handle registry record."""
+    storage_root = str(runtime_paths.storage_root.resolve())
+    resolved_base_dir = str(base_dir.expanduser().resolve()) if base_dir is not None else ""
+    return f"{storage_root}::{resolved_base_dir}"
+
+
 @dataclass
 class _ProcessRecord:
     """Tracks a backgrounded shell process."""
 
+    namespace: str
     handle: str
     pid: int
     args: list[str]
@@ -143,11 +163,10 @@ class _ProcessRecord:
             type="text",
             required=False,
             default=None,
-            placeholder="WHISPER_URL, TTS_URL, CALDAV_*",
+            placeholder="MY_SERVICE_URL, MY_SERVICE_*",
             description=(
                 "Comma or newline-separated env var names or glob patterns to expose to shell "
-                "execution in addition to the committed runtime env. When set, a small set of "
-                "common service URLs (WHISPER_URL, TTS_URL, etc.) is also included automatically."
+                "execution in addition to the committed runtime env."
             ),
         ),
     ],
@@ -186,7 +205,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     process_env=runtime_paths.process_env,
                 ),
             )
+            self._process_env_overrides = dict(runtime_paths.process_env)
             self._processes = _process_registry
+            self._handle_namespace = _handle_namespace(runtime_paths=runtime_paths, base_dir=self.base_dir)
 
         async def run_shell_command(self, args: list[str], tail: int = 100, timeout: int = 120) -> str:  # noqa: ASYNC109
             """Runs a shell command and returns the output or error.
@@ -214,7 +235,10 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=str(self.base_dir) if self.base_dir else None,
-                    env=_shell_subprocess_env(self._runtime_env),
+                    env=_shell_subprocess_env(
+                        self._runtime_env,
+                        process_env_overrides=self._process_env_overrides,
+                    ),
                     start_new_session=True,
                 )
             except Exception as exc:
@@ -243,6 +267,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     )
                 handle = f"shell:{uuid.uuid4().hex[:8]}"
                 record = _ProcessRecord(
+                    namespace=self._handle_namespace,
                     handle=handle,
                     pid=process.pid,
                     args=args,
@@ -285,7 +310,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
             """
             record = self._processes.get(handle)
-            if record is None:
+            if record is None or record.namespace != self._handle_namespace:
                 return f"Error: Unknown handle '{handle}'"
 
             elapsed = time.monotonic() - record.started_at
@@ -317,7 +342,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
             """
             record = self._processes.get(handle)
-            if record is None:
+            if record is None or record.namespace != self._handle_namespace:
                 return f"Error: Unknown handle '{handle}'"
 
             if record.finished:

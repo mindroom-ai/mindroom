@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tools.shell import _process_registry
+from mindroom.tools.shell import _process_registry, shell_tools
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from agno.tools.toolkit import Toolkit
 
 
-def _make_runtime_paths(tmp_path: Path):
+def _make_runtime_paths(tmp_path: Path) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -27,7 +33,7 @@ def _make_runtime_paths(tmp_path: Path):
     )
 
 
-def _get_toolkit(tmp_path: Path):
+def _get_toolkit(tmp_path: Path) -> Toolkit:
     runtime_paths = _make_runtime_paths(tmp_path)
     return get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
 
@@ -132,7 +138,8 @@ async def test_check_shell_command_running(tmp_path: Path) -> None:
     tool = _get_toolkit(tmp_path)
     run_fn = tool.async_functions["run_shell_command"].entrypoint
     check_fn = tool.functions["check_shell_command"].entrypoint
-    assert run_fn is not None and check_fn is not None
+    assert run_fn is not None
+    assert check_fn is not None
 
     result = await run_fn(["sleep", "300"], timeout=1)
     handle = result.split("Handle: ")[1].split("\n")[0]
@@ -152,7 +159,8 @@ async def test_check_shell_command_finished(tmp_path: Path) -> None:
     tool = _get_toolkit(tmp_path)
     run_fn = tool.async_functions["run_shell_command"].entrypoint
     check_fn = tool.functions["check_shell_command"].entrypoint
-    assert run_fn is not None and check_fn is not None
+    assert run_fn is not None
+    assert check_fn is not None
 
     # Use a command that sleeps longer than the timeout to guarantee backgrounding,
     # but emits output first so we can verify it after finish.
@@ -188,7 +196,8 @@ async def test_check_shell_command_partial_output(tmp_path: Path) -> None:
     tool = _get_toolkit(tmp_path)
     run_fn = tool.async_functions["run_shell_command"].entrypoint
     check_fn = tool.functions["check_shell_command"].entrypoint
-    assert run_fn is not None and check_fn is not None
+    assert run_fn is not None
+    assert check_fn is not None
 
     result = await run_fn(
         ["bash", "-c", "for i in 1 2 3; do echo partial-line-$i; done; sleep 300"],
@@ -222,7 +231,9 @@ async def test_kill_shell_command(tmp_path: Path) -> None:
     run_fn = tool.async_functions["run_shell_command"].entrypoint
     kill_fn = tool.functions["kill_shell_command"].entrypoint
     check_fn = tool.functions["check_shell_command"].entrypoint
-    assert run_fn is not None and kill_fn is not None and check_fn is not None
+    assert run_fn is not None
+    assert kill_fn is not None
+    assert check_fn is not None
 
     result = await run_fn(["sleep", "300"], timeout=1)
     handle = result.split("Handle: ")[1].split("\n")[0]
@@ -246,7 +257,8 @@ async def test_kill_shell_command_force(tmp_path: Path) -> None:
     tool = _get_toolkit(tmp_path)
     run_fn = tool.async_functions["run_shell_command"].entrypoint
     kill_fn = tool.functions["kill_shell_command"].entrypoint
-    assert run_fn is not None and kill_fn is not None
+    assert run_fn is not None
+    assert kill_fn is not None
 
     result = await run_fn(["sleep", "300"], timeout=1)
     handle = result.split("Handle: ")[1].split("\n")[0]
@@ -263,7 +275,9 @@ async def test_kill_shell_command_already_finished(tmp_path: Path) -> None:
     run_fn = tool.async_functions["run_shell_command"].entrypoint
     kill_fn = tool.functions["kill_shell_command"].entrypoint
     check_fn = tool.functions["check_shell_command"].entrypoint
-    assert run_fn is not None and kill_fn is not None and check_fn is not None
+    assert run_fn is not None
+    assert kill_fn is not None
+    assert check_fn is not None
 
     # Force backgrounding: command finishes in ~0.2s but timeout is very short
     result = await run_fn(["bash", "-c", "echo fast; sleep 0.2"], timeout=0)
@@ -311,8 +325,6 @@ def test_shell_registers_three_tools(tmp_path: Path) -> None:
 def test_shell_disabled_registers_no_tools(tmp_path: Path) -> None:
     """Shell toolkit with enable_run_shell_command=False should have no tools."""
     runtime_paths = _make_runtime_paths(tmp_path)
-    from mindroom.tools.shell import shell_tools
-
     cls = shell_tools()
     toolkit = cls(enable_run_shell_command=False, runtime_paths=runtime_paths)
     assert len(toolkit.functions) == 0
@@ -330,7 +342,8 @@ async def test_sweep_stale_records(tmp_path: Path) -> None:
     tool = _get_toolkit(tmp_path)
     run_fn = tool.async_functions["run_shell_command"].entrypoint
     check_fn = tool.functions["check_shell_command"].entrypoint
-    assert run_fn is not None and check_fn is not None
+    assert run_fn is not None
+    assert check_fn is not None
 
     # Force backgrounding with timeout=0, command finishes quickly
     result = await run_fn(["bash", "-c", "echo quick; sleep 0.2"], timeout=0)
@@ -463,6 +476,40 @@ async def test_handle_check_then_kill_across_instances(tmp_path: Path) -> None:
     assert "FINISHED" in status
 
 
+@pytest.mark.asyncio
+async def test_handle_isolation_blocks_cross_runtime_access(tmp_path: Path) -> None:
+    """A handle from one runtime should not be visible to a different runtime root."""
+    runtime_a = tmp_path / "runtime-a"
+    runtime_b = tmp_path / "runtime-b"
+    runtime_a.mkdir()
+    runtime_b.mkdir()
+
+    tool_a = _get_toolkit(runtime_a)
+    tool_b = _get_toolkit(runtime_b)
+    run_a = tool_a.async_functions["run_shell_command"].entrypoint
+    check_b = tool_b.functions["check_shell_command"].entrypoint
+    kill_b = tool_b.functions["kill_shell_command"].entrypoint
+    kill_a = tool_a.functions["kill_shell_command"].entrypoint
+    assert run_a is not None
+    assert check_b is not None
+    assert kill_b is not None
+    assert kill_a is not None
+
+    result = await run_a(["sleep", "300"], timeout=0)
+    assert "Handle:" in result
+    handle = result.split("Handle: ")[1].split("\n")[0]
+
+    try:
+        check_result = check_b(handle)
+        assert "Unknown handle" in check_result
+
+        kill_result = kill_b(handle, force=True)
+        assert "Unknown handle" in kill_result
+    finally:
+        kill_a(handle, force=True)
+        await asyncio.sleep(0.1)
+
+
 # ---------------------------------------------------------------------------
 # _MAX_BACKGROUNDED limit
 # ---------------------------------------------------------------------------
@@ -471,8 +518,6 @@ async def test_handle_check_then_kill_across_instances(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_max_backgrounded_limit(tmp_path: Path) -> None:
     """Exceeding _MAX_BACKGROUNDED should return an error and kill the excess process."""
-    from unittest.mock import patch
-
     tool = _get_toolkit(tmp_path)
     run_fn = tool.async_functions["run_shell_command"].entrypoint
     assert run_fn is not None
@@ -509,7 +554,8 @@ async def test_long_running_command_not_swept_on_finish(tmp_path: Path) -> None:
     tool = _get_toolkit(tmp_path)
     run_fn = tool.async_functions["run_shell_command"].entrypoint
     check_fn = tool.functions["check_shell_command"].entrypoint
-    assert run_fn is not None and check_fn is not None
+    assert run_fn is not None
+    assert check_fn is not None
 
     # Force backgrounding with timeout=0
     result = await run_fn(["bash", "-c", "echo long-output; sleep 0.2"], timeout=0)
