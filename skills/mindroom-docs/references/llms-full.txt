@@ -2408,7 +2408,7 @@ Tool integrations should not rely on tool-specific env vars such as `CLICKUP_API
 
 Configure tools through the dashboard credentials store, persisted tool configuration, or explicit runtime overrides instead.
 
-Execution tools do not use env vars as constructor-time configuration. `shell` still receives the committed runtime env as explicit execution context. Additional process env must be opted into with `extra_env_passthrough`. If shell execution needs extra PATH entries such as wrapper directories, configure `shell_path_prepend` instead of relying on host-specific defaults. When `run_shell_command` hits its timeout, it now keeps the command running in the background and returns a handle instead of failing immediately. Use `check_shell_command(handle)` to poll status and `kill_shell_command(handle)` to stop a backgrounded process. These handles are process-local: they survive multiple requests to the same runner process, but do not survive runner restarts. `python` should not rely on in-process runtime env emulation. If Python code needs runtime-scoped env, run it through sandbox/worker subprocess execution instead.
+Execution tools do not use env vars as constructor-time configuration. `shell` still receives the committed runtime env as explicit execution context. Additional process env must be opted into with `extra_env_passthrough`. If shell execution needs extra PATH entries such as wrapper directories, configure `shell_path_prepend` instead of relying on host-specific defaults. When `run_shell_command` hits its timeout, it keeps the command running in the background and returns a handle. Use `check_shell_command(handle)` to poll status and `kill_shell_command(handle)` to stop a backgrounded process. These handles are process-local: they survive multiple requests to the same runner process, but do not survive runner restarts. `python` should not rely on in-process runtime env emulation. If Python code needs runtime-scoped env, run it through sandbox/worker subprocess execution instead.
 
 # MCP (Planned)
 
@@ -6379,7 +6379,7 @@ The `shell` tool still receives the committed runtime env as explicit execution 
 
 If proxied shell commands need extra PATH entries such as wrapper directories, configure `shell_path_prepend`. This prepends the configured entries ahead of the runtime PATH while preserving the existing PATH order and removing duplicates. That keeps PATH handling deployment-specific instead of baking host-specific directories into the shell tool itself.
 
-Shell commands that exceed their timeout now return a background handle instead of failing immediately. Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process. These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts. To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE=subprocess`.
+Shell commands that exceed their timeout return a background handle. Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process. These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts. To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE=subprocess`.
 
 ## Credential leases
 

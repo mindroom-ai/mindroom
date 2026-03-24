@@ -322,7 +322,7 @@ Execution tools do not use env vars as constructor-time configuration.
 `shell` still receives the committed runtime env as explicit execution context.
 Additional process env must be opted into with `extra_env_passthrough`.
 If shell execution needs extra PATH entries such as wrapper directories, configure `shell_path_prepend` instead of relying on host-specific defaults.
-When `run_shell_command` hits its timeout, it now keeps the command running in the background and returns a handle instead of failing immediately.
+When `run_shell_command` hits its timeout, it keeps the command running in the background and returns a handle.
 Use `check_shell_command(handle)` to poll status and `kill_shell_command(handle)` to stop a backgrounded process.
 These handles are process-local: they survive multiple requests to the same runner process, but do not survive runner restarts.
 `python` should not rely on in-process runtime env emulation.
