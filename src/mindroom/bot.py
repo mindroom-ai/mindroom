@@ -543,6 +543,20 @@ class AgentBot:
         """Get or create the StopManager for this agent."""
         return StopManager()
 
+    def in_flight_response_count(self) -> int:
+        """Return the number of active response tasks for this bot."""
+        stop_manager = vars(self).get("stop_manager")
+        if stop_manager is None:
+            return 0
+        return stop_manager.active_message_count()
+
+    def _active_response_event_ids(self, room_id: str) -> set[str]:
+        """Return still-running response event IDs for this bot in the room."""
+        return {
+            event_id
+            for event_id, tracked in self.stop_manager.tracked_messages.items()
+            if tracked.room_id == room_id and not tracked.task.done()
+        }
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
         assert self.client is not None
@@ -2262,6 +2276,7 @@ class AgentBot:
         )
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
+        active_event_ids = self._active_response_event_ids(room_id)
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
@@ -2285,6 +2300,7 @@ class AgentBot:
                         user_id=user_id,
                         media=media_inputs,
                         reply_to_event_id=reply_to_event_id,
+                        active_event_ids=active_event_ids,
                         show_tool_calls=self.show_tool_calls,
                         tool_trace_collector=tool_trace,
                         run_metadata_collector=run_metadata_content,
@@ -2400,6 +2416,7 @@ class AgentBot:
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
+        active_event_ids = self._active_response_event_ids(room_id)
         async with typing_indicator(self.client, room_id):
             with (
                 tool_execution_identity(execution_identity),
@@ -2419,6 +2436,7 @@ class AgentBot:
                     room_id=room_id,
                     knowledge=knowledge,
                     reply_to_event_id=reply_to_event_id,
+                    active_event_ids=active_event_ids,
                     show_tool_calls=show_tool_calls,
                     tool_trace_collector=tool_trace,
                     run_metadata_collector=run_metadata_content,
@@ -2577,6 +2595,7 @@ class AgentBot:
             execution_identity,
         )
         run_metadata_content: dict[str, Any] = {}
+        active_event_ids = self._active_response_event_ids(room_id)
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
@@ -2600,6 +2619,7 @@ class AgentBot:
                         user_id=user_id,
                         media=media_inputs,
                         reply_to_event_id=reply_to_event_id,
+                        active_event_ids=active_event_ids,
                         show_tool_calls=self.show_tool_calls,
                         run_metadata_collector=run_metadata_content,
                         execution_identity=execution_identity,

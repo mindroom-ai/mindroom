@@ -1261,6 +1261,103 @@ class TestAgentBot:
         assert sent_extra_content[ATTACHMENT_IDS_KEY] == attachment_ids
         assert sent_extra_content["io.mindroom.ai_run"]["version"] == 1
 
+    @pytest.mark.asyncio
+    async def test_process_and_respond_passes_active_response_event_ids(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Non-streaming AI calls should receive only live tracked event IDs for the room."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response")
+
+        running_task = asyncio.create_task(asyncio.sleep(60))
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        other_room_task = asyncio.create_task(asyncio.sleep(60))
+        await done_task
+        bot.stop_manager.set_current("$active", "!test:localhost", running_task)
+        bot.stop_manager.set_current("$done", "!test:localhost", done_task)
+        bot.stop_manager.set_current("$other-room", "!other:localhost", other_room_task)
+
+        try:
+            with (
+                patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+                patch("mindroom.bot.ai_response", new_callable=AsyncMock, return_value="Handled") as mock_ai_response,
+            ):
+                await bot._process_and_respond(
+                    room_id="!test:localhost",
+                    prompt="Please continue",
+                    reply_to_event_id="$event123",
+                    thread_id=None,
+                    thread_history=[],
+                    user_id="@user:localhost",
+                )
+
+            assert mock_ai_response.call_args.kwargs["active_event_ids"] == {"$active"}
+        finally:
+            running_task.cancel()
+            other_room_task.cancel()
+            await asyncio.gather(running_task, other_room_task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_process_and_respond_streaming_passes_active_response_event_ids(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming AI calls should receive only live tracked event IDs for the room."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+            yield "chunk"
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._handle_interactive_question = AsyncMock()
+
+        running_task = asyncio.create_task(asyncio.sleep(60))
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        other_room_task = asyncio.create_task(asyncio.sleep(60))
+        await done_task
+        bot.stop_manager.set_current("$active", "!test:localhost", running_task)
+        bot.stop_manager.set_current("$done", "!test:localhost", done_task)
+        bot.stop_manager.set_current("$other-room", "!other:localhost", other_room_task)
+
+        try:
+            with (
+                patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+                patch("mindroom.bot.stream_agent_response", return_value=mock_streaming_response()) as mock_stream,
+                patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
+            ):
+                mock_send_streaming_response.return_value = ("$response", "chunk")
+                await bot._process_and_respond_streaming(
+                    room_id="!test:localhost",
+                    prompt="Please continue",
+                    reply_to_event_id="$event456",
+                    thread_id=None,
+                    thread_history=[],
+                    user_id="@user:localhost",
+                )
+
+            assert mock_stream.call_args.kwargs["active_event_ids"] == {"$active"}
+        finally:
+            running_task.cancel()
+            other_room_task.cancel()
+            await asyncio.gather(running_task, other_room_task, return_exceptions=True)
+
     def test_agent_has_matrix_messaging_tool_when_openclaw_compat_enabled(
         self,
         mock_agent_user: AgentMatrixUser,

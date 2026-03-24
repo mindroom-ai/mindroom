@@ -11,6 +11,14 @@ from typing import TYPE_CHECKING, Any
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import interactive
+from mindroom.constants import (
+    STREAM_STATUS_CANCELLED,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import edit_message, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -36,11 +44,15 @@ logger = get_logger(__name__)
 
 # Global constant for the in-progress marker
 IN_PROGRESS_MARKER = " ⋯"
-PROGRESS_PLACEHOLDER = "Thinking..."
-CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
+_PROGRESS_PLACEHOLDER = "Thinking..."
+PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
+_CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
+CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
+_RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
-IN_PROGRESS_MESSAGE_PATTERN = re.compile(rf"{re.escape(IN_PROGRESS_MARKER)}\.*$")
+_IN_PROGRESS_MESSAGE_PATTERN = re.compile(rf"{re.escape(IN_PROGRESS_MARKER)}\.*$")
+IN_PROGRESS_MESSAGE_PATTERN = _IN_PROGRESS_MESSAGE_PATTERN
 
 
 def _format_stream_error_note(error: Exception) -> str:
@@ -57,9 +69,15 @@ def is_in_progress_message(text: object) -> bool:
     """Return True when a message ends with an in-progress marker."""
     if not isinstance(text, str):
         return False
-    return bool(IN_PROGRESS_MESSAGE_PATTERN.search(text))
+    return bool(_IN_PROGRESS_MESSAGE_PATTERN.search(text))
 
 
+def build_restart_interrupted_body(text: str) -> str:
+    """Return restart-note text for a stale in-progress message body."""
+    stripped_text = _IN_PROGRESS_MESSAGE_PATTERN.sub("", text).rstrip()
+    if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
+        return _RESTART_INTERRUPTED_RESPONSE_NOTE
+    return f"{stripped_text}\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}"
 def _longest_common_prefix_len(first: list[ToolTraceEntry], second: list[ToolTraceEntry]) -> int:
     """Return the number of leading tool-trace entries shared by both lists."""
     max_len = min(len(first), len(second))
@@ -207,7 +225,7 @@ class StreamingResponse:
         elif cancelled:
             stripped_text = self.accumulated_text.rstrip()
             self.accumulated_text = (
-                f"{stripped_text}\n\n{CANCELLED_RESPONSE_NOTE}" if stripped_text else CANCELLED_RESPONSE_NOTE
+                f"{stripped_text}\n\n{_CANCELLED_RESPONSE_NOTE}" if stripped_text else _CANCELLED_RESPONSE_NOTE
             )
 
         # When a placeholder message exists but no real text arrived,
@@ -215,7 +233,24 @@ class StreamingResponse:
         has_placeholder = (
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
-        await self._send_or_edit_message(client, is_final=True, allow_empty_progress=has_placeholder)
+        final_stream_status = STREAM_STATUS_COMPLETED
+        if error is not None:
+            final_stream_status = STREAM_STATUS_ERROR
+        elif cancelled:
+            final_stream_status = STREAM_STATUS_CANCELLED
+        send_succeeded = await self._send_or_edit_message(
+            client,
+            is_final=True,
+            allow_empty_progress=has_placeholder,
+            stream_status=final_stream_status,
+        )
+        if not send_succeeded:
+            logger.warning(
+                "Failed to persist terminal stream status",
+                event_id=self.event_id,
+                room_id=self.room_id,
+                stream_status=final_stream_status,
+            )
 
     async def _send_or_edit_message(
         self,
@@ -223,15 +258,16 @@ class StreamingResponse:
         is_final: bool = False,
         *,
         allow_empty_progress: bool = False,
-    ) -> None:
+        stream_status: str | None = None,
+    ) -> bool:
         """Send new message or edit existing one."""
         if not self.accumulated_text.strip() and not allow_empty_progress:
-            return
+            return True
 
         effective_thread_id = None if self.room_mode else self.thread_id if self.thread_id else self.reply_to_event_id
 
         # Add in-progress marker during streaming (not on final update)
-        text_to_send = self.accumulated_text if self.accumulated_text.strip() else PROGRESS_PLACEHOLDER
+        text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
         if not is_final:
             marker_suffix = "." * (self.in_progress_update_count % 3)
             text_to_send += f"{IN_PROGRESS_MARKER}{marker_suffix}"
@@ -242,6 +278,9 @@ class StreamingResponse:
 
         # Only use latest_thread_event_id for the initial message (not edits)
         latest_for_message = self.latest_thread_event_id if self.event_id is None and not self.room_mode else None
+        stream_status = self._resolve_stream_status(is_final=is_final, stream_status=stream_status)
+        extra_content = dict(self.extra_content or {})
+        extra_content[STREAM_STATUS_KEY] = stream_status
 
         content = format_message_with_mentions(
             config=self.config,
@@ -252,34 +291,76 @@ class StreamingResponse:
             reply_to_event_id=None if self.room_mode else self.reply_to_event_id,
             latest_thread_event_id=latest_for_message,
             tool_trace=self.tool_trace if self.show_tool_calls else None,
-            extra_content=self.extra_content,
+            extra_content=extra_content,
         )
 
-        send_succeeded = False
-        if self.event_id is None:
-            # First message - send new
-            logger.debug("Sending initial streaming message")
-            response_event_id = await send_message(client, self.room_id, content)
-            if response_event_id:
-                self.event_id = response_event_id
-                logger.debug("Initial streaming message sent", event_id=self.event_id)
-                send_succeeded = True
-            else:
-                logger.error("Failed to send initial streaming message")
-        else:
-            # Subsequent updates - edit existing message
-            logger.debug("Editing streaming message", event_id=self.event_id)
-            response_event_id = await edit_message(client, self.room_id, self.event_id, content, display_text)
-            if response_event_id:
-                send_succeeded = True
-            else:
-                logger.error("Failed to edit streaming message")
-
+        send_succeeded = await self._send_content(
+            client,
+            content=content,
+            display_text=display_text,
+            retry_on_failure=is_final,
+        )
         if send_succeeded and not is_final:
             self.in_progress_update_count += 1
             self.placeholder_progress_sent = not self.accumulated_text.strip()
         elif send_succeeded and is_final:
             self.placeholder_progress_sent = False
+        return send_succeeded
+
+    def _resolve_stream_status(self, *, is_final: bool, stream_status: str | None) -> str:
+        """Return the content status for the current send or edit."""
+        if stream_status is not None:
+            return stream_status
+        if is_final:
+            return STREAM_STATUS_COMPLETED
+        if self.event_id is None:
+            return STREAM_STATUS_PENDING
+        return STREAM_STATUS_STREAMING
+
+    async def _send_content(
+        self,
+        client: nio.AsyncClient,
+        *,
+        content: dict[str, Any],
+        display_text: str,
+        retry_on_failure: bool = False,
+    ) -> bool:
+        """Send a new event or edit the existing one."""
+        attempts = 2 if retry_on_failure else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                if self.event_id is None:
+                    logger.debug("Sending initial streaming message", attempt=attempt)
+                    response_event_id = await send_message(client, self.room_id, content)
+                    if response_event_id:
+                        self.event_id = response_event_id
+                        logger.debug("Initial streaming message sent", event_id=self.event_id)
+                        return True
+                    logger.error("Failed to send initial streaming message", attempt=attempt)
+                else:
+                    logger.debug("Editing streaming message", event_id=self.event_id, attempt=attempt)
+                    response_event_id = await edit_message(client, self.room_id, self.event_id, content, display_text)
+                    if response_event_id:
+                        return True
+                    logger.error("Failed to edit streaming message", attempt=attempt)
+            except Exception:
+                logger.warning(
+                    "Streaming update attempt raised an exception",
+                    attempt=attempt,
+                    event_id=self.event_id,
+                    room_id=self.room_id,
+                    exc_info=True,
+                )
+                if attempt == attempts:
+                    raise
+            if attempt < attempts:
+                logger.warning(
+                    "Retrying failed terminal streaming update",
+                    attempt=attempt,
+                    event_id=self.event_id,
+                    room_id=self.room_id,
+                )
+        return False
 
 
 class ReplacementStreamingResponse(StreamingResponse):

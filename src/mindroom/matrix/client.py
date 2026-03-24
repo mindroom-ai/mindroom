@@ -14,7 +14,7 @@ import nio
 from nio import crypto
 
 from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
-from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
+from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
@@ -907,6 +907,14 @@ def _history_message_sort_key(message: dict[str, Any]) -> tuple[int, str]:
     return (message["timestamp"], message["event_id"])
 
 
+def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
+    """Extract persisted stream status from message content when present."""
+    if content is None:
+        return None
+    status = content.get(STREAM_STATUS_KEY)
+    return status if isinstance(status, str) else None
+
+
 def _record_latest_thread_edit(
     event: nio.RoomMessageText,
     *,
@@ -947,12 +955,16 @@ async def _record_thread_message(
 
     if is_root_message and not root_message_found:
         message_data = await extract_and_resolve_message(event, client)
+        if stream_status := _stream_status_from_content(message_data.get("content")):
+            message_data["stream_status"] = stream_status
         messages.append(message_data)
         messages_by_event_id[event.event_id] = message_data
         return True
 
     if is_thread_message:
         message_data = await extract_and_resolve_message(event, client)
+        if stream_status := _stream_status_from_content(message_data.get("content")):
+            message_data["stream_status"] = stream_status
         messages.append(message_data)
         messages_by_event_id[event.event_id] = message_data
 
@@ -984,6 +996,11 @@ async def _apply_thread_edits_to_history(
             existing_message["body"] = edited_body
             if edited_content is not None:
                 existing_message["content"] = edited_content
+                existing_message_stream_status = _stream_status_from_content(edited_content)
+                if existing_message_stream_status is None:
+                    existing_message.pop("stream_status", None)
+                else:
+                    existing_message["stream_status"] = existing_message_stream_status
             continue
 
         synthesized_message = {
@@ -993,6 +1010,9 @@ async def _apply_thread_edits_to_history(
             "event_id": original_event_id,
             "content": edited_content if edited_content is not None else {},
         }
+        synthesized_stream_status = _stream_status_from_content(synthesized_message["content"])
+        if synthesized_stream_status is not None:
+            synthesized_message["stream_status"] = synthesized_stream_status
         messages.append(synthesized_message)
         messages_by_event_id[original_event_id] = synthesized_message
 
