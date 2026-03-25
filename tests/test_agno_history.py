@@ -444,7 +444,12 @@ class TestGetUnseenMessages:
             {"sender": "@user:example.com", "body": "Hello", "event_id": "$u1"},
         ]
         unseen, _partial = _get_unseen_messages(
-            thread_history, "test_agent", config, runtime_paths_for(config), set(), None
+            thread_history,
+            "test_agent",
+            config,
+            runtime_paths_for(config),
+            set(),
+            None,
         )
         assert len(unseen) == 1
         assert unseen[0]["event_id"] == "$u1"
@@ -457,7 +462,12 @@ class TestGetUnseenMessages:
             {"sender": "@user:example.com", "body": "New msg", "event_id": "$u2"},
         ]
         unseen, _partial = _get_unseen_messages(
-            thread_history, "test_agent", config, runtime_paths_for(config), {"$u1"}, None
+            thread_history,
+            "test_agent",
+            config,
+            runtime_paths_for(config),
+            {"$u1"},
+            None,
         )
         assert len(unseen) == 1
         assert unseen[0]["event_id"] == "$u2"
@@ -469,7 +479,12 @@ class TestGetUnseenMessages:
             {"sender": "@user:example.com", "body": "Current", "event_id": "$u1"},
         ]
         unseen, _partial = _get_unseen_messages(
-            thread_history, "test_agent", config, runtime_paths_for(config), set(), "$u1"
+            thread_history,
+            "test_agent",
+            config,
+            runtime_paths_for(config),
+            set(),
+            "$u1",
         )
         assert len(unseen) == 0
 
@@ -852,7 +867,12 @@ class TestUnseenNotReinjected:
         # Turn 1: agent sees $a1, $b1 is unseen
         turn1_seen = {"$a1"}
         unseen_turn1, _partial = _get_unseen_messages(
-            thread_history, "bot", config, runtime_paths_for(config), turn1_seen, "$a1"
+            thread_history,
+            "bot",
+            config,
+            runtime_paths_for(config),
+            turn1_seen,
+            "$a1",
         )
         unseen_turn1_ids = [m["event_id"] for m in unseen_turn1]
         assert "$b1" in unseen_turn1_ids
@@ -862,7 +882,12 @@ class TestUnseenNotReinjected:
 
         # Turn 2: $b1 should NOT appear as unseen
         unseen_turn2, _partial = _get_unseen_messages(
-            thread_history, "bot", config, runtime_paths_for(config), turn2_seen, "$a2"
+            thread_history,
+            "bot",
+            config,
+            runtime_paths_for(config),
+            turn2_seen,
+            "$a2",
         )
         unseen_turn2_ids = [m["event_id"] for m in unseen_turn2]
         assert "$b1" not in unseen_turn2_ids

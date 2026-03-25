@@ -20,8 +20,8 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
-    PROGRESS_PLACEHOLDER,
     IN_PROGRESS_MARKER,
+    PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingResponse,
     is_in_progress_message,
