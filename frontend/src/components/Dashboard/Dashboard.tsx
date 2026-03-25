@@ -199,15 +199,6 @@ export function Dashboard() {
     };
   }, [agents, rooms, teams, searchTerm, showTypes]);
 
-  // Show skeleton while initial config is loading
-  if (!config) {
-    return <DashboardSkeleton />;
-  }
-
-  // Get selected room details
-  const selectedRoom = selectedRoomId ? rooms.find(r => r.id === selectedRoomId) : null;
-  const selectedAgent = selectedAgentId ? agents.find(a => a.id === selectedAgentId) : null;
-
   // Memoized export configuration function
   const exportConfiguration = useCallback(() => {
     const exportData = {
@@ -239,6 +230,15 @@ export function Dashboard() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, [agents, rooms, teams, config, stats]);
+
+  // Show skeleton while initial config is loading
+  if (!config) {
+    return <DashboardSkeleton />;
+  }
+
+  // Get selected room details
+  const selectedRoom = selectedRoomId ? rooms.find(r => r.id === selectedRoomId) : null;
+  const selectedAgent = selectedAgentId ? agents.find(a => a.id === selectedAgentId) : null;
 
   return (
     <div className="flex flex-col gap-4">
