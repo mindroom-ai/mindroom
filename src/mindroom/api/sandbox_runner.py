@@ -636,16 +636,8 @@ async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse
     )
 
 
-@router.post("/execute", response_model=SandboxRunnerExecuteResponse)
-async def execute_tool_call(  # noqa: C901
-    request: Request,
-    payload: SandboxRunnerExecuteRequest,
-) -> SandboxRunnerExecuteResponse:
-    """Execute a tool function locally and return the serialized result."""
-    runtime_paths = sandbox_runner_runtime_paths(request)
-    config = _runtime_config_or_empty(runtime_paths)
-    runner_token = _app_runner_token(request.app)
-    payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
+def _validate_execute_request_payload(payload: SandboxRunnerExecuteRequest) -> None:
+    """Validate request override channels before execution dispatch."""
     if payload.credential_overrides:
         raise HTTPException(status_code=400, detail="credential_overrides must be supplied via lease_id.")
     if payload.tool_init_overrides and payload.tool_name in TOOL_METADATA:
@@ -664,6 +656,23 @@ async def execute_tool_call(  # noqa: C901
             )
         except ToolConfigOverrideError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.execution_env and payload.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES:
+        raise HTTPException(status_code=400, detail="execution_env is only supported for execution tools.")
+    if payload.extra_env_passthrough is not None and payload.tool_name != "shell":
+        raise HTTPException(status_code=400, detail="extra_env_passthrough is only supported for shell.")
+
+
+@router.post("/execute", response_model=SandboxRunnerExecuteResponse)
+async def execute_tool_call(
+    request: Request,
+    payload: SandboxRunnerExecuteRequest,
+) -> SandboxRunnerExecuteResponse:
+    """Execute a tool function locally and return the serialized result."""
+    runtime_paths = sandbox_runner_runtime_paths(request)
+    config = _runtime_config_or_empty(runtime_paths)
+    runner_token = _app_runner_token(request.app)
+    payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
+    _validate_execute_request_payload(payload)
     credential_overrides: dict[str, object] = {}
     if payload.lease_id is not None:
         credential_overrides = sandbox_worker_prep.consume_credential_lease(
@@ -673,10 +682,6 @@ async def execute_tool_call(  # noqa: C901
         )
 
     payload.credential_overrides = credential_overrides
-    if payload.execution_env and payload.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES:
-        raise HTTPException(status_code=400, detail="execution_env is only supported for execution tools.")
-    if payload.extra_env_passthrough is not None and payload.tool_name != "shell":
-        raise HTTPException(status_code=400, detail="extra_env_passthrough is only supported for shell.")
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None
     if payload.worker_key is not None:
         try:

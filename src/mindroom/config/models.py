@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
@@ -28,6 +28,52 @@ class StreamingConfig(BaseModel):
     )
 
 
+def _normalize_tool_entry_overrides(
+    overrides: object,
+    *,
+    error_message: str,
+) -> dict[str, object]:
+    """Normalize one inline tool override mapping."""
+    if overrides is None:
+        return {}
+    if not isinstance(overrides, dict):
+        raise ValueError(error_message)  # noqa: TRY004 - keep Pydantic validation errors structured
+    return cast("dict[str, object]", dict(overrides))
+
+
+def _coerce_named_tool_entry(data: dict[object, object]) -> dict[str, object]:
+    """Normalize the explicit ``{name: ..., overrides: ...}`` form."""
+    normalized = cast("dict[str, object]", dict(data))
+    normalized["overrides"] = _normalize_tool_entry_overrides(
+        normalized.get("overrides"),
+        error_message="Tool entry overrides must be a mapping",
+    )
+    return normalized
+
+
+def _coerce_single_key_tool_entry(data: dict[object, object]) -> dict[str, object]:
+    """Normalize the compact single-key YAML form."""
+    if len(data) != 1:
+        msg = (
+            "Tool entries must be either a string name or a single-key mapping like "
+            "{shell: {extra_env_passthrough: 'DAWARICH_*'}}"
+        )
+        raise ValueError(msg)
+
+    name, overrides = next(iter(data.items()))
+    if not isinstance(name, str):
+        msg = "Tool entry names must be strings"
+        raise ValueError(msg)  # noqa: TRY004 - keep Pydantic validation errors structured
+
+    return {
+        "name": name,
+        "overrides": _normalize_tool_entry_overrides(
+            overrides,
+            error_message=f"Tool '{name}' overrides must be a mapping",
+        ),
+    }
+
+
 class ToolConfigEntry(BaseModel):
     """One authored tool entry with optional inline overrides."""
 
@@ -45,33 +91,12 @@ class ToolConfigEntry(BaseModel):
         if isinstance(data, str):
             return {"name": data}
         if isinstance(data, dict):
-            if "name" in data or "overrides" in data:
-                normalized = dict(data)
-                overrides = normalized.get("overrides")
-                if overrides is None:
-                    normalized["overrides"] = {}
-                    return normalized
-                if not isinstance(overrides, dict):
-                    msg = "Tool entry overrides must be a mapping"
-                    raise ValueError(msg)
-                normalized["overrides"] = dict(overrides)
-                return normalized
-            if len(data) != 1:
-                msg = (
-                    "Tool entries must be either a string name or a single-key mapping like "
-                    "{shell: {extra_env_passthrough: 'DAWARICH_*'}}"
-                )
-                raise ValueError(msg)
-            name, overrides = next(iter(data.items()))
-            if not isinstance(name, str):
-                msg = "Tool entry names must be strings"
-                raise ValueError(msg)
-            if overrides is None:
-                return {"name": name, "overrides": {}}
-            if not isinstance(overrides, dict):
-                msg = f"Tool '{name}' overrides must be a mapping"
-                raise ValueError(msg)
-            return {"name": name, "overrides": dict(overrides)}
+            entry_dict = cast("dict[object, object]", data)
+            return (
+                _coerce_named_tool_entry(entry_dict)
+                if "name" in entry_dict or "overrides" in entry_dict
+                else _coerce_single_key_tool_entry(entry_dict)
+            )
         msg = "Tool entries must be strings or single-key mappings"
         raise ValueError(msg)
 

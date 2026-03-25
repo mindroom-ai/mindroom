@@ -1940,38 +1940,6 @@
     {
       "auth_provider": null,
       "category": "development",
-      "config_fields": null,
-      "default_execution_target": "primary",
-      "dependencies": null,
-      "description": "Demo package plugin tool",
-      "display_name": "Demo Package Plugin",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": null,
-      "icon_color": null,
-      "name": "demo_pkg_tool",
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "auth_provider": null,
-      "category": "development",
-      "config_fields": null,
-      "default_execution_target": "primary",
-      "dependencies": null,
-      "description": "Demo plugin tool",
-      "display_name": "Demo Plugin",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": null,
-      "icon_color": null,
-      "name": "demo_plugin",
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "auth_provider": null,
-      "category": "development",
       "config_fields": [
         {
           "authored_override": true,
