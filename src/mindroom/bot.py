@@ -118,6 +118,8 @@ from .constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
     resolve_avatar_path,
@@ -2044,6 +2046,7 @@ class AgentBot:
                             header=None,
                             show_tool_calls=self.show_tool_calls,
                             existing_event_id=message_id,
+                            adopt_existing_placeholder=message_id is not None,
                             room_mode=room_mode,
                         )
 
@@ -2168,6 +2171,7 @@ class AgentBot:
                     reply_to_event_id,
                     f"{thinking_message} {IN_PROGRESS_MARKER}",
                     thread_id,
+                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
                 )
 
             # Determine which message ID to use
@@ -2551,6 +2555,8 @@ class AgentBot:
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
+        *,
+        adopt_existing_placeholder: bool = False,
         user_id: str | None = None,
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
@@ -2631,6 +2637,7 @@ class AgentBot:
                         response_stream,
                         streaming_cls=StreamingResponse,
                         existing_event_id=existing_event_id,
+                        adopt_existing_placeholder=adopt_existing_placeholder,
                         room_mode=room_mode,
                         show_tool_calls=self.show_tool_calls,
                         extra_content=response_extra_content,
@@ -2730,6 +2737,7 @@ class AgentBot:
                     thread_id,
                     thread_history,
                     message_id,  # Edit the thinking message or existing
+                    adopt_existing_placeholder=existing_event_id is None and message_id is not None,
                     user_id=user_id,
                     media=media_inputs,
                     attachment_ids=attachment_ids,

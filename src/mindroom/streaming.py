@@ -487,6 +487,7 @@ async def send_streaming_response(
     streaming_cls: type[StreamingResponse] = StreamingResponse,
     header: str | None = None,
     existing_event_id: str | None = None,
+    adopt_existing_placeholder: bool = False,
     room_mode: bool = False,
     show_tool_calls: bool = True,
     extra_content: dict[str, Any] | None = None,
@@ -505,6 +506,9 @@ async def send_streaming_response(
         streaming_cls: StreamingResponse class to use (default: StreamingResponse, alternative: ReplacementStreamingResponse)
         header: Optional text prefix to send before chunks
         existing_event_id: If editing an existing message, pass its ID
+        adopt_existing_placeholder: Treat an existing event as a bot-created
+            thinking placeholder so terminal finalize still edits it even if no
+            chunks arrive.
         room_mode: If True, skip thread relations (for bridges/mobile)
         show_tool_calls: Whether to include tool call text inline in the streamed message
         extra_content: Optional custom metadata fields merged into each event
@@ -547,6 +551,7 @@ async def send_streaming_response(
     if existing_event_id:
         streaming.event_id = existing_event_id
         streaming.accumulated_text = ""
+        streaming.placeholder_progress_sent = adopt_existing_placeholder
 
     if header:
         await streaming.update_content(header, client)

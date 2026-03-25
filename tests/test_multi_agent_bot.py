@@ -1675,6 +1675,63 @@ class TestAgentBot:
         assert store_args[7] == "@alice:localhost"
 
     @pytest.mark.asyncio
+    async def test_generate_response_marks_fresh_thinking_message_as_adopted_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming generation should flag fresh thinking placeholders for adoption."""
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function("$thinking")
+            return "$thinking"
+
+        scheduled_tasks: list[asyncio.Task[None]] = []
+
+        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        def schedule_background_task(
+            coro: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            error_handler: object | None = None,  # noqa: ARG001
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+            scheduled_tasks.append(task)
+            return task
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._process_and_respond_streaming = AsyncMock(return_value="$thinking")
+        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
+
+        with (
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=True),
+            patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
+        ):
+            await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Continue",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                user_id="@alice:localhost",
+            )
+
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+        process_args = bot._process_and_respond_streaming.await_args.args
+        process_kwargs = bot._process_and_respond_streaming.await_args.kwargs
+        assert process_args[5] == "$thinking"
+        assert process_kwargs["adopt_existing_placeholder"] is True
+
+    @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test agent bot not responding when not mentioned."""
         config = self._config_for_storage(tmp_path)

@@ -13,11 +13,12 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState
+from mindroom.streaming import IN_PROGRESS_MARKER
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1184,6 +1185,69 @@ async def test_run_cancellable_response_does_not_depend_on_current_task_lookup(
         thread_id=None,
         response_function=response_function,
     )
+
+
+@pytest.mark.asyncio
+async def test_run_cancellable_response_marks_thinking_placeholder_pending(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mock_agent_users: dict[str, AgentMatrixUser],
+) -> None:
+    """Initial thinking messages should carry pending stream metadata for restart-safe classification."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(
+        agent_user=mock_agent_users["agent1"],
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    setup_test_bot(bot, AsyncMock())
+
+    captured_send: dict[str, object] = {}
+
+    async def fake_send_response(
+        room_id: str,
+        reply_to_event_id: str | None,
+        response_text: str,
+        thread_id: str | None,
+        reply_to_event: object | None = None,
+        skip_mentions: bool = False,
+        tool_trace: list[object] | None = None,
+        extra_content: dict[str, object] | None = None,
+        thread_mode_override: str | None = None,
+    ) -> str:
+        captured_send["room_id"] = room_id
+        captured_send["reply_to_event_id"] = reply_to_event_id
+        captured_send["response_text"] = response_text
+        captured_send["thread_id"] = thread_id
+        captured_send["reply_to_event"] = reply_to_event
+        captured_send["skip_mentions"] = skip_mentions
+        captured_send["tool_trace"] = tool_trace
+        captured_send["extra_content"] = extra_content
+        captured_send["thread_mode_override"] = thread_mode_override
+        return "$thinking"
+
+    monkeypatch.setattr(bot, "_send_response", AsyncMock(side_effect=fake_send_response))
+
+    async def response_function(message_id: str | None) -> None:
+        assert message_id == "$thinking"
+
+    await bot._run_cancellable_response(
+        room_id="!room:localhost",
+        reply_to_event_id="$reply",
+        thread_id=None,
+        response_function=response_function,
+        thinking_message="Thinking...",
+    )
+
+    assert captured_send["response_text"] == f"Thinking... {IN_PROGRESS_MARKER}"
+    assert captured_send["extra_content"] == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
 
 
 @pytest.mark.asyncio
