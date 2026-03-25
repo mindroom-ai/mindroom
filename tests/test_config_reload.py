@@ -219,6 +219,50 @@ async def test_request_config_reload_ignores_changes_while_startup_is_in_progres
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_attr", "cancel_method_name", "task_name"),
+    [
+        ("_config_reload_task", "_cancel_config_reload_task", "config_reload"),
+        ("_knowledge_refresh_task", "_cancel_knowledge_refresh_task", "knowledge_refresh"),
+    ],
+)
+async def test_detached_task_cancel_logs_exception_instead_of_suppressing_silently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    task_attr: str,
+    cancel_method_name: str,
+    task_name: str,
+) -> None:
+    """Detached task cancellation should log unexpected failures and keep shutdown moving."""
+    logger_mock = MagicMock()
+    monkeypatch.setattr("mindroom.orchestrator.logger", logger_mock)
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    started = asyncio.Event()
+
+    async def fail_during_cancel() -> None:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError as err:
+            msg = "boom"
+            raise RuntimeError(msg) from err
+
+    setattr(orchestrator, task_attr, asyncio.create_task(fail_during_cancel(), name=task_name))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await getattr(orchestrator, cancel_method_name)()
+
+    assert getattr(orchestrator, task_attr) is None
+    assert any(
+        call.args
+        and call.args[0] == "Detached task failed while being cancelled"
+        and call.kwargs.get("task_name") == task_name
+        for call in logger_mock.debug.call_args_list
+    )
+
+
+@pytest.mark.asyncio
 async def test_queued_config_reload_coalesces_rapid_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

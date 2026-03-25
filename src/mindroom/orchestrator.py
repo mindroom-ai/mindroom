@@ -221,14 +221,25 @@ class MultiAgentOrchestrator:
         """Cancel any in-flight background knowledge refresh task."""
         task = self._knowledge_refresh_task
         self._knowledge_refresh_task = None
-        await cancel_task(task, suppress_exceptions=(asyncio.CancelledError, Exception))
+        await self._cancel_detached_task(task, task_name="knowledge_refresh")
 
     async def _cancel_config_reload_task(self) -> None:
         """Cancel any queued config reload task."""
         task = self._config_reload_task
         self._config_reload_task = None
         self._config_reload_requested_at = None
-        await cancel_task(task, suppress_exceptions=(asyncio.CancelledError, Exception))
+        await self._cancel_detached_task(task, task_name="config_reload")
+
+    async def _cancel_detached_task(self, task: asyncio.Task | None, *, task_name: str) -> None:
+        """Cancel a detached background task without hiding cleanup failures."""
+        try:
+            await cancel_task(task)
+        except Exception:
+            logger.debug(
+                "Detached task failed while being cancelled",
+                task_name=task_name,
+                exc_info=True,
+            )
 
     async def _cancel_bot_start_task(self, entity_name: str) -> None:
         """Cancel any background start task for one bot."""
