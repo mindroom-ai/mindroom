@@ -117,7 +117,8 @@ This is why the `openclaw_compat` preset includes `attachments` in its effective
 
 When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable.
 This context carries the current `room_id`, `thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
-Tools like `matrix_message` use this context to post messages back to the correct room and thread without the caller passing explicit IDs.
+Tools like `matrix_message` and `thread_resolution` use this context to act on the correct room and thread without the caller passing explicit IDs.
+`thread_resolution` can also target another authorized room, but it still checks the target room's canonical thread root and requester membership before writing the shared resolution state.
 
 Attachment IDs from the current conversation are also available in the runtime context.
 Tools that accept `attachment_ids` (such as `matrix_message`) resolve those IDs against the context-scoped attachment registry, preventing one conversation from accessing files uploaded in another.

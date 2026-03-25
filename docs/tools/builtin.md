@@ -93,6 +93,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | Icon | Tool | Description | Config Required |
 |------|------|-------------|-----------------|
 | :lucide-message-square: | `matrix_message` | Native Matrix messaging actions (`send`, `reply`, `thread-reply`, `react`, `read`, `thread-list`, `edit`, `context`) | - |
+| :lucide-check-check: | `thread_resolution` | Resolve or reopen Matrix threads using shared room-state markers (`resolve_thread`, `unresolve_thread`) | - |
 | :lucide-message-square: | `gmail` | Read, search, and manage Gmail emails | Google OAuth |
 | :lucide-message-square: | `slack` | Send messages and manage channels | `token` |
 | :lucide-message-square: | `discord` | Interact with Discord channels and servers | `bot_token` |
