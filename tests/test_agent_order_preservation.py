@@ -39,7 +39,7 @@ def mock_config() -> Config:
                 "phone": AgentConfig(
                     display_name="PhoneAgent",
                     role="Make phone calls",
-                    tools=["phone"],
+                    tools=["twilio"],
                     instructions=[],
                     rooms=[],
                     model="default",
@@ -47,7 +47,7 @@ def mock_config() -> Config:
                 "research": AgentConfig(
                     display_name="ResearchAgent",
                     role="Research information",
-                    tools=["search"],
+                    tools=["duckduckgo"],
                     instructions=[],
                     rooms=[],
                     model="default",

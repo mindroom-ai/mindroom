@@ -1940,6 +1940,38 @@
     {
       "auth_provider": null,
       "category": "development",
+      "config_fields": null,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Demo package plugin tool",
+      "display_name": "Demo Package Plugin",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": null,
+      "icon_color": null,
+      "name": "demo_pkg_tool",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": null,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Demo plugin tool",
+      "display_name": "Demo Plugin",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": null,
+      "icon_color": null,
+      "name": "demo_plugin",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
       "config_fields": [
         {
           "authored_override": true,
@@ -4632,7 +4664,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Comma or newline-separated env var names or glob patterns to expose to shell execution in addition to the committed runtime env. When set, a small set of common service URLs (WHISPER_URL, TTS_URL, etc.) is also included automatically.",
+          "description": "Comma or newline-separated env var names or glob patterns to expose to shell execution in addition to the committed runtime env.",
           "label": "Extra Env Passthrough",
           "name": "extra_env_passthrough",
           "options": null,
@@ -4642,6 +4674,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Comma or newline-separated path entries to prepend to PATH for shell execution.",
           "label": "Shell PATH Prepend",
@@ -5839,22 +5872,6 @@
       "name": "clickup",
       "setup_type": "api_key",
       "status": "requires_config"
-    },
-    {
-      "auth_provider": null,
-      "category": "productivity",
-      "config_fields": [],
-      "default_execution_target": "primary",
-      "dependencies": [],
-      "description": "Compress older conversation history into a summary to free context space",
-      "display_name": "Context Compaction",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "Minimize2",
-      "icon_color": "text-amber-500",
-      "name": "compact_context",
-      "setup_type": "none",
-      "status": "available"
     },
     {
       "auth_provider": null,
