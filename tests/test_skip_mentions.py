@@ -9,7 +9,10 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot, _should_skip_mentions
-from tests.conftest import test_runtime_paths
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.matrix.identity import MatrixID
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -172,3 +175,44 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
         # Verify mentions were detected
         assert context.am_i_mentioned is True
         assert "email_agent" in context.mentioned_agents
+
+
+@pytest.mark.asyncio
+async def test_extract_context_without_skip_metadata_detects_tool_mentions(tmp_path: Path) -> None:
+    """Tool-shaped events without skip metadata should still trigger mention detection."""
+    config = bind_runtime_paths(
+        Config(agents={"email_agent": AgentConfig(display_name="Email Agent")}),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+
+    bot = AsyncMock(spec=AgentBot)
+    bot.config = config
+    bot.agent_name = "email_agent"
+    bot.client = AsyncMock()
+    bot.logger = MagicMock()
+    bot.matrix_id = MatrixID.from_agent("email_agent", "localhost", runtime_paths)
+    bot.runtime_paths = runtime_paths
+    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+
+    room = nio.MatrixRoom(room_id="!test:server", own_user_id="@bot:server")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "@mindroom_email_agent:localhost please continue",
+                "msgtype": "m.text",
+                "m.mentions": {
+                    "user_ids": [bot.matrix_id.full_id],
+                },
+            },
+            "sender": "@mindroom_general:localhost",
+            "event_id": "$event789",
+            "room_id": "!test:server",
+            "origin_server_ts": 123456789,
+        },
+    )
+
+    context = await AgentBot._extract_message_context(bot, room, event)
+
+    assert context.am_i_mentioned is True
+    assert [agent.full_id for agent in context.mentioned_agents] == [bot.matrix_id.full_id]

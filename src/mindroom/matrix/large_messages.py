@@ -13,7 +13,7 @@ from typing import Any
 import nio
 from nio import crypto
 
-from mindroom.constants import AI_RUN_METADATA_KEY, STREAM_STATUS_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, ORIGINAL_SENDER_KEY, STREAM_STATUS_KEY
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -24,6 +24,7 @@ _EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
 _PASSTHROUGH_CONTENT_KEYS = (
     "m.mentions",
     "com.mindroom.skip_mentions",
+    ORIGINAL_SENDER_KEY,
     AI_RUN_METADATA_KEY,
     STREAM_STATUS_KEY,
 )
