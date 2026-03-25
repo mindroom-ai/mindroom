@@ -84,6 +84,16 @@ async def test_thread_resolution_tool_requires_runtime_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unresolve_thread_requires_runtime_context() -> None:
+    """Unresolve should fail clearly outside Matrix runtime context."""
+    payload = json.loads(await ThreadResolutionTools().unresolve_thread())
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "thread_resolution"
+    assert "context" in payload["message"]
+
+
+@pytest.mark.asyncio
 async def test_resolve_thread_defaults_to_context_resolved_thread_id() -> None:
     """Resolve should use the active resolved thread root when not overridden."""
     tool = ThreadResolutionTools()
@@ -174,6 +184,21 @@ async def test_thread_resolution_explicit_room_target_requires_authorization() -
 
 
 @pytest.mark.asyncio
+async def test_unresolve_thread_explicit_room_target_requires_authorization() -> None:
+    """Explicit room targeting should also enforce authorization for unresolve."""
+    tool = ThreadResolutionTools()
+    context = _make_context()
+
+    with tool_runtime_context(context):
+        payload = json.loads(await tool.unresolve_thread(room_id="!other:localhost"))
+
+    assert payload["status"] == "error"
+    assert payload["room_id"] == "!other:localhost"
+    assert payload["action"] == "unresolve"
+    assert "Not authorized" in payload["message"]
+
+
+@pytest.mark.asyncio
 async def test_thread_resolution_cross_room_does_not_inherit_context_thread() -> None:
     """Cross-room resolution should not silently reuse the origin room thread context."""
     tool = ThreadResolutionTools()
@@ -187,6 +212,23 @@ async def test_thread_resolution_cross_room_does_not_inherit_context_thread() ->
 
     assert payload["status"] == "error"
     assert payload["action"] == "resolve"
+    assert "thread_id is required" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_unresolve_thread_cross_room_does_not_inherit_context_thread() -> None:
+    """Cross-room unresolve should not silently reuse the origin room thread context."""
+    tool = ThreadResolutionTools()
+    context = _make_context(thread_id="$origin-thread:localhost")
+
+    with (
+        patch("mindroom.custom_tools.thread_resolution.room_access_allowed", return_value=True),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.unresolve_thread(room_id="!other:localhost"))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "unresolve"
     assert "thread_id is required" in payload["message"]
 
 
@@ -246,6 +288,27 @@ async def test_thread_resolution_returns_error_when_normalization_fails() -> Non
 
 
 @pytest.mark.asyncio
+async def test_unresolve_thread_returns_error_when_normalization_fails() -> None:
+    """Unresolve should surface normalization failures as structured errors."""
+    tool = ThreadResolutionTools()
+    context = _make_context(thread_id="$reply:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_resolution.normalize_thread_root_event_id",
+            new=AsyncMock(return_value=None),
+        ),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.unresolve_thread())
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "unresolve"
+    assert payload["thread_id"] == "$reply:localhost"
+    assert "canonical thread root" in payload["message"]
+
+
+@pytest.mark.asyncio
 async def test_thread_resolution_surfaces_write_failures() -> None:
     """State write failures should return structured tool errors."""
     tool = ThreadResolutionTools()
@@ -267,6 +330,31 @@ async def test_thread_resolution_surfaces_write_failures() -> None:
     assert payload["status"] == "error"
     assert payload["thread_id"] == "$thread:localhost"
     assert payload["message"] == "write failed"
+
+
+@pytest.mark.asyncio
+async def test_unresolve_thread_surfaces_clear_failures() -> None:
+    """State clear failures should return structured tool errors."""
+    tool = ThreadResolutionTools()
+    context = _make_context()
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_resolution.normalize_thread_root_event_id",
+            new=AsyncMock(return_value="$thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_resolution.clear_thread_resolution",
+            new=AsyncMock(side_effect=ThreadResolutionError("clear failed")),
+        ),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.unresolve_thread())
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "unresolve"
+    assert payload["thread_id"] == "$thread:localhost"
+    assert payload["message"] == "clear failed"
 
 
 @pytest.mark.asyncio

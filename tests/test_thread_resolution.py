@@ -8,6 +8,7 @@ import nio
 import pytest
 
 import mindroom.thread_resolution as thread_resolution_module
+from mindroom.matrix.reply_chain import canonicalize_related_event_id
 from mindroom.thread_resolution import (
     THREAD_RESOLUTION_EVENT_TYPE,
     ThreadResolutionError,
@@ -614,6 +615,44 @@ async def test_normalize_thread_root_event_id_returns_none_for_blank_input(event
 
     assert normalized is None
     client.room_get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_canonicalize_related_event_id_returns_none_for_blank_input() -> None:
+    """The shared relation walker should reject blank event IDs directly."""
+    client = AsyncMock()
+
+    normalized = await canonicalize_related_event_id(
+        client,
+        "!room:localhost",
+        "   ",
+    )
+
+    assert normalized is None
+    client.room_get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_canonicalize_related_event_id_returns_none_for_related_events_without_targets() -> None:
+    """Malformed related events should fail closed in the shared canonicalizer too."""
+    client = AsyncMock()
+    client.room_get_event.return_value = _message_event_response(
+        "$annotation:localhost",
+        content={
+            "body": "Reaction",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.annotation", "key": "👍"},
+        },
+    )
+
+    normalized = await canonicalize_related_event_id(
+        client,
+        "!room:localhost",
+        "$annotation:localhost",
+    )
+
+    assert normalized is None
+    client.room_get_event.assert_awaited_once_with("!room:localhost", "$annotation:localhost")
 
 
 @pytest.mark.asyncio
