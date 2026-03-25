@@ -68,7 +68,7 @@ class EventInfo:
         """Create EventInfo from a raw event source dictionary."""
         return _analyze_event_relations(event_source)
 
-    def next_related_event_id(self, current_event_id: str | None = None) -> str | None:
+    def next_related_event_id(self, current_event_id: str) -> str | None:
         """Return the next authoritative related event to inspect."""
         for related_event_id in (
             self.thread_id,
