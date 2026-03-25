@@ -69,9 +69,8 @@ class EventInfo:
         return _analyze_event_relations(event_source)
 
     def next_related_event_id(self, current_event_id: str) -> str | None:
-        """Return the next authoritative related event to inspect."""
+        """Return the next relation target to inspect outside native thread hops."""
         for related_event_id in (
-            self.thread_id,
             self.safe_thread_root,
             self.reply_to_event_id,
         ):
