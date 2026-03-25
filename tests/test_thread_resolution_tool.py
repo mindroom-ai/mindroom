@@ -24,7 +24,7 @@ def _make_context(
     *,
     room_id: str = "!room:localhost",
     thread_id: str | None = "$thread:localhost",
-    event_id: str | None = None,
+    reply_to_event_id: str | None = None,
 ) -> ToolRuntimeContext:
     runtime_root = Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
@@ -41,8 +41,7 @@ def _make_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         room=None,
-        reply_to_event_id=None,
-        event_id=event_id,
+        reply_to_event_id=reply_to_event_id,
         storage_path=None,
     )
 
@@ -271,10 +270,13 @@ async def test_thread_resolution_surfaces_write_failures() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_thread_falls_back_to_event_id_for_room_timeline_root() -> None:
-    """Room-level messages with no thread context should use event_id as the thread root."""
+async def test_resolve_thread_falls_back_to_reply_to_event_id_for_room_timeline_root() -> None:
+    """Room-level messages with no thread context should use reply_to_event_id as the thread root."""
     tool = ThreadResolutionTools()
-    context = _make_context(thread_id=None, event_id="$root-event:localhost")
+    context = _make_context(
+        thread_id=None,
+        reply_to_event_id="$root-event:localhost",
+    )
 
     with (
         patch(
@@ -308,7 +310,7 @@ async def test_resolve_thread_falls_back_to_event_id_for_room_timeline_root() ->
 async def test_unresolve_thread_canonical_skips_normalization() -> None:
     """Canonical mode should clear the marker without fetching the live event."""
     tool = ThreadResolutionTools()
-    context = _make_context(thread_id=None, event_id="$orphaned-root:localhost")
+    context = _make_context(thread_id=None, reply_to_event_id="$orphaned-root:localhost")
 
     with (
         patch(

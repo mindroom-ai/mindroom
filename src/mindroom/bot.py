@@ -1822,7 +1822,6 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             room=self._cached_room(room_id),
             reply_to_event_id=reply_to_event_id,
-            event_id=reply_to_event_id,
             storage_path=self.storage_path,
             attachment_ids=tuple(attachment_ids or []),
         )

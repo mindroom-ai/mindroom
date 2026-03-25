@@ -207,3 +207,21 @@ class TestEventRelations:
 
         assert info.can_be_thread_root is False
         assert info.safe_thread_root == "$reacted_msg"
+
+    def test_next_related_event_id_prefers_original_event_for_edits(self) -> None:
+        """Edits should follow the edited event before any copied reply metadata."""
+        event_source = {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$original_msg",
+                    "m.in_reply_to": {
+                        "event_id": "$reply_target",
+                    },
+                },
+            },
+        }
+
+        info = EventInfo.from_event(event_source)
+
+        assert info.next_related_event_id(current_event_id="$edit_event") == "$original_msg"

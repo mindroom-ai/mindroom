@@ -37,3 +37,22 @@ def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
         context.runtime_paths,
         room_alias=room_alias,
     )
+
+
+def resolve_context_thread_id(
+    context: ToolRuntimeContext,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    allow_context_fallback: bool = True,
+    room_timeline_sentinel: str | None = None,
+    room_timeline_fallback_event_id: str | None = None,
+) -> str | None:
+    """Return a target thread ID only when it is valid for the chosen room."""
+    if room_timeline_sentinel is not None and thread_id == room_timeline_sentinel:
+        return None
+    if thread_id is not None:
+        return thread_id
+    if allow_context_fallback and room_id == context.room_id:
+        return context.resolved_thread_id or room_timeline_fallback_event_id
+    return None

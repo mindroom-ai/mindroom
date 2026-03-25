@@ -9,7 +9,7 @@ from typing import cast
 
 import nio
 
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.reply_chain import canonicalize_related_event_id
 
 THREAD_RESOLUTION_EVENT_TYPE = "com.mindroom.thread.resolution"
 POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
@@ -80,24 +80,6 @@ def _require_non_empty_string(value: object, *, field_name: str) -> str:
         msg = f"{field_name} must be a non-empty string."
         raise ThreadResolutionError(msg)
     return normalized_value
-
-
-def _next_related_event_id(current_event_id: str, event_info: EventInfo) -> str | None:
-    """Return the next event to inspect while normalizing a thread root."""
-    # Follow the authoritative relation target for edits instead of trusting
-    # thread metadata copied into m.new_content.
-    related_event_ids = [
-        event_info.thread_id,
-        event_info.safe_thread_root,
-        event_info.reply_to_event_id,
-    ]
-
-    for related_event_id in related_event_ids:
-        normalized_related_event_id = _normalize_non_empty_string(related_event_id)
-        if normalized_related_event_id is None or normalized_related_event_id == current_event_id:
-            continue
-        return normalized_related_event_id
-    return None
 
 
 def _parse_thread_resolution_record(
@@ -306,32 +288,15 @@ async def normalize_thread_root_event_id(
     event_id: str,
 ) -> str | None:
     """Resolve a room event or related reply into the canonical thread root ID."""
-    current_event_id = _normalize_non_empty_string(event_id)
-    if not current_event_id:
+    normalized_event_id = _normalize_non_empty_string(event_id)
+    if not normalized_event_id:
         return None
-
-    seen_event_ids: set[str] = set()
-
-    while current_event_id:
-        if len(seen_event_ids) >= MAX_THREAD_ROOT_NORMALIZATION_DEPTH:
-            break
-        if current_event_id in seen_event_ids:
-            break
-        seen_event_ids.add(current_event_id)
-
-        response = await client.room_get_event(room_id, current_event_id)
-        if not isinstance(response, nio.RoomGetEventResponse):
-            return None
-
-        event_info = EventInfo.from_event(response.event.source)
-        next_event_id = _next_related_event_id(current_event_id, event_info)
-        if next_event_id is None:
-            if event_info.has_relations:
-                return None
-            return current_event_id
-        current_event_id = next_event_id
-
-    return None
+    return await canonicalize_related_event_id(
+        client,
+        room_id,
+        normalized_event_id,
+        traversal_limit=MAX_THREAD_ROOT_NORMALIZATION_DEPTH,
+    )
 
 
 async def get_thread_resolution(

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 
 if TYPE_CHECKING:
@@ -25,6 +26,8 @@ type _FetchThreadHistory = Callable[
     [nio.AsyncClient, str, str],
     Coroutine[Any, Any, list[dict[str, Any]]],
 ]
+
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +69,7 @@ class _ReplyChainNode:
     message: dict[str, Any]
     parent_event_id: str | None
     thread_root_id: str | None
+    has_relations: bool
 
 
 @dataclass
@@ -105,11 +109,7 @@ def _event_to_history_message(event: nio.Event) -> dict[str, Any]:
 
 def _next_reply_chain_event_id(event_info: EventInfo, current_event_id: str) -> str | None:
     """Resolve the next event in a reply chain."""
-    if event_info.reply_to_event_id:
-        return event_info.reply_to_event_id
-    if event_info.safe_thread_root and event_info.safe_thread_root != current_event_id:
-        return event_info.safe_thread_root
-    return None
+    return event_info.next_related_event_id(current_event_id)
 
 
 def _thread_history_has_replies(thread_history: list[dict[str, Any]], root_event_id: str) -> bool:
@@ -260,6 +260,7 @@ async def _fetch_node(
         message=_event_to_history_message(target_event),
         parent_event_id=_next_reply_chain_event_id(target_info, event_id),
         thread_root_id=target_info.thread_id,
+        has_relations=target_info.has_relations,
     )
     caches.nodes.put(room_id, event_id, node)
     if node.thread_root_id:
@@ -278,7 +279,7 @@ async def _resolve_direct_thread_root(
     chain_history_length: int,
 ) -> tuple[str, list[dict[str, Any]], bool, bool] | None:
     """Resolve clients that reply to an existing thread root without m.thread metadata."""
-    if chain_history_length != 1 or node.parent_event_id or node.thread_root_id:
+    if chain_history_length != 1 or node.parent_event_id or node.thread_root_id or node.has_relations:
         return None
 
     thread_history = await fetch_history(client, room_id, event_id)
@@ -288,10 +289,52 @@ async def _resolve_direct_thread_root(
     caches.nodes.put(
         room_id,
         event_id,
-        _ReplyChainNode(message=node.message, parent_event_id=node.parent_event_id, thread_root_id=event_id),
+        _ReplyChainNode(
+            message=node.message,
+            parent_event_id=node.parent_event_id,
+            thread_root_id=event_id,
+            has_relations=node.has_relations,
+        ),
     )
     _cache_roots(caches, room_id, visited_event_ids, event_id, points_to_thread=True)
     return event_id, thread_history, True, True
+
+
+async def canonicalize_related_event_id(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    *,
+    caches: ReplyChainCaches | None = None,
+    traversal_limit: int | None = None,
+) -> str | None:
+    """Resolve one event or relation chain into its canonical conversation root."""
+    current_event_id = event_id.strip()
+    if not current_event_id:
+        return None
+
+    effective_caches = caches or ReplyChainCaches()
+    effective_traversal_limit = traversal_limit or effective_caches.traversal_limit
+    canonical_event_id: str | None = None
+    seen_event_ids: set[str] = set()
+
+    while current_event_id:
+        if len(seen_event_ids) >= effective_traversal_limit or current_event_id in seen_event_ids:
+            break
+        seen_event_ids.add(current_event_id)
+
+        node = await _fetch_node(client, effective_caches, logger, room_id, current_event_id)
+        if node is None:
+            break
+
+        next_event_id = node.thread_root_id or node.parent_event_id
+        if next_event_id is None:
+            if not node.has_relations:
+                canonical_event_id = current_event_id
+            break
+        current_event_id = next_event_id
+
+    return canonical_event_id
 
 
 def _build_context_result(

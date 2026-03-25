@@ -7,14 +7,14 @@ from datetime import UTC, datetime
 
 from agno.tools import Toolkit
 
-from mindroom.custom_tools.attachment_helpers import room_access_allowed
+from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id, room_access_allowed
 from mindroom.thread_resolution import (
     ThreadResolutionError,
     clear_thread_resolution,
     normalize_thread_root_event_id,
     set_thread_resolved,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 
 class ThreadResolutionTools(Toolkit):
@@ -39,20 +39,6 @@ class ThreadResolutionTools(Toolkit):
             message="Thread resolution tool context is unavailable in this runtime path.",
         )
 
-    @staticmethod
-    def _safe_thread_id(
-        context: ToolRuntimeContext,
-        *,
-        room_id: str,
-        thread_id: str | None,
-    ) -> str | None:
-        """Return a thread ID only when it is valid for the target room."""
-        if thread_id is not None:
-            return thread_id
-        if room_id == context.room_id:
-            return context.resolved_thread_id or context.event_id
-        return None
-
     async def resolve_thread(
         self,
         thread_id: str | None = None,
@@ -72,10 +58,11 @@ class ThreadResolutionTools(Toolkit):
                 message="Not authorized to access the target room.",
             )
 
-        effective_thread_id = self._safe_thread_id(
+        effective_thread_id = resolve_context_thread_id(
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
+            room_timeline_fallback_event_id=context.reply_to_event_id,
         )
         if effective_thread_id is None:
             return self._payload(
@@ -151,10 +138,11 @@ class ThreadResolutionTools(Toolkit):
                 message="Not authorized to access the target room.",
             )
 
-        effective_thread_id = self._safe_thread_id(
+        effective_thread_id = resolve_context_thread_id(
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
+            room_timeline_fallback_event_id=context.reply_to_event_id,
         )
         if effective_thread_id is None:
             return self._payload(
