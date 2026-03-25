@@ -74,8 +74,7 @@ class TestClassifyPartialReply:
         assert (
             _classify_partial_reply(
                 {"body": "Final answer", "stream_status": STREAM_STATUS_COMPLETED},
-                current_timestamp_ms=None,
-                active_event_ids=None,
+                active_event_ids=set(),
             )
             is None
         )
@@ -85,8 +84,7 @@ class TestClassifyPartialReply:
         assert (
             _classify_partial_reply(
                 {"body": "Partial answer", "stream_status": STREAM_STATUS_CANCELLED},
-                current_timestamp_ms=None,
-                active_event_ids=None,
+                active_event_ids=set(),
             )
             is PartialReplyKind.INTERRUPTED
         )
@@ -96,8 +94,7 @@ class TestClassifyPartialReply:
         assert (
             _classify_partial_reply(
                 {"body": "Partial answer", "stream_status": STREAM_STATUS_ERROR},
-                current_timestamp_ms=None,
-                active_event_ids=None,
+                active_event_ids=set(),
             )
             is PartialReplyKind.INTERRUPTED
         )
@@ -107,8 +104,7 @@ class TestClassifyPartialReply:
         assert (
             _classify_partial_reply(
                 {"body": "Thinking...", "stream_status": STREAM_STATUS_PENDING},
-                current_timestamp_ms=None,
-                active_event_ids=None,
+                active_event_ids=set(),
             )
             is PartialReplyKind.IN_PROGRESS
         )
@@ -118,14 +114,13 @@ class TestClassifyPartialReply:
         assert (
             _classify_partial_reply(
                 {"body": "Partial answer ⋯", "stream_status": STREAM_STATUS_STREAMING},
-                current_timestamp_ms=None,
-                active_event_ids=None,
+                active_event_ids=set(),
             )
             is PartialReplyKind.IN_PROGRESS
         )
 
     def test_streaming_metadata_with_live_event_id_is_in_progress_even_when_old(self) -> None:
-        """Prefer the live active-event set over age-based interruption fallback."""
+        """Prefer the live active-event set over any stale timestamp in the event body."""
         assert (
             _classify_partial_reply(
                 {
@@ -134,7 +129,6 @@ class TestClassifyPartialReply:
                     "stream_status": STREAM_STATUS_STREAMING,
                     "timestamp": 1_000,
                 },
-                current_timestamp_ms=600_000,
                 active_event_ids={"e1"},
             )
             is PartialReplyKind.IN_PROGRESS
@@ -150,23 +144,7 @@ class TestClassifyPartialReply:
                     "stream_status": STREAM_STATUS_STREAMING,
                     "timestamp": 599_000,
                 },
-                current_timestamp_ms=600_000,
                 active_event_ids=set(),
-            )
-            is PartialReplyKind.INTERRUPTED
-        )
-
-    def test_stale_streaming_metadata_is_interrupted(self) -> None:
-        """Treat orphaned streaming metadata as interrupted after the staleness window."""
-        assert (
-            _classify_partial_reply(
-                {
-                    "body": "Partial answer ⋯",
-                    "stream_status": STREAM_STATUS_STREAMING,
-                    "timestamp": 1_000,
-                },
-                current_timestamp_ms=302_000,
-                active_event_ids=None,
             )
             is PartialReplyKind.INTERRUPTED
         )
@@ -176,8 +154,7 @@ class TestClassifyPartialReply:
         assert (
             _classify_partial_reply(
                 {"body": "Finished text ⋯", "stream_status": STREAM_STATUS_COMPLETED},
-                current_timestamp_ms=None,
-                active_event_ids=None,
+                active_event_ids=set(),
             )
             is None
         )
@@ -187,8 +164,7 @@ class TestClassifyPartialReply:
         assert (
             _classify_partial_reply(
                 {"body": "Legacy partial ⋯"},
-                current_timestamp_ms=None,
-                active_event_ids=None,
+                active_event_ids=set(),
             )
             is PartialReplyKind.IN_PROGRESS
         )
@@ -207,8 +183,7 @@ class TestClassifyPartialReply:
         assert (
             _classify_partial_reply(
                 {"body": body},
-                current_timestamp_ms=None,
-                active_event_ids=None,
+                active_event_ids=set(),
             )
             is PartialReplyKind.INTERRUPTED
         )
@@ -218,8 +193,7 @@ class TestClassifyPartialReply:
         assert (
             _classify_partial_reply(
                 {"body": "Completed response"},
-                current_timestamp_ms=None,
-                active_event_ids=None,
+                active_event_ids=set(),
             )
             is None
         )
@@ -229,8 +203,7 @@ class TestClassifyPartialReply:
         assert (
             _classify_partial_reply(
                 {"body": {"structured": True}},
-                current_timestamp_ms=None,
-                active_event_ids=None,
+                active_event_ids=set(),
             )
             is None
         )
@@ -339,7 +312,7 @@ class TestUnseenMessagesPartialReplies:
             runtime_paths,
             seen_event_ids=set(),
             current_event_id="e2",
-            active_event_ids=None,
+            active_event_ids=set(),
         )
 
         assert partial_reply_kinds == {PartialReplyKind.INTERRUPTED}
@@ -459,7 +432,7 @@ class TestUnseenMessagesPartialReplies:
             runtime_paths,
             seen_event_ids=set(),
             current_event_id="e2",
-            active_event_ids=None,
+            active_event_ids=set(),
         )
         seen_event_ids = set(_get_unseen_event_ids_for_metadata(initial_unseen)) | {"e2"}
 
@@ -479,7 +452,7 @@ class TestUnseenMessagesPartialReplies:
             runtime_paths,
             seen_event_ids=seen_event_ids,
             current_event_id="e3",
-            active_event_ids=None,
+            active_event_ids=set(),
         )
 
         assert [msg["event_id"] for msg in initial_unseen] == ["e1"]
@@ -530,7 +503,7 @@ class TestUnseenMessagesPartialReplies:
             runtime_paths,
             seen_event_ids=seen_event_ids,
             current_event_id="e3",
-            active_event_ids=None,
+            active_event_ids=set(),
         )
 
         assert updated_kinds == {PartialReplyKind.INTERRUPTED}

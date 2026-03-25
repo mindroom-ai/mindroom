@@ -854,6 +854,7 @@ async def _non_stream_completion(
         knowledge=knowledge,
         user_id=user,
         include_interactive_questions=False,
+        active_event_ids=set(),
         execution_identity=execution_identity,
     )
 
@@ -1034,6 +1035,7 @@ async def _stream_completion(
             knowledge=knowledge,
             user_id=user,
             include_interactive_questions=False,
+            active_event_ids=set(),
             execution_identity=execution_identity,
         )
 

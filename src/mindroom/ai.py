@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import importlib
-import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
@@ -63,7 +62,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Collection, Sequence
     from pathlib import Path
 
     from agno.agent import Agent
@@ -102,7 +101,6 @@ _PARTIAL_REPLY_SENDER_LABELS = {
     "interrupted": "You (interrupted reply draft)",
     "in_progress": "You (reply still streaming)",
 }
-_STALE_STREAM_STATUS_MAX_AGE_MS = 300_000
 
 
 class PartialReplyKind(str, Enum):
@@ -704,19 +702,10 @@ def build_prompt_with_thread_history(prompt: str, thread_history: list[dict[str,
     return _format_messages_context(thread_history, "Previous conversation in this thread:", prompt)
 
 
-def _message_timestamp_ms(msg: dict[str, Any]) -> int | None:
-    """Return the message timestamp in milliseconds when available."""
-    timestamp = msg.get("timestamp")
-    if not isinstance(timestamp, int | float):
-        return None
-    return int(timestamp)
-
-
 def _classify_partial_reply(
     msg: dict[str, Any],
     *,
-    current_timestamp_ms: int | None,
-    active_event_ids: set[str] | None,
+    active_event_ids: Collection[str],
 ) -> PartialReplyKind | None:
     """Classify a self-authored partial reply from persisted stream metadata first."""
     status = msg.get("stream_status")
@@ -728,15 +717,9 @@ def _classify_partial_reply(
         partial_kind = PartialReplyKind.INTERRUPTED
     elif status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
         event_id = msg.get("event_id")
-        if active_event_ids is not None and isinstance(event_id, str):
+        if isinstance(event_id, str):
             return PartialReplyKind.IN_PROGRESS if event_id in active_event_ids else PartialReplyKind.INTERRUPTED
-        if current_timestamp_ms is None:
-            current_timestamp_ms = int(time.time() * 1000)
-        timestamp_ms = _message_timestamp_ms(msg)
-        if timestamp_ms is not None and current_timestamp_ms - timestamp_ms > _STALE_STREAM_STATUS_MAX_AGE_MS:
-            partial_kind = PartialReplyKind.INTERRUPTED
-        else:
-            partial_kind = PartialReplyKind.IN_PROGRESS
+        partial_kind = PartialReplyKind.IN_PROGRESS
     else:
         body = msg.get("body", "")
         if not isinstance(body, str):
@@ -786,7 +769,7 @@ def _get_unseen_messages(
     seen_event_ids: set[str],
     current_event_id: str | None,
     *,
-    active_event_ids: set[str] | None,
+    active_event_ids: Collection[str],
 ) -> tuple[list[dict[str, Any]], set[PartialReplyKind]]:
     """Filter thread_history to messages not yet consumed by this agent.
 
@@ -802,7 +785,6 @@ def _get_unseen_messages(
     agent_sender_id = matrix_id.full_id if matrix_id else None
     unseen: list[dict[str, Any]] = []
     partial_reply_kinds: set[PartialReplyKind] = set()
-    current_timestamp_ms = int(time.time() * 1000)
     for msg in thread_history:
         event_id = msg.get("event_id")
         sender = msg.get("sender")
@@ -815,7 +797,6 @@ def _get_unseen_messages(
         if agent_sender_id and sender == agent_sender_id:
             partial_kind = _classify_partial_reply(
                 msg,
-                current_timestamp_ms=current_timestamp_ms,
                 active_event_ids=active_event_ids,
             )
             if partial_kind is None:
@@ -1045,7 +1026,7 @@ async def _prepare_agent_and_prompt(
     include_interactive_questions: bool = True,
     session_id: str | None = None,
     reply_to_event_id: str | None = None,
-    active_event_ids: set[str] | None = None,
+    active_event_ids: Collection[str] = frozenset(),
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> tuple[Agent, str, list[str]]:
     """Prepare agent and full prompt for AI processing.
@@ -1143,7 +1124,7 @@ async def ai_response(
     include_interactive_questions: bool = True,
     media: MediaInputs | None = None,
     reply_to_event_id: str | None = None,
-    active_event_ids: set[str] | None = None,
+    active_event_ids: Collection[str] = frozenset(),
     show_tool_calls: bool = True,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
@@ -1355,7 +1336,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     include_interactive_questions: bool = True,
     media: MediaInputs | None = None,
     reply_to_event_id: str | None = None,
-    active_event_ids: set[str] | None = None,
+    active_event_ids: Collection[str] = frozenset(),
     show_tool_calls: bool = True,
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
