@@ -34,6 +34,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default=None,
+            authored_override=False,
         ),
         ConfigField(
             name="enable_save_file",

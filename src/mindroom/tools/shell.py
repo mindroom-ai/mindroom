@@ -167,6 +167,7 @@ class _ProcessRecord:
             type="text",
             required=False,
             default=None,
+            authored_override=False,
         ),
         ConfigField(
             name="enable_run_shell_command",

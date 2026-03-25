@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.memory import MemoryBackend  # noqa: TC001
-from mindroom.config.models import AgentLearningMode  # noqa: TC001
+from mindroom.config.models import AgentLearningMode, ToolConfigEntry, validate_unique_tool_entries
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 CultureMode = Literal["automatic", "agentic", "manual"]
@@ -159,7 +159,7 @@ class AgentConfig(BaseModel):
 
     display_name: str = Field(description="Human-readable name for the agent")
     role: str = Field(default="", description="Description of the agent's purpose")
-    tools: list[str] = Field(default_factory=list, description="List of tool names")
+    tools: list[ToolConfigEntry] = Field(default_factory=list, description="List of tool names")
     include_default_tools: bool = Field(
         default=True,
         description="Whether to merge defaults.tools into this agent's tools",
@@ -240,6 +240,11 @@ class AgentConfig(BaseModel):
         description="List of agent names this agent can delegate tasks to via tool calls",
     )
 
+    @property
+    def tool_names(self) -> list[str]:
+        """Return authored tool names without inline override details."""
+        return [entry.name for entry in self.tools]
+
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
         if self.num_history_runs is not None and self.num_history_messages is not None:
@@ -272,6 +277,12 @@ class AgentConfig(BaseModel):
                 msg = "Agent field 'sandbox_tools' was removed. Use 'worker_tools' instead."
                 raise ValueError(msg)
         return data
+
+    @field_validator("tools")
+    @classmethod
+    def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
+        """Ensure each normalized tool appears at most once."""
+        return validate_unique_tool_entries(tools, scope_name="agent")
 
     @field_validator("knowledge_bases")
     @classmethod

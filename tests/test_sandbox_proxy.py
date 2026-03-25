@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
 import pytest
+from agno.tools import Toolkit
 
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
@@ -26,7 +27,15 @@ from mindroom.constants import (
     shell_extra_env_values,
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.tool_system.metadata import ToolInitOverrideError, get_tool_by_name
+from mindroom.tool_system.metadata import (
+    _TOOL_REGISTRY,
+    TOOL_METADATA,
+    ConfigField,
+    ToolCategory,
+    ToolInitOverrideError,
+    get_tool_by_name,
+    register_tool_with_metadata,
+)
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -178,6 +187,61 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         "kwargs": {},
     }
     assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
+
+
+def test_proxy_payload_includes_tool_config_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proxy execution should forward authored tool config overrides separately from runtime init overrides."""
+    captured: dict[str, Any] = {}
+    tool_name = "test_proxy_configured_tool"
+
+    class _ConfiguredToolkit(Toolkit):
+        def __init__(self, label: str | None = None) -> None:
+            self.label = label
+            super().__init__(name=tool_name, tools=[self.ping])
+
+        def ping(self) -> str:
+            return self.label or "local"
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="Proxy Configured Tool",
+        description="Test-only proxy payload coverage.",
+        category=ToolCategory.DEVELOPMENT,
+        config_fields=[ConfigField(name="label", label="Label", type="text", required=False)],
+    )
+    def _configured_tool_factory() -> type[_ConfiguredToolkit]:
+        return _ConfiguredToolkit
+
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={tool_name},
+        credential_policy={},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured=captured),
+    )
+
+    try:
+        tool = get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            tool_config_overrides={"label": "from-config"},
+            worker_target=None,
+        )
+        entrypoint = tool.functions["ping"].entrypoint
+        assert entrypoint is not None
+        result = entrypoint()
+
+        assert result == "sandbox-result"
+        assert captured["json"]["tool_config_overrides"] == {"label": "from-config"}
+        assert "tool_init_overrides" not in captured["json"]
+    finally:
+        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
 
 
 def test_proxy_disabled_in_runner_mode(monkeypatch: pytest.MonkeyPatch) -> None:

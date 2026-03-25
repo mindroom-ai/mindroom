@@ -340,6 +340,36 @@ def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Pat
     assert entrypoint is not None
 
 
+def test_resolve_entrypoint_applies_tool_config_overrides_over_persisted_config(tmp_path: Path) -> None:
+    """Sandbox-side rebuilds should let authored overrides beat persisted non-secret config."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    save_scoped_credentials(
+        "clickup",
+        {"api_key": "clickup-test", "master_space_id": "space-123"},
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+
+    toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+        runtime_paths=runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        tool_name="clickup",
+        function_name="list_spaces",
+        tool_config_overrides={"master_space_id": "space-override"},
+    )
+
+    assert toolkit.api_key == "clickup-test"
+    assert toolkit.master_space_id == "space-override"
+    assert entrypoint is not None
+
+
 def test_sandbox_runner_subprocess_python_sees_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -982,6 +1012,75 @@ def test_sandbox_runner_rejects_invalid_base_dir_override_type(
 
     assert response.status_code == 400
     assert "base_dir" in response.json()["detail"]
+
+
+def test_sandbox_runner_rejects_disallowed_authored_base_dir_override(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authored config should not be allowed to set runtime-only base_dir fields."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "coding",
+            "function_name": "ls",
+            "args": [],
+            "kwargs": {"path": "."},
+            "tool_config_overrides": {"base_dir": "/tmp/workspace"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "request.tool_config_overrides.coding.base_dir" in response.json()["detail"]
+
+
+def test_sandbox_runner_rejects_password_authored_override(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Password-backed config fields should stay credential-only in runner requests."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "clickup",
+            "function_name": "list_spaces",
+            "args": [],
+            "kwargs": {},
+            "tool_config_overrides": {"api_key": "test-key"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "request.tool_config_overrides.clickup.api_key" in response.json()["detail"]
+
+
+def test_sandbox_runner_rejects_unknown_authored_override_field(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown authored override fields should be rejected with path context."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["echo", "hello"]],
+            "kwargs": {},
+            "tool_config_overrides": {"missing_field": True},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "request.tool_config_overrides.shell.missing_field" in response.json()["detail"]
 
 
 def test_sandbox_runner_subprocess_rejects_unsafe_tool_init_overrides(

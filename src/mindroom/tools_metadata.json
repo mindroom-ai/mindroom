@@ -5,6 +5,7 @@
       "category": "communication",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Bot Token",
@@ -16,6 +17,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Send Message",
@@ -27,6 +29,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Channel Messages",
@@ -38,6 +41,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Channel Info",
@@ -49,6 +53,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable List Channels",
@@ -60,6 +65,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Delete Message",
@@ -71,6 +77,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -119,6 +126,7 @@
       "category": "communication",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Token",
@@ -130,6 +138,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Markdown",
@@ -141,6 +150,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Send Message",
@@ -152,6 +162,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Send Message Thread",
@@ -163,6 +174,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable List Channels",
@@ -174,6 +186,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Channel History",
@@ -185,6 +198,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -215,6 +229,7 @@
       "category": "communication",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Chat ID",
@@ -226,6 +241,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Token",
@@ -237,6 +253,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Send Message",
@@ -248,6 +265,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -296,6 +314,7 @@
       "category": "communication",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Account Sid",
@@ -307,6 +326,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Auth Token",
@@ -318,6 +338,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -329,6 +350,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Secret",
@@ -340,6 +362,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Region",
@@ -351,6 +374,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Edge",
@@ -362,6 +386,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Debug",
@@ -373,6 +398,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Send Sms",
@@ -384,6 +410,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Call Details",
@@ -395,6 +422,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable List Messages",
@@ -406,6 +434,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -436,6 +465,7 @@
       "category": "communication",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Send Message",
@@ -447,6 +477,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable List Rooms",
@@ -458,6 +489,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -469,6 +501,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Access Token",
@@ -499,6 +532,7 @@
       "category": "communication",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "WhatsApp Business API access token",
           "label": "Access Token",
@@ -510,6 +544,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "WhatsApp Business Account phone number ID",
           "label": "Phone Number ID",
@@ -521,6 +556,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "v22.0",
           "description": "WhatsApp API version to use",
           "label": "API Version",
@@ -532,6 +568,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Default recipient WhatsApp ID or phone number (optional)",
           "label": "Default Recipient WhatsApp ID",
@@ -543,6 +580,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Enable asynchronous message sending",
           "label": "Async Mode",
@@ -573,6 +611,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Dags Dir",
@@ -584,6 +623,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Save Dag File",
@@ -595,6 +635,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Read Dag File",
@@ -606,6 +647,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -634,6 +676,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Apify API token for authentication",
           "label": "API Token",
@@ -645,6 +688,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Single Actor ID as string or comma-separated list of Actor IDs to register as individual tools (e.g., 'apify/rag-web-browser' for web content extraction)",
           "label": "Actors",
@@ -675,6 +719,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": "us-east-1",
           "description": null,
           "label": "Region Name",
@@ -686,6 +731,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable List Functions",
@@ -697,6 +743,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Invoke Function",
@@ -708,6 +755,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -738,6 +786,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Bitbucket username",
           "label": "Username",
@@ -749,6 +798,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "App password. Use either this or token.",
           "label": "App Password",
@@ -760,6 +810,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Access token. Use either this or password.",
           "label": "Token",
@@ -771,6 +822,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Workspace",
@@ -782,6 +834,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Repository Slug",
@@ -793,6 +846,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "api.bitbucket.org",
           "description": null,
           "label": "Server URL",
@@ -804,6 +858,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "2.0",
           "description": null,
           "label": "API Version",
@@ -834,6 +889,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -845,6 +901,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Event Type ID",
@@ -856,6 +913,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "User Timezone",
@@ -867,6 +925,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Available Slots",
@@ -878,6 +937,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Create Booking",
@@ -889,6 +949,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Upcoming Bookings",
@@ -900,6 +961,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Reschedule Booking",
@@ -911,6 +973,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Cancel Booking",
@@ -922,6 +985,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -971,6 +1035,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -982,6 +1047,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "sonic-2",
           "description": null,
           "label": "Model ID",
@@ -993,6 +1059,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "78ab82d5-25be-4f7d-82b3-7ad64e5b85b2",
           "description": null,
           "label": "Default Voice ID",
@@ -1004,6 +1071,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Text To Speech",
@@ -1015,6 +1083,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable List Voices",
@@ -1026,6 +1095,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Localize Voice",
@@ -1037,6 +1107,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -1067,6 +1138,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Anthropic API Key",
@@ -1078,6 +1150,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Optional Anthropic-compatible gateway URL. Use host root (for example http://litellm.local), not a /v1 suffix.",
           "label": "Anthropic Base URL",
@@ -1089,6 +1162,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Optional bearer token for Anthropic-compatible gateways.",
           "label": "Anthropic Auth Token",
@@ -1100,6 +1174,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Set CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 for Anthropic-compatible gateway compatibility.",
           "label": "Disable Experimental Betas",
@@ -1111,6 +1186,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Working Directory",
@@ -1122,6 +1198,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Claude Model",
@@ -1133,6 +1210,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "default",
           "description": "default, acceptEdits, plan, or bypassPermissions",
           "label": "Permission Mode",
@@ -1144,6 +1222,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Continue the same Claude conversation context across queries in a session.",
           "label": "Continue Conversation",
@@ -1155,6 +1234,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Comma-separated Claude Code tool names",
           "label": "Allowed Tools",
@@ -1166,6 +1246,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Comma-separated Claude Code tool names",
           "label": "Disallowed Tools",
@@ -1177,6 +1258,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Max Turns",
@@ -1188,6 +1270,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "System Prompt",
@@ -1199,6 +1282,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "CLI Path",
@@ -1210,6 +1294,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 60,
           "description": null,
           "label": "Session TTL Minutes",
@@ -1221,6 +1306,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 200,
           "description": null,
           "label": "Max Sessions",
@@ -1251,6 +1337,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": false,
           "default": null,
           "description": "Working directory for file operations. Defaults to current directory.",
           "label": "Base Directory",
@@ -1299,6 +1386,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Confluence instance URL",
           "label": "Confluence URL",
@@ -1310,6 +1398,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Confluence username",
           "label": "Username",
@@ -1321,6 +1410,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Confluence password",
           "label": "Password",
@@ -1332,6 +1422,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Confluence API key, alternative to password",
           "label": "API Key",
@@ -1343,6 +1434,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": "Whether to verify SSL certificates when connecting to Confluence",
           "label": "Verify SSL",
@@ -1373,6 +1465,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Base URL",
@@ -1384,6 +1477,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Username",
@@ -1395,6 +1489,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Password",
@@ -1406,6 +1501,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -1417,6 +1513,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Headers",
@@ -1428,6 +1525,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Verify Ssl",
@@ -1439,6 +1537,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 30,
           "description": null,
           "label": "Timeout",
@@ -1450,6 +1549,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Make Request",
@@ -1461,6 +1561,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -1491,6 +1592,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": "dall-e-3",
           "description": null,
           "label": "Model",
@@ -1502,6 +1604,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 1,
           "description": null,
           "label": "N",
@@ -1513,6 +1616,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "1024x1024",
           "description": null,
           "label": "Size",
@@ -1524,6 +1628,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "standard",
           "description": null,
           "label": "Quality",
@@ -1535,6 +1640,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "vivid",
           "description": null,
           "label": "Style",
@@ -1546,6 +1652,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -1557,6 +1664,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Create Image",
@@ -1568,6 +1676,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -1598,6 +1707,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Daytona API key",
           "label": "API Key",
@@ -1609,6 +1719,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Daytona API URL",
           "label": "API URL",
@@ -1620,6 +1731,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Specific sandbox ID to use. If None, creates or uses persistent sandbox",
           "label": "Sandbox ID",
@@ -1631,6 +1743,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "PYTHON",
           "description": "Primary language for the sandbox (PYTHON, JAVASCRIPT, TYPESCRIPT)",
           "label": "Sandbox Language",
@@ -1642,6 +1755,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Target configuration for the sandbox",
           "label": "Sandbox Target",
@@ -1653,6 +1767,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Operating system for the sandbox",
           "label": "Sandbox OS",
@@ -1664,6 +1779,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 60,
           "description": "Auto-stop interval in minutes (0 to disable)",
           "label": "Auto Stop Interval",
@@ -1675,6 +1791,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "OS user for the sandbox",
           "label": "Sandbox OS User",
@@ -1686,6 +1803,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Environment variables for the sandbox (JSON format)",
           "label": "Sandbox Environment Variables",
@@ -1697,6 +1815,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "{}",
           "description": "Labels for the sandbox (JSON format)",
           "label": "Sandbox Labels",
@@ -1708,6 +1827,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Organization ID for the sandbox",
           "label": "Organization ID",
@@ -1719,6 +1839,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 300,
           "description": "Timeout for sandbox operations in seconds",
           "label": "Timeout",
@@ -1730,6 +1851,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": "Automatically create sandbox if none exists",
           "label": "Auto Create Sandbox",
@@ -1741,6 +1863,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Whether to verify SSL certificates",
           "label": "Verify SSL",
@@ -1752,6 +1875,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": "Whether to reuse the same sandbox across agent sessions",
           "label": "Persistent",
@@ -1763,6 +1887,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Whether the sandbox should be public",
           "label": "Sandbox Public",
@@ -1774,6 +1899,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Custom instructions for the toolkit",
           "label": "Instructions",
@@ -1785,6 +1911,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Whether to add instructions to the agent",
           "label": "Add Instructions",
@@ -1815,6 +1942,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "DesiVocal API key",
           "label": "API Key",
@@ -1826,6 +1954,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "f27d74e5-ea71-4697-be3e-f04bbd80c1a8",
           "description": "Default voice ID to use for speech synthesis",
           "label": "Voice ID",
@@ -1837,6 +1966,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Voices",
@@ -1848,6 +1978,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Text to Speech",
@@ -1859,6 +1990,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -1907,6 +2039,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -1918,6 +2051,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 300,
           "description": null,
           "label": "Timeout",
@@ -1929,6 +2063,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Sandbox Options",
@@ -1959,6 +2094,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": "JBFqnCBsd6RMkjVDRZzb",
           "description": null,
           "label": "Voice ID",
@@ -1970,6 +2106,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -1981,6 +2118,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Target Directory",
@@ -1992,6 +2130,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "eleven_multilingual_v2",
           "description": null,
           "label": "Model ID",
@@ -2003,6 +2142,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "mp3_44100_64",
           "description": null,
           "label": "Output Format",
@@ -2014,6 +2154,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Voices",
@@ -2025,6 +2166,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Generate Sound Effect",
@@ -2036,6 +2178,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Text To Speech",
@@ -2047,6 +2190,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -2077,6 +2221,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -2088,6 +2233,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "fal-ai/hunyuan-video",
           "description": null,
           "label": "Model",
@@ -2099,6 +2245,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Generate Media",
@@ -2110,6 +2257,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Image To Image",
@@ -2121,6 +2269,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -2151,6 +2300,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": false,
           "default": null,
           "description": null,
           "label": "Base Dir",
@@ -2162,6 +2312,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Save File",
@@ -2173,6 +2324,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Read File",
@@ -2184,6 +2336,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Delete File",
@@ -2195,6 +2348,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable List Files",
@@ -2206,6 +2360,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Files",
@@ -2217,6 +2372,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Read File Chunk",
@@ -2228,6 +2384,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Replace File Chunk",
@@ -2239,6 +2396,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Expose Base Directory",
@@ -2250,6 +2408,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 10000000,
           "description": null,
           "label": "Max File Length",
@@ -2261,6 +2420,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 100000,
           "description": null,
           "label": "Max File Lines",
@@ -2272,6 +2432,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "\n",
           "description": null,
           "label": "Line Separator",
@@ -2283,6 +2444,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -2313,6 +2475,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Output Directory",
@@ -2324,6 +2487,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable JSON Generation",
@@ -2335,6 +2499,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable CSV Generation",
@@ -2346,6 +2511,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable PDF Generation",
@@ -2357,6 +2523,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable TXT Generation",
@@ -2368,6 +2535,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -2398,6 +2566,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -2428,6 +2597,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -2439,6 +2609,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Vertexai",
@@ -2450,6 +2621,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Project ID",
@@ -2461,6 +2633,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Location",
@@ -2472,6 +2645,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "imagen-3.0-generate-002",
           "description": null,
           "label": "Image Generation Model",
@@ -2483,6 +2657,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "veo-2.0-generate-001",
           "description": null,
           "label": "Video Generation Model",
@@ -2494,6 +2669,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Generate Image",
@@ -2505,6 +2681,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Generate Video",
@@ -2516,6 +2693,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -2546,6 +2724,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -2557,6 +2736,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 1,
           "description": null,
           "label": "Limit",
@@ -2568,6 +2748,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Gifs",
@@ -2579,6 +2760,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -2609,6 +2791,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Access Token",
@@ -2620,6 +2803,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Base URL",
@@ -2650,6 +2834,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "BigQuery dataset name",
           "label": "Dataset",
@@ -2661,6 +2846,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Google Cloud project ID",
           "label": "Project",
@@ -2672,6 +2858,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "BigQuery location",
           "label": "Location",
@@ -2683,6 +2870,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Optional Google Cloud credentials object passed directly to the toolkit",
           "label": "Credentials",
@@ -2694,6 +2882,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable List Tables",
@@ -2705,6 +2894,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Describe Table",
@@ -2716,6 +2906,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Run SQL Query",
@@ -2727,6 +2918,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -2757,6 +2949,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Key",
@@ -2788,6 +2981,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "The ID of the Google Spreadsheet to work with. If not specified, you can work with multiple spreadsheets.",
           "label": "Spreadsheet ID",
@@ -2799,6 +2993,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Default range to use for operations (optional)",
           "label": "Default Range",
@@ -2810,6 +3005,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": "Allow reading data from spreadsheets",
           "label": "Enable Read Operations",
@@ -2821,6 +3017,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Allow creating new spreadsheets",
           "label": "Enable Create Operations",
@@ -2832,6 +3029,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Allow updating existing spreadsheets",
           "label": "Enable Update Operations",
@@ -2843,6 +3041,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Allow duplicating spreadsheets",
           "label": "Enable Duplicate Operations",
@@ -2875,6 +3074,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -2886,6 +3086,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "whisper-large-v3",
           "description": null,
           "label": "Transcription Model",
@@ -2897,6 +3098,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "whisper-large-v3",
           "description": null,
           "label": "Translation Model",
@@ -2908,6 +3110,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "playai-tts",
           "description": null,
           "label": "Tts Model",
@@ -2919,6 +3122,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "Chip-PlayAI",
           "description": null,
           "label": "Tts Voice",
@@ -2930,6 +3134,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Transcribe Audio",
@@ -2941,6 +3146,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Translate Audio",
@@ -2952,6 +3158,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Generate Speech",
@@ -2963,6 +3170,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -2993,6 +3201,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Server URL",
@@ -3004,6 +3213,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Username",
@@ -3015,6 +3225,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Password",
@@ -3026,6 +3237,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Token",
@@ -3037,6 +3249,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Issue",
@@ -3048,6 +3261,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Create Issue",
@@ -3059,6 +3273,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Issues",
@@ -3070,6 +3285,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Add Comment",
@@ -3081,6 +3297,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Add Worklog",
@@ -3092,6 +3309,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -3122,6 +3340,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -3152,6 +3371,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -3163,6 +3383,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Wait For Completion",
@@ -3174,6 +3395,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 3,
           "description": null,
           "label": "Poll Interval",
@@ -3185,6 +3407,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 300,
           "description": null,
           "label": "Max Wait Time",
@@ -3196,6 +3419,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Generate Video",
@@ -3207,6 +3431,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Image To Video",
@@ -3218,6 +3443,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -3248,6 +3474,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "The ModelsLab API key for authentication",
           "label": "API Key",
@@ -3259,6 +3486,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "mp4",
           "description": "The type of file to generate (mp4, gif, or mp3)",
           "label": "File Type",
@@ -3270,6 +3498,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Whether to wait for the media generation to complete before returning",
           "label": "Wait for Completion",
@@ -3281,6 +3510,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 15,
           "description": "Time in seconds to add to the ETA to account for the time it takes to fetch the media",
           "label": "Add to ETA",
@@ -3292,6 +3522,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 60,
           "description": "Maximum time in seconds to wait for the media to be ready",
           "label": "Max Wait Time",
@@ -3322,6 +3553,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Process Video",
@@ -3333,6 +3565,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Generate Captions",
@@ -3344,6 +3577,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Embed Captions",
@@ -3355,6 +3589,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -3385,6 +3620,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Neo4j connection URI",
           "label": "URI",
@@ -3396,6 +3632,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Neo4j username",
           "label": "Username",
@@ -3407,6 +3644,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Neo4j password",
           "label": "Password",
@@ -3418,6 +3656,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Database",
@@ -3429,6 +3668,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable List Labels",
@@ -3440,6 +3680,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable List Relationships",
@@ -3451,6 +3692,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Schema",
@@ -3462,6 +3704,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Run Cypher",
@@ -3473,6 +3716,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -3503,6 +3747,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -3514,6 +3759,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Transcription",
@@ -3525,6 +3771,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Image Generation",
@@ -3536,6 +3783,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Speech Generation",
@@ -3547,6 +3795,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -3558,6 +3807,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "whisper-1",
           "description": null,
           "label": "Transcription Model",
@@ -3569,6 +3819,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "alloy",
           "description": null,
           "label": "Text To Speech Voice",
@@ -3580,6 +3831,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "tts-1",
           "description": null,
           "label": "Text To Speech Model",
@@ -3591,6 +3843,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "mp3",
           "description": null,
           "label": "Text To Speech Format",
@@ -3602,6 +3855,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "dall-e-3",
           "description": null,
           "label": "Image Model",
@@ -3613,6 +3867,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Image Quality",
@@ -3624,6 +3879,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Image Size",
@@ -3635,6 +3891,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Image Style",
@@ -3681,6 +3938,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -3692,6 +3950,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "metric",
           "description": null,
           "label": "Units",
@@ -3703,6 +3962,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Current Weather",
@@ -3714,6 +3974,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Forecast",
@@ -3725,6 +3986,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Air Pollution",
@@ -3736,6 +3998,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Geocoding",
@@ -3747,6 +4010,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -3777,6 +4041,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Programmatic only: pass an existing psycopg connection object (not usable from UI).",
           "label": "Connection",
@@ -3788,6 +4053,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "PostgreSQL server hostname",
           "label": "Host",
@@ -3799,6 +4065,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 5432,
           "description": null,
           "label": "Port",
@@ -3810,6 +4077,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Database Name",
@@ -3821,6 +4089,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Username",
@@ -3832,6 +4101,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Password",
@@ -3843,6 +4113,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "public",
           "description": null,
           "label": "Table Schema",
@@ -3873,6 +4144,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": false,
           "default": null,
           "description": null,
           "label": "Base Dir",
@@ -3884,6 +4156,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Safe Globals",
@@ -3895,6 +4168,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Safe Locals",
@@ -3906,6 +4180,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Restrict To Base Dir",
@@ -3936,6 +4211,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Think",
@@ -3947,6 +4223,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Analyze",
@@ -3958,6 +4235,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Add Instructions",
@@ -3969,6 +4247,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Add Few-Shot Examples",
@@ -3980,6 +4259,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Custom instructions to override the default reasoning instructions",
           "label": "Instructions",
@@ -3991,6 +4271,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Custom few-shot examples for the reasoning tools",
           "label": "Few-Shot Examples",
@@ -4002,6 +4283,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -4030,6 +4312,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Redshift cluster endpoint",
           "label": "Host",
@@ -4041,6 +4324,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 5439,
           "description": null,
           "label": "Port",
@@ -4052,6 +4336,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Database name",
           "label": "Database",
@@ -4063,6 +4348,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Username",
@@ -4074,6 +4360,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Password",
@@ -4085,6 +4372,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Use IAM authentication instead of password",
           "label": "Use IAM Authentication",
@@ -4096,6 +4384,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Redshift cluster identifier (required for IAM auth)",
           "label": "Cluster Identifier",
@@ -4107,6 +4396,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Region",
@@ -4118,6 +4408,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Database user for IAM authentication",
           "label": "DB User",
@@ -4129,6 +4420,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Access Key ID",
@@ -4140,6 +4432,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Secret Access Key",
@@ -4151,6 +4444,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Session Token",
@@ -4162,6 +4456,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "AWS Profile",
@@ -4173,6 +4468,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "SSL",
@@ -4184,6 +4480,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "public",
           "description": null,
           "label": "Table Schema",
@@ -4214,6 +4511,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -4225,6 +4523,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "minimax/video-01",
           "description": null,
           "label": "Model",
@@ -4236,6 +4535,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Generate Media",
@@ -4247,6 +4547,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -4293,6 +4594,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": false,
           "default": null,
           "description": null,
           "label": "Base Dir",
@@ -4304,6 +4606,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Run Shell Command",
@@ -4315,6 +4618,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -4326,8 +4630,9 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
-          "description": "Comma or newline-separated env var names or glob patterns to expose to shell execution in addition to the committed runtime env.",
+          "description": "Comma or newline-separated env var names or glob patterns to expose to shell execution in addition to the committed runtime env. When set, a small set of common service URLs (WHISPER_URL, TTS_URL, etc.) is also included automatically.",
           "label": "Extra Env Passthrough",
           "name": "extra_env_passthrough",
           "options": null,
@@ -4365,6 +4670,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Sleep",
@@ -4376,6 +4682,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -4424,6 +4731,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -4435,6 +4743,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Secret",
@@ -4446,6 +4755,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Token",
@@ -4476,6 +4786,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": "charts",
           "description": null,
           "label": "Output Directory",
@@ -4487,6 +4798,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Bar Chart",
@@ -4498,6 +4810,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Line Chart",
@@ -4509,6 +4822,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Pie Chart",
@@ -4520,6 +4834,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Scatter Plot",
@@ -4531,6 +4846,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Histogram",
@@ -4542,6 +4858,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -4572,6 +4889,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Open Page",
@@ -4583,6 +4901,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -4611,6 +4930,7 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Username",
@@ -4622,6 +4942,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Password",
@@ -4633,6 +4954,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Company Name",
@@ -4644,6 +4966,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Zendesk",
@@ -4655,6 +4978,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -4685,6 +5009,7 @@
       "category": "email",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Sender Email",
@@ -4696,6 +5021,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Sender Name",
@@ -4707,6 +5033,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "us-east-1",
           "description": null,
           "label": "Region Name",
@@ -4718,6 +5045,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Send Email",
@@ -4729,6 +5057,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -4759,6 +5088,7 @@
       "category": "email",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Receiver Email",
@@ -4770,6 +5100,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Sender Name",
@@ -4781,6 +5112,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Sender Email",
@@ -4792,6 +5124,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Sender Passkey",
@@ -4803,6 +5136,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Email User",
@@ -4814,6 +5148,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -4842,6 +5177,7 @@
       "category": "email",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": "Allow retrieving the latest emails",
           "label": "Get Latest Emails",
@@ -4853,6 +5189,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": "Allow retrieving emails from specific users",
           "label": "Get Emails From User",
@@ -4864,6 +5201,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": "Allow retrieving unread emails",
           "label": "Get Unread Emails",
@@ -4875,6 +5213,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": "Allow retrieving starred emails",
           "label": "Get Starred Emails",
@@ -4886,6 +5225,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": "Allow searching through emails",
           "label": "Search Emails",
@@ -4897,6 +5237,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": "Allow creating draft emails",
           "label": "Create Draft Emails",
@@ -4908,6 +5249,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": "Allow sending emails",
           "label": "Send Emails",
@@ -4919,6 +5261,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": "Allow sending replies to emails",
           "label": "Send Email Replies",
@@ -4952,6 +5295,7 @@
       "category": "email",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -4963,6 +5307,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "From Email",
@@ -4974,6 +5319,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Send Email",
@@ -4985,6 +5331,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -5015,6 +5362,7 @@
       "category": "entertainment",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "OAuth access token with required scopes (user-read-private, playlist-modify-public, playlist-modify-private)",
           "label": "Access Token",
@@ -5026,6 +5374,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "US",
           "description": null,
           "label": "Default Market",
@@ -5037,6 +5386,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 30,
           "description": null,
           "label": "Timeout",
@@ -5067,6 +5417,7 @@
       "category": "entertainment",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Video Captions",
@@ -5078,6 +5429,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Video Data",
@@ -5089,6 +5441,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Video Timestamps",
@@ -5100,6 +5453,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -5111,6 +5465,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Languages",
@@ -5122,6 +5477,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Proxies",
@@ -5152,6 +5508,7 @@
       "category": "integrations",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Composio API key",
           "label": "API Key",
@@ -5163,6 +5520,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Base URL for Composio API (leave empty for default)",
           "label": "Base URL",
@@ -5174,6 +5532,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "default",
           "description": "Entity identifier for Composio workspace",
           "label": "Entity ID",
@@ -5185,6 +5544,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Workspace identifier for organizing tools and data",
           "label": "Workspace ID",
@@ -5196,6 +5556,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "JSON configuration for workspace settings",
           "label": "Workspace Config",
@@ -5207,6 +5568,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "JSON mapping of app names to connected account IDs",
           "label": "Connected Account IDs",
@@ -5218,6 +5580,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "JSON metadata for tools and actions configuration",
           "label": "Metadata",
@@ -5229,6 +5592,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Custom processors configuration (JSON format)",
           "label": "Processors",
@@ -5240,6 +5604,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Directory path for output files",
           "label": "Output Directory",
@@ -5251,6 +5616,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Path to lock file for concurrency control",
           "label": "Lock File Path",
@@ -5262,6 +5628,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 3,
           "description": "Maximum number of retries for failed operations",
           "label": "Max Retries",
@@ -5273,6 +5640,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Logging verbosity level (0-3, higher = more verbose)",
           "label": "Verbosity Level",
@@ -5284,6 +5652,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Enable file-based output for operations",
           "label": "Output in File",
@@ -5295,6 +5664,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Enable operation tracing for debugging",
           "label": "Allow Tracing",
@@ -5306,6 +5676,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": "Enable file locking for concurrent operations",
           "label": "Enable Locking",
@@ -5317,6 +5688,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "INFO",
           "description": "Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
           "label": "Logging Level",
@@ -5347,6 +5719,7 @@
       "category": "integrations",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Your Shopify store name (e.g., 'my-store' from my-store.myshopify.com).",
           "label": "Shop Name",
@@ -5358,6 +5731,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Shopify Admin API access token.",
           "label": "Access Token",
@@ -5369,6 +5743,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "2025-10",
           "description": null,
           "label": "API Version",
@@ -5380,6 +5755,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 30,
           "description": null,
           "label": "Timeout",
@@ -5426,6 +5802,7 @@
       "category": "productivity",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "API key from ClickUp",
           "label": "API Key",
@@ -5437,6 +5814,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "ID of the master space to work with",
           "label": "Master Space ID",
@@ -5465,8 +5843,25 @@
     {
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": [],
+      "default_execution_target": "primary",
+      "dependencies": [],
+      "description": "Compress older conversation history into a summary to free context space",
+      "display_name": "Context Compaction",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": "Minimize2",
+      "icon_color": "text-amber-500",
+      "name": "compact_context",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Csvs",
@@ -5478,6 +5873,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Row Limit",
@@ -5489,6 +5885,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Duckdb Connection",
@@ -5500,6 +5897,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Duckdb Kwargs",
@@ -5511,6 +5909,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Read Csv File",
@@ -5522,6 +5921,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable List Csv Files",
@@ -5533,6 +5933,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Columns",
@@ -5544,6 +5945,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Query Csv File",
@@ -5555,6 +5957,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -5601,6 +6004,7 @@
       "category": "productivity",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Db Path",
@@ -5612,6 +6016,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Connection",
@@ -5623,6 +6028,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Init Commands",
@@ -5634,6 +6040,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Read Only",
@@ -5645,6 +6052,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Config",
@@ -5675,6 +6083,7 @@
       "category": "productivity",
       "config_fields": [
         {
+          "authored_override": true,
           "default": "primary",
           "description": "The Google Calendar ID to use (default: 'primary' for the user's main calendar)",
           "label": "Calendar ID",
@@ -5686,6 +6095,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Allow the agent to create, update, and delete calendar events",
           "label": "Allow Updates",
@@ -5719,6 +6129,7 @@
       "category": "productivity",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Config",
@@ -5730,6 +6141,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -5741,6 +6153,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "User ID",
@@ -5752,6 +6165,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Org ID",
@@ -5763,6 +6177,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Project ID",
@@ -5774,6 +6189,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Infer",
@@ -5785,6 +6201,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Add Memory",
@@ -5796,6 +6213,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Memory",
@@ -5807,6 +6225,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get All Memories",
@@ -5818,6 +6237,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Delete All Memories",
@@ -5829,6 +6249,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -5875,6 +6296,7 @@
       "category": "productivity",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Internal integration token",
           "label": "API Key",
@@ -5886,6 +6308,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "ID of the Notion database to work with",
           "label": "Database ID",
@@ -5897,6 +6320,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Create Page",
@@ -5908,6 +6332,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Update Page",
@@ -5919,6 +6344,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Pages",
@@ -5930,6 +6356,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -5960,6 +6387,7 @@
       "category": "productivity",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Optional pre-configured OpenBB instance (advanced usage)",
           "label": "OpenBB Instance",
@@ -5971,6 +6399,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "OpenBB PAT for premium data providers. Optional - works without it using yfinance.",
           "label": "Personal Access Token",
@@ -5982,6 +6411,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "yfinance",
           "description": "Data provider: yfinance, benzinga, fmp, intrinio, polygon, tiingo, or tmx",
           "label": "Data Provider",
@@ -5993,6 +6423,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Stock Price",
@@ -6004,6 +6435,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Search Company Symbol",
@@ -6015,6 +6447,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Get Company News",
@@ -6026,6 +6459,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Get Company Profile",
@@ -6037,6 +6471,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Get Price Targets",
@@ -6048,6 +6483,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -6078,6 +6514,7 @@
       "category": "productivity",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Create Pandas Dataframe",
@@ -6089,6 +6526,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Run Dataframe Operation",
@@ -6100,6 +6538,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -6148,6 +6587,7 @@
       "category": "productivity",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Db URL",
@@ -6159,6 +6599,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Db Engine",
@@ -6170,6 +6611,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "User",
@@ -6181,6 +6623,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Password",
@@ -6192,6 +6635,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Host",
@@ -6203,6 +6647,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Port",
@@ -6214,6 +6659,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Schema",
@@ -6225,6 +6671,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Dialect",
@@ -6236,6 +6683,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Tables",
@@ -6247,6 +6695,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable List Tables",
@@ -6258,6 +6707,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Describe Table",
@@ -6269,6 +6719,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Run Sql Query",
@@ -6280,6 +6731,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -6310,6 +6762,7 @@
       "category": "productivity",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Token",
@@ -6340,6 +6793,7 @@
       "category": "productivity",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Session",
@@ -6370,6 +6824,7 @@
       "category": "productivity",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Session ID",
@@ -6381,6 +6836,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "User ID",
@@ -6392,6 +6848,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -6403,6 +6860,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Ignore Assistant Messages",
@@ -6414,6 +6872,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Add Zep Message",
@@ -6425,6 +6884,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Zep Memory",
@@ -6436,6 +6896,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Zep Memory",
@@ -6447,6 +6908,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Instructions",
@@ -6458,6 +6920,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Add Instructions",
@@ -6469,6 +6932,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -6499,6 +6963,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -6510,6 +6975,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Scrape Website",
@@ -6521,6 +6987,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Custom Scrape Website",
@@ -6532,6 +6999,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -6543,6 +7011,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "",
           "description": null,
           "label": "Agentql Query",
@@ -6574,6 +7043,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Arxiv",
@@ -6585,6 +7055,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Read Arxiv Papers",
@@ -6596,6 +7067,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -6607,6 +7079,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Download Dir",
@@ -6638,6 +7111,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Fixed Max Results",
@@ -6649,6 +7123,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Fixed Language",
@@ -6660,6 +7135,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Headers",
@@ -6671,6 +7147,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Proxy",
@@ -6682,6 +7159,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 10,
           "description": null,
           "label": "Timeout",
@@ -6693,6 +7171,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Debug",
@@ -6704,6 +7183,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Baidu Search",
@@ -6715,6 +7195,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -6746,6 +7227,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Brandfetch API key for Brand API",
           "label": "API Key",
@@ -6757,6 +7239,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Brandfetch Client ID for Brand Search API",
           "label": "Client ID",
@@ -6768,6 +7251,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search by Identifier",
@@ -6779,6 +7263,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Search by Brand",
@@ -6790,6 +7275,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "https://api.brandfetch.io/v2",
           "description": null,
           "label": "Base URL",
@@ -6801,6 +7287,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 20.0,
           "description": null,
           "label": "Timeout",
@@ -6812,6 +7299,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -6823,6 +7311,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Async Tools (Deprecated)",
@@ -6853,6 +7342,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -6864,6 +7354,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Scrape Markdown",
@@ -6875,6 +7366,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Screenshot",
@@ -6886,6 +7378,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Engine",
@@ -6897,6 +7390,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Web Data Feed",
@@ -6908,6 +7402,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -6919,6 +7414,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "serp_api",
           "description": null,
           "label": "Serp Zone",
@@ -6930,6 +7426,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "web_unlocker1",
           "description": null,
           "label": "Web Unlocker Zone",
@@ -6941,6 +7438,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Verbose",
@@ -6952,6 +7450,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 600,
           "description": null,
           "label": "Timeout",
@@ -6982,6 +7481,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Optional directory for browser screenshots, PDFs, and downloads.",
           "label": "Output Directory",
@@ -7012,6 +7512,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -7023,6 +7524,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Project ID",
@@ -7034,6 +7536,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Base URL",
@@ -7045,6 +7548,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Navigate To",
@@ -7056,6 +7560,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Screenshot",
@@ -7067,6 +7572,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Page Content",
@@ -7078,6 +7584,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Close Session",
@@ -7089,6 +7596,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -7100,6 +7608,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Parse Html",
@@ -7111,6 +7620,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 100000,
           "description": null,
           "label": "Max Content Length",
@@ -7142,6 +7652,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": 5000,
           "description": null,
           "label": "Max Length",
@@ -7153,6 +7664,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 60,
           "description": null,
           "label": "Timeout",
@@ -7164,6 +7676,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Use Pruning",
@@ -7175,6 +7688,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 0.48,
           "description": null,
           "label": "Pruning Threshold",
@@ -7186,6 +7700,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 1.0,
           "description": null,
           "label": "Bm25 Threshold",
@@ -7197,6 +7712,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Headless",
@@ -7208,6 +7724,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "domcontentloaded",
           "description": null,
           "label": "Wait Until",
@@ -7219,6 +7736,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Proxy Config",
@@ -7230,6 +7748,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Crawl",
@@ -7241,6 +7760,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -7271,6 +7791,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search",
@@ -7282,6 +7803,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable News",
@@ -7293,6 +7815,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Modifier",
@@ -7304,6 +7827,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Fixed Max Results",
@@ -7315,6 +7839,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Proxy",
@@ -7326,6 +7851,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 10,
           "description": null,
           "label": "Timeout",
@@ -7337,6 +7863,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Verify Ssl",
@@ -7367,6 +7894,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search",
@@ -7378,6 +7906,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Contents",
@@ -7389,6 +7918,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Find Similar",
@@ -7400,6 +7930,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Answer",
@@ -7411,6 +7942,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Research",
@@ -7422,6 +7954,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -7433,6 +7966,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Text",
@@ -7444,6 +7978,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 1000,
           "description": null,
           "label": "Text Length Limit",
@@ -7455,6 +7990,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Summary",
@@ -7466,6 +8002,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -7477,6 +8014,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Num Results",
@@ -7488,6 +8026,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "always",
           "description": null,
           "label": "Livecrawl",
@@ -7499,6 +8038,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Start Crawl Date",
@@ -7510,6 +8050,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "End Crawl Date",
@@ -7521,6 +8062,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Start Published Date",
@@ -7532,6 +8074,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "End Published Date",
@@ -7543,6 +8086,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Type",
@@ -7554,6 +8098,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Category",
@@ -7565,6 +8110,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Include Domains",
@@ -7576,6 +8122,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Exclude Domains",
@@ -7587,6 +8134,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Show Results",
@@ -7598,6 +8146,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Model",
@@ -7609,6 +8158,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 30,
           "description": null,
           "label": "Timeout",
@@ -7620,6 +8170,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "exa-research",
           "description": null,
           "label": "Research Model",
@@ -7650,6 +8201,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -7661,6 +8213,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Scrape",
@@ -7672,6 +8225,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Crawl",
@@ -7683,6 +8237,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Mapping",
@@ -7694,6 +8249,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Search",
@@ -7705,6 +8261,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -7716,6 +8273,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Formats",
@@ -7727,6 +8285,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 10,
           "description": null,
           "label": "Limit",
@@ -7738,6 +8297,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 30,
           "description": null,
           "label": "Poll Interval",
@@ -7749,6 +8309,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Search Params",
@@ -7760,6 +8321,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "https://api.firecrawl.dev",
           "description": null,
           "label": "API URL",
@@ -7790,6 +8352,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search",
@@ -7801,6 +8364,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable News",
@@ -7812,6 +8376,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Modifier",
@@ -7823,6 +8388,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Fixed Max Results",
@@ -7834,6 +8400,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Proxy",
@@ -7845,6 +8412,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 10,
           "description": null,
           "label": "Timeout",
@@ -7856,6 +8424,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Verify Ssl",
@@ -7886,6 +8455,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Top Stories",
@@ -7897,6 +8467,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get User Details",
@@ -7908,6 +8479,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -7938,6 +8510,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -7949,6 +8522,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "https://r.jina.ai/",
           "description": null,
           "label": "Base URL",
@@ -7960,6 +8534,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "https://s.jina.ai/",
           "description": null,
           "label": "Search URL",
@@ -7971,6 +8546,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 10000,
           "description": null,
           "label": "Max Content Length",
@@ -7982,6 +8558,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Timeout",
@@ -7993,6 +8570,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Search Query Content",
@@ -8004,6 +8582,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Read URL",
@@ -8015,6 +8594,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Search Query",
@@ -8026,6 +8606,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -8057,6 +8638,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -8068,6 +8650,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "standard",
           "description": null,
           "label": "Depth",
@@ -8079,6 +8662,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "searchResults",
           "description": null,
           "label": "Output Type",
@@ -8090,6 +8674,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Web Search With Linkup",
@@ -8101,6 +8686,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -8131,6 +8717,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Include Summary",
@@ -8142,6 +8729,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Article Length",
@@ -8153,6 +8741,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Read Article",
@@ -8164,6 +8753,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -8195,6 +8785,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Oxylabs dashboard username",
           "label": "Username",
@@ -8206,6 +8797,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Oxylabs dashboard password",
           "label": "Password",
@@ -8236,6 +8828,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": "your_email@example.com",
           "description": null,
           "label": "Email",
@@ -8247,6 +8840,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Max Results",
@@ -8258,6 +8852,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Results Expanded",
@@ -8269,6 +8864,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Pubmed",
@@ -8280,6 +8876,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -8310,6 +8907,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -8321,6 +8919,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Smartscraper",
@@ -8332,6 +8931,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Markdownify",
@@ -8343,6 +8943,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Crawl",
@@ -8354,6 +8955,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Searchscraper",
@@ -8365,6 +8967,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Agentic Crawler",
@@ -8376,6 +8979,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Scrape",
@@ -8387,6 +8991,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Render Heavy Js",
@@ -8398,6 +9003,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -8428,6 +9034,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Host",
@@ -8439,6 +9046,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Engines",
@@ -8450,6 +9058,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Fixed Max Results",
@@ -8478,6 +9087,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -8489,6 +9099,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Google",
@@ -8500,6 +9111,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Search Youtube",
@@ -8511,6 +9123,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -8541,6 +9154,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -8552,6 +9166,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "us",
           "description": null,
           "label": "Location",
@@ -8563,6 +9178,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "en",
           "description": null,
           "label": "Language",
@@ -8574,6 +9190,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 10,
           "description": null,
           "label": "Num Results",
@@ -8585,6 +9202,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Date Range",
@@ -8596,6 +9214,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search",
@@ -8607,6 +9226,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search News",
@@ -8618,6 +9238,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Scholar",
@@ -8629,6 +9250,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Scrape Webpage",
@@ -8640,6 +9262,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -8670,6 +9293,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Max Results",
@@ -8681,6 +9305,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "URL",
@@ -8692,6 +9317,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Optional Params",
@@ -8703,6 +9329,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search",
@@ -8714,6 +9341,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Scrape",
@@ -8725,6 +9353,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Crawl",
@@ -8736,6 +9365,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -8766,6 +9396,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Key",
@@ -8777,6 +9408,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "API Base URL",
@@ -8788,6 +9420,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search",
@@ -8799,6 +9432,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Search Context",
@@ -8810,6 +9444,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Extract",
@@ -8821,6 +9456,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -8832,6 +9468,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 6000,
           "description": null,
           "label": "Max Tokens",
@@ -8843,6 +9480,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Include Answer",
@@ -8854,6 +9492,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "advanced",
           "description": null,
           "label": "Search Depth",
@@ -8865,6 +9504,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "basic",
           "description": null,
           "label": "Extract Depth",
@@ -8876,6 +9516,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Include Images",
@@ -8887,6 +9528,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Include Favicon",
@@ -8898,6 +9540,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Extract Timeout",
@@ -8909,6 +9552,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "markdown",
           "description": null,
           "label": "Extract Format",
@@ -8920,6 +9564,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": "markdown",
           "description": null,
           "label": "Format",
@@ -8950,6 +9595,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": "txt",
           "description": "Output format: txt, json, markdown, xml, csv, or html",
           "label": "Output Format",
@@ -8961,6 +9607,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Include Comments",
@@ -8972,6 +9619,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Include Tables",
@@ -8983,6 +9631,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Include Images",
@@ -8994,6 +9643,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Include Formatting",
@@ -9005,6 +9655,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Include Links",
@@ -9016,6 +9667,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Include Metadata",
@@ -9027,6 +9679,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Favor Precision",
@@ -9038,6 +9691,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Favor Recall",
@@ -9049,6 +9703,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Target Language",
@@ -9060,6 +9715,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Deduplicate",
@@ -9071,6 +9727,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Max Tree Size",
@@ -9082,6 +9739,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 10,
           "description": null,
           "label": "Max Crawl URLs",
@@ -9093,6 +9751,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": 100000,
           "description": null,
           "label": "Max Known URLs",
@@ -9104,6 +9763,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Extract Text",
@@ -9115,6 +9775,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Extract Metadata Only",
@@ -9126,6 +9787,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable HTML to Text",
@@ -9137,6 +9799,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Extract Batch",
@@ -9148,6 +9811,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Crawl Website",
@@ -9159,6 +9823,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -9189,6 +9854,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "API access key from Unsplash Developer account",
           "label": "Access Key",
@@ -9200,6 +9866,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search Photos",
@@ -9211,6 +9878,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Photo",
@@ -9222,6 +9890,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Get Random Photo",
@@ -9233,6 +9902,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Enable Download Photo",
@@ -9244,6 +9914,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -9272,6 +9943,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Knowledge",
@@ -9303,6 +9975,7 @@
       "category": "research",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Knowledge",
@@ -9314,6 +9987,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -9344,6 +10018,7 @@
       "category": "smart_home",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "URL to your Home Assistant instance",
           "label": "Home Assistant URL",
@@ -9355,6 +10030,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Long-lived access token from Home Assistant",
           "label": "Access Token",
@@ -9385,6 +10061,7 @@
       "category": "social",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Reddit Instance",
@@ -9396,6 +10073,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Client ID",
@@ -9407,6 +10085,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Client Secret",
@@ -9418,6 +10097,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "User Agent",
@@ -9429,6 +10109,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Username",
@@ -9440,6 +10121,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Password",
@@ -9470,6 +10152,7 @@
       "category": "social",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Twitter API Bearer token",
           "label": "Bearer Token",
@@ -9481,6 +10164,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Twitter API consumer key",
           "label": "Consumer Key",
@@ -9492,6 +10176,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Twitter API consumer secret",
           "label": "Consumer Secret",
@@ -9503,6 +10188,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Twitter API access token",
           "label": "Access Token",
@@ -9514,6 +10200,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Twitter API access token secret",
           "label": "Access Token Secret",
@@ -9525,6 +10212,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Enable including post metrics (likes, retweets, etc.) in search results",
           "label": "Include Post Metrics",
@@ -9536,6 +10224,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": false,
           "description": "Enable waiting when rate limit is reached instead of failing",
           "label": "Wait on Rate Limit",
@@ -9566,6 +10255,7 @@
       "category": "social",
       "config_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Zoom account ID from Server-to-Server OAuth app",
           "label": "Account ID",
@@ -9577,6 +10267,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Client ID from Server-to-Server OAuth app",
           "label": "Client ID",
@@ -9588,6 +10279,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Client secret from Server-to-Server OAuth app",
           "label": "Client Secret",

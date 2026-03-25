@@ -133,7 +133,11 @@ agents:
     display_name: Assistant        # Required: Human-readable name
     role: A helpful AI assistant   # Optional: Description of purpose
     model: sonnet                  # Optional: Model name (default: "default")
-    tools: [file, shell]           # Optional: Agent-specific tools (merged with defaults.tools)
+    tools:                         # Optional: Agent-specific tools (merged with defaults.tools)
+      - file
+      - shell
+      # - shell:                    # Per-agent tool config overrides (single-key dict):
+      #     extra_env_passthrough: "DAWARICH_*"
     include_default_tools: true    # Optional: Per-agent opt-out for defaults.tools
     skills: []                     # Optional: List of skill names
     instructions: []               # Optional: Custom instructions
@@ -205,7 +209,8 @@ router:
 
 # Default settings for all agents (optional)
 defaults:
-  tools: [scheduler]               # Default: ["scheduler"] (added to every agent; set [] to disable)
+  tools:                           # Default: ["scheduler"] (added to every agent; set [] to disable)
+    - scheduler                    # Plain string or single-key dict with inline config overrides
   markdown: true                   # Default: true
   enable_streaming: true           # Default: true (stream responses via message edits)
   streaming:
@@ -229,6 +234,8 @@ defaults:
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
 # defaults.streaming is also global-only and controls streamed message edit cadence.
+# Tools can be plain strings or single-key dicts with per-agent config overrides.
+# See agents.md for the full per-agent tool configuration syntax.
 
 # Memory system configuration (optional)
 memory:

@@ -115,7 +115,8 @@ router:
 
 ## Agent Configuration Structure
 
-Each agent in the YAML file follows this structure:
+Each agent in the YAML file follows this structure.
+Tool entries can be plain strings or single-key dicts with inline config overrides:
 
 ```yaml
 agents:
@@ -125,6 +126,10 @@ agents:
     tools:
       - tool_name_1
       - tool_name_2
+      # Per-agent tool config override (single-key dict):
+      # - shell:
+      #     extra_env_passthrough: "DAWARICH_*"
+      #     enable_run_shell_command: true
     include_default_tools: true  # Optional: merge defaults.tools into this agent's tools
     skills:
       - skill_name_1
@@ -152,7 +157,7 @@ agents:
 - **agent_name**: The identifier used for the Matrix account (becomes `@mindroom_<agent_name>:<server>`)
 - **display_name**: A friendly name shown in conversations
 - **role**: A brief description of the agent's purpose
-- **tools**: List of tools the agent can use (see Available Tools below)
+- **tools**: List of tools the agent can use — plain strings or single-key dicts with inline config overrides (see Available Tools below and [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration))
 - **include_default_tools**: Whether to merge `defaults.tools` into this agent's `tools` (default: true)
 - **skills**: Skill names the agent can use
 - **instructions**: Specific guidelines for the agent's behavior

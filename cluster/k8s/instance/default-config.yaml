@@ -229,7 +229,7 @@ agents:
     skills: []
     tools:
     - duckduckgo
-    - newspaper
+    - newspaper4k
   openclaw:
     display_name: OpenClawAgent
     instructions:

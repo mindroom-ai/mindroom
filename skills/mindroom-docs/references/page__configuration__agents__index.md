@@ -27,11 +27,15 @@ agents:
     # Model to use (defined in models section)
     model: sonnet
 
-    # Tools the agent can use
+    # Tools the agent can use (plain names or inline config overrides)
     tools:
       - file
       - shell
       - github
+      # Per-agent tool config override (single-key dict syntax):
+      # - shell:
+      #     extra_env_passthrough: "DAWARICH_*"
+      #     enable_run_shell_command: true
 
     # Skills the agent can use (defined in skills section or plugins)
     skills:
@@ -114,7 +118,7 @@ agents:
 | `display_name`                | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `role`                        | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `model`                       | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `tools`                       | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `tools + defaults.tools` with duplicates removed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `tools`                       | list   | `[]`        | Agent-specific tool entries — plain strings or single-key dicts with config overrides (see [Tools](https://docs.mindroom.chat/tools/index.md) and [Per-Agent Tool Configuration](#per-agent-tool-configuration)); effective tools are `tools + defaults.tools` with duplicates removed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `include_default_tools`       | bool   | `true`      | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `skills`                      | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `instructions`                | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -144,6 +148,70 @@ Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `con
 Per-agent fields with a `null` default inherit from the `defaults` section at runtime. Per-agent values override them. `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent. `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent. The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
 Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted. `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`). When the effective memory backend is `file`, the agent's canonical file memory root is that same workspace directory. Absolute paths and `..` traversal are rejected.
+
+## Per-Agent Tool Configuration
+
+Tools can be plain strings or single-key dicts with inline config overrides. This lets you customize tool behavior per agent without affecting other agents that use the same tool.
+
+```
+agents:
+  code:
+    tools:
+      - file                              # no override, uses defaults
+      - shell:                            # per-agent override
+          extra_env_passthrough: "DAWARICH_*"
+          enable_run_shell_command: true
+  research:
+    tools:
+      - shell                             # uses global defaults (no overrides)
+      - duckduckgo
+```
+
+### Merge Order
+
+Per-agent overrides are merged on top of defaults:
+
+1. Tool constructor defaults (hardcoded in tool code)
+1. Credentials (dashboard or credential store)
+1. `defaults.tools` overrides (global inline config)
+1. `agents.<name>.tools` overrides (per-agent inline config)
+1. Runtime overrides (sandbox proxy, init overrides)
+
+When the same tool appears in both `defaults.tools` and `agents.<name>.tools` with overrides, the per-agent values win for overlapping keys and non-overlapping keys are merged from both.
+
+### Defaults with Overrides
+
+`defaults.tools` also accepts the single-key dict syntax for global overrides that apply to all agents:
+
+```
+defaults:
+  tools:
+    - scheduler
+    - shell:
+        enable_run_shell_command: true     # global default for all agents
+```
+
+### Security Restrictions
+
+Not all config fields can be overridden inline:
+
+- `type="password"` fields are blocked (credentials must go through the dashboard or credential store)
+- `base_dir` is blocked (runtime-only, set by the workspace system)
+- Fields with `authored_override: false` in the tool metadata are blocked
+
+MindRoom validates overrides at config load time and rejects unknown field names, wrong value types, and blocked fields with a clear error message.
+
+### Backward Compatibility
+
+Existing configs with plain string tool lists work unchanged:
+
+```
+tools: [shell, file, duckduckgo]   # still valid
+```
+
+### Config Manager
+
+The `!config` chat command and the `config_manager` tool preserve inline overrides when updating tool lists. Adding or removing tools via chat does not discard existing per-agent overrides on other tools.
 
 ## Worker Routing
 
@@ -353,7 +421,11 @@ The `defaults` section sets fallback values for all agents. Any agent that omits
 
 ```
 defaults:
-  tools: [scheduler]                   # Tools added to every agent by default (set [] to disable)
+  tools:                                # Tools added to every agent by default (set [] to disable)
+    - scheduler
+    # Per-agent tool config overrides also work in defaults:
+    # - shell:
+    #     enable_run_shell_command: true
   markdown: true                        # Format responses as Markdown
   learning: true                        # Enable Agno Learning
   learning_mode: always                 # "always" or "agentic"

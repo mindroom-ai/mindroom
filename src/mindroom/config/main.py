@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
@@ -69,6 +70,14 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_room_access",
     "matrix_space",
 )
+
+
+@dataclass(frozen=True)
+class ResolvedToolConfig:
+    """Resolved authored tool config after defaults and per-agent overrides merge."""
+
+    name: str
+    tool_config_overrides: dict[str, object]
 
 
 def _resolve_agent_thread_mode(
@@ -569,7 +578,9 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
     ) -> Config:
         """Validate config data against one explicit runtime context."""
-        return cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
+        config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
+        config._validate_authored_tool_entries(runtime_paths)
+        return config
 
     @classmethod
     def from_yaml(
@@ -733,24 +744,65 @@ class Config(BaseModel):
             git=private_knowledge.git,
         )
 
-    def get_agent_tools(self, agent_name: str) -> list[str]:
-        """Get effective tools for an agent.
+    def _validate_authored_tool_entry(
+        self,
+        entry: ToolConfigEntry,
+        *,
+        config_path_prefix: str,
+    ) -> None:
+        """Validate one authored tool entry against the loaded tool metadata."""
+        from mindroom.tool_system.metadata import TOOL_METADATA, validate_authored_overrides  # noqa: PLC0415
 
-        Args:
-            agent_name: Name of the agent.
+        if entry.name not in TOOL_METADATA and not self.is_tool_preset(entry.name):
+            msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
+            raise ValueError(msg)
 
-        Returns:
-            Ordered tool names with duplicates removed.
+        validate_authored_overrides(
+            entry.name,
+            entry.overrides,
+            config_path_prefix=config_path_prefix,
+        )
 
-        Raises:
-            ValueError: If agent not found.
+    def _validate_authored_tool_entries(self, runtime_paths: RuntimePaths) -> None:
+        """Validate defaults and per-agent authored tool overrides with runtime metadata loaded."""
+        from mindroom.tool_system.metadata import ensure_tool_registry_loaded  # noqa: PLC0415
 
-        """
+        ensure_tool_registry_loaded(runtime_paths, self)
+        for index, entry in enumerate(self.defaults.tools):
+            self._validate_authored_tool_entry(entry, config_path_prefix=f"defaults.tools[{index}]")
+        for agent_name, agent_config in self.agents.items():
+            for index, entry in enumerate(agent_config.tools):
+                self._validate_authored_tool_entry(
+                    entry,
+                    config_path_prefix=f"agents.{agent_name}.tools[{index}]",
+                )
+
+    def get_agent_tool_configs(self, agent_name: str) -> list[ResolvedToolConfig]:
+        """Return effective authored tool config entries for one agent."""
         agent_config = self.get_agent(agent_name)
-        tool_names = list(agent_config.tools)
+        merged_overrides: dict[str, dict[str, object]] = {}
+        explicit_names = list(agent_config.tool_names)
+
         if agent_config.include_default_tools:
-            tool_names.extend(self.defaults.tools)
-        return self.expand_tool_names(tool_names)
+            explicit_names.extend(self.defaults.tool_names)
+            for entry in self.defaults.tools:
+                merged_overrides[entry.name] = dict(entry.overrides)
+
+        for entry in agent_config.tools:
+            base_overrides = merged_overrides.get(entry.name, {})
+            merged_overrides[entry.name] = {**base_overrides, **entry.overrides}
+
+        return [
+            ResolvedToolConfig(
+                name=tool_name,
+                tool_config_overrides=dict(merged_overrides.get(tool_name, {})),
+            )
+            for tool_name in self.expand_tool_names(explicit_names)
+        ]
+
+    def get_agent_tools(self, agent_name: str) -> list[str]:
+        """Get effective tool names for an agent."""
+        return [entry.name for entry in self.get_agent_tool_configs(agent_name)]
 
     def get_private_agent_names(self) -> frozenset[str]:
         """Return agent names that materialize requester-private state."""

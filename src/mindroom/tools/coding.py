@@ -35,6 +35,7 @@ if TYPE_CHECKING:
             required=False,
             default=None,
             description="Working directory for file operations. Defaults to current directory.",
+            authored_override=False,
         ),
     ],
     dependencies=[],

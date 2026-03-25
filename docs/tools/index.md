@@ -8,7 +8,8 @@ MindRoom includes 100+ tool integrations that agents can use to interact with ex
 
 ## Enabling Tools
 
-Tools are enabled per-agent in the configuration:
+Tools are enabled per-agent in the configuration.
+Each tool entry can be a plain string or a single-key dict with inline config overrides:
 
 ```yaml
 agents:
@@ -17,8 +18,9 @@ agents:
     role: A helpful assistant with file and web access
     model: sonnet
     tools:
-      - file
-      - shell
+      - file                              # plain string, uses defaults
+      - shell:                            # inline config override
+          extra_env_passthrough: "DAWARICH_*"
       - github
       - duckduckgo
 ```
@@ -32,6 +34,9 @@ defaults:
 ```
 
 `defaults.tools` are merged into each agent's own `tools` list with duplicates removed. Set `defaults.tools: []` to disable global default tools, or set `agents.<name>.include_default_tools: false` to opt out a specific agent.
+
+When the same tool appears in both `defaults.tools` and an agent's `tools` with inline overrides, the per-agent overrides take priority (with non-overlapping keys merged from both).
+See [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration) for the full override syntax and merge order.
 
 ## Tool Categories
 

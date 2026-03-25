@@ -33,10 +33,15 @@ if TYPE_CHECKING:
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
+_TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "text", "url"})
 
 
 class ToolInitOverrideError(ValueError):
     """Raised when a caller supplies unsupported tool init overrides."""
+
+
+class ToolConfigOverrideError(ValueError):
+    """Raised when authored tool config overrides are invalid."""
 
 
 def _sanitize_safe_tool_init_override_value(
@@ -63,6 +68,89 @@ def _sanitize_safe_tool_init_override_value(
         raise ToolInitOverrideError(msg)
 
     return value
+
+
+def _override_path(
+    tool_name: str,
+    field_name: str,
+    *,
+    config_path_prefix: str | None,
+) -> str:
+    if config_path_prefix:
+        return f"{config_path_prefix}.{tool_name}.{field_name}"
+    return f"{tool_name}.{field_name}"
+
+
+def _validate_authored_override_value(
+    field: ConfigField,
+    value: object,
+    *,
+    full_path: str,
+) -> object:
+    """Validate one authored override value against its declared config field type."""
+    if value is None:
+        if field.required:
+            msg = f"{full_path}: null is not allowed for required fields."
+            raise ToolConfigOverrideError(msg)
+        return None
+
+    if field.type in _TEXT_CONFIG_FIELD_TYPES:
+        if not isinstance(value, str):
+            msg = f"{full_path}: expected a string or null."
+            raise ToolConfigOverrideError(msg)
+        return value
+
+    if field.type == "boolean":
+        if not isinstance(value, bool):
+            msg = f"{full_path}: expected a boolean or null."
+            raise ToolConfigOverrideError(msg)
+        return value
+
+    if field.type == "number":
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            msg = f"{full_path}: expected a number or null."
+            raise ToolConfigOverrideError(msg)
+        return value
+
+    return value
+
+
+def validate_authored_overrides(
+    tool_name: str,
+    overrides: dict[str, object] | None,
+    *,
+    config_path_prefix: str | None = None,
+) -> dict[str, object]:
+    """Validate authored YAML overrides against one tool's declared config fields."""
+    if not overrides:
+        return {}
+
+    metadata = TOOL_METADATA.get(tool_name)
+    if metadata is None:
+        msg = f"Unknown tool '{tool_name}'."
+        raise ToolConfigOverrideError(msg)
+
+    fields_by_name = {field.name: field for field in metadata.config_fields or []}
+    unexpected_fields = sorted(set(overrides) - set(fields_by_name))
+    if unexpected_fields:
+        unexpected = ", ".join(unexpected_fields)
+        allowed = ", ".join(sorted(fields_by_name)) or "none"
+        path = _override_path(tool_name, unexpected_fields[0], config_path_prefix=config_path_prefix)
+        msg = f"{path}: unknown authored override field(s): {unexpected}. Allowed fields: {allowed}."
+        raise ToolConfigOverrideError(msg)
+
+    validated: dict[str, object] = {}
+    for field_name, value in overrides.items():
+        field = fields_by_name[field_name]
+        full_path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)
+        if field.type == "password":
+            msg = f"{full_path}: authored overrides are not allowed for password fields."
+            raise ToolConfigOverrideError(msg)
+        if not field.authored_override:
+            msg = f"{full_path}: authored overrides are not allowed for this field."
+            raise ToolConfigOverrideError(msg)
+        validated[field_name] = _validate_authored_override_value(field, value, full_path=full_path)
+    return validated
 
 
 def sanitize_tool_init_overrides(
@@ -94,6 +182,7 @@ def _build_tool_config_init_kwargs(
     metadata: ToolMetadata,
     *,
     credentials: dict[str, object],
+    tool_config_overrides: dict[str, object] | None,
     tool_init_overrides: dict[str, object] | None,
     runtime_overrides: dict[str, object] | None,
 ) -> dict[str, object]:
@@ -103,6 +192,14 @@ def _build_tool_config_init_kwargs(
 
     config_field_names = {field.name for field in metadata.config_fields}
     init_kwargs = {field.name: credentials[field.name] for field in metadata.config_fields if field.name in credentials}
+    if tool_config_overrides:
+        init_kwargs.update(
+            {
+                field.name: tool_config_overrides[field.name]
+                for field in metadata.config_fields
+                if field.name in tool_config_overrides
+            },
+        )
     if tool_init_overrides:
         init_kwargs.update(
             {
@@ -160,6 +257,7 @@ def _build_tool_instance(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
+    tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
@@ -196,10 +294,12 @@ def _build_tool_instance(
     ) or {}
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
+    validated_tool_config_overrides = validate_authored_overrides(tool_name, tool_config_overrides)
     safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
     init_kwargs = _build_tool_config_init_kwargs(
         metadata,
         credentials=credentials,
+        tool_config_overrides=validated_tool_config_overrides,
         tool_init_overrides=safe_tool_init_overrides,
         runtime_overrides=runtime_overrides,
     )
@@ -226,6 +326,7 @@ def _build_tool_instance(
         runtime_paths=runtime_paths,
         credentials_manager=resolved_credentials_manager,
         tool_init_overrides=proxy_tool_init_overrides or None,
+        tool_config_overrides=validated_tool_config_overrides,
         runtime_overrides=runtime_overrides,
         extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
         worker_tools_override=worker_tools_override,
@@ -241,6 +342,7 @@ def get_tool_by_name(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
+    tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
@@ -260,6 +362,7 @@ def get_tool_by_name(
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
         credentials_manager=credentials_manager,
+        tool_config_overrides=tool_config_overrides,
         tool_init_overrides=tool_init_overrides,
         worker_tools_override=worker_tools_override,
         runtime_overrides=runtime_overrides,
@@ -359,6 +462,7 @@ class ConfigField:
     description: str | None = None
     options: list[dict[str, str]] | None = None  # For select type
     validation: dict[str, Any] | None = None  # min, max, pattern, etc.
+    authored_override: bool = True
 
 
 @dataclass

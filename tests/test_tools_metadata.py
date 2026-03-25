@@ -13,11 +13,14 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
     TOOL_METADATA,
+    ConfigField,
     ToolCategory,
+    ToolConfigOverrideError,
     ToolManagedInitArg,
     export_tools_metadata,
     get_tool_by_name,
     register_tool_with_metadata,
+    validate_authored_overrides,
 )
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
 
@@ -205,3 +208,127 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
     finally:
         _TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
+
+
+def test_validate_authored_overrides_accepts_declared_field_types_and_nulls() -> None:
+    """Authored overrides should accept declared scalar types and optional nulls."""
+    tool_name = "test_authored_override_tool"
+
+    class _FakeToolkit(Toolkit):
+        def __init__(self, **_kwargs: object) -> None:
+            super().__init__(name=tool_name, tools=[])
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="Authored Override Tool",
+        description="Test-only toolkit for authored override validation.",
+        category=ToolCategory.DEVELOPMENT,
+        config_fields=[
+            ConfigField(name="enabled", label="Enabled", type="boolean", required=False),
+            ConfigField(name="count", label="Count", type="number", required=False),
+            ConfigField(name="label", label="Label", type="text", required=False),
+            ConfigField(name="endpoint", label="Endpoint", type="url", required=False),
+        ],
+    )
+    def _fake_tool_factory() -> type[_FakeToolkit]:
+        return _FakeToolkit
+
+    try:
+        assert validate_authored_overrides(
+            tool_name,
+            {
+                "enabled": True,
+                "count": 3.5,
+                "label": None,
+                "endpoint": "https://example.com",
+            },
+            config_path_prefix="agents.code.tools[0]",
+        ) == {
+            "enabled": True,
+            "count": 3.5,
+            "label": None,
+            "endpoint": "https://example.com",
+        }
+    finally:
+        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+
+def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> None:
+    """Authored overrides should reject bad types, runtime-only fields, and password fields."""
+    tool_name = "test_authored_override_errors"
+
+    class _FakeToolkit(Toolkit):
+        def __init__(self, **_kwargs: object) -> None:
+            super().__init__(name=tool_name, tools=[])
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="Authored Override Errors",
+        description="Test-only toolkit for override error coverage.",
+        category=ToolCategory.DEVELOPMENT,
+        config_fields=[
+            ConfigField(name="flag", label="Flag", type="boolean", required=False),
+            ConfigField(name="base_dir", label="Base Dir", type="text", required=False, authored_override=False),
+            ConfigField(name="api_key", label="API Key", type="password", required=False),
+        ],
+    )
+    def _fake_tool_factory() -> type[_FakeToolkit]:
+        return _FakeToolkit
+
+    try:
+        with pytest.raises(
+            ToolConfigOverrideError, match="agents.code.tools\\[0\\].test_authored_override_errors.flag"
+        ):
+            validate_authored_overrides(
+                tool_name,
+                {"flag": "yes"},
+                config_path_prefix="agents.code.tools[0]",
+            )
+
+        with pytest.raises(ToolConfigOverrideError, match="authored overrides are not allowed for this field"):
+            validate_authored_overrides(
+                tool_name,
+                {"base_dir": "/tmp"},
+                config_path_prefix="agents.code.tools[0]",
+            )
+
+        with pytest.raises(ToolConfigOverrideError, match="password fields"):
+            validate_authored_overrides(
+                tool_name,
+                {"api_key": "sk-test"},
+                config_path_prefix="agents.code.tools[0]",
+            )
+
+        with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
+            validate_authored_overrides(
+                tool_name,
+                {"missing": True},
+                config_path_prefix="agents.code.tools[0]",
+            )
+    finally:
+        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+
+def test_secret_like_config_fields_are_marked_password() -> None:
+    """Secret-like tool config fields should be declared as password inputs."""
+    suspicious_suffixes = ("_api_key", "_password", "_secret", "_token")
+    suspicious_exact = {
+        "api_key",
+        "password",
+        "secret",
+        "token",
+        "access_token",
+        "refresh_token",
+        "auth_token",
+        "bearer_token",
+    }
+
+    for tool_name, metadata in TOOL_METADATA.items():
+        for field in metadata.config_fields or []:
+            lowered = field.name.lower()
+            if "url" in lowered or lowered.endswith("_id") or lowered == "client_id":
+                continue
+            if lowered in suspicious_exact or lowered.endswith(suspicious_suffixes):
+                assert field.type == "password", f"{tool_name}.{field.name} should use type='password'"
