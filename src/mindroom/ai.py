@@ -104,7 +104,6 @@ _PARTIAL_REPLY_SENDER_LABELS = {
 _PARTIAL_REPLY_PROGRESS_PLACEHOLDER = "Thinking..."
 _PARTIAL_REPLY_CANCELLED_SUFFIX = "**[Response cancelled by user]**"
 _PARTIAL_REPLY_ERROR_PREFIX = "**[Response interrupted by an error"
-_PARTIAL_REPLY_MAX_CHARS = 4000
 _STALE_STREAM_STATUS_MAX_AGE_MS = 300_000
 
 
@@ -772,8 +771,6 @@ def _clean_partial_reply_body(body: str) -> str:
 
     if cleaned == _PARTIAL_REPLY_PROGRESS_PLACEHOLDER or not cleaned or not any(char.isalnum() for char in cleaned):
         return ""
-    if len(cleaned) > _PARTIAL_REPLY_MAX_CHARS:
-        cleaned = "[... earlier content truncated ...]\n" + cleaned[-_PARTIAL_REPLY_MAX_CHARS:]
     return cleaned
 
 

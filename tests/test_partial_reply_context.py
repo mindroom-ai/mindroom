@@ -192,11 +192,10 @@ class TestCleanPartialReplyBody:
         """Remove streaming markers and terminal status notes from preserved text."""
         assert _clean_partial_reply_body(body) == expected
 
-    def test_clean_partial_reply_body_truncates_long_content(self) -> None:
-        """Cap preserved partial-reply context so it cannot crowd out newer prompt context."""
+    def test_clean_partial_reply_body_preserves_long_content(self) -> None:
+        """Keep long partial-reply content once markers are removed."""
         result = _clean_partial_reply_body(f"{'x' * 5000} ⋯")
-        assert result.startswith("[... earlier content truncated ...]\n")
-        assert len(result) == len("[... earlier content truncated ...]\n") + 4000
+        assert result == "x" * 5000
 
 
 class TestUnseenMessagesPartialReplies:
