@@ -16,6 +16,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
+from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import (
@@ -24,7 +25,9 @@ from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingResponse,
+    clean_partial_reply_text,
     is_in_progress_message,
+    is_interrupted_partial_reply,
     send_streaming_response,
 )
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -468,6 +471,22 @@ class TestStreamingBehavior:
         assert not is_in_progress_message("Thinking...")
         assert not is_in_progress_message(None)
 
+    def test_is_interrupted_partial_reply_detects_terminal_markers(self) -> None:
+        """Interrupted partial-reply detection should recognize shared cancelled/error notes."""
+        assert is_interrupted_partial_reply(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}")
+        assert is_interrupted_partial_reply("Draft answer\n\n**[Response interrupted by an error: boom]**")
+        assert not is_interrupted_partial_reply("Finished answer")
+        assert not is_interrupted_partial_reply(None)
+
+    def test_clean_partial_reply_text_strips_shared_markers(self) -> None:
+        """Shared partial-reply cleanup should normalize cancelled/error/placeholder bodies."""
+        assert clean_partial_reply_text(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}") == "Draft answer"
+        assert (
+            clean_partial_reply_text("Draft answer\n\n**[Response interrupted by an error: boom]**") == "Draft answer"
+        )
+        assert clean_partial_reply_text(f"{PROGRESS_PLACEHOLDER} ⋯") == ""
+        assert clean_partial_reply_text("... ⋯") == ""
+
     @pytest.mark.asyncio
     async def test_throttled_send_uses_ramp_interval(self) -> None:
         """Integration test: _throttled_send respects the ramped interval."""
@@ -688,6 +707,50 @@ class TestStreamingBehavior:
             await streaming.finalize(mock_client)
 
         assert mock_edit.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_send_streaming_response_finalizes_adopted_placeholder_without_chunks(self) -> None:
+        """Adopted thinking placeholders should still get a terminal edit when no text arrives."""
+        mock_client = AsyncMock()
+        edited_contents: list[tuple[dict[str, object], str]] = []
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            new_content: dict[str, object],
+            new_text: str,
+        ) -> str:
+            edited_contents.append((new_content, new_text))
+            return "$edit"
+
+        async def empty_stream() -> AsyncIterator[str]:
+            if False:
+                yield ""
+            return
+
+        with patch("mindroom.streaming.edit_message", new=AsyncMock(side_effect=record_edit)):
+            event_id, accumulated = await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=empty_stream(),
+                existing_event_id="$thinking_123",
+                adopt_existing_placeholder=True,
+                room_mode=True,
+            )
+
+        assert event_id == "$thinking_123"
+        assert accumulated == ""
+        assert len(edited_contents) == 1
+        final_content, final_text = edited_contents[0]
+        assert final_text == PROGRESS_PLACEHOLDER
+        assert final_content["body"] == PROGRESS_PLACEHOLDER
+        assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
 
     @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(

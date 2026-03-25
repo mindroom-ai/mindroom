@@ -13,7 +13,7 @@ from typing import Any
 import nio
 from nio import crypto
 
-from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, STREAM_STATUS_KEY
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -21,7 +21,12 @@ logger = get_logger(__name__)
 # Conservative limits accounting for Matrix overhead
 _NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 _EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
-_PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions", AI_RUN_METADATA_KEY)
+_PASSTHROUGH_CONTENT_KEYS = (
+    "m.mentions",
+    "com.mindroom.skip_mentions",
+    AI_RUN_METADATA_KEY,
+    STREAM_STATUS_KEY,
+)
 
 
 def _calculate_event_size(content: dict[str, Any]) -> int:

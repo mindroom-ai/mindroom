@@ -1261,6 +1261,103 @@ class TestAgentBot:
         assert sent_extra_content[ATTACHMENT_IDS_KEY] == attachment_ids
         assert sent_extra_content["io.mindroom.ai_run"]["version"] == 1
 
+    @pytest.mark.asyncio
+    async def test_process_and_respond_passes_active_response_event_ids(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Non-streaming AI calls should receive only live tracked event IDs for the room."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response")
+
+        running_task = asyncio.create_task(asyncio.sleep(60))
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        other_room_task = asyncio.create_task(asyncio.sleep(60))
+        await done_task
+        bot.stop_manager.set_current("$active", "!test:localhost", running_task)
+        bot.stop_manager.set_current("$done", "!test:localhost", done_task)
+        bot.stop_manager.set_current("$other-room", "!other:localhost", other_room_task)
+
+        try:
+            with (
+                patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+                patch("mindroom.bot.ai_response", new_callable=AsyncMock, return_value="Handled") as mock_ai_response,
+            ):
+                await bot._process_and_respond(
+                    room_id="!test:localhost",
+                    prompt="Please continue",
+                    reply_to_event_id="$event123",
+                    thread_id=None,
+                    thread_history=[],
+                    user_id="@user:localhost",
+                )
+
+            assert mock_ai_response.call_args.kwargs["active_event_ids"] == {"$active"}
+        finally:
+            running_task.cancel()
+            other_room_task.cancel()
+            await asyncio.gather(running_task, other_room_task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_process_and_respond_streaming_passes_active_response_event_ids(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming AI calls should receive only live tracked event IDs for the room."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+            yield "chunk"
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._handle_interactive_question = AsyncMock()
+
+        running_task = asyncio.create_task(asyncio.sleep(60))
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        other_room_task = asyncio.create_task(asyncio.sleep(60))
+        await done_task
+        bot.stop_manager.set_current("$active", "!test:localhost", running_task)
+        bot.stop_manager.set_current("$done", "!test:localhost", done_task)
+        bot.stop_manager.set_current("$other-room", "!other:localhost", other_room_task)
+
+        try:
+            with (
+                patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+                patch("mindroom.bot.stream_agent_response", return_value=mock_streaming_response()) as mock_stream,
+                patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
+            ):
+                mock_send_streaming_response.return_value = ("$response", "chunk")
+                await bot._process_and_respond_streaming(
+                    room_id="!test:localhost",
+                    prompt="Please continue",
+                    reply_to_event_id="$event456",
+                    thread_id=None,
+                    thread_history=[],
+                    user_id="@user:localhost",
+                )
+
+            assert mock_stream.call_args.kwargs["active_event_ids"] == {"$active"}
+        finally:
+            running_task.cancel()
+            other_room_task.cancel()
+            await asyncio.gather(running_task, other_room_task, return_exceptions=True)
+
     def test_agent_has_matrix_messaging_tool_when_openclaw_compat_enabled(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -1576,6 +1673,63 @@ class TestAgentBot:
         assert store_args[0] == "What time is it?"
         assert store_args[6] == thread_history
         assert store_args[7] == "@alice:localhost"
+
+    @pytest.mark.asyncio
+    async def test_generate_response_marks_fresh_thinking_message_as_adopted_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming generation should flag fresh thinking placeholders for adoption."""
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function("$thinking")
+            return "$thinking"
+
+        scheduled_tasks: list[asyncio.Task[None]] = []
+
+        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        def schedule_background_task(
+            coro: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            error_handler: object | None = None,  # noqa: ARG001
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+            scheduled_tasks.append(task)
+            return task
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._process_and_respond_streaming = AsyncMock(return_value="$thinking")
+        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
+
+        with (
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=True),
+            patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
+        ):
+            await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Continue",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                user_id="@alice:localhost",
+            )
+
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+        process_args = bot._process_and_respond_streaming.await_args.args
+        process_kwargs = bot._process_and_respond_streaming.await_args.kwargs
+        assert process_args[5] == "$thinking"
+        assert process_kwargs["adopt_existing_placeholder"] is True
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:

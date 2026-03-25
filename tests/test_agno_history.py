@@ -39,7 +39,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import STREAM_STATUS_STREAMING, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
@@ -443,16 +443,18 @@ class TestGetUnseenMessages:
             {"sender": agent_id, "body": "I am the agent", "event_id": "$a1"},
             {"sender": "@user:example.com", "body": "Hello", "event_id": "$u1"},
         ]
-        unseen, _partial = _get_unseen_messages(
+        unseen, partial_reply_kinds = _get_unseen_messages(
             thread_history,
             "test_agent",
             config,
             runtime_paths_for(config),
             set(),
             None,
+            active_event_ids=set(),
         )
         assert len(unseen) == 1
         assert unseen[0]["event_id"] == "$u1"
+        assert partial_reply_kinds == set()
 
     def test_filters_seen_event_ids(self) -> None:
         """Messages with event_ids in seen_event_ids are excluded."""
@@ -461,16 +463,18 @@ class TestGetUnseenMessages:
             {"sender": "@user:example.com", "body": "Old msg", "event_id": "$u1"},
             {"sender": "@user:example.com", "body": "New msg", "event_id": "$u2"},
         ]
-        unseen, _partial = _get_unseen_messages(
+        unseen, partial_reply_kinds = _get_unseen_messages(
             thread_history,
             "test_agent",
             config,
             runtime_paths_for(config),
             {"$u1"},
             None,
+            active_event_ids=set(),
         )
         assert len(unseen) == 1
         assert unseen[0]["event_id"] == "$u2"
+        assert partial_reply_kinds == set()
 
     def test_filters_current_event(self) -> None:
         """The current triggering message is excluded."""
@@ -478,21 +482,32 @@ class TestGetUnseenMessages:
         thread_history = [
             {"sender": "@user:example.com", "body": "Current", "event_id": "$u1"},
         ]
-        unseen, _partial = _get_unseen_messages(
+        unseen, partial_reply_kinds = _get_unseen_messages(
             thread_history,
             "test_agent",
             config,
             runtime_paths_for(config),
             set(),
             "$u1",
+            active_event_ids=set(),
         )
         assert len(unseen) == 0
+        assert partial_reply_kinds == set()
 
     def test_empty_history(self) -> None:
         """Empty thread history returns empty list."""
         config = self._make_config()
-        unseen, _partial = _get_unseen_messages([], "test_agent", config, runtime_paths_for(config), set(), None)
+        unseen, partial_reply_kinds = _get_unseen_messages(
+            [],
+            "test_agent",
+            config,
+            runtime_paths_for(config),
+            set(),
+            None,
+            active_event_ids=set(),
+        )
         assert unseen == []
+        assert partial_reply_kinds == set()
 
     def test_multi_user_scenario(self) -> None:
         """Multiple users/agents in thread, only unseen from non-self returned."""
@@ -505,17 +520,19 @@ class TestGetUnseenMessages:
             {"sender": "@alice:example.com", "body": "More", "event_id": "$a2"},
         ]
         # Agent has seen $a1 (from previous turn)
-        unseen, _partial = _get_unseen_messages(
+        unseen, partial_reply_kinds = _get_unseen_messages(
             thread_history,
             "test_agent",
             config,
             runtime_paths_for(config),
             {"$a1"},
             "$a2",
+            active_event_ids=set(),
         )
         # Only $b1 should be unseen ($a1 seen, $bot1 is self, $a2 is current)
         assert len(unseen) == 1
         assert unseen[0]["event_id"] == "$b1"
+        assert partial_reply_kinds == set()
 
 
 class TestBuildPromptWithUnseen:
@@ -523,7 +540,7 @@ class TestBuildPromptWithUnseen:
 
     def test_no_unseen(self) -> None:
         """Prompt is returned unchanged when no unseen messages."""
-        result = _build_prompt_with_unseen("Hello", [])
+        result = _build_prompt_with_unseen("Hello", [], partial_reply_kinds=None)
         assert result == "Hello"
 
     def test_with_unseen(self) -> None:
@@ -531,7 +548,7 @@ class TestBuildPromptWithUnseen:
         unseen = [
             {"sender": "@alice:example.com", "body": "Hi there"},
         ]
-        result = _build_prompt_with_unseen("Hello", unseen)
+        result = _build_prompt_with_unseen("Hello", unseen, partial_reply_kinds=None)
         assert "Messages from other participants" in result
         assert "@alice:example.com: Hi there" in result
         assert "Current message:\nHello" in result
@@ -539,7 +556,7 @@ class TestBuildPromptWithUnseen:
     def test_unseen_missing_body(self) -> None:
         """Messages without body are skipped."""
         unseen = [{"sender": "@alice:example.com"}]
-        result = _build_prompt_with_unseen("Hello", unseen)
+        result = _build_prompt_with_unseen("Hello", unseen, partial_reply_kinds=None)
         assert result == "Hello"
 
 
@@ -564,9 +581,18 @@ class TestPrepareAgentAndPrompt:
 
     @pytest.mark.asyncio
     async def test_fallback_when_no_session(self, config: Config, tmp_path: object) -> None:
-        """When session has no runs, build_prompt_with_thread_history IS called."""
+        """Matrix fallback without prior runs should still reuse unseen partial-reply logic."""
+        runtime_paths = _runtime_paths(tmp_path)
+        agent_id = config.get_ids(runtime_paths)["calculator"].full_id
         thread_history = [
-            {"sender": "@user:example.com", "body": "Hi", "event_id": "$u1"},
+            {"sender": "@user:example.com", "body": "Earlier question", "event_id": "$u1"},
+            {
+                "sender": agent_id,
+                "body": "Partial reply ⋯",
+                "event_id": "$bot1",
+                "stream_status": STREAM_STATUS_STREAMING,
+            },
+            {"sender": "@user:example.com", "body": "Current question", "event_id": "$u2"},
         ]
         with (
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
@@ -579,15 +605,18 @@ class TestPrepareAgentAndPrompt:
             _agent, prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                _runtime_paths(tmp_path),
+                runtime_paths,
                 config,
                 thread_history=thread_history,
                 session_id="sid",
-                reply_to_event_id="$u1",
+                reply_to_event_id="$u2",
+                active_event_ids={"$bot1"},
             )
-            mock_stuff.assert_called_once_with("enhanced", thread_history)
-            assert prompt == "stuffed"
-            assert unseen_ids == []
+            mock_stuff.assert_not_called()
+            assert unseen_ids == ["$u1"]
+            assert "Your previous response is still being delivered." in prompt
+            assert "Do NOT repeat or redo that work." in prompt
+            assert "You (reply still streaming): Partial reply" in prompt
 
     @pytest.mark.asyncio
     async def test_agno_history_skips_thread_stuffing(self, config: Config, tmp_path: object) -> None:
@@ -665,6 +694,36 @@ class TestPrepareAgentAndPrompt:
                 session_id=None,
             )
             mock_stuff.assert_called_once()
+            assert unseen_ids == []
+
+    @pytest.mark.asyncio
+    async def test_matrix_first_turn_without_unseen_messages_skips_stuffing(
+        self,
+        config: Config,
+        tmp_path: object,
+    ) -> None:
+        """Matrix first turns should stay on the unseen-message path even when nothing is injected."""
+        thread_history = [{"sender": "@user:example.com", "body": "Current question", "event_id": "$u1"}]
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.create_agent") as mock_create,
+            patch("mindroom.ai._get_agent_session", return_value=None),
+            patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
+            patch("mindroom.ai.create_session_storage"),
+        ):
+            mock_create.return_value = MagicMock(spec=Agent)
+            _, prompt, unseen_ids = await _prepare_agent_and_prompt(
+                "calculator",
+                "test",
+                _runtime_paths(tmp_path),
+                config,
+                thread_history=thread_history,
+                session_id="sid",
+                reply_to_event_id="$u1",
+            )
+
+            mock_stuff.assert_not_called()
+            assert prompt == "enhanced"
             assert unseen_ids == []
 
     @pytest.mark.asyncio
@@ -866,32 +925,36 @@ class TestUnseenNotReinjected:
 
         # Turn 1: agent sees $a1, $b1 is unseen
         turn1_seen = {"$a1"}
-        unseen_turn1, _partial = _get_unseen_messages(
+        unseen_turn1, partial_reply_kinds_turn1 = _get_unseen_messages(
             thread_history,
             "bot",
             config,
             runtime_paths_for(config),
             turn1_seen,
             "$a1",
+            active_event_ids=set(),
         )
         unseen_turn1_ids = [m["event_id"] for m in unseen_turn1]
         assert "$b1" in unseen_turn1_ids
+        assert partial_reply_kinds_turn1 == set()
 
         # After turn 1, matrix_seen_event_ids = [$a1, $b1]
         turn2_seen = {"$a1", "$b1"}
 
         # Turn 2: $b1 should NOT appear as unseen
-        unseen_turn2, _partial = _get_unseen_messages(
+        unseen_turn2, partial_reply_kinds_turn2 = _get_unseen_messages(
             thread_history,
             "bot",
             config,
             runtime_paths_for(config),
             turn2_seen,
             "$a2",
+            active_event_ids=set(),
         )
         unseen_turn2_ids = [m["event_id"] for m in unseen_turn2]
         assert "$b1" not in unseen_turn2_ids
         assert unseen_turn2_ids == []
+        assert partial_reply_kinds_turn2 == set()
 
 
 # ---------------------------------------------------------------------------
@@ -1102,17 +1165,19 @@ class TestFullScenario:
         # Turn 1: Agent responded to $a1. It saw $a1.
         turn1_seen = {"$a1"}
         # Current message for turn 2 is $a2
-        unseen_turn2, _partial = _get_unseen_messages(
+        unseen_turn2, partial_reply_kinds_turn2 = _get_unseen_messages(
             thread_history,
             "bot",
             config,
             runtime_paths_for(config),
             turn1_seen,
             "$a2",
+            active_event_ids=set(),
         )
         unseen_turn2_ids = [m["event_id"] for m in unseen_turn2]
         # Should see $b1 and $c1 (not $bot1 (self), not $a1 (seen), not $a2 (current))
         assert unseen_turn2_ids == ["$b1", "$c1"]
+        assert partial_reply_kinds_turn2 == set()
 
         # After turn 2, all consumed: $a1, $b1, $c1, $a2
         turn3_seen = {"$a1", "$b1", "$c1", "$a2"}
@@ -1121,29 +1186,33 @@ class TestFullScenario:
         thread_history.append({"sender": "@bob:example.com", "body": "Another", "event_id": "$b2"})
         thread_history.append({"sender": "@alice:example.com", "body": "Turn 3", "event_id": "$a3"})
 
-        unseen_turn3, _partial = _get_unseen_messages(
+        unseen_turn3, partial_reply_kinds_turn3 = _get_unseen_messages(
             thread_history,
             "bot",
             config,
             runtime_paths_for(config),
             turn3_seen,
             "$a3",
+            active_event_ids=set(),
         )
         unseen_turn3_ids = [m["event_id"] for m in unseen_turn3]
         assert unseen_turn3_ids == ["$b2"]
+        assert partial_reply_kinds_turn3 == set()
 
         # Simulate restart: seen_event_ids still come from stored metadata
         # Same assertion holds — no reinjection
         restart_seen = {"$a1", "$b1", "$c1", "$a2", "$b2", "$a3"}
-        unseen_after_restart, _partial = _get_unseen_messages(
+        unseen_after_restart, partial_reply_kinds_after_restart = _get_unseen_messages(
             thread_history,
             "bot",
             config,
             runtime_paths_for(config),
             restart_seen,
             "$a3",
+            active_event_ids=set(),
         )
         assert unseen_after_restart == []
+        assert partial_reply_kinds_after_restart == set()
 
 
 # ---------------------------------------------------------------------------

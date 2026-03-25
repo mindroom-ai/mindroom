@@ -626,6 +626,12 @@ ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
 VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
+STREAM_STATUS_KEY = "io.mindroom.stream_status"
+STREAM_STATUS_PENDING = "pending"
+STREAM_STATUS_STREAMING = "streaming"
+STREAM_STATUS_COMPLETED = "completed"
+STREAM_STATUS_CANCELLED = "cancelled"
+STREAM_STATUS_ERROR = "error"
 
 # Placeholder used in starter config templates. `mindroom connect` can
 # automatically replace this token with the owner Matrix user ID returned

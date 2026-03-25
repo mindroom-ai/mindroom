@@ -118,6 +118,8 @@ from .constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
     resolve_avatar_path,
@@ -542,6 +544,14 @@ class AgentBot:
     def stop_manager(self) -> StopManager:
         """Get or create the StopManager for this agent."""
         return StopManager()
+
+    def _active_response_event_ids(self, room_id: str) -> set[str]:
+        """Return still-running response event IDs for this bot in the room."""
+        return {
+            event_id
+            for event_id, tracked in self.stop_manager.tracked_messages.items()
+            if tracked.room_id == room_id and not tracked.task.done()
+        }
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -2036,6 +2046,7 @@ class AgentBot:
                             header=None,
                             show_tool_calls=self.show_tool_calls,
                             existing_event_id=message_id,
+                            adopt_existing_placeholder=message_id is not None,
                             room_mode=room_mode,
                         )
 
@@ -2160,6 +2171,7 @@ class AgentBot:
                     reply_to_event_id,
                     f"{thinking_message} {IN_PROGRESS_MARKER}",
                     thread_id,
+                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
                 )
 
             # Determine which message ID to use
@@ -2262,6 +2274,7 @@ class AgentBot:
         )
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
+        active_event_ids = self._active_response_event_ids(room_id)
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
@@ -2285,6 +2298,7 @@ class AgentBot:
                         user_id=user_id,
                         media=media_inputs,
                         reply_to_event_id=reply_to_event_id,
+                        active_event_ids=active_event_ids,
                         show_tool_calls=self.show_tool_calls,
                         tool_trace_collector=tool_trace,
                         run_metadata_collector=run_metadata_content,
@@ -2400,6 +2414,7 @@ class AgentBot:
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
+        active_event_ids = self._active_response_event_ids(room_id)
         async with typing_indicator(self.client, room_id):
             with (
                 tool_execution_identity(execution_identity),
@@ -2419,6 +2434,7 @@ class AgentBot:
                     room_id=room_id,
                     knowledge=knowledge,
                     reply_to_event_id=reply_to_event_id,
+                    active_event_ids=active_event_ids,
                     show_tool_calls=show_tool_calls,
                     tool_trace_collector=tool_trace,
                     run_metadata_collector=run_metadata_content,
@@ -2539,6 +2555,8 @@ class AgentBot:
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
+        *,
+        adopt_existing_placeholder: bool = False,
         user_id: str | None = None,
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
@@ -2577,6 +2595,7 @@ class AgentBot:
             execution_identity,
         )
         run_metadata_content: dict[str, Any] = {}
+        active_event_ids = self._active_response_event_ids(room_id)
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
@@ -2600,6 +2619,7 @@ class AgentBot:
                         user_id=user_id,
                         media=media_inputs,
                         reply_to_event_id=reply_to_event_id,
+                        active_event_ids=active_event_ids,
                         show_tool_calls=self.show_tool_calls,
                         run_metadata_collector=run_metadata_content,
                         execution_identity=execution_identity,
@@ -2617,6 +2637,7 @@ class AgentBot:
                         response_stream,
                         streaming_cls=StreamingResponse,
                         existing_event_id=existing_event_id,
+                        adopt_existing_placeholder=adopt_existing_placeholder,
                         room_mode=room_mode,
                         show_tool_calls=self.show_tool_calls,
                         extra_content=response_extra_content,
@@ -2716,6 +2737,7 @@ class AgentBot:
                     thread_id,
                     thread_history,
                     message_id,  # Edit the thinking message or existing
+                    adopt_existing_placeholder=existing_event_id is None and message_id is not None,
                     user_id=user_id,
                     media=media_inputs,
                     attachment_ids=attachment_ids,

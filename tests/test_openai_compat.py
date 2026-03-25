@@ -358,6 +358,7 @@ class TestChatCompletions:
 
             assert "include_default_tools" not in mock_ai.call_args.kwargs
             assert mock_ai.call_args.kwargs["include_interactive_questions"] is False
+            assert mock_ai.call_args.kwargs["active_event_ids"] == set()
 
     def test_passes_knowledge_none(self, app_client: TestClient) -> None:
         """Passes knowledge=None when agent has no knowledge_bases."""
@@ -851,6 +852,7 @@ class TestStreamingCompletion:
         assert response.status_code == 200
         assert "include_default_tools" not in mock_stream_fn.call_args.kwargs
         assert mock_stream_fn.call_args.kwargs["include_interactive_questions"] is False
+        assert mock_stream_fn.call_args.kwargs["active_event_ids"] == set()
 
     def test_streaming_consistent_id(self, app_client: TestClient) -> None:
         """All streaming chunks have the same completion ID."""
