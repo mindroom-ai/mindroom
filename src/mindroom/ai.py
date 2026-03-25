@@ -54,6 +54,7 @@ from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_enhanced_prompt
+from mindroom.streaming import clean_partial_reply_text, is_in_progress_message, is_interrupted_partial_reply
 from mindroom.tool_system.events import (
     complete_pending_tool_block,
     extract_tool_completed_info,
@@ -101,9 +102,6 @@ _PARTIAL_REPLY_SENDER_LABELS = {
     "interrupted": "You (interrupted reply draft)",
     "in_progress": "You (reply still streaming)",
 }
-_PARTIAL_REPLY_PROGRESS_PLACEHOLDER = "Thinking..."
-_PARTIAL_REPLY_CANCELLED_SUFFIX = "**[Response cancelled by user]**"
-_PARTIAL_REPLY_ERROR_PREFIX = "**[Response interrupted by an error"
 _STALE_STREAM_STATUS_MAX_AGE_MS = 300_000
 
 
@@ -743,12 +741,9 @@ def _classify_partial_reply(
         body = msg.get("body", "")
         if not isinstance(body, str):
             return None
-        trimmed_body = body.rstrip()
-        if trimmed_body.endswith((_PARTIAL_REPLY_CANCELLED_SUFFIX, " [cancelled]", " [error]")) or (
-            _PARTIAL_REPLY_ERROR_PREFIX in trimmed_body
-        ):
+        if is_interrupted_partial_reply(body):
             partial_kind = PartialReplyKind.INTERRUPTED
-        elif trimmed_body.rstrip(".").endswith("⋯"):
+        elif is_in_progress_message(body):
             partial_kind = PartialReplyKind.IN_PROGRESS
 
     return partial_kind
@@ -756,22 +751,7 @@ def _classify_partial_reply(
 
 def _clean_partial_reply_body(body: str) -> str:
     """Strip streaming markers and status notes from partial reply text."""
-    cleaned = body.rstrip()
-
-    stripped_marker = cleaned.rstrip(".").rstrip()
-    if stripped_marker.endswith("⋯"):
-        cleaned = stripped_marker.removesuffix("⋯").rstrip()
-
-    for marker in (" [cancelled]", " [error]", _PARTIAL_REPLY_CANCELLED_SUFFIX):
-        if cleaned.endswith(marker):
-            cleaned = cleaned[: -len(marker)].rstrip()
-
-    if _PARTIAL_REPLY_ERROR_PREFIX in cleaned:
-        cleaned = cleaned.split(_PARTIAL_REPLY_ERROR_PREFIX, 1)[0].rstrip()
-
-    if cleaned == _PARTIAL_REPLY_PROGRESS_PLACEHOLDER or not cleaned or not any(char.isalnum() for char in cleaned):
-        return ""
-    return cleaned
+    return clean_partial_reply_text(body)
 
 
 def _build_unseen_messages_header(partial_reply_kinds: set[PartialReplyKind]) -> str:
@@ -1101,11 +1081,10 @@ async def _prepare_agent_and_prompt(
         session = _get_agent_session(storage, session_id)
         has_prior_runs = session is not None and bool(session.runs)
 
-    if has_prior_runs and reply_to_event_id:
-        # Matrix bot path: Agno replays history natively, inject only unseen messages.
-        assert session is not None
-        assert thread_history is not None
-        seen_ids = get_seen_event_ids(session)
+    if reply_to_event_id and thread_history:
+        # Matrix bot path: reuse unseen-message extraction even on first turn or
+        # after storage loss so partial-reply handling stays consistent.
+        seen_ids = get_seen_event_ids(session) if has_prior_runs and session is not None else set()
         unseen_messages, partial_reply_kinds = _get_unseen_messages(
             thread_history,
             agent_name,
@@ -1121,12 +1100,12 @@ async def _prepare_agent_and_prompt(
             unseen_messages,
             partial_reply_kinds=partial_reply_kinds,
         )
-    elif has_prior_runs and not reply_to_event_id:
+    elif has_prior_runs:
         # Non-Matrix path (OpenAI-compat): Agno replays history natively.
         # No unseen detection (thread_history entries lack event_id fields).
         full_prompt = enhanced_prompt
     else:
-        # No prior runs (first turn / storage lost / no session_id) → fallback.
+        # Non-Matrix first turn / no session_id → fallback to full thread stuffing.
         full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
 
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)

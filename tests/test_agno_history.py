@@ -39,7 +39,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import STREAM_STATUS_STREAMING, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
@@ -576,9 +576,18 @@ class TestPrepareAgentAndPrompt:
 
     @pytest.mark.asyncio
     async def test_fallback_when_no_session(self, config: Config, tmp_path: object) -> None:
-        """When session has no runs, build_prompt_with_thread_history IS called."""
+        """Matrix fallback without prior runs should still reuse unseen partial-reply logic."""
+        runtime_paths = _runtime_paths(tmp_path)
+        agent_id = config.get_ids(runtime_paths)["calculator"].full_id
         thread_history = [
-            {"sender": "@user:example.com", "body": "Hi", "event_id": "$u1"},
+            {"sender": "@user:example.com", "body": "Earlier question", "event_id": "$u1"},
+            {
+                "sender": agent_id,
+                "body": "Partial reply ⋯",
+                "event_id": "$bot1",
+                "stream_status": STREAM_STATUS_STREAMING,
+            },
+            {"sender": "@user:example.com", "body": "Current question", "event_id": "$u2"},
         ]
         with (
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
@@ -591,15 +600,18 @@ class TestPrepareAgentAndPrompt:
             _agent, prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                _runtime_paths(tmp_path),
+                runtime_paths,
                 config,
                 thread_history=thread_history,
                 session_id="sid",
-                reply_to_event_id="$u1",
+                reply_to_event_id="$u2",
+                active_event_ids={"$bot1"},
             )
-            mock_stuff.assert_called_once_with("enhanced", thread_history)
-            assert prompt == "stuffed"
-            assert unseen_ids == []
+            mock_stuff.assert_not_called()
+            assert unseen_ids == ["$u1"]
+            assert "Your previous response is still being delivered." in prompt
+            assert "Do NOT repeat or redo that work." in prompt
+            assert "You (reply still streaming): Partial reply" in prompt
 
     @pytest.mark.asyncio
     async def test_agno_history_skips_thread_stuffing(self, config: Config, tmp_path: object) -> None:
