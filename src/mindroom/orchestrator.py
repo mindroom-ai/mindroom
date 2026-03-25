@@ -25,6 +25,7 @@ from mindroom.matrix.client import (
     get_room_members,
     invite_to_room,
 )
+from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
@@ -1279,4 +1280,5 @@ async def main(
             with suppress(asyncio.CancelledError):
                 await task
         await orchestrator.stop()
+        reset_matrix_sync_health()
         reset_runtime_state()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
@@ -14,6 +15,11 @@ from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wai
 
 from mindroom.matrix import image_handler
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.health import (
+    clear_matrix_sync_state,
+    mark_matrix_sync_loop_started,
+    mark_matrix_sync_success,
+)
 from mindroom.matrix.identity import (
     MatrixID,
     extract_agent_name,
@@ -389,6 +395,9 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator | None = field(default=None, init=False)  # Reference to orchestrator
+    last_sync_time: datetime | None = field(default=None, init=False)
+    _last_sync_monotonic: float | None = field(default=None, init=False)
+    _first_sync_done: bool = field(default=False, init=False)
     _reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches, init=False)
     in_flight_response_count: int = field(default=0, init=False)
 
@@ -636,6 +645,30 @@ class AgentBot:
         status_msg = build_agent_status_message(self.agent_name, self.config)
         await set_presence_status(self.client, status_msg)
 
+    def mark_sync_loop_started(self) -> None:
+        """Record that a sync loop iteration is starting."""
+        mark_matrix_sync_loop_started(self.agent_name)
+
+    def reset_watchdog_clock(self) -> None:
+        """Reset the monotonic watchdog clock for a fresh sync iteration."""
+        self._last_sync_monotonic = None
+
+    def seconds_since_last_sync_activity(self) -> float | None:
+        """Return elapsed seconds since the last successful sync or loop start."""
+        if self._last_sync_monotonic is None:
+            return None
+        return time.monotonic() - self._last_sync_monotonic
+
+    async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
+        """Track successful sync responses for health checks and watchdogs."""
+        self._first_sync_done = True
+        self.last_sync_time = mark_matrix_sync_success(self.agent_name)
+        self._last_sync_monotonic = time.monotonic()
+
+    async def _on_sync_error(self, _response: nio.SyncError) -> None:
+        """Update the watchdog clock on sync errors so it knows the loop is alive."""
+        self._last_sync_monotonic = time.monotonic()
+
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
 
@@ -672,6 +705,8 @@ class AgentBot:
         self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedVideo)
         self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageAudio)
         self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedAudio)
+        self.client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
+        self.client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
         self.running = True
 
@@ -734,6 +769,10 @@ class AgentBot:
     async def stop(self) -> None:
         """Stop the agent bot."""
         self.running = False
+        self.last_sync_time = None
+        self._last_sync_monotonic = None
+        self._first_sync_done = False
+        clear_matrix_sync_state(self.agent_name)
 
         # Wait for any pending background tasks (like memory saves) to complete
         try:
@@ -802,7 +841,7 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
-        await self.client.sync_forever(timeout=_SYNC_TIMEOUT_MS, full_state=True)
+        await self.client.sync_forever(timeout=_SYNC_TIMEOUT_MS, full_state=not self._first_sync_done)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         assert self.client is not None

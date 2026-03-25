@@ -40,6 +40,8 @@ from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.file_watcher import watch_file
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 from mindroom.logging_config import get_logger
+from mindroom.matrix.health import get_matrix_sync_health_snapshot
+from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
@@ -713,9 +715,26 @@ app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify
 
 
 @app.get("/api/health")
-async def health_check() -> dict[str, str]:
-    """Health check endpoint for testing."""
-    return {"status": "healthy"}
+async def health_check(request: Request) -> JSONResponse:
+    """Health check endpoint with Matrix sync-loop liveness."""
+    runtime_state = get_runtime_state()
+    runtime_paths = api_runtime_paths(request)
+    sync_health = get_matrix_sync_health_snapshot(
+        startup_grace_seconds=matrix_sync_startup_timeout_seconds(runtime_paths),
+    )
+
+    response: dict[str, object] = {
+        "status": "healthy",
+        "last_sync_time": sync_health.last_sync_time.isoformat() if sync_health.last_sync_time is not None else None,
+    }
+    if sync_health.stale_entities:
+        response["stale_sync_entities"] = list(sync_health.stale_entities)
+
+    if runtime_state.phase == "ready" and not sync_health.is_healthy:
+        response["status"] = "unhealthy"
+        return JSONResponse(status_code=503, content=response)
+
+    return JSONResponse(content=response)
 
 
 @app.get("/api/ready")

@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, patch
@@ -16,6 +17,12 @@ from mindroom import constants, frontend_assets
 from mindroom.api import main
 from mindroom.api import workers as workers_api
 from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig
+from mindroom.matrix.health import (
+    mark_matrix_sync_loop_started,
+    mark_matrix_sync_success,
+    reset_matrix_sync_health,
+)
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.workers.models import WorkerHandle
 
@@ -424,10 +431,147 @@ async def test_watch_config_uses_single_file_watcher(monkeypatch: pytest.MonkeyP
 
 def test_health_check(test_client: TestClient) -> None:
     """Test the health check endpoint."""
+    reset_matrix_sync_health()
     response = test_client.get("/api/health")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "healthy"
+    assert data["last_sync_time"] is None
+
+
+def test_health_check_reports_stale_matrix_sync(test_client: TestClient) -> None:
+    """Ready runtimes should fail health checks when Matrix sync responses go stale."""
+    reset_matrix_sync_health()
+    stale_sync_time = datetime.now(UTC) - timedelta(seconds=181)
+    mark_matrix_sync_loop_started("router")
+    mark_matrix_sync_success("router", stale_sync_time)
+    set_runtime_ready()
+
+    response = test_client.get("/api/health")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unhealthy",
+        "last_sync_time": stale_sync_time.isoformat(),
+        "stale_sync_entities": ["router"],
+    }
+    reset_matrix_sync_health()
+    reset_runtime_state()
+
+
+def test_health_startup_grace_before_first_sync(test_client: TestClient) -> None:
+    """Health should return 200 during startup before the first sync callback arrives."""
+    reset_matrix_sync_health()
+    mark_matrix_sync_loop_started("router")
+    mark_matrix_sync_loop_started("general")
+    set_runtime_ready()
+
+    response = test_client.get("/api/health")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["last_sync_time"] is None
+    assert "stale_sync_entities" not in data
+
+    reset_matrix_sync_health()
+    reset_runtime_state()
+
+
+def test_health_after_watchdog_restart_stays_unhealthy_until_sync(test_client: TestClient) -> None:
+    """A restart must not hide a stale sync timestamp until a new sync succeeds."""
+    reset_matrix_sync_health()
+    stale_time = datetime.now(UTC) - timedelta(seconds=300)
+    mark_matrix_sync_loop_started("router")
+    mark_matrix_sync_success("router", stale_time)
+    set_runtime_ready()
+
+    # Confirm it's stale first
+    response = test_client.get("/api/health")
+    assert response.status_code == 503
+
+    # Simulate watchdog restart.
+    mark_matrix_sync_loop_started("router")
+
+    response = test_client.get("/api/health")
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unhealthy",
+        "last_sync_time": stale_time.isoformat(),
+        "stale_sync_entities": ["router"],
+    }
+
+    reset_matrix_sync_health()
+    reset_runtime_state()
+
+
+def test_health_mixed_entities_some_stale(test_client: TestClient) -> None:
+    """If one entity is stale and another is fresh, health should report unhealthy."""
+    reset_matrix_sync_health()
+    fresh_time = datetime.now(UTC) - timedelta(seconds=5)
+    stale_time = datetime.now(UTC) - timedelta(seconds=300)
+    mark_matrix_sync_loop_started("router")
+    mark_matrix_sync_success("router", fresh_time)
+    mark_matrix_sync_loop_started("general")
+    mark_matrix_sync_success("general", stale_time)
+    set_runtime_ready()
+
+    response = test_client.get("/api/health")
+
+    assert response.status_code == 503
+    data = response.json()
+    assert data["status"] == "unhealthy"
+    assert data["stale_sync_entities"] == ["general"]
+
+    reset_matrix_sync_health()
+    reset_runtime_state()
+
+
+def test_health_mixed_entities_one_in_startup_grace(test_client: TestClient) -> None:
+    """An entity still in startup grace (no sync yet) should not cause 503."""
+    reset_matrix_sync_health()
+    fresh_time = datetime.now(UTC) - timedelta(seconds=5)
+    mark_matrix_sync_loop_started("router")
+    mark_matrix_sync_success("router", fresh_time)
+    # general just started, no sync callback yet
+    mark_matrix_sync_loop_started("general")
+    set_runtime_ready()
+
+    response = test_client.get("/api/health")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert "stale_sync_entities" not in data
+
+    reset_matrix_sync_health()
+    reset_runtime_state()
+
+
+def test_health_shutdown_clears_entity(test_client: TestClient) -> None:
+    """After clearing an entity, it should no longer affect health."""
+    from mindroom.matrix.health import clear_matrix_sync_state  # noqa: PLC0415
+
+    reset_matrix_sync_health()
+    mark_matrix_sync_loop_started("router")
+    mark_matrix_sync_success("router", datetime.now(UTC) - timedelta(seconds=5))
+    mark_matrix_sync_loop_started("general")
+    mark_matrix_sync_success("general", datetime.now(UTC) - timedelta(seconds=300))
+    set_runtime_ready()
+
+    # Unhealthy due to stale general
+    response = test_client.get("/api/health")
+    assert response.status_code == 503
+
+    # Shut down the stale entity
+    clear_matrix_sync_state("general")
+
+    response = test_client.get("/api/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "healthy"
+
+    reset_matrix_sync_health()
+    reset_runtime_state()
 
 
 def test_readiness_check_reports_idle(test_client: TestClient) -> None:
@@ -1466,24 +1610,11 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
 
     assert saved_config["models"]["default"]["id"] == "test-model-2"
     assert "new_agent" in saved_config["agents"]
-    assert saved_config["defaults"] == {
-        "tools": ["scheduler"],
-        "markdown": True,
-        "enable_streaming": True,
-        "streaming": {
-            "update_interval": 5.0,
-            "min_update_interval": 0.5,
-            "interval_ramp_seconds": 15.0,
-        },
-        "show_stop_button": True,
-        "learning": True,
-        "learning_mode": "always",
-        "compress_tool_results": True,
-        "enable_session_summaries": False,
-        "show_tool_calls": True,
-        "allow_self_config": False,
-        "max_preload_chars": 50000,
-    }
+    # Build expected defaults from the authoritative model so the test
+    # tracks the schema instead of hardcoding a stale subset.
+    # The save endpoint excludes None values from YAML, so match that.
+    expected_defaults = yaml.safe_load(yaml.dump(DefaultsConfig().model_dump(exclude_none=True)))
+    assert saved_config["defaults"] == expected_defaults
 
 
 def test_save_config_rejects_runtime_sensitive_invalid_payload(
@@ -2327,3 +2458,62 @@ def test_platform_frontend_serves_dashboard_with_valid_cookie(
     )
     assert response.status_code == 200
     assert "MindRoom Dashboard" in response.text
+
+
+def test_health_startup_grace_expires_after_stale_threshold(
+    test_client: TestClient,
+) -> None:
+    """Entity without first SyncResponse becomes stale after startup grace expires."""
+    from mindroom.matrix.health import _matrix_sync_state  # noqa: PLC0415
+
+    reset_matrix_sync_health()
+    reset_runtime_state()
+    mark_matrix_sync_loop_started("router")
+    set_runtime_ready()
+
+    # Immediately after start, should be healthy (in grace period)
+    response = test_client.get("/api/health")
+    assert response.status_code == 200
+
+    # Now simulate 601 seconds passing — beyond the 600s startup grace
+    state = _matrix_sync_state["router"]
+    state.loop_started_time = datetime.now(UTC) - timedelta(seconds=601)
+
+    # Should now be stale — startup grace expired without first sync
+    response = test_client.get("/api/health")
+    assert response.status_code == 503
+    data = response.json()
+    assert data["status"] == "unhealthy"
+    assert "router" in data.get("stale_sync_entities", [])
+
+    reset_matrix_sync_health()
+    reset_runtime_state()
+
+
+def test_health_repeated_restarts_do_not_extend_first_sync_grace(test_client: TestClient) -> None:
+    """Repeated restarts without a successful sync must still go unhealthy."""
+    from mindroom.matrix.health import _matrix_sync_state  # noqa: PLC0415
+
+    reset_matrix_sync_health()
+    reset_runtime_state()
+    mark_matrix_sync_loop_started("router")
+    set_runtime_ready()
+
+    first_start_time = datetime.now(UTC) - timedelta(seconds=601)
+    _matrix_sync_state["router"].loop_started_time = first_start_time
+
+    for _ in range(3):
+        mark_matrix_sync_loop_started("router")
+
+    response = test_client.get("/api/health")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unhealthy",
+        "last_sync_time": None,
+        "stale_sync_entities": ["router"],
+    }
+    assert _matrix_sync_state["router"].loop_started_time == first_start_time
+
+    reset_matrix_sync_health()
+    reset_runtime_state()

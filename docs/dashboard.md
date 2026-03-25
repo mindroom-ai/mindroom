@@ -262,7 +262,7 @@ Credentials support scoping via query parameters:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Always returns `{"status": "healthy"}` — confirms the HTTP server is running |
+| GET | `/api/health` | Returns `{"status": "healthy"}` when the HTTP server is running and Matrix sync is active. Returns `503` with `{"status": "unhealthy", "stale_sync_entities": [...]}` when Matrix sync has been stale for >180s (after watchdog recovery attempts) |
 | GET | `/api/ready` | Returns `{"status": "ready"}` when the orchestrator has finished startup. Returns `503` with `{"status": "<phase>", "detail": "..."}` otherwise |
 
 MindRoom tracks runtime phases internally:
@@ -274,7 +274,7 @@ MindRoom tracks runtime phases internally:
 | `ready` | Orchestrator booted, serving requests |
 | `failed` | Startup or runtime failure (detail message available) |
 
-Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators.
+Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators. Note: `/api/health` returns `503` when Matrix sync is stale (>180s without successful sync, after the 120s watchdog timeout has attempted recovery). Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
 
 ### Tools & Matrix
 
