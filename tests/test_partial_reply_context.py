@@ -71,33 +71,56 @@ class TestClassifyPartialReply:
 
     def test_completed_metadata_is_not_partial(self) -> None:
         """Treat completed messages as fully delivered, even if the body looks partial."""
-        assert _classify_partial_reply({"body": "Final answer", "stream_status": STREAM_STATUS_COMPLETED}) is None
+        assert (
+            _classify_partial_reply(
+                {"body": "Final answer", "stream_status": STREAM_STATUS_COMPLETED},
+                current_timestamp_ms=None,
+                active_event_ids=None,
+            )
+            is None
+        )
 
     def test_cancelled_metadata_is_interrupted(self) -> None:
         """Treat cancelled messages as interrupted partial replies."""
         assert (
-            _classify_partial_reply({"body": "Partial answer", "stream_status": STREAM_STATUS_CANCELLED})
+            _classify_partial_reply(
+                {"body": "Partial answer", "stream_status": STREAM_STATUS_CANCELLED},
+                current_timestamp_ms=None,
+                active_event_ids=None,
+            )
             is PartialReplyKind.INTERRUPTED
         )
 
     def test_error_metadata_is_interrupted(self) -> None:
         """Treat errored messages as interrupted partial replies."""
         assert (
-            _classify_partial_reply({"body": "Partial answer", "stream_status": STREAM_STATUS_ERROR})
+            _classify_partial_reply(
+                {"body": "Partial answer", "stream_status": STREAM_STATUS_ERROR},
+                current_timestamp_ms=None,
+                active_event_ids=None,
+            )
             is PartialReplyKind.INTERRUPTED
         )
 
     def test_pending_metadata_is_in_progress(self) -> None:
         """Treat initial sent-but-not-finalized messages as still in progress."""
         assert (
-            _classify_partial_reply({"body": "Thinking...", "stream_status": STREAM_STATUS_PENDING})
+            _classify_partial_reply(
+                {"body": "Thinking...", "stream_status": STREAM_STATUS_PENDING},
+                current_timestamp_ms=None,
+                active_event_ids=None,
+            )
             is PartialReplyKind.IN_PROGRESS
         )
 
     def test_streaming_metadata_is_in_progress(self) -> None:
         """Treat actively edited streaming messages as still in progress."""
         assert (
-            _classify_partial_reply({"body": "Partial answer ⋯", "stream_status": STREAM_STATUS_STREAMING})
+            _classify_partial_reply(
+                {"body": "Partial answer ⋯", "stream_status": STREAM_STATUS_STREAMING},
+                current_timestamp_ms=None,
+                active_event_ids=None,
+            )
             is PartialReplyKind.IN_PROGRESS
         )
 
@@ -143,17 +166,32 @@ class TestClassifyPartialReply:
                     "timestamp": 1_000,
                 },
                 current_timestamp_ms=302_000,
+                active_event_ids=None,
             )
             is PartialReplyKind.INTERRUPTED
         )
 
     def test_completed_metadata_wins_over_trailing_marker(self) -> None:
         """Prefer persisted completion metadata over stale visible marker text."""
-        assert _classify_partial_reply({"body": "Finished text ⋯", "stream_status": STREAM_STATUS_COMPLETED}) is None
+        assert (
+            _classify_partial_reply(
+                {"body": "Finished text ⋯", "stream_status": STREAM_STATUS_COMPLETED},
+                current_timestamp_ms=None,
+                active_event_ids=None,
+            )
+            is None
+        )
 
     def test_trailing_marker_without_metadata_is_in_progress(self) -> None:
         """Fallback to body-marker detection for pre-upgrade messages."""
-        assert _classify_partial_reply({"body": "Legacy partial ⋯"}) is PartialReplyKind.IN_PROGRESS
+        assert (
+            _classify_partial_reply(
+                {"body": "Legacy partial ⋯"},
+                current_timestamp_ms=None,
+                active_event_ids=None,
+            )
+            is PartialReplyKind.IN_PROGRESS
+        )
 
     @pytest.mark.parametrize(
         "body",
@@ -166,15 +204,36 @@ class TestClassifyPartialReply:
     )
     def test_legacy_interrupted_markers_without_metadata_are_interrupted(self, body: str) -> None:
         """Fallback to interrupted classification for legacy cancelled/error bodies."""
-        assert _classify_partial_reply({"body": body}) is PartialReplyKind.INTERRUPTED
+        assert (
+            _classify_partial_reply(
+                {"body": body},
+                current_timestamp_ms=None,
+                active_event_ids=None,
+            )
+            is PartialReplyKind.INTERRUPTED
+        )
 
     def test_no_metadata_and_no_marker_is_not_partial(self) -> None:
         """Ignore messages that have neither metadata nor partial markers."""
-        assert _classify_partial_reply({"body": "Completed response"}) is None
+        assert (
+            _classify_partial_reply(
+                {"body": "Completed response"},
+                current_timestamp_ms=None,
+                active_event_ids=None,
+            )
+            is None
+        )
 
     def test_non_text_body_without_metadata_is_not_partial(self) -> None:
         """Ignore malformed legacy bodies when there is no stream-status metadata to trust."""
-        assert _classify_partial_reply({"body": {"structured": True}}) is None
+        assert (
+            _classify_partial_reply(
+                {"body": {"structured": True}},
+                current_timestamp_ms=None,
+                active_event_ids=None,
+            )
+            is None
+        )
 
 
 class TestCleanPartialReplyBody:
@@ -280,6 +339,7 @@ class TestUnseenMessagesPartialReplies:
             runtime_paths,
             seen_event_ids=set(),
             current_event_id="e2",
+            active_event_ids=None,
         )
 
         assert partial_reply_kinds == {PartialReplyKind.INTERRUPTED}
@@ -399,6 +459,7 @@ class TestUnseenMessagesPartialReplies:
             runtime_paths,
             seen_event_ids=set(),
             current_event_id="e2",
+            active_event_ids=None,
         )
         seen_event_ids = set(_get_unseen_event_ids_for_metadata(initial_unseen)) | {"e2"}
 
@@ -418,6 +479,7 @@ class TestUnseenMessagesPartialReplies:
             runtime_paths,
             seen_event_ids=seen_event_ids,
             current_event_id="e3",
+            active_event_ids=None,
         )
 
         assert [msg["event_id"] for msg in initial_unseen] == ["e1"]
@@ -468,6 +530,7 @@ class TestUnseenMessagesPartialReplies:
             runtime_paths,
             seen_event_ids=seen_event_ids,
             current_event_id="e3",
+            active_event_ids=None,
         )
 
         assert updated_kinds == {PartialReplyKind.INTERRUPTED}

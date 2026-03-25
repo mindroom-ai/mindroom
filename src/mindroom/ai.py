@@ -715,8 +715,8 @@ def _message_timestamp_ms(msg: dict[str, Any]) -> int | None:
 def _classify_partial_reply(
     msg: dict[str, Any],
     *,
-    current_timestamp_ms: int | None = None,
-    active_event_ids: set[str] | None = None,
+    current_timestamp_ms: int | None,
+    active_event_ids: set[str] | None,
 ) -> PartialReplyKind | None:
     """Classify a self-authored partial reply from persisted stream metadata first."""
     status = msg.get("stream_status")
@@ -786,7 +786,7 @@ def _get_unseen_messages(
     seen_event_ids: set[str],
     current_event_id: str | None,
     *,
-    active_event_ids: set[str] | None = None,
+    active_event_ids: set[str] | None,
 ) -> tuple[list[dict[str, Any]], set[PartialReplyKind]]:
     """Filter thread_history to messages not yet consumed by this agent.
 
@@ -844,7 +844,7 @@ def _build_prompt_with_unseen(
     prompt: str,
     unseen_messages: list[dict[str, Any]],
     *,
-    partial_reply_kinds: set[PartialReplyKind] | None = None,
+    partial_reply_kinds: set[PartialReplyKind] | None,
 ) -> str:
     """Prepend unseen messages from other participants to the prompt."""
     if not unseen_messages:

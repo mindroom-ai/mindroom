@@ -450,6 +450,7 @@ class TestGetUnseenMessages:
             runtime_paths_for(config),
             set(),
             None,
+            active_event_ids=None,
         )
         assert len(unseen) == 1
         assert unseen[0]["event_id"] == "$u1"
@@ -469,6 +470,7 @@ class TestGetUnseenMessages:
             runtime_paths_for(config),
             {"$u1"},
             None,
+            active_event_ids=None,
         )
         assert len(unseen) == 1
         assert unseen[0]["event_id"] == "$u2"
@@ -487,6 +489,7 @@ class TestGetUnseenMessages:
             runtime_paths_for(config),
             set(),
             "$u1",
+            active_event_ids=None,
         )
         assert len(unseen) == 0
         assert partial_reply_kinds == set()
@@ -501,6 +504,7 @@ class TestGetUnseenMessages:
             runtime_paths_for(config),
             set(),
             None,
+            active_event_ids=None,
         )
         assert unseen == []
         assert partial_reply_kinds == set()
@@ -523,6 +527,7 @@ class TestGetUnseenMessages:
             runtime_paths_for(config),
             {"$a1"},
             "$a2",
+            active_event_ids=None,
         )
         # Only $b1 should be unseen ($a1 seen, $bot1 is self, $a2 is current)
         assert len(unseen) == 1
@@ -535,7 +540,7 @@ class TestBuildPromptWithUnseen:
 
     def test_no_unseen(self) -> None:
         """Prompt is returned unchanged when no unseen messages."""
-        result = _build_prompt_with_unseen("Hello", [])
+        result = _build_prompt_with_unseen("Hello", [], partial_reply_kinds=None)
         assert result == "Hello"
 
     def test_with_unseen(self) -> None:
@@ -543,7 +548,7 @@ class TestBuildPromptWithUnseen:
         unseen = [
             {"sender": "@alice:example.com", "body": "Hi there"},
         ]
-        result = _build_prompt_with_unseen("Hello", unseen)
+        result = _build_prompt_with_unseen("Hello", unseen, partial_reply_kinds=None)
         assert "Messages from other participants" in result
         assert "@alice:example.com: Hi there" in result
         assert "Current message:\nHello" in result
@@ -551,7 +556,7 @@ class TestBuildPromptWithUnseen:
     def test_unseen_missing_body(self) -> None:
         """Messages without body are skipped."""
         unseen = [{"sender": "@alice:example.com"}]
-        result = _build_prompt_with_unseen("Hello", unseen)
+        result = _build_prompt_with_unseen("Hello", unseen, partial_reply_kinds=None)
         assert result == "Hello"
 
 
@@ -927,6 +932,7 @@ class TestUnseenNotReinjected:
             runtime_paths_for(config),
             turn1_seen,
             "$a1",
+            active_event_ids=None,
         )
         unseen_turn1_ids = [m["event_id"] for m in unseen_turn1]
         assert "$b1" in unseen_turn1_ids
@@ -943,6 +949,7 @@ class TestUnseenNotReinjected:
             runtime_paths_for(config),
             turn2_seen,
             "$a2",
+            active_event_ids=None,
         )
         unseen_turn2_ids = [m["event_id"] for m in unseen_turn2]
         assert "$b1" not in unseen_turn2_ids
@@ -1165,6 +1172,7 @@ class TestFullScenario:
             runtime_paths_for(config),
             turn1_seen,
             "$a2",
+            active_event_ids=None,
         )
         unseen_turn2_ids = [m["event_id"] for m in unseen_turn2]
         # Should see $b1 and $c1 (not $bot1 (self), not $a1 (seen), not $a2 (current))
@@ -1185,6 +1193,7 @@ class TestFullScenario:
             runtime_paths_for(config),
             turn3_seen,
             "$a3",
+            active_event_ids=None,
         )
         unseen_turn3_ids = [m["event_id"] for m in unseen_turn3]
         assert unseen_turn3_ids == ["$b2"]
@@ -1200,6 +1209,7 @@ class TestFullScenario:
             runtime_paths_for(config),
             restart_seen,
             "$a3",
+            active_event_ids=None,
         )
         assert unseen_after_restart == []
         assert partial_reply_kinds_after_restart == set()
