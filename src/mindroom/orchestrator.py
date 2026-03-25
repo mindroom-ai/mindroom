@@ -361,7 +361,7 @@ class MultiAgentOrchestrator:
 
     def in_flight_response_count(self) -> int:
         """Return the number of active response tasks across all managed bots."""
-        return sum(bot.in_flight_response_count() for bot in self.agent_bots.values())
+        return sum(bot.in_flight_response_count for bot in self.agent_bots.values())
 
     def request_config_reload(self) -> None:
         """Queue a debounced config reload for the running orchestrator."""

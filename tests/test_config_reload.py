@@ -89,7 +89,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     try:
         await asyncio.wait_for(response_started.wait(), timeout=1)
         bot._send_response.assert_awaited_once()
-        assert bot.in_flight_response_count() == 1
+        assert bot.in_flight_response_count == 1
 
         orchestrator.request_config_reload()
         task = orchestrator._config_reload_task
@@ -131,7 +131,7 @@ async def test_queued_config_reload_surfaces_stuck_drain_and_forces_reload(
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
-    mock_bot.in_flight_response_count.return_value = 1
+    mock_bot.in_flight_response_count = 1
     orchestrator.agent_bots["agent1"] = mock_bot
     orchestrator.update_config = AsyncMock(return_value=True)
 
@@ -168,7 +168,7 @@ async def test_queued_config_reload_resets_drain_window_for_new_change(
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
-    mock_bot.in_flight_response_count.return_value = 1
+    mock_bot.in_flight_response_count = 1
     orchestrator.agent_bots["agent1"] = mock_bot
 
     loop = asyncio.get_running_loop()
@@ -231,7 +231,7 @@ async def test_queued_config_reload_coalesces_rapid_changes(
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
-    mock_bot.in_flight_response_count.return_value = 0
+    mock_bot.in_flight_response_count = 0
     orchestrator.agent_bots["agent1"] = mock_bot
 
     update_started = asyncio.Event()
@@ -1028,7 +1028,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
     try:
         await asyncio.wait_for(send_entered.wait(), timeout=1)
         # _send_response is blocked, but the pre-tracking sentinel must be visible
-        assert bot.in_flight_response_count() >= 1
+        assert bot.in_flight_response_count >= 1
     finally:
         release_send.set()
         await asyncio.gather(task, return_exceptions=True)
@@ -1089,7 +1089,7 @@ async def test_failed_update_config_does_not_strand_queued_reload(
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
-    mock_bot.in_flight_response_count.return_value = 0
+    mock_bot.in_flight_response_count = 0
     orchestrator.agent_bots["agent1"] = mock_bot
 
     call_count = 0
@@ -1127,7 +1127,7 @@ async def test_config_change_during_update_config_triggers_second_reload(
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
-    mock_bot.in_flight_response_count.return_value = 0
+    mock_bot.in_flight_response_count = 0
     orchestrator.agent_bots["agent1"] = mock_bot
 
     call_count = 0
@@ -1162,7 +1162,7 @@ async def test_shutdown_during_active_drain_cancels_reload(
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
-    mock_bot.in_flight_response_count.return_value = 1  # Never drains
+    mock_bot.in_flight_response_count = 1  # Never drains
     mock_bot.stop = AsyncMock()
     orchestrator.agent_bots["agent1"] = mock_bot
     orchestrator.update_config = AsyncMock(return_value=True)
