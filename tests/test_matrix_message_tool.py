@@ -131,6 +131,7 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     assert "m.relates_to" not in sent_content
 
 
+@pytest.mark.asyncio
 async def test_matrix_message_send_interactive_block_registers_question_and_adds_reactions() -> None:
     """Interactive sends should format the question and add reaction buttons."""
     tool = MatrixMessageTools()
