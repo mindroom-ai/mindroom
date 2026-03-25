@@ -390,7 +390,7 @@ class AgentBot:
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator | None = field(default=None, init=False)  # Reference to orchestrator
     _reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches, init=False)
-    _in_flight_response_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
+    _in_flight_response_count: int = field(default=0, init=False)
 
     @property
     def agent_name(self) -> str:
@@ -536,7 +536,7 @@ class AgentBot:
 
     def in_flight_response_count(self) -> int:
         """Return the number of active response tasks for this bot."""
-        return len(self._in_flight_response_tasks)
+        return self._in_flight_response_count
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -2111,12 +2111,10 @@ class AgentBot:
             "thinking_message and existing_event_id are mutually exclusive"
         )
 
-        outer_task = asyncio.current_task()
-        assert outer_task is not None
         try:
             # Count the full response lifecycle, including the initial
             # thinking-message send before a cancellable task exists.
-            self._in_flight_response_tasks.add(outer_task)
+            self._in_flight_response_count += 1
 
             # Send initial thinking message if not editing an existing message
             initial_message_id = None
@@ -2181,7 +2179,7 @@ class AgentBot:
 
             return initial_message_id
         finally:
-            self._in_flight_response_tasks.discard(outer_task)
+            self._in_flight_response_count -= 1
 
     async def _process_and_respond(
         self,

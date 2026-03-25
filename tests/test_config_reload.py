@@ -1038,6 +1038,45 @@ async def test_in_flight_response_count_nonzero_during_send_response(
 
 
 @pytest.mark.asyncio
+async def test_run_cancellable_response_does_not_depend_on_current_task_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mock_agent_users: dict[str, AgentMatrixUser],
+) -> None:
+    """Response tracking should not depend on asyncio ambient task lookup."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(
+        agent_user=mock_agent_users["agent1"],
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    setup_test_bot(bot, AsyncMock())
+
+    def fail_current_task() -> None:
+        msg = "_run_cancellable_response should not call asyncio.current_task()"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.bot.asyncio.current_task", fail_current_task)
+
+    async def response_function(message_id: str | None) -> None:
+        assert message_id is None
+
+    await bot._run_cancellable_response(
+        room_id="!room:localhost",
+        reply_to_event_id="$reply",
+        thread_id=None,
+        response_function=response_function,
+    )
+
+
+@pytest.mark.asyncio
 async def test_failed_update_config_does_not_strand_queued_reload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
