@@ -1,5 +1,4 @@
 """Tests for partial reply context preservation (ISSUE-016)."""
-# ruff: noqa: D101, D102
 
 from __future__ import annotations
 
