@@ -187,6 +187,26 @@ def _raise_insufficient_power_level(
     raise ThreadResolutionError(msg)
 
 
+async def _assert_requester_joined_room(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    requester_user_id: str,
+) -> None:
+    """Require the requester to be a joined member of the target room."""
+    response = await client.joined_members(room_id)
+    if not isinstance(response, nio.JoinedMembersResponse):
+        msg = f"Failed to verify requester membership for {requester_user_id} in {room_id}: {response}"
+        raise ThreadResolutionError(msg)
+
+    joined_member_ids = {member.user_id for member in response.members}
+    if requester_user_id in joined_member_ids:
+        return
+
+    msg = f"Requester is not joined to the target room: {requester_user_id} is not joined to {room_id}."
+    raise ThreadResolutionError(msg)
+
+
 def _assert_user_can_write_thread_resolution(
     power_levels_content: Mapping[str, object],
     room_id: str,
@@ -274,6 +294,11 @@ async def _assert_thread_resolution_write_allowed(
     if normalized_requester_user_id == actor_user_id:
         return
 
+    await _assert_requester_joined_room(
+        client,
+        room_id,
+        requester_user_id=normalized_requester_user_id,
+    )
     _assert_user_can_write_thread_resolution(
         response.content,
         room_id,

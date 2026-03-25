@@ -101,6 +101,17 @@ def _thread_resolution_state_error(
     )
 
 
+def _joined_members_response(*user_ids: str) -> nio.JoinedMembersResponse:
+    return nio.JoinedMembersResponse.from_dict(
+        {
+            "joined": {
+                user_id: {"display_name": user_id.removeprefix("@").split(":", 1)[0].title()} for user_id in user_ids
+            },
+        },
+        room_id="!room:localhost",
+    )
+
+
 @pytest.mark.asyncio
 async def test_set_thread_resolved_writes_state_and_returns_record() -> None:
     """Resolved state should be written to the expected room state key."""
@@ -115,6 +126,10 @@ async def test_set_thread_resolved_writes_state_and_returns_record() -> None:
     client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
         {"event_id": "$state"},
         room_id="!room:localhost",
+    )
+    client.joined_members.return_value = _joined_members_response(
+        "@mindroom_general:localhost",
+        "@alice:localhost",
     )
 
     record = await set_thread_resolved(
@@ -150,6 +165,10 @@ async def test_set_thread_resolved_raises_on_write_error() -> None:
         },
     )
     client.room_put_state.return_value = object()
+    client.joined_members.return_value = _joined_members_response(
+        "@mindroom_general:localhost",
+        "@alice:localhost",
+    )
 
     with pytest.raises(ThreadResolutionError, match="Failed to write thread resolution state"):
         await set_thread_resolved(
@@ -177,6 +196,10 @@ async def test_clear_thread_resolution_writes_empty_state() -> None:
     client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
         {"event_id": "$state"},
         room_id="!room:localhost",
+    )
+    client.joined_members.return_value = _joined_members_response(
+        "@mindroom_general:localhost",
+        "@alice:localhost",
     )
 
     await clear_thread_resolution(
@@ -387,6 +410,10 @@ async def test_thread_resolution_write_rejects_low_power_requester(action: str) 
             "@alice:localhost": 0,
         },
     )
+    client.joined_members.return_value = _joined_members_response(
+        "@mindroom_general:localhost",
+        "@alice:localhost",
+    )
     operation = (
         set_thread_resolved(
             client,
@@ -406,6 +433,51 @@ async def test_thread_resolution_write_rejects_low_power_requester(action: str) 
     with pytest.raises(ThreadResolutionError, match="the requester"):
         await operation
 
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["resolve", "clear"])
+async def test_thread_resolution_write_rejects_non_member_requester_even_with_pl0_event(action: str) -> None:
+    """Cross-room writes should reject requesters who are not joined to the target room."""
+    client = AsyncMock()
+    client.user_id = "@mindroom_general:localhost"
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={
+            "@mindroom_general:localhost": 100,
+        },
+        users_default=0,
+        events={THREAD_RESOLUTION_EVENT_TYPE: 0},
+    )
+    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
+        {
+            "joined": {
+                "@mindroom_general:localhost": {"display_name": "MindRoom"},
+                "@alice:localhost": {"display_name": "Alice"},
+            },
+        },
+        room_id="!room:localhost",
+    )
+    operation = (
+        set_thread_resolved(
+            client,
+            "!room:localhost",
+            "$thread-root:localhost",
+            "@outsider:localhost",
+        )
+        if action == "resolve"
+        else clear_thread_resolution(
+            client,
+            "!room:localhost",
+            "$thread-root:localhost",
+            requester_user_id="@outsider:localhost",
+        )
+    )
+
+    with pytest.raises(ThreadResolutionError, match="not joined to the target room"):
+        await operation
+
+    client.joined_members.assert_awaited_once_with("!room:localhost")
     client.room_put_state.assert_not_awaited()
 
 
@@ -481,6 +553,10 @@ async def test_clear_thread_resolution_rejects_missing_existing_marker() -> None
         ),
         _thread_resolution_state_error(message="missing", status_code="M_NOT_FOUND"),
     ]
+    client.joined_members.return_value = _joined_members_response(
+        "@mindroom_general:localhost",
+        "@alice:localhost",
+    )
 
     with pytest.raises(ThreadResolutionError, match="No thread resolution state exists"):
         await clear_thread_resolution(
@@ -507,6 +583,10 @@ async def test_clear_thread_resolution_raises_when_state_fetch_fails() -> None:
         ),
         _thread_resolution_state_error(message="forbidden", status_code="M_FORBIDDEN"),
     ]
+    client.joined_members.return_value = _joined_members_response(
+        "@mindroom_general:localhost",
+        "@alice:localhost",
+    )
 
     with pytest.raises(ThreadResolutionError, match="Failed to fetch thread resolution state"):
         await clear_thread_resolution(
