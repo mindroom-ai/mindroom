@@ -17,7 +17,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
 from mindroom.orchestration.runtime import create_logged_task
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -36,6 +36,62 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     """Helper to setup a test bot with required attributes."""
     bot.client = mock_client
+
+
+def test_config_reload_drain_state_tracks_wait_warning_force_and_reset() -> None:
+    """Drain-state helpers should model wait, warning, force, and reset transitions."""
+    state = _ConfigReloadDrainState()
+
+    assert state.waiting_for_idle is False
+    assert state.should_reset_for_request(1.0) is False
+
+    state.begin_wait(now=10.0, requested_at=1.0)
+
+    assert state.waiting_for_idle is True
+    assert state.should_reset_for_request(1.0) is False
+    assert state.should_reset_for_request(2.0) is True
+    assert (
+        state.should_warn(
+            now=10.5,
+            warning_after_seconds=1.0,
+            warning_interval_seconds=10.0,
+        )
+        is False
+    )
+    assert (
+        state.should_warn(
+            now=11.0,
+            warning_after_seconds=1.0,
+            warning_interval_seconds=10.0,
+        )
+        is True
+    )
+
+    state.mark_warning(11.0)
+
+    assert (
+        state.should_warn(
+            now=15.0,
+            warning_after_seconds=1.0,
+            warning_interval_seconds=10.0,
+        )
+        is False
+    )
+    assert (
+        state.should_warn(
+            now=21.0,
+            warning_after_seconds=1.0,
+            warning_interval_seconds=10.0,
+        )
+        is True
+    )
+    assert state.should_force_reload(now=11.9, force_after_seconds=2.0) is False
+    assert state.should_force_reload(now=12.0, force_after_seconds=2.0) is True
+
+    state.reset()
+
+    assert state.waiting_for_idle is False
+    assert state.should_reset_for_request(2.0) is False
 
 
 @pytest.mark.asyncio

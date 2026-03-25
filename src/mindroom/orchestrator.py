@@ -94,6 +94,62 @@ _CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
 _CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS = 120.0
 
 
+@dataclass
+class _ConfigReloadDrainState:
+    """Track response-drain state for a queued config reload."""
+
+    waiting_for_idle: bool = False
+    wait_started_at: float | None = None
+    last_warning_at: float | None = None
+    request_started_at: float | None = None
+
+    def reset(self) -> None:
+        """Clear all drain tracking state."""
+        self.waiting_for_idle = False
+        self.wait_started_at = None
+        self.last_warning_at = None
+        self.request_started_at = None
+
+    def begin_wait(self, *, now: float, requested_at: float) -> None:
+        """Start a fresh drain window for the current reload request."""
+        self.waiting_for_idle = True
+        self.wait_started_at = now
+        self.last_warning_at = None
+        self.request_started_at = requested_at
+
+    def should_reset_for_request(self, requested_at: float) -> bool:
+        """Return whether a newer request should restart the drain window."""
+        return self.waiting_for_idle and self.request_started_at != requested_at
+
+    def wait_seconds(self, now: float) -> float:
+        """Return how long the current drain window has been waiting."""
+        if self.wait_started_at is None:
+            return 0.0
+        return now - self.wait_started_at
+
+    def should_warn(
+        self,
+        *,
+        now: float,
+        warning_after_seconds: float,
+        warning_interval_seconds: float,
+    ) -> bool:
+        """Return whether the current drain should emit a warning."""
+        if self.wait_started_at is None or self.wait_seconds(now) < warning_after_seconds:
+            return False
+        if self.last_warning_at is None:
+            return True
+        return now - self.last_warning_at >= warning_interval_seconds
+
+    def mark_warning(self, now: float) -> None:
+        """Record the time a drain warning was logged."""
+        self.last_warning_at = now
+
+    def should_force_reload(self, *, now: float, force_after_seconds: float) -> bool:
+        """Return whether the drain timeout has expired."""
+        return self.wait_started_at is not None and self.wait_seconds(now) >= force_after_seconds
+
+
 class _SignalAwareUvicornServer(uvicorn.Server):
     """Uvicorn server that marks the shared shutdown event on signal exit."""
 
@@ -380,99 +436,114 @@ class MultiAgentOrchestrator:
             failure_message="Queued config reload failed",
         )
 
-    async def _run_config_reload_loop(self) -> None:  # noqa: C901, PLR0912, PLR0915
+    async def _wait_for_reload_debounce(
+        self,
+        requested_at: float,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """Sleep until the debounce window closes for a queued reload request."""
+        reload_at = requested_at + _CONFIG_RELOAD_DEBOUNCE_SECONDS
+        delay_seconds = reload_at - loop.time()
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+
+    async def _should_defer_reload_for_active_responses(
+        self,
+        *,
+        drain_state: _ConfigReloadDrainState,
+        requested_at: float,
+        active_response_count: int,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """Return whether a queued reload should keep waiting for responses to finish."""
+        if active_response_count <= 0:
+            return False
+
+        now = loop.time()
+        if not drain_state.waiting_for_idle:
+            logger.info(
+                "Deferring configuration reload until active responses finish",
+                active_response_count=active_response_count,
+            )
+            drain_state.begin_wait(now=now, requested_at=requested_at)
+        elif drain_state.should_warn(
+            now=now,
+            warning_after_seconds=_CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS,
+            warning_interval_seconds=_CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS,
+        ):
+            logger.warning(
+                "Configuration reload still waiting for active responses to finish",
+                active_response_count=active_response_count,
+                drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
+            )
+            drain_state.mark_warning(now)
+
+        if drain_state.should_force_reload(
+            now=now,
+            force_after_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
+        ):
+            logger.error(
+                "Forcing configuration reload while responses are still active",
+                active_response_count=active_response_count,
+                drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
+                timeout_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
+            )
+            return False
+
+        await asyncio.sleep(_CONFIG_RELOAD_IDLE_POLL_SECONDS)
+        return True
+
+    async def _apply_queued_config_reload(self) -> None:
+        """Apply one queued config reload attempt and log the result."""
+        self._config_reload_requested_at = None
+        logger.info("Configuration file changed, checking for updates...")
+        try:
+            updated = await self.update_config()
+        except Exception:
+            logger.exception("Configuration update failed; will retry if a new change is queued")
+            return
+        if updated:
+            logger.info("Configuration update applied to affected agents")
+        else:
+            logger.info("No agent changes detected in configuration update")
+
+    async def _run_config_reload_loop(self) -> None:
         """Apply queued config reloads after debounce and response drain."""
         current_task = asyncio.current_task()
         loop = asyncio.get_running_loop()
-        waiting_for_idle = False
-        drain_wait_started_at: float | None = None
-        last_drain_warning_at: float | None = None
-        drain_request_started_at: float | None = None
-
-        def reset_drain_state() -> None:
-            nonlocal waiting_for_idle, drain_wait_started_at, last_drain_warning_at, drain_request_started_at
-            waiting_for_idle = False
-            drain_wait_started_at = None
-            last_drain_warning_at = None
-            drain_request_started_at = None
+        drain_state = _ConfigReloadDrainState()
 
         try:
             while self.running and self._config_reload_requested_at is not None:
                 requested_at = self._config_reload_requested_at
-                reload_at = requested_at + _CONFIG_RELOAD_DEBOUNCE_SECONDS
-                delay_seconds = reload_at - loop.time()
-                if delay_seconds > 0:
-                    await asyncio.sleep(delay_seconds)
+                await self._wait_for_reload_debounce(requested_at, loop)
                 if self._config_reload_requested_at != requested_at:
                     # A newer config change superseded the current one.
                     # Reset drain state so the new change gets a full drain window.
-                    reset_drain_state()
+                    drain_state.reset()
                     continue
 
-                if waiting_for_idle and drain_request_started_at != requested_at:
+                if drain_state.should_reset_for_request(requested_at):
                     # A newer config change arrived while we were already waiting
                     # for responses to drain, so restart the drain window.
-                    reset_drain_state()
+                    drain_state.reset()
                     continue
 
                 active_response_count = self.in_flight_response_count()
-                force_reload = False
-                if active_response_count > 0:
-                    now = loop.time()
-                    if not waiting_for_idle:
-                        logger.info(
-                            "Deferring configuration reload until active responses finish",
-                            active_response_count=active_response_count,
-                        )
-                        waiting_for_idle = True
-                        drain_wait_started_at = now
-                        drain_request_started_at = requested_at
-                        last_drain_warning_at = None
-                    elif (
-                        drain_wait_started_at is not None
-                        and now - drain_wait_started_at >= _CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS
-                        and (
-                            last_drain_warning_at is None
-                            or now - last_drain_warning_at >= _CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS
-                        )
-                    ):
-                        logger.warning(
-                            "Configuration reload still waiting for active responses to finish",
-                            active_response_count=active_response_count,
-                            drain_wait_seconds=round(now - drain_wait_started_at, 1),
-                        )
-                        last_drain_warning_at = now
-                    if (
-                        drain_wait_started_at is not None
-                        and now - drain_wait_started_at >= _CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS
-                    ):
-                        logger.error(
-                            "Forcing configuration reload while responses are still active",
-                            active_response_count=active_response_count,
-                            drain_wait_seconds=round(now - drain_wait_started_at, 1),
-                            timeout_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
-                        )
-                        force_reload = True
-                    if not force_reload:
-                        await asyncio.sleep(_CONFIG_RELOAD_IDLE_POLL_SECONDS)
-                        continue
-
-                if waiting_for_idle and not force_reload:
-                    logger.info("Active responses finished; applying queued configuration reload")
-                if waiting_for_idle:
-                    reset_drain_state()
-
-                self._config_reload_requested_at = None
-                logger.info("Configuration file changed, checking for updates...")
-                try:
-                    updated = await self.update_config()
-                except Exception:
-                    logger.exception("Configuration update failed; will retry if a new change is queued")
+                if await self._should_defer_reload_for_active_responses(
+                    drain_state=drain_state,
+                    requested_at=requested_at,
+                    active_response_count=active_response_count,
+                    loop=loop,
+                ):
                     continue
-                if updated:
-                    logger.info("Configuration update applied to affected agents")
-                else:
-                    logger.info("No agent changes detected in configuration update")
+
+                if drain_state.waiting_for_idle and active_response_count == 0:
+                    logger.info("Active responses finished; applying queued configuration reload")
+                if drain_state.waiting_for_idle:
+                    drain_state.reset()
+
+                await self._apply_queued_config_reload()
         finally:
             if self._config_reload_task is current_task:
                 self._config_reload_task = None
