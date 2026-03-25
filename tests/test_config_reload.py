@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -16,7 +16,8 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestration.runtime import create_logged_task
+from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -35,6 +36,333 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     """Helper to setup a test bot with required attributes."""
     bot.client = mock_client
+
+
+def test_config_reload_drain_state_tracks_wait_warning_force_and_reset() -> None:
+    """Drain-state helpers should model wait, warning, force, and reset transitions."""
+    state = _ConfigReloadDrainState()
+
+    assert state.waiting_for_idle is False
+    assert state.should_reset_for_request(1.0) is False
+
+    state.begin_wait(now=10.0, requested_at=1.0)
+
+    assert state.waiting_for_idle is True
+    assert state.should_reset_for_request(1.0) is False
+    assert state.should_reset_for_request(2.0) is True
+    assert (
+        state.should_warn(
+            now=10.5,
+            warning_after_seconds=1.0,
+            warning_interval_seconds=10.0,
+        )
+        is False
+    )
+    assert (
+        state.should_warn(
+            now=11.0,
+            warning_after_seconds=1.0,
+            warning_interval_seconds=10.0,
+        )
+        is True
+    )
+
+    state.mark_warning(11.0)
+
+    assert (
+        state.should_warn(
+            now=15.0,
+            warning_after_seconds=1.0,
+            warning_interval_seconds=10.0,
+        )
+        is False
+    )
+    assert (
+        state.should_warn(
+            now=21.0,
+            warning_after_seconds=1.0,
+            warning_interval_seconds=10.0,
+        )
+        is True
+    )
+    assert state.should_force_reload(now=11.9, force_after_seconds=2.0) is False
+    assert state.should_force_reload(now=12.0, force_after_seconds=2.0) is True
+
+    state.reset()
+
+    assert state.waiting_for_idle is False
+    assert state.should_reset_for_request(2.0) is False
+
+
+@pytest.mark.asyncio
+async def test_queued_config_reload_waits_for_in_flight_response_without_event_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mock_agent_users: dict[str, AgentMatrixUser],
+) -> None:
+    """Queued reloads should wait for tracked responses even without a Matrix event ID."""
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(
+        agent_user=mock_agent_users["agent1"],
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    setup_test_bot(bot, AsyncMock())
+    monkeypatch.setattr(bot, "_send_response", AsyncMock(return_value=None))
+
+    response_started = asyncio.Event()
+    release_response = asyncio.Event()
+
+    async def response_function(message_id: str | None) -> None:
+        assert message_id is None
+        response_started.set()
+        await release_response.wait()
+
+    response_task = asyncio.create_task(
+        bot._run_cancellable_response(
+            room_id="!room:localhost",
+            reply_to_event_id="$reply",
+            thread_id=None,
+            response_function=response_function,
+            thinking_message="Thinking...",
+        ),
+    )
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.running = True
+    orchestrator.agent_bots["agent1"] = bot
+    orchestrator.update_config = AsyncMock(return_value=True)
+
+    try:
+        await asyncio.wait_for(response_started.wait(), timeout=1)
+        bot._send_response.assert_awaited_once()
+        assert bot.in_flight_response_count == 1
+
+        orchestrator.request_config_reload()
+        task = orchestrator._config_reload_task
+        assert task is not None
+
+        await asyncio.sleep(0.05)
+        orchestrator.update_config.assert_not_awaited()
+
+        release_response.set()
+        await asyncio.wait_for(response_task, timeout=1)
+        await asyncio.wait_for(task, timeout=1)
+
+        orchestrator.update_config.assert_awaited_once()
+    finally:
+        release_response.set()
+        await asyncio.gather(response_task, return_exceptions=True)
+        for cleanup_task in bot.stop_manager.cleanup_tasks:
+            cleanup_task.cancel()
+        await asyncio.gather(*bot.stop_manager.cleanup_tasks, return_exceptions=True)
+        await orchestrator._cancel_config_reload_task()
+
+
+@pytest.mark.asyncio
+async def test_queued_config_reload_surfaces_stuck_drain_and_forces_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Queued reloads should warn and then force through a wedged drain."""
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS", 0.02)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS", 1.0)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS", 0.04)
+
+    logger_mock = MagicMock()
+    monkeypatch.setattr("mindroom.orchestrator.logger", logger_mock)
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.running = True
+
+    mock_bot = MagicMock(spec=AgentBot)
+    mock_bot.in_flight_response_count = 1
+    orchestrator.agent_bots["agent1"] = mock_bot
+    orchestrator.update_config = AsyncMock(return_value=True)
+
+    orchestrator.request_config_reload()
+    task = orchestrator._config_reload_task
+    assert task is not None
+
+    await asyncio.wait_for(task, timeout=1)
+
+    orchestrator.update_config.assert_awaited_once()
+    assert any(
+        call.args and call.args[0] == "Configuration reload still waiting for active responses to finish"
+        for call in logger_mock.warning.call_args_list
+    )
+    assert any(
+        call.args and call.args[0] == "Forcing configuration reload while responses are still active"
+        for call in logger_mock.error.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_queued_config_reload_resets_drain_window_for_new_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A newer config change should get a fresh drain timeout window."""
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.005)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS", 1.0)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS", 1.0)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS", 0.12)
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.running = True
+
+    mock_bot = MagicMock(spec=AgentBot)
+    mock_bot.in_flight_response_count = 1
+    orchestrator.agent_bots["agent1"] = mock_bot
+
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    update_called_at: float | None = None
+
+    async def fake_update_config() -> bool:
+        nonlocal update_called_at
+        update_called_at = loop.time()
+        return True
+
+    orchestrator.update_config = AsyncMock(side_effect=fake_update_config)
+
+    orchestrator.request_config_reload()
+    await asyncio.sleep(0.06)
+    orchestrator.request_config_reload()
+
+    task = orchestrator._config_reload_task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=1)
+
+    assert update_called_at is not None
+    assert update_called_at - started_at >= 0.16
+    orchestrator.update_config.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_request_config_reload_ignores_changes_while_startup_is_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Queued reloads should not start before the orchestrator is running."""
+    logger_mock = MagicMock()
+    monkeypatch.setattr("mindroom.orchestrator.logger", logger_mock)
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.update_config = AsyncMock(return_value=True)
+
+    orchestrator.request_config_reload()
+
+    assert orchestrator._config_reload_requested_at is None
+    assert orchestrator._config_reload_task is None
+    orchestrator.update_config.assert_not_awaited()
+    assert any(
+        call.args and call.args[0] == "Ignoring config change while startup is still in progress"
+        for call in logger_mock.info.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_attr", "cancel_method_name", "task_name"),
+    [
+        ("_config_reload_task", "_cancel_config_reload_task", "config_reload"),
+        ("_knowledge_refresh_task", "_cancel_knowledge_refresh_task", "knowledge_refresh"),
+    ],
+)
+async def test_detached_task_cancel_logs_exception_instead_of_suppressing_silently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    task_attr: str,
+    cancel_method_name: str,
+    task_name: str,
+) -> None:
+    """Detached task cancellation should log unexpected failures and keep shutdown moving."""
+    logger_mock = MagicMock()
+    monkeypatch.setattr("mindroom.orchestration.runtime.logger", logger_mock)
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    started = asyncio.Event()
+
+    async def fail_during_cancel() -> None:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError as err:
+            msg = "boom"
+            raise RuntimeError(msg) from err
+
+    setattr(
+        orchestrator,
+        task_attr,
+        create_logged_task(
+            fail_during_cancel(),
+            name=task_name,
+            failure_message=f"{task_name} failed",
+        ),
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await getattr(orchestrator, cancel_method_name)()
+
+    assert getattr(orchestrator, task_attr) is None
+    assert any(
+        call.args
+        and call.args[0] == "Detached task failed while being cancelled"
+        and call.kwargs.get("task_name") == task_name
+        for call in logger_mock.debug.call_args_list
+    )
+    logger_mock.exception.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_queued_config_reload_coalesces_rapid_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Multiple quick config changes should produce one reload."""
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.05)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.running = True
+
+    mock_bot = MagicMock(spec=AgentBot)
+    mock_bot.in_flight_response_count = 0
+    orchestrator.agent_bots["agent1"] = mock_bot
+
+    update_started = asyncio.Event()
+
+    async def fake_update_config() -> bool:
+        update_started.set()
+        return True
+
+    orchestrator.update_config = AsyncMock(side_effect=fake_update_config)
+
+    orchestrator.request_config_reload()
+    task = orchestrator._config_reload_task
+    assert task is not None
+
+    await asyncio.sleep(0.02)
+    orchestrator.request_config_reload()
+
+    await asyncio.wait_for(update_started.wait(), timeout=1)
+    await asyncio.wait_for(task, timeout=1)
+
+    orchestrator.update_config.assert_awaited_once()
 
 
 def test_get_changed_agents_detects_culture_config_updates() -> None:
@@ -760,3 +1088,205 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
         "@mindroom_team1:localhost",
         f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
     }
+
+
+@pytest.mark.asyncio
+async def test_in_flight_response_count_nonzero_during_send_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mock_agent_users: dict[str, AgentMatrixUser],
+) -> None:
+    """in_flight_response_count must be >0 even while _send_response is still awaiting."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(
+        agent_user=mock_agent_users["agent1"],
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    setup_test_bot(bot, AsyncMock())
+
+    send_entered = asyncio.Event()
+    release_send = asyncio.Event()
+
+    async def slow_send(*_args: object, **_kwargs: object) -> str:
+        send_entered.set()
+        await release_send.wait()
+        return "$msg"
+
+    monkeypatch.setattr(bot, "_send_response", slow_send)
+
+    async def response_function(message_id: str | None) -> None:
+        pass
+
+    task = asyncio.create_task(
+        bot._run_cancellable_response(
+            room_id="!room:localhost",
+            reply_to_event_id="$reply",
+            thread_id=None,
+            response_function=response_function,
+            thinking_message="Thinking...",
+        ),
+    )
+
+    try:
+        await asyncio.wait_for(send_entered.wait(), timeout=1)
+        # _send_response is blocked, but the pre-tracking sentinel must be visible
+        assert bot.in_flight_response_count >= 1
+    finally:
+        release_send.set()
+        await asyncio.gather(task, return_exceptions=True)
+        for t in bot.stop_manager.cleanup_tasks:
+            t.cancel()
+        await asyncio.gather(*bot.stop_manager.cleanup_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_run_cancellable_response_does_not_depend_on_current_task_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mock_agent_users: dict[str, AgentMatrixUser],
+) -> None:
+    """Response tracking should not depend on asyncio ambient task lookup."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(
+        agent_user=mock_agent_users["agent1"],
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    setup_test_bot(bot, AsyncMock())
+
+    def fail_current_task() -> None:
+        msg = "_run_cancellable_response should not call asyncio.current_task()"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.bot.asyncio.current_task", fail_current_task)
+
+    async def response_function(message_id: str | None) -> None:
+        assert message_id is None
+
+    await bot._run_cancellable_response(
+        room_id="!room:localhost",
+        reply_to_event_id="$reply",
+        thread_id=None,
+        response_function=response_function,
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_update_config_does_not_strand_queued_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed update_config must not prevent a subsequently queued reload from running."""
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.running = True
+
+    mock_bot = MagicMock(spec=AgentBot)
+    mock_bot.in_flight_response_count = 0
+    orchestrator.agent_bots["agent1"] = mock_bot
+
+    call_count = 0
+
+    async def failing_then_succeeding_update() -> bool:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call fails; queue a new reload during the failure
+            orchestrator.request_config_reload()
+            msg = "Simulated config update failure"
+            raise RuntimeError(msg)
+        return True
+
+    orchestrator.update_config = AsyncMock(side_effect=failing_then_succeeding_update)
+    orchestrator.request_config_reload()
+    task = orchestrator._config_reload_task
+    assert task is not None
+
+    await asyncio.wait_for(task, timeout=2)
+
+    assert orchestrator.update_config.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_config_change_during_update_config_triggers_second_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A config change arriving while update_config runs should cause a second reload."""
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.running = True
+
+    mock_bot = MagicMock(spec=AgentBot)
+    mock_bot.in_flight_response_count = 0
+    orchestrator.agent_bots["agent1"] = mock_bot
+
+    call_count = 0
+
+    async def update_config_with_second_change() -> bool:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            orchestrator.request_config_reload()
+        return True
+
+    orchestrator.update_config = AsyncMock(side_effect=update_config_with_second_change)
+    orchestrator.request_config_reload()
+    task = orchestrator._config_reload_task
+    assert task is not None
+
+    await asyncio.wait_for(task, timeout=2)
+
+    assert orchestrator.update_config.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_shutdown_during_active_drain_cancels_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Calling stop() during an active drain must cancel the reload without applying it."""
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.running = True
+
+    mock_bot = MagicMock(spec=AgentBot)
+    mock_bot.in_flight_response_count = 1  # Never drains
+    mock_bot.stop = AsyncMock()
+    orchestrator.agent_bots["agent1"] = mock_bot
+    orchestrator.update_config = AsyncMock(return_value=True)
+    orchestrator.request_config_reload()
+    task = orchestrator._config_reload_task
+    assert task is not None
+
+    # Let the drain loop start polling
+    await asyncio.sleep(0.05)
+    orchestrator.update_config.assert_not_awaited()
+
+    # Shutdown
+    await orchestrator.stop()
+
+    # The reload task should have been cancelled
+    assert task.done()
+    orchestrator.update_config.assert_not_awaited()

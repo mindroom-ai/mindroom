@@ -62,6 +62,12 @@ class _AgentValidationResult(NamedTuple):
     invalid_agents: list[MatrixID]
 
 
+def _raise_scheduled_workflow_send_error() -> typing.NoReturn:
+    """Raise when a scheduled workflow message cannot be sent."""
+    msg = "Failed to send scheduled workflow message to Matrix"
+    raise RuntimeError(msg)
+
+
 # ---- Workflow scheduling primitives ----
 
 
@@ -586,8 +592,7 @@ async def _execute_scheduled_workflow(
             content[ORIGINAL_SENDER_KEY] = workflow.created_by
         event_id = await send_message(client, workflow.room_id, content)
         if event_id is None:
-            msg = "Failed to send scheduled workflow message to Matrix"
-            raise RuntimeError(msg)
+            _raise_scheduled_workflow_send_error()
         logger.info(
             "Executed scheduled workflow",
             description=workflow.description,

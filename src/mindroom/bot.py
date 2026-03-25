@@ -390,6 +390,7 @@ class AgentBot:
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator | None = field(default=None, init=False)  # Reference to orchestrator
     _reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches, init=False)
+    in_flight_response_count: int = field(default=0, init=False)
 
     @property
     def agent_name(self) -> str:
@@ -2106,67 +2107,75 @@ class AgentBot:
             "thinking_message and existing_event_id are mutually exclusive"
         )
 
-        # Send initial thinking message if not editing an existing message
-        initial_message_id = None
-        if thinking_message:
-            assert not existing_event_id  # Redundant but makes the logic clear
-            initial_message_id = await self._send_response(
-                room_id,
-                reply_to_event_id,
-                f"{thinking_message} {IN_PROGRESS_MARKER}",
-                thread_id,
-            )
+        try:
+            # Count the full response lifecycle, including the initial
+            # thinking-message send before a cancellable task exists.
+            self.in_flight_response_count += 1
 
-        # Determine which message ID to use
-        message_id = existing_event_id or initial_message_id
-
-        # Create cancellable task by calling the function with the message ID
-        task: asyncio.Task[None] = asyncio.create_task(response_function(message_id))  # type: ignore[operator]
-
-        # Track for stop button (only if we have a message to track)
-        message_to_track = existing_event_id or initial_message_id
-        show_stop_button = False  # Default to not showing
-
-        if message_to_track:
-            self.stop_manager.set_current(message_to_track, room_id, task, None)
-
-            # Add stop button if configured AND user is online
-            # This uses the same logic as streaming to determine if user is online
-            show_stop_button = self.config.defaults.show_stop_button
-            if show_stop_button and user_id:
-                # Check if user is online - same logic as streaming decision
-                user_is_online = await is_user_online(self.client, user_id)
-                show_stop_button = user_is_online
-                self.logger.info(
-                    "Stop button decision",
-                    message_id=message_to_track,
-                    user_online=user_is_online,
-                    show_button=show_stop_button,
+            # Send initial thinking message if not editing an existing message
+            initial_message_id = None
+            if thinking_message:
+                assert not existing_event_id  # Redundant but makes the logic clear
+                initial_message_id = await self._send_response(
+                    room_id,
+                    reply_to_event_id,
+                    f"{thinking_message} {IN_PROGRESS_MARKER}",
+                    thread_id,
                 )
 
-            if show_stop_button:
-                self.logger.info("Adding stop button", message_id=message_to_track)
-                await self.stop_manager.add_stop_button(self.client, room_id, message_to_track)
+            # Determine which message ID to use
+            message_id = existing_event_id or initial_message_id
 
-        try:
-            await task
-        except asyncio.CancelledError:
-            self.logger.info("Response cancelled by user", message_id=message_to_track)
-        except Exception as e:
-            self.logger.exception("Error during response generation", error=str(e))
-            raise
-        finally:
+            # Create cancellable task by calling the function with the message ID
+            task: asyncio.Task[None] = asyncio.create_task(response_function(message_id))  # type: ignore[operator]
+
+            # Always track the task so stop reactions still work when we do not
+            # have a Matrix event ID yet.
+            message_to_track = existing_event_id or initial_message_id
+            tracked_message_id = message_to_track or f"__pending_response__:{id(task)}"
+            show_stop_button = False  # Default to not showing
+
+            self.stop_manager.set_current(tracked_message_id, room_id, task, None)
+
             if message_to_track:
-                tracked = self.stop_manager.tracked_messages.get(message_to_track)
+                # Add stop button if configured AND user is online
+                # This uses the same logic as streaming to determine if user is online
+                show_stop_button = self.config.defaults.show_stop_button
+                if show_stop_button and user_id:
+                    # Check if user is online - same logic as streaming decision
+                    user_is_online = await is_user_online(self.client, user_id)
+                    show_stop_button = user_is_online
+                    self.logger.info(
+                        "Stop button decision",
+                        message_id=message_to_track,
+                        user_online=user_is_online,
+                        show_button=show_stop_button,
+                    )
+
+                if show_stop_button:
+                    self.logger.info("Adding stop button", message_id=message_to_track)
+                    await self.stop_manager.add_stop_button(self.client, room_id, message_to_track)
+
+            try:
+                await task
+            except asyncio.CancelledError:
+                self.logger.info("Response cancelled", message_id=message_to_track or tracked_message_id)
+            except Exception as e:
+                self.logger.exception("Error during response generation", error=str(e))
+                raise
+            finally:
+                tracked = self.stop_manager.tracked_messages.get(tracked_message_id)
                 button_already_removed = tracked is None or tracked.reaction_event_id is None
 
                 self.stop_manager.clear_message(
-                    message_to_track,
+                    tracked_message_id,
                     client=self.client,
                     remove_button=show_stop_button and not button_already_removed,
                 )
 
-        return initial_message_id
+            return initial_message_id
+        finally:
+            self.in_flight_response_count -= 1
 
     async def _process_and_respond(
         self,
