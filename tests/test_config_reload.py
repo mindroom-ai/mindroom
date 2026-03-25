@@ -16,6 +16,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
+from mindroom.orchestration.runtime import create_logged_task
 from mindroom.orchestrator import MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
@@ -235,7 +236,7 @@ async def test_detached_task_cancel_logs_exception_instead_of_suppressing_silent
 ) -> None:
     """Detached task cancellation should log unexpected failures and keep shutdown moving."""
     logger_mock = MagicMock()
-    monkeypatch.setattr("mindroom.orchestrator.logger", logger_mock)
+    monkeypatch.setattr("mindroom.orchestration.runtime.logger", logger_mock)
 
     orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     started = asyncio.Event()
@@ -248,7 +249,15 @@ async def test_detached_task_cancel_logs_exception_instead_of_suppressing_silent
             msg = "boom"
             raise RuntimeError(msg) from err
 
-    setattr(orchestrator, task_attr, asyncio.create_task(fail_during_cancel(), name=task_name))
+    setattr(
+        orchestrator,
+        task_attr,
+        create_logged_task(
+            fail_during_cancel(),
+            name=task_name,
+            failure_message=f"{task_name} failed",
+        ),
+    )
     await asyncio.wait_for(started.wait(), timeout=1)
 
     await getattr(orchestrator, cancel_method_name)()
@@ -260,6 +269,7 @@ async def test_detached_task_cancel_logs_exception_instead_of_suppressing_silent
         and call.kwargs.get("task_name") == task_name
         for call in logger_mock.debug.call_args_list
     )
+    logger_mock.exception.assert_not_called()
 
 
 @pytest.mark.asyncio

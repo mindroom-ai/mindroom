@@ -31,6 +31,7 @@ _MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS = 5.0
 _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS = 2.0
 STARTUP_RETRY_INITIAL_DELAY_SECONDS = 2.0
 STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
+_CANCELLING_LOGGED_TASKS: set[asyncio.Task[Any]] = set()
 
 
 def _matrix_homeserver_startup_timeout_seconds_from_env(
@@ -78,6 +79,19 @@ async def cancel_task(
         await task
 
 
+async def cancel_logged_task(task: asyncio.Task | None) -> None:
+    """Cancel a detached logged task without re-raising its completion exception."""
+    if task is None:
+        return
+    _CANCELLING_LOGGED_TASKS.add(task)
+    try:
+        await cancel_task(task)
+    except Exception:
+        # `_log_detached_task_result` downgrades these cancellation-time failures to
+        # debug logging, so shutdown/reload should not re-raise them here.
+        return
+
+
 def _log_detached_task_result(task: asyncio.Task, *, message: str) -> None:
     """Log failures from a detached background task."""
     try:
@@ -85,7 +99,16 @@ def _log_detached_task_result(task: asyncio.Task, *, message: str) -> None:
     except asyncio.CancelledError:
         return
     except Exception:
+        if task in _CANCELLING_LOGGED_TASKS:
+            logger.debug(
+                "Detached task failed while being cancelled",
+                task_name=task.get_name(),
+                exc_info=True,
+            )
+            return
         logger.exception(message)
+    finally:
+        _CANCELLING_LOGGED_TASKS.discard(task)
 
 
 def create_logged_task(
