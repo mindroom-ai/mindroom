@@ -370,6 +370,36 @@ def test_resolve_entrypoint_applies_tool_config_overrides_over_persisted_config(
     assert entrypoint is not None
 
 
+def test_resolve_entrypoint_inherit_sentinel_falls_back_to_persisted_config(tmp_path: Path) -> None:
+    """Sentinel overrides should remove a higher-priority authored value and reuse persisted config."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    save_scoped_credentials(
+        "clickup",
+        {"api_key": "clickup-test", "master_space_id": "space-123"},
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+
+    toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+        runtime_paths=runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        tool_name="clickup",
+        function_name="list_spaces",
+        tool_config_overrides={"master_space_id": metadata_module.AUTHORED_OVERRIDE_INHERIT},
+    )
+
+    assert toolkit.api_key == "clickup-test"
+    assert toolkit.master_space_id == "space-123"
+    assert entrypoint is not None
+
+
 def test_sandbox_runner_subprocess_python_sees_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1029,7 +1059,7 @@ def test_sandbox_runner_rejects_disallowed_authored_base_dir_override(
             "function_name": "ls",
             "args": [],
             "kwargs": {"path": "."},
-            "tool_config_overrides": {"base_dir": "/tmp/workspace"},
+            "tool_config_overrides": {"base_dir": "/workspace"},
         },
     )
 

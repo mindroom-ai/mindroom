@@ -240,6 +240,8 @@ defaults:
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
 # defaults.streaming is also global-only and controls streamed message edit cadence.
 # Tools can be plain strings or single-key dicts with per-agent config overrides.
+# Use __MINDROOM_INHERIT__ inside a tool override to clear one inherited authored field
+# while keeping the rest of defaults.tools for that agent.
 # See agents.md for the full per-agent tool configuration syntax.
 
 # Memory system configuration (optional)

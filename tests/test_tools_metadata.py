@@ -12,6 +12,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
+    AUTHORED_OVERRIDE_INHERIT,
     TOOL_METADATA,
     ConfigField,
     ToolCategory,
@@ -254,6 +255,37 @@ def test_validate_authored_overrides_accepts_declared_field_types_and_nulls() ->
         TOOL_METADATA.pop(tool_name, None)
 
 
+def test_validate_authored_overrides_accepts_inherit_sentinel_for_required_fields() -> None:
+    """The inherit sentinel should be allowed even when the field itself is required."""
+    tool_name = "test_authored_override_inherit_required"
+
+    class _FakeToolkit(Toolkit):
+        def __init__(self, **_kwargs: object) -> None:
+            super().__init__(name=tool_name, tools=[])
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="Authored Override Inherit Required",
+        description="Test-only toolkit for inherit sentinel coverage.",
+        category=ToolCategory.DEVELOPMENT,
+        config_fields=[
+            ConfigField(name="workspace_id", label="Workspace ID", type="text", required=True),
+        ],
+    )
+    def _fake_tool_factory() -> type[_FakeToolkit]:
+        return _FakeToolkit
+
+    try:
+        assert validate_authored_overrides(
+            tool_name,
+            {"workspace_id": AUTHORED_OVERRIDE_INHERIT},
+            config_path_prefix="agents.code.tools[0]",
+        ) == {"workspace_id": AUTHORED_OVERRIDE_INHERIT}
+    finally:
+        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+
 def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> None:
     """Authored overrides should reject bad types, runtime-only fields, and password fields."""
     tool_name = "test_authored_override_errors"
@@ -278,7 +310,8 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
 
     try:
         with pytest.raises(
-            ToolConfigOverrideError, match="agents.code.tools\\[0\\].test_authored_override_errors.flag"
+            ToolConfigOverrideError,
+            match=r"agents.code.tools\[0\].test_authored_override_errors.flag",
         ):
             validate_authored_overrides(
                 tool_name,
@@ -289,7 +322,7 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
         with pytest.raises(ToolConfigOverrideError, match="authored overrides are not allowed for this field"):
             validate_authored_overrides(
                 tool_name,
-                {"base_dir": "/tmp"},
+                {"base_dir": "/workspace"},
                 config_path_prefix="agents.code.tools[0]",
             )
 

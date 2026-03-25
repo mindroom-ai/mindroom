@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
 _TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "text", "url"})
+AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
 
 
 class ToolInitOverrideError(ValueError):
@@ -42,6 +43,28 @@ class ToolInitOverrideError(ValueError):
 
 class ToolConfigOverrideError(ValueError):
     """Raised when authored tool config overrides are invalid."""
+
+
+def is_authored_override_inherit(value: object) -> bool:
+    """Return whether an authored override value clears an inherited higher-level override."""
+    return value == AUTHORED_OVERRIDE_INHERIT
+
+
+def apply_authored_overrides(
+    base: dict[str, object],
+    overrides: dict[str, object] | None,
+) -> dict[str, object]:
+    """Apply one authored override layer onto an existing authored-override mapping."""
+    resolved = dict(base)
+    if not overrides:
+        return resolved
+
+    for field_name, value in overrides.items():
+        if is_authored_override_inherit(value):
+            resolved.pop(field_name, None)
+        else:
+            resolved[field_name] = value
+    return resolved
 
 
 def _sanitize_safe_tool_init_override_value(
@@ -88,6 +111,9 @@ def _validate_authored_override_value(
     full_path: str,
 ) -> object:
     """Validate one authored override value against its declared config field type."""
+    if is_authored_override_inherit(value):
+        return value
+
     if value is None:
         if field.required:
             msg = f"{full_path}: null is not allowed for required fields."
@@ -193,13 +219,13 @@ def _build_tool_config_init_kwargs(
     config_field_names = {field.name for field in metadata.config_fields}
     init_kwargs = {field.name: credentials[field.name] for field in metadata.config_fields if field.name in credentials}
     if tool_config_overrides:
-        init_kwargs.update(
-            {
-                field.name: tool_config_overrides[field.name]
-                for field in metadata.config_fields
-                if field.name in tool_config_overrides
-            },
-        )
+        for field in metadata.config_fields:
+            if field.name not in tool_config_overrides:
+                continue
+            override_value = tool_config_overrides[field.name]
+            if is_authored_override_inherit(override_value):
+                continue
+            init_kwargs[field.name] = override_value
     if tool_init_overrides:
         init_kwargs.update(
             {

@@ -25,7 +25,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
 from mindroom.config.memory import MemoryBackend, MemoryConfig
-from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
@@ -779,6 +779,8 @@ class Config(BaseModel):
 
     def get_agent_tool_configs(self, agent_name: str) -> list[ResolvedToolConfig]:
         """Return effective authored tool config entries for one agent."""
+        from mindroom.tool_system.metadata import apply_authored_overrides  # noqa: PLC0415
+
         agent_config = self.get_agent(agent_name)
         merged_overrides: dict[str, dict[str, object]] = {}
         explicit_names = list(agent_config.tool_names)
@@ -786,11 +788,11 @@ class Config(BaseModel):
         if agent_config.include_default_tools:
             explicit_names.extend(self.defaults.tool_names)
             for entry in self.defaults.tools:
-                merged_overrides[entry.name] = dict(entry.overrides)
+                merged_overrides[entry.name] = apply_authored_overrides({}, entry.overrides)
 
         for entry in agent_config.tools:
             base_overrides = merged_overrides.get(entry.name, {})
-            merged_overrides[entry.name] = {**base_overrides, **entry.overrides}
+            merged_overrides[entry.name] = apply_authored_overrides(base_overrides, entry.overrides)
 
         return [
             ResolvedToolConfig(

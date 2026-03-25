@@ -15,6 +15,7 @@ from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
+from mindroom.tool_system.metadata import AUTHORED_OVERRIDE_INHERIT
 
 
 def _minimal_config_path(tmp_path: Path) -> Path:
@@ -372,6 +373,30 @@ class TestConsolidatedConfigManager:
             "enable_run_shell_command": True,
             "extra_env_passthrough": None,
         }
+
+    def test_tool_config_inherit_sentinel_clears_required_default_override(self) -> None:
+        """A per-agent sentinel should remove an inherited required override and fall back to lower layers."""
+        config = Config.validate_with_runtime(
+            {
+                "defaults": {
+                    "tools": [
+                        {"clickup": {"master_space_id": "space-default"}},
+                    ],
+                },
+                "agents": {
+                    "code": {
+                        "display_name": "Code",
+                        "tools": [
+                            {"clickup": {"master_space_id": AUTHORED_OVERRIDE_INHERIT}},
+                        ],
+                    },
+                },
+            },
+            _runtime_paths(),
+        )
+
+        resolved = next(entry for entry in config.get_agent_tool_configs("code") if entry.name == "clickup")
+        assert resolved.tool_config_overrides == {}
 
     def test_duplicate_tool_entries_are_rejected_for_agents_and_defaults(self) -> None:
         """Duplicate tool names should be rejected even across mixed string and mapping syntax."""
