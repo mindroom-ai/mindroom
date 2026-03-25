@@ -243,8 +243,37 @@ async def test_cancel_sync_iteration_tasks_logs_non_cancelled_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_full_state_only_on_first_sync() -> None:
-    """sync_forever should pass full_state=True only on the first call."""
+async def test_full_state_stays_enabled_until_first_sync_response() -> None:
+    """A cancelled first sync must keep requesting full state on retry."""
+    full_state_values: list[bool] = []
+
+    class FakeClient:
+        async def sync_forever(self, *, timeout: int, full_state: bool) -> None:  # noqa: ASYNC109, ARG002
+            full_state_values.append(full_state)
+            await asyncio.Event().wait()
+
+    bot = MagicMock(spec=AgentBot)
+    bot._first_sync_done = False
+    bot.client = FakeClient()
+
+    first_task = asyncio.create_task(AgentBot.sync_forever(bot))
+    await asyncio.sleep(0)
+    first_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_task
+
+    second_task = asyncio.create_task(AgentBot.sync_forever(bot))
+    await asyncio.sleep(0)
+    second_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second_task
+
+    assert full_state_values == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_full_state_only_after_successful_first_sync() -> None:
+    """sync_forever should stop requesting full state after a successful first sync."""
     full_state_values: list[bool] = []
 
     class FakeClient:
@@ -260,11 +289,14 @@ async def test_full_state_only_on_first_sync() -> None:
             pass
 
     bot = MagicMock(spec=AgentBot)
+    bot.agent_name = "test_agent"
+    bot.last_sync_time = None
     bot._first_sync_done = False
     bot.client = FakeClient()
 
     # Call the real sync_forever method
     await AgentBot.sync_forever(bot)
+    await AgentBot._on_sync_response(bot, MagicMock())
     await AgentBot.sync_forever(bot)
 
     assert full_state_values == [True, False]

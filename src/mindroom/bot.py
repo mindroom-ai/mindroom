@@ -149,7 +149,6 @@ from .scheduling import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
-    from datetime import datetime
     from pathlib import Path
 
     import structlog
@@ -662,6 +661,7 @@ class AgentBot:
 
     async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
+        self._first_sync_done = True
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
         self._last_sync_monotonic = time.monotonic()
 
@@ -841,9 +841,7 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
-        use_full_state = not self._first_sync_done
-        self._first_sync_done = True
-        await self.client.sync_forever(timeout=_SYNC_TIMEOUT_MS, full_state=use_full_state)
+        await self.client.sync_forever(timeout=_SYNC_TIMEOUT_MS, full_state=not self._first_sync_done)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         assert self.client is not None
