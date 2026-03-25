@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import functools
 import importlib
-from copy import deepcopy
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, cast
 
 import diskcache
 from agno.models.anthropic import Claude
@@ -104,6 +104,7 @@ _PARTIAL_REPLY_SENDER_LABELS = {
 _PARTIAL_REPLY_PROGRESS_PLACEHOLDER = "Thinking..."
 _PARTIAL_REPLY_CANCELLED_SUFFIX = "**[Response cancelled by user]**"
 _PARTIAL_REPLY_ERROR_PREFIX = "**[Response interrupted by an error"
+_PARTIAL_REPLY_MAX_CHARS = 4000
 _STALE_STREAM_STATUS_MAX_AGE_MS = 300_000
 
 
@@ -718,6 +719,7 @@ def _classify_partial_reply(
     msg: dict[str, Any],
     *,
     current_timestamp_ms: int | None = None,
+    active_event_ids: set[str] | None = None,
 ) -> PartialReplyKind | None:
     """Classify a self-authored partial reply from persisted stream metadata first."""
     status = msg.get("stream_status")
@@ -728,6 +730,9 @@ def _classify_partial_reply(
     if status in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR}:
         partial_kind = PartialReplyKind.INTERRUPTED
     elif status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+        event_id = msg.get("event_id")
+        if active_event_ids is not None and isinstance(event_id, str):
+            return PartialReplyKind.IN_PROGRESS if event_id in active_event_ids else PartialReplyKind.INTERRUPTED
         if current_timestamp_ms is None:
             current_timestamp_ms = int(time.time() * 1000)
         timestamp_ms = _message_timestamp_ms(msg)
@@ -767,6 +772,8 @@ def _clean_partial_reply_body(body: str) -> str:
 
     if cleaned == _PARTIAL_REPLY_PROGRESS_PLACEHOLDER or not cleaned or not any(char.isalnum() for char in cleaned):
         return ""
+    if len(cleaned) > _PARTIAL_REPLY_MAX_CHARS:
+        cleaned = "[... earlier content truncated ...]\n" + cleaned[-_PARTIAL_REPLY_MAX_CHARS:]
     return cleaned
 
 
@@ -794,7 +801,6 @@ def _get_unseen_event_ids_for_metadata(unseen_messages: list[dict[str, Any]]) ->
     return event_ids
 
 
-@overload
 def _get_unseen_messages(
     thread_history: list[dict[str, Any]],
     agent_name: str,
@@ -803,33 +809,8 @@ def _get_unseen_messages(
     seen_event_ids: set[str],
     current_event_id: str | None,
     *,
-    include_partial_reply_kinds: Literal[True],
-) -> tuple[list[dict[str, Any]], set[PartialReplyKind]]: ...
-
-
-@overload
-def _get_unseen_messages(
-    thread_history: list[dict[str, Any]],
-    agent_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    seen_event_ids: set[str],
-    current_event_id: str | None,
-    *,
-    include_partial_reply_kinds: Literal[False] = False,
-) -> list[dict[str, Any]]: ...
-
-
-def _get_unseen_messages(
-    thread_history: list[dict[str, Any]],
-    agent_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    seen_event_ids: set[str],
-    current_event_id: str | None,
-    *,
-    include_partial_reply_kinds: bool = False,
-) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], set[PartialReplyKind]]:
+    active_event_ids: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], set[PartialReplyKind]]:
     """Filter thread_history to messages not yet consumed by this agent.
 
     Excludes:
@@ -855,7 +836,11 @@ def _get_unseen_messages(
         if current_event_id and event_id == current_event_id:
             continue
         if agent_sender_id and sender == agent_sender_id:
-            partial_kind = _classify_partial_reply(msg, current_timestamp_ms=current_timestamp_ms)
+            partial_kind = _classify_partial_reply(
+                msg,
+                current_timestamp_ms=current_timestamp_ms,
+                active_event_ids=active_event_ids,
+            )
             if partial_kind is None:
                 continue
             body = msg.get("body")
@@ -875,9 +860,7 @@ def _get_unseen_messages(
             )
             continue
         unseen.append(msg)
-    if include_partial_reply_kinds:
-        return unseen, partial_reply_kinds
-    return unseen
+    return unseen, partial_reply_kinds
 
 
 def _build_prompt_with_unseen(
@@ -1133,7 +1116,7 @@ async def _prepare_agent_and_prompt(
             runtime_paths,
             seen_ids,
             reply_to_event_id,
-            include_partial_reply_kinds=True,
+            active_event_ids=active_event_ids,
         )
         unseen_event_ids = _get_unseen_event_ids_for_metadata(unseen_messages)
         full_prompt = _build_prompt_with_unseen(

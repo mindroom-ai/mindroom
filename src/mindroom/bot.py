@@ -543,13 +543,6 @@ class AgentBot:
         """Get or create the StopManager for this agent."""
         return StopManager()
 
-    def in_flight_response_count(self) -> int:
-        """Return the number of active response tasks for this bot."""
-        stop_manager = vars(self).get("stop_manager")
-        if stop_manager is None:
-            return 0
-        return stop_manager.active_message_count()
-
     def _active_response_event_ids(self, room_id: str) -> set[str]:
         """Return still-running response event IDs for this bot in the room."""
         return {
@@ -557,6 +550,7 @@ class AgentBot:
             for event_id, tracked in self.stop_manager.tracked_messages.items()
             if tracked.room_id == room_id and not tracked.task.done()
         }
+
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
         assert self.client is not None
