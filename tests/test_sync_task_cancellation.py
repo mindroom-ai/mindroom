@@ -14,8 +14,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.runtime import (
-    _cancel_sync_iteration_tasks,
-    _start_sync_iteration,
+    _SyncIteration,
     cancel_sync_task,
     matrix_sync_startup_timeout_seconds,
     stop_entities,
@@ -228,8 +227,34 @@ async def test_sync_error_updates_watchdog_clock(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
-async def test_cancel_sync_iteration_tasks_logs_non_cancelled_errors() -> None:
+async def test_sync_iteration_wait_prioritizes_sync_failure() -> None:
+    """The sync task failure should win if both child tasks finish together."""
+    bot = _FakeBot()
+
+    async def raise_sync_error() -> None:
+        msg = "sync failed"
+        raise RuntimeError(msg)
+
+    async def watchdog_returns() -> None:
+        return
+
+    iteration = _SyncIteration(
+        bot=bot,
+        sync_task=asyncio.create_task(raise_sync_error()),
+        watchdog_task=asyncio.create_task(watchdog_returns()),
+    )
+    await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="sync failed"):
+        await iteration.wait()
+
+    await iteration.cancel()
+
+
+@pytest.mark.asyncio
+async def test_sync_iteration_cancel_logs_non_cancelled_errors() -> None:
     """Non-CancelledError exceptions should be logged, not silently swallowed."""
+    bot = _FakeBot()
 
     async def raise_runtime_error() -> None:
         msg = "unexpected error"
@@ -239,7 +264,7 @@ async def test_cancel_sync_iteration_tasks_logs_non_cancelled_errors() -> None:
     await asyncio.sleep(0)  # Let the task run
 
     # Should not raise — the error is logged and suppressed.
-    await _cancel_sync_iteration_tasks(task, None)
+    await _SyncIteration(bot=bot, sync_task=task, watchdog_task=None).cancel()
 
 
 @pytest.mark.asyncio
@@ -658,7 +683,7 @@ async def test_watchdog_coroutine_closed_on_create_task_failure(monkeypatch: pyt
     monkeypatch.setattr(asyncio, "create_task", failing_create_task)
 
     with pytest.raises(RuntimeError, match="simulated create_task failure"):
-        _start_sync_iteration(bot)
+        _SyncIteration.start(bot)
 
     # No RuntimeWarning about unawaited coroutines should be produced.
     # The sync_task created by the first create_task was cancelled.
