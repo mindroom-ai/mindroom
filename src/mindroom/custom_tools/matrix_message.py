@@ -17,6 +17,12 @@ from mindroom.custom_tools.attachment_helpers import (
     room_access_allowed,
 )
 from mindroom.custom_tools.attachments import send_context_attachments
+from mindroom.interactive import (
+    add_reaction_buttons,
+    parse_and_format_interactive,
+    register_interactive_question,
+    should_create_interactive_question,
+)
 from mindroom.matrix.client import (
     edit_message,
     fetch_thread_history,
@@ -159,6 +165,7 @@ class MatrixMessageTools(Toolkit):
         text: str,
         thread_id: str | None,
     ) -> str | None:
+        formatted_text = parse_and_format_interactive(text, extract_mapping=False).formatted_text
         latest_thread_event_id = await get_latest_thread_event_id_if_needed(
             context.client,
             room_id,
@@ -167,12 +174,42 @@ class MatrixMessageTools(Toolkit):
         content = format_message_with_mentions(
             context.config,
             context.runtime_paths,
-            text,
+            formatted_text,
             sender_domain=context.config.get_domain(context.runtime_paths),
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
         )
         return await send_message(context.client, room_id, content)
+
+    async def _maybe_add_interactive_question(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        original_text: str | None,
+        event_id: str | None,
+        room_id: str,
+        thread_id: str | None,
+    ) -> None:
+        if original_text is None or event_id is None or not should_create_interactive_question(original_text):
+            return
+
+        response = parse_and_format_interactive(original_text, extract_mapping=True)
+        if not response.option_map or not response.options_list:
+            return
+
+        register_interactive_question(
+            event_id,
+            room_id,
+            thread_id,
+            response.option_map,
+            context.agent_name,
+        )
+        await add_reaction_buttons(
+            context.client,
+            room_id,
+            event_id,
+            response.options_list,
+        )
 
     async def _message_send_or_reply(
         self,
@@ -197,6 +234,7 @@ class MatrixMessageTools(Toolkit):
                 message="At least one of message, attachment_ids, or attachment_file_paths must be provided.",
             )
 
+        original_text = text
         event_id: str | None = None
         if text is not None:
             event_id = await self._send_matrix_text(
@@ -212,6 +250,13 @@ class MatrixMessageTools(Toolkit):
                 room_id=room_id,
                 message="Failed to send message to Matrix.",
             )
+        await self._maybe_add_interactive_question(
+            context,
+            original_text=original_text,
+            event_id=event_id,
+            room_id=room_id,
+            thread_id=effective_thread_id,
+        )
 
         attachment_event_ids: list[str] = []
         resolved_attachment_ids: list[str] = []
