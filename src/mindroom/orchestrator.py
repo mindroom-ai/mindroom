@@ -379,13 +379,22 @@ class MultiAgentOrchestrator:
             failure_message="Queued config reload failed",
         )
 
-    async def _run_config_reload_loop(self) -> None:  # noqa: C901, PLR0915
+    async def _run_config_reload_loop(self) -> None:  # noqa: C901, PLR0912, PLR0915
         """Apply queued config reloads after debounce and response drain."""
         current_task = asyncio.current_task()
         loop = asyncio.get_running_loop()
         waiting_for_idle = False
         drain_wait_started_at: float | None = None
         last_drain_warning_at: float | None = None
+        drain_request_started_at: float | None = None
+
+        def reset_drain_state() -> None:
+            nonlocal waiting_for_idle, drain_wait_started_at, last_drain_warning_at, drain_request_started_at
+            waiting_for_idle = False
+            drain_wait_started_at = None
+            last_drain_warning_at = None
+            drain_request_started_at = None
+
         try:
             while self.running and self._config_reload_requested_at is not None:
                 requested_at = self._config_reload_requested_at
@@ -396,9 +405,13 @@ class MultiAgentOrchestrator:
                 if self._config_reload_requested_at != requested_at:
                     # A newer config change superseded the current one.
                     # Reset drain state so the new change gets a full drain window.
-                    waiting_for_idle = False
-                    drain_wait_started_at = None
-                    last_drain_warning_at = None
+                    reset_drain_state()
+                    continue
+
+                if waiting_for_idle and drain_request_started_at != requested_at:
+                    # A newer config change arrived while we were already waiting
+                    # for responses to drain, so restart the drain window.
+                    reset_drain_state()
                     continue
 
                 active_response_count = self.in_flight_response_count()
@@ -412,6 +425,7 @@ class MultiAgentOrchestrator:
                         )
                         waiting_for_idle = True
                         drain_wait_started_at = now
+                        drain_request_started_at = requested_at
                         last_drain_warning_at = None
                     elif (
                         drain_wait_started_at is not None
@@ -445,9 +459,7 @@ class MultiAgentOrchestrator:
                 if waiting_for_idle and not force_reload:
                     logger.info("Active responses finished; applying queued configuration reload")
                 if waiting_for_idle:
-                    waiting_for_idle = False
-                    drain_wait_started_at = None
-                    last_drain_warning_at = None
+                    reset_drain_state()
 
                 self._config_reload_requested_at = None
                 logger.info("Configuration file changed, checking for updates...")

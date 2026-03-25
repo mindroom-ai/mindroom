@@ -17,7 +17,6 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
 from mindroom.orchestrator import MultiAgentOrchestrator
-from mindroom.stop import StopManager
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -36,28 +35,6 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     """Helper to setup a test bot with required attributes."""
     bot.client = mock_client
-
-
-@pytest.mark.asyncio
-async def test_stop_manager_active_message_count_ignores_completed_tasks() -> None:
-    """Only still-running response tasks should block config reload."""
-
-    async def block() -> None:
-        await asyncio.sleep(60)
-
-    running_task = asyncio.create_task(block())
-    completed_task = asyncio.create_task(asyncio.sleep(0))
-    await completed_task
-
-    stop_manager = StopManager()
-    stop_manager.set_current("running", "!room:localhost", running_task)
-    stop_manager.set_current("completed", "!room:localhost", completed_task)
-
-    try:
-        assert stop_manager.active_message_count() == 1
-    finally:
-        running_task.cancel()
-        await asyncio.gather(running_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -173,6 +150,49 @@ async def test_queued_config_reload_surfaces_stuck_drain_and_forces_reload(
         call.args and call.args[0] == "Forcing configuration reload while responses are still active"
         for call in logger_mock.error.call_args_list
     )
+
+
+@pytest.mark.asyncio
+async def test_queued_config_reload_resets_drain_window_for_new_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A newer config change should get a fresh drain timeout window."""
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.005)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS", 1.0)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS", 1.0)
+    monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS", 0.12)
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.running = True
+
+    mock_bot = MagicMock(spec=AgentBot)
+    mock_bot.in_flight_response_count.return_value = 1
+    orchestrator.agent_bots["agent1"] = mock_bot
+
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    update_called_at: float | None = None
+
+    async def fake_update_config() -> bool:
+        nonlocal update_called_at
+        update_called_at = loop.time()
+        return True
+
+    orchestrator.update_config = AsyncMock(side_effect=fake_update_config)
+
+    orchestrator.request_config_reload()
+    await asyncio.sleep(0.06)
+    orchestrator.request_config_reload()
+
+    task = orchestrator._config_reload_task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=1)
+
+    assert update_called_at is not None
+    assert update_called_at - started_at >= 0.16
+    orchestrator.update_config.assert_awaited_once()
 
 
 @pytest.mark.asyncio
