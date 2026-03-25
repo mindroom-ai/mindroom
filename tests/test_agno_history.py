@@ -692,6 +692,36 @@ class TestPrepareAgentAndPrompt:
             assert unseen_ids == []
 
     @pytest.mark.asyncio
+    async def test_matrix_first_turn_without_unseen_messages_skips_stuffing(
+        self,
+        config: Config,
+        tmp_path: object,
+    ) -> None:
+        """Matrix first turns should stay on the unseen-message path even when nothing is injected."""
+        thread_history = [{"sender": "@user:example.com", "body": "Current question", "event_id": "$u1"}]
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.create_agent") as mock_create,
+            patch("mindroom.ai._get_agent_session", return_value=None),
+            patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
+            patch("mindroom.ai.create_session_storage"),
+        ):
+            mock_create.return_value = MagicMock(spec=Agent)
+            _, prompt, unseen_ids = await _prepare_agent_and_prompt(
+                "calculator",
+                "test",
+                _runtime_paths(tmp_path),
+                config,
+                thread_history=thread_history,
+                session_id="sid",
+                reply_to_event_id="$u1",
+            )
+
+            mock_stuff.assert_not_called()
+            assert prompt == "enhanced"
+            assert unseen_ids == []
+
+    @pytest.mark.asyncio
     async def test_prepare_agent_and_prompt_reloads_context_files_for_next_reply(
         self,
         config: Config,

@@ -172,6 +172,10 @@ class TestClassifyPartialReply:
         """Ignore messages that have neither metadata nor partial markers."""
         assert _classify_partial_reply({"body": "Completed response"}) is None
 
+    def test_non_text_body_without_metadata_is_not_partial(self) -> None:
+        """Ignore malformed legacy bodies when there is no stream-status metadata to trust."""
+        assert _classify_partial_reply({"body": {"structured": True}}) is None
+
 
 class TestCleanPartialReplyBody:
     """Test marker stripping and preserved partial-draft cleanup."""
@@ -200,6 +204,20 @@ class TestCleanPartialReplyBody:
 
 class TestUnseenMessagesPartialReplies:
     """Test unseen-context extraction for self-authored partial replies."""
+
+    def test_mixed_partial_reply_header_warns_about_live_and_interrupted_content(self) -> None:
+        """Mixed partial states should use the combined warning header."""
+        prompt = _build_prompt_with_unseen(
+            "Continue.",
+            [
+                {"sender": "You (reply still streaming)", "body": "Live draft"},
+                {"sender": "You (interrupted reply draft)", "body": "Interrupted draft"},
+            ],
+            partial_reply_kinds={PartialReplyKind.IN_PROGRESS, PartialReplyKind.INTERRUPTED},
+        )
+
+        assert "Some partial content from your previous response is still being delivered" in prompt
+        assert "Other partial content was interrupted before completion" in prompt
 
     def test_includes_streaming_self_reply_with_cleaned_body_and_header(self) -> None:
         """Inject still-streaming self replies with the non-duplication warning header."""
@@ -330,6 +348,34 @@ class TestUnseenMessagesPartialReplies:
 
         assert partial_reply_kinds == {PartialReplyKind.INTERRUPTED}
         assert unseen[0]["partial_reply_kind"] is PartialReplyKind.INTERRUPTED
+
+    def test_placeholder_only_self_reply_is_not_injected(self) -> None:
+        """Do not inject placeholder-only self replies as meaningful unseen context."""
+        config = _make_config()
+        runtime_paths = runtime_paths_for(config)
+        agent_id = config.get_ids(runtime_paths)["helper"].full_id
+
+        unseen, partial_reply_kinds = _get_unseen_messages(
+            [
+                {
+                    "event_id": "e1",
+                    "sender": agent_id,
+                    "body": f"{_PROGRESS_PLACEHOLDER} ⋯",
+                    "stream_status": STREAM_STATUS_STREAMING,
+                    "content": {STREAM_STATUS_KEY: STREAM_STATUS_STREAMING},
+                },
+                {"event_id": "e2", "sender": "@user:localhost", "body": "Question"},
+            ],
+            "helper",
+            config,
+            runtime_paths,
+            seen_event_ids=set(),
+            current_event_id="e2",
+            active_event_ids={"e1"},
+        )
+
+        assert unseen == []
+        assert partial_reply_kinds == set()
 
     def test_interrupted_partial_reply_event_id_is_marked_seen_after_consumption(self) -> None:
         """Mark interrupted self partial replies as seen so they do not reappear forever."""

@@ -24,7 +24,9 @@ from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingResponse,
+    clean_partial_reply_text,
     is_in_progress_message,
+    is_interrupted_partial_reply,
     send_streaming_response,
 )
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -467,6 +469,22 @@ class TestStreamingBehavior:
         assert is_in_progress_message("Thinking... ⋯..")
         assert not is_in_progress_message("Thinking...")
         assert not is_in_progress_message(None)
+
+    def test_is_interrupted_partial_reply_detects_terminal_markers(self) -> None:
+        """Interrupted partial-reply detection should recognize shared cancelled/error notes."""
+        assert is_interrupted_partial_reply(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}")
+        assert is_interrupted_partial_reply("Draft answer\n\n**[Response interrupted by an error: boom]**")
+        assert not is_interrupted_partial_reply("Finished answer")
+        assert not is_interrupted_partial_reply(None)
+
+    def test_clean_partial_reply_text_strips_shared_markers(self) -> None:
+        """Shared partial-reply cleanup should normalize cancelled/error/placeholder bodies."""
+        assert clean_partial_reply_text(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}") == "Draft answer"
+        assert (
+            clean_partial_reply_text("Draft answer\n\n**[Response interrupted by an error: boom]**") == "Draft answer"
+        )
+        assert clean_partial_reply_text(f"{PROGRESS_PLACEHOLDER} ⋯") == ""
+        assert clean_partial_reply_text("... ⋯") == ""
 
     @pytest.mark.asyncio
     async def test_throttled_send_uses_ramp_interval(self) -> None:
