@@ -13,6 +13,7 @@ from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import (
     normalize_str_list,
+    resolve_context_thread_id,
     room_access_allowed,
 )
 from mindroom.custom_tools.attachments import send_context_attachments
@@ -479,28 +480,6 @@ class MatrixMessageTools(Toolkit):
             event_id=edit_event_id,
         )
 
-    @staticmethod
-    def _safe_thread_id(
-        context: ToolRuntimeContext,
-        *,
-        room_id: str,
-        thread_id: str | None,
-        allow_context_fallback: bool = True,
-    ) -> str | None:
-        """Return thread_id only when it belongs to the target room.
-
-        When the caller targets a different room, the current context's
-        thread_id is invalid there, so we only fall back to it for the
-        same room.
-        """
-        if thread_id == MatrixMessageTools._ROOM_TIMELINE_SENTINEL:
-            return None
-        if thread_id is not None:
-            return thread_id
-        if allow_context_fallback and room_id == context.room_id:
-            return context.resolved_thread_id
-        return None
-
     def _message_context(
         self,
         context: ToolRuntimeContext,
@@ -510,11 +489,12 @@ class MatrixMessageTools(Toolkit):
         normalized_action: str,
     ) -> str:
         resolved_room_id = room_id or context.room_id
-        resolved_thread_id = self._safe_thread_id(
+        resolved_thread_id = resolve_context_thread_id(
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
             allow_context_fallback=True,
+            room_timeline_sentinel=self._ROOM_TIMELINE_SENTINEL,
         )
         if room_id and not room_access_allowed(context, resolved_room_id):
             return self._payload(
@@ -549,11 +529,12 @@ class MatrixMessageTools(Toolkit):
     ) -> str:
         if action in {"send", "thread-reply", "reply"}:
             allow_context_fallback = action in {"thread-reply", "reply"}
-            effective_thread_id = self._safe_thread_id(
+            effective_thread_id = resolve_context_thread_id(
                 context,
                 room_id=room_id,
                 thread_id=thread_id,
                 allow_context_fallback=allow_context_fallback,
+                room_timeline_sentinel=self._ROOM_TIMELINE_SENTINEL,
             )
             return await self._message_send_or_reply(
                 context,
@@ -572,7 +553,12 @@ class MatrixMessageTools(Toolkit):
                 target=target,
             )
         if action == "read":
-            safe_thread = self._safe_thread_id(context, room_id=room_id, thread_id=thread_id)
+            safe_thread = resolve_context_thread_id(
+                context,
+                room_id=room_id,
+                thread_id=thread_id,
+                room_timeline_sentinel=self._ROOM_TIMELINE_SENTINEL,
+            )
             return await self._message_read(
                 context,
                 room_id=room_id,
@@ -580,7 +566,12 @@ class MatrixMessageTools(Toolkit):
                 read_limit=self._read_limit(limit),
             )
         if action == "thread-list":
-            safe_thread = self._safe_thread_id(context, room_id=room_id, thread_id=thread_id)
+            safe_thread = resolve_context_thread_id(
+                context,
+                room_id=room_id,
+                thread_id=thread_id,
+                room_timeline_sentinel=self._ROOM_TIMELINE_SENTINEL,
+            )
             return await self._message_thread_list(
                 context,
                 room_id=room_id,
@@ -588,7 +579,12 @@ class MatrixMessageTools(Toolkit):
                 read_limit=self._read_limit(limit),
             )
         if action == "edit":
-            safe_thread = self._safe_thread_id(context, room_id=room_id, thread_id=thread_id)
+            safe_thread = resolve_context_thread_id(
+                context,
+                room_id=room_id,
+                thread_id=thread_id,
+                room_timeline_sentinel=self._ROOM_TIMELINE_SENTINEL,
+            )
             return await self._message_edit(
                 context,
                 room_id=room_id,

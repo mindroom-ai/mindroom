@@ -295,6 +295,7 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 ### Step 2: Environment & Dependencies
 
 - **Environment Setup**: Use `uv sync --all-extras` to install all dependencies and `source .venv/bin/activate` to activate the virtual environment.
+- **Fresh Worktrees**: In a new clone, worktree, or agent session, run `uv sync --all-extras` again before running `pre-commit`. Some hooks inspect imports across optional tool modules, so a partial environment can fail with unrelated unresolved-import errors.
 - **Adding Packages**: Use `uv add <package_name>` for new dependencies or `uv add --dev <package_name>` for development-only packages.
 
 ### Local Live Run (non-docker backend) + Matty smoke test
@@ -435,7 +436,7 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 ### Step 4: Testing & Quality
 
 - **Test Before Committing**: **NEVER** claim a task is complete without running `pytest` to ensure all tests pass.
-- **Run Pre-commit Hooks**: Always run `pre-commit run --all-files` before committing to enforce code style and quality.
+- **Run Pre-commit Hooks**: After `uv sync --all-extras`, run `uv run pre-commit run --all-files` before committing to enforce code style and quality.
 - **Handle Linter Issues**:
   - **False Positives**: The linter may incorrectly flag issues in `pyproject.toml`; these can be ignored.
   - **Test-Related Errors**: If a pre-commit fix breaks a test (e.g., by removing an unused but necessary fixture), suppress the warning with a `# noqa: <error_code>` comment.

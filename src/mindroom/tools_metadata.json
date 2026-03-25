@@ -276,6 +276,24 @@
     {
       "auth_provider": null,
       "category": "communication",
+      "config_fields": null,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Resolve or reopen Matrix threads using shared room-state markers",
+      "display_name": "Thread Resolution",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "helper_text": null,
+      "icon": "CheckCheck",
+      "icon_color": "text-emerald-500",
+      "name": "thread_resolution",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "communication",
       "config_fields": [
         {
           "default": null,

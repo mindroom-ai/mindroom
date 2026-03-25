@@ -68,6 +68,20 @@ class EventInfo:
         """Create EventInfo from a raw event source dictionary."""
         return _analyze_event_relations(event_source)
 
+    def next_related_event_id(self, current_event_id: str) -> str | None:
+        """Return the next relation target to inspect outside native thread hops."""
+        for related_event_id in (
+            self.safe_thread_root,
+            self.reply_to_event_id,
+        ):
+            if not isinstance(related_event_id, str):
+                continue
+            normalized_related_event_id = related_event_id.strip()
+            if not normalized_related_event_id or normalized_related_event_id == current_event_id:
+                continue
+            return normalized_related_event_id
+        return None
+
 
 def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     """Analyze complete relation information for a Matrix event.
