@@ -214,6 +214,46 @@ def test_different_providers_with_extra_kwargs() -> None:
     assert anthropic_model.max_tokens == 2048
 
 
+def test_anthropic_ignores_removed_constructor_kwargs() -> None:
+    """Anthropic models should ignore stale config kwargs removed by Agno."""
+    os.environ["ANTHROPIC_API_KEY"] = "test-key"
+
+    config_data = {
+        "models": {
+            "anthropic_model": {
+                "provider": "anthropic",
+                "id": "claude-sonnet-4-5-20250929",
+                "extra_kwargs": {
+                    "temperature": 0.2,
+                    "cache_system_prompt": True,
+                    "cache_conversation_history": True,
+                },
+            },
+        },
+        "defaults": {
+            "markdown": True,
+        },
+        "router": {
+            "model": "anthropic_model",
+        },
+        "memory": {
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                },
+            },
+        },
+        "agents": {},
+    }
+
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+    model = get_model_instance(config, runtime_paths, "anthropic_model")
+
+    assert model.temperature == 0.2
+    assert model.cache_system_prompt is True
+
+
 def test_model_without_extra_kwargs() -> None:
     """Test that models work fine without extra_kwargs."""
     os.environ["OPENAI_API_KEY"] = "test-key"
