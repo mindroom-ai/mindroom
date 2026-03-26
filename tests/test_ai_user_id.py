@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,7 +10,13 @@ import pytest
 from agno.media import File
 from agno.models.metrics import Metrics
 from agno.models.vertexai.claude import Claude as VertexAIClaude
-from agno.run.agent import ModelRequestCompletedEvent, RunCompletedEvent, RunContentEvent, RunErrorEvent
+from agno.run.agent import (
+    ModelRequestCompletedEvent,
+    RunCancelledEvent,
+    RunCompletedEvent,
+    RunContentEvent,
+    RunErrorEvent,
+)
 from agno.run.base import RunStatus
 
 from mindroom.ai import (
@@ -207,6 +214,37 @@ class TestUserIdPassthrough:
             assert mock_agent.arun.call_args.kwargs["user_id"] == "@user:localhost"
 
     @pytest.mark.asyncio
+    async def test_ai_response_passes_run_id_to_agent_arun(self, tmp_path: Path) -> None:
+        """Non-streaming cancellation needs an explicit run_id threaded to Agno."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Response"
+        mock_run_output.tools = None
+        mock_agent.arun = AsyncMock(return_value=mock_run_output)
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+
+            await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                run_id="run-123",
+            )
+
+            mock_agent.arun.assert_called_once()
+            assert mock_agent.arun.call_args.kwargs["run_id"] == "run-123"
+
+    @pytest.mark.asyncio
     async def test_prepare_agent_and_prompt_threads_config_path_to_create_agent(self, tmp_path: Path) -> None:
         """The shared agent-build helper should preserve an explicit orchestrator config path."""
         config = _config()
@@ -322,6 +360,70 @@ class TestUserIdPassthrough:
 
             mock_agent.arun.assert_called_once()
             assert mock_agent.arun.call_args.kwargs["user_id"] == "@user:localhost"
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_passes_run_id_to_agent_arun(self, tmp_path: Path) -> None:
+        """Streaming cancellation needs an explicit run_id threaded to Agno."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            yield "chunk"
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+
+            _chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    run_id="run-456",
+                )
+            ]
+
+            mock_agent.arun.assert_called_once()
+            assert mock_agent.arun.call_args.kwargs["run_id"] == "run-456"
+
+    @pytest.mark.asyncio
+    async def test_ai_response_raises_cancelled_error_for_cancelled_runs(self, tmp_path: Path) -> None:
+        """Gracefully cancelled Agno runs should surface as task cancellation to the bot."""
+        mock_agent = MagicMock()
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Run run-123 was cancelled"
+        mock_run_output.tools = None
+        mock_run_output.status = RunStatus.cancelled
+        mock_run_output.run_id = "run-123"
+        mock_run_output.session_id = "session1"
+        mock_run_output.model = "test-model"
+        mock_run_output.model_provider = "openai"
+        mock_run_output.metrics = None
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+
+            with pytest.raises(asyncio.CancelledError):
+                await ai_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                )
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:
@@ -845,6 +947,62 @@ class TestUserIdPassthrough:
         assert payload["context"]["input_tokens"] == 500
         assert payload["context"]["window_tokens"] == 1000
         assert "utilization_pct" not in payload["context"]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_raises_cancelled_error_for_run_cancelled_event(self, tmp_path: Path) -> None:
+        """Graceful stream cancellation should preserve metadata and end as CancelledError."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="partial")
+            yield ModelRequestCompletedEvent(
+                model="test-model",
+                model_provider="openai",
+                input_tokens=100,
+                output_tokens=25,
+                total_tokens=125,
+            )
+            yield RunCancelledEvent(
+                run_id="run-3",
+                session_id="session1",
+                reason="Run run-3 was cancelled",
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        config = Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
+        )
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            run_metadata: dict[str, object] = {}
+            with pytest.raises(asyncio.CancelledError):
+                async for _chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=config,
+                    run_metadata_collector=run_metadata,
+                ):
+                    pass
+
+        payload = run_metadata["io.mindroom.ai_run"]
+        assert payload["run_id"] == "run-3"
+        assert payload["status"] == "cancelled"
+        assert payload["usage"]["input_tokens"] == 100
+        assert payload["usage"]["output_tokens"] == 25
+        assert payload["usage"]["total_tokens"] == 125
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_uses_request_metrics_fallback(self, tmp_path: Path) -> None:

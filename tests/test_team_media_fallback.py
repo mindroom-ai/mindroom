@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.run.base import RunStatus
+from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
@@ -17,8 +20,10 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
 from mindroom.team_runtime_resolution import (
+    ResolvedExactTeamMembers,
     materialize_exact_requested_team_members,
     resolve_live_shared_agent_names,
 )
@@ -141,6 +146,139 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     assert list(first_call.kwargs["audio"]) == [audio_input]
     assert list(second_call.kwargs["audio"]) == []
     assert "Inline media unavailable for this model" in second_call.args[0]
+
+
+@pytest.mark.asyncio
+async def test_team_response_passes_run_id_to_team_arun() -> None:
+    """Non-streaming team responses should pass an explicit run_id to Agno."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = MagicMock()
+    mock_team.arun = AsyncMock(
+        return_value=TeamRunOutput(content="Recovered team response", status=RunStatus.completed),
+    )
+
+    fake_agent = MagicMock()
+    fake_agent.name = "GeneralAgent"
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            run_id="run-123",
+        )
+
+    assert "Recovered team response" in response
+    assert mock_team.arun.await_args.kwargs["run_id"] == "run-123"
+
+
+@pytest.mark.asyncio
+async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None:
+    """Gracefully cancelled team runs should surface as CancelledError."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = MagicMock()
+    mock_team.arun = AsyncMock(
+        return_value=TeamRunOutput(
+            content="Run run-123 was cancelled",
+            status=RunStatus.cancelled,
+        ),
+    )
+
+    fake_agent = MagicMock()
+    fake_agent.name = "GeneralAgent"
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            run_id="run-123",
+        )
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelled_event() -> None:
+    """Streaming team cancellation should propagate as CancelledError."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        assert _kwargs["run_id"] == "run-456"
+        yield TeamRunContentEvent(content="partial consensus")
+        yield TeamRunCancelledEvent(run_id="run-456", reason="Run run-456 was cancelled")
+
+    team_agent_ids = [
+        MatrixID.from_agent(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+
+    with (
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+    ):
+
+        async def collect_chunks_until_cancelled() -> list[str]:
+            return [
+                str(chunk)
+                async for chunk in team_response_stream(
+                    agent_ids=team_agent_ids,
+                    message="Analyze this.",
+                    orchestrator=orchestrator,
+                    execution_identity=None,
+                    mode=TeamMode.COORDINATE,
+                    run_id="run-456",
+                )
+            ]
+
+        with pytest.raises(asyncio.CancelledError):
+            await collect_chunks_until_cancelled()
+
+    streamed_text = [
+        str(chunk.content)
+        async for chunk in fake_stream_raw(run_id="run-456")
+        if isinstance(chunk, TeamRunContentEvent)
+    ]
+    assert any("partial consensus" in chunk for chunk in streamed_text)
 
 
 @pytest.mark.asyncio

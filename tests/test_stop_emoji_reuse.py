@@ -106,6 +106,72 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_emoji_prefers_graceful_agno_cancel_when_run_id_present(tmp_path: Path) -> None:
+    """Tracked Agno runs should use graceful cancellation before hard task cancellation."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    config = MagicMock()
+    config.authorization.agent_reply_permissions = {}
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={},
+        ),
+        rooms=["!test:example.com"],
+    )
+
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = "@test_agent:example.com"
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot.logger = MagicMock()
+    bot.stop_manager = StopManager()
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+    reaction_event = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$message:example.com",
+                    "key": "🛑",
+                },
+            },
+            "event_id": "$reaction:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": "!test:example.com",
+        },
+    )
+
+    task = MagicMock()
+    task.done = MagicMock(return_value=False)
+    bot.stop_manager.set_current(
+        message_id="$message:example.com",
+        room_id="!test:example.com",
+        task=task,
+        run_id="run-123",
+    )
+
+    with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
+        await bot._on_reaction(room, reaction_event)
+
+    mock_schedule_cancel.assert_called_once_with("$message:example.com")
+    task.cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
     """Test that 🛑 reactions from agents fall through to other handlers."""
     # Create a mock agent user

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import nio
@@ -2006,6 +2007,7 @@ class AgentBot:
         if orchestrator is None:
             msg = "Orchestrator is not set"
             raise RuntimeError(msg)
+        response_run_id = str(uuid4())
 
         # Create async function for team response generation that takes message_id as parameter
         client = self.client
@@ -2029,6 +2031,7 @@ class AgentBot:
                             media=payload.media,
                             show_tool_calls=self.show_tool_calls,
                             session_id=session_id,
+                            run_id=response_run_id,
                             user_id=requester_user_id,
                             reason_prefix=reason_prefix,
                         )
@@ -2076,6 +2079,7 @@ class AgentBot:
                             model_name=model_name,
                             media=payload.media,
                             session_id=session_id,
+                            run_id=response_run_id,
                             user_id=requester_user_id,
                             reason_prefix=reason_prefix,
                         )
@@ -2116,6 +2120,7 @@ class AgentBot:
             thinking_message=thinking_msg,
             existing_event_id=existing_event_id,
             user_id=requester_user_id,
+            run_id=response_run_id,
         )
 
     async def _run_cancellable_response(
@@ -2127,6 +2132,7 @@ class AgentBot:
         thinking_message: str | None = None,  # None means don't send thinking message
         existing_event_id: str | None = None,
         user_id: str | None = None,  # User ID for presence check
+        run_id: str | None = None,
     ) -> str | None:
         """Run a response generation function with cancellation support.
 
@@ -2143,6 +2149,7 @@ class AgentBot:
             thinking_message: Thinking message to show (only used when existing_event_id is None)
             existing_event_id: ID of existing message to edit (for interactive questions)
             user_id: User ID for checking if they're online (for stop button decision)
+            run_id: Explicit Agno run identifier used for graceful stop/cancel handling.
 
         Returns:
             The initial message ID if created, None otherwise
@@ -2186,7 +2193,13 @@ class AgentBot:
             tracked_message_id = message_to_track or f"__pending_response__:{id(task)}"
             show_stop_button = False  # Default to not showing
 
-            self.stop_manager.set_current(tracked_message_id, room_id, task, None)
+            self.stop_manager.set_current(
+                tracked_message_id,
+                room_id,
+                task,
+                None,
+                run_id=run_id,
+            )
 
             if message_to_track:
                 # Add stop button if configured AND user is online
@@ -2237,6 +2250,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        run_id: str | None = None,
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
     ) -> str | None:
@@ -2296,6 +2310,7 @@ class AgentBot:
                         room_id=room_id,
                         knowledge=knowledge,
                         user_id=user_id,
+                        run_id=run_id,
                         media=media_inputs,
                         reply_to_event_id=reply_to_event_id,
                         active_event_ids=active_event_ids,
@@ -2558,6 +2573,7 @@ class AgentBot:
         *,
         adopt_existing_placeholder: bool = False,
         user_id: str | None = None,
+        run_id: str | None = None,
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
     ) -> str | None:
@@ -2617,6 +2633,7 @@ class AgentBot:
                         room_id=room_id,
                         knowledge=knowledge,
                         user_id=user_id,
+                        run_id=run_id,
                         media=media_inputs,
                         reply_to_event_id=reply_to_event_id,
                         active_event_ids=active_event_ids,
@@ -2726,6 +2743,7 @@ class AgentBot:
             requester_user_id=user_id,
             enable_streaming=self.enable_streaming,
         )
+        response_run_id = str(uuid4())
 
         # Create async function for generation that takes message_id as parameter
         async def generate(message_id: str | None) -> None:
@@ -2739,6 +2757,7 @@ class AgentBot:
                     message_id,  # Edit the thinking message or existing
                     adopt_existing_placeholder=existing_event_id is None and message_id is not None,
                     user_id=user_id,
+                    run_id=response_run_id,
                     media=media_inputs,
                     attachment_ids=attachment_ids,
                 )
@@ -2751,6 +2770,7 @@ class AgentBot:
                     thread_history,
                     message_id,  # Edit the thinking message or existing
                     user_id=user_id,
+                    run_id=response_run_id,
                     media=media_inputs,
                     attachment_ids=attachment_ids,
                 )
@@ -2769,6 +2789,7 @@ class AgentBot:
             thinking_message=thinking_msg,
             existing_event_id=existing_event_id,
             user_id=user_id,
+            run_id=response_run_id,
         )
 
         # Store memory after response generation.

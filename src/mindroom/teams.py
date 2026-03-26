@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
@@ -12,6 +13,8 @@ from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
 from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
 from agno.run.agent import ToolCallStartedEvent as AgentToolCallStartedEvent
+from agno.run.base import RunStatus
+from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
@@ -1126,6 +1129,7 @@ async def team_response(
     model_name: str | None = None,
     media: MediaInputs | None = None,
     session_id: str | None = None,
+    run_id: str | None = None,
     user_id: str | None = None,
     *,
     reason_prefix: str = "Team request",
@@ -1164,6 +1168,7 @@ async def team_response(
         return await team.arun(
             current_prompt,
             session_id=session_id,
+            run_id=run_id,
             user_id=user_id,
             audio=current_media_inputs.audio,
             images=current_media_inputs.images,
@@ -1187,6 +1192,9 @@ async def team_response(
         except Exception as retry_error:
             logger.exception(f"Error in team response with agents {agent_list}")
             return get_user_friendly_error_message(retry_error, team_name)
+
+    if isinstance(response, TeamRunOutput) and response.status == RunStatus.cancelled:
+        raise asyncio.CancelledError(response.content or "Run cancelled")
 
     if isinstance(response, TeamRunOutput):
         if response.member_responses:
@@ -1217,6 +1225,7 @@ async def _team_response_stream_raw(
     model_name: str | None = None,
     media: MediaInputs | None = None,
     session_id: str | None = None,
+    run_id: str | None = None,
     user_id: str | None = None,
 ) -> AsyncIterator[Any]:
     """Yield raw team events (for structured live rendering). Falls back to a final response.
@@ -1246,6 +1255,7 @@ async def _team_response_stream_raw(
             stream=True,
             stream_events=True,
             session_id=session_id,
+            run_id=run_id,
             user_id=user_id,
             audio=current_media_inputs.audio,
             images=current_media_inputs.images,
@@ -1276,6 +1286,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
     session_id: str | None = None,
+    run_id: str | None = None,
     user_id: str | None = None,
     *,
     reason_prefix: str = "Team request",
@@ -1465,6 +1476,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             model_name=model_name,
             media=attempt_media_inputs,
             session_id=session_id,
+            run_id=run_id,
             user_id=user_id,
         )
         async for event in raw_stream:
@@ -1493,6 +1505,9 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     break
                 yield get_user_friendly_error_message(Exception(error_text), team_name)
                 return
+
+            if isinstance(event, TeamRunCancelledEvent):
+                raise asyncio.CancelledError(event.reason or "Run cancelled")
 
             # Individual agent response event
             if isinstance(event, AgentRunContentEvent):

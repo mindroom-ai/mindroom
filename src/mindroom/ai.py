@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import importlib
 from copy import deepcopy
@@ -22,6 +23,7 @@ from agno.models.openrouter import OpenRouter
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
     ModelRequestCompletedEvent,
+    RunCancelledEvent,
     RunCompletedEvent,
     RunContentEvent,
     RunErrorEvent,
@@ -129,6 +131,7 @@ class _StreamingAttemptState:
     pending_tools: list[tuple[str, int]] = field(default_factory=list)
     latest_model_id: str | None = None
     latest_model_provider: str | None = None
+    cancelled_run_event: RunCancelledEvent | None = None
     completed_run_event: RunCompletedEvent | None = None
     request_metric_totals: dict[str, int] = field(default_factory=_empty_request_metric_totals)
     first_token_latency: float | None = None
@@ -975,6 +978,7 @@ async def _cached_agent_run(
     *,
     runtime_paths: RuntimePaths,
     user_id: str | None = None,
+    run_id: str | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> RunOutput:
@@ -993,6 +997,7 @@ async def _cached_agent_run(
             full_prompt,
             session_id=session_id,
             user_id=user_id,
+            run_id=run_id,
             audio=media_inputs.audio,
             images=media_inputs.images,
             files=media_inputs.files,
@@ -1008,10 +1013,17 @@ async def _cached_agent_run(
         logger.info("Cache hit", agent=agent_name)
         return cast("RunOutput", cached_result)
 
-    response = await agent.arun(full_prompt, session_id=session_id, user_id=user_id, metadata=metadata)
+    response = await agent.arun(
+        full_prompt,
+        session_id=session_id,
+        user_id=user_id,
+        run_id=run_id,
+        metadata=metadata,
+    )
 
-    cache.set(cache_key, response)
-    logger.info("Response cached", agent=agent_name)
+    if response.status not in {RunStatus.cancelled, RunStatus.error}:
+        cache.set(cache_key, response)
+        logger.info("Response cached", agent=agent_name)
 
     return response
 
@@ -1121,6 +1133,7 @@ async def ai_response(
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
+    run_id: str | None = None,
     include_interactive_questions: bool = True,
     media: MediaInputs | None = None,
     reply_to_event_id: str | None = None,
@@ -1142,6 +1155,7 @@ async def ai_response(
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
+        run_id: Explicit Agno run identifier used for graceful stop/cancel handling.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
@@ -1195,6 +1209,7 @@ async def ai_response(
             agent_name,
             runtime_paths=runtime_paths,
             user_id=user_id,
+            run_id=run_id,
             media=media_inputs,
             metadata=metadata,
         )
@@ -1214,6 +1229,7 @@ async def ai_response(
                     agent_name,
                     runtime_paths=runtime_paths,
                     user_id=user_id,
+                    run_id=run_id,
                     media=MediaInputs(),
                     metadata=metadata,
                 )
@@ -1243,6 +1259,9 @@ async def ai_response(
         )
         if run_metadata:
             run_metadata_collector.update(run_metadata)
+
+    if response.status == RunStatus.cancelled:
+        raise asyncio.CancelledError(response.content or "Run cancelled")
 
     # Extract response content - this shouldn't fail
     return _extract_response_content(response, show_tool_calls=show_tool_calls)
@@ -1293,6 +1312,10 @@ async def _process_stream_events(  # noqa: C901
                 state.completed_run_event = event
                 continue
 
+            if isinstance(event, RunCancelledEvent):
+                state.cancelled_run_event = event
+                return
+
             if isinstance(event, RunErrorEvent):
                 error_text = event.content or "Unknown agent error"
                 if _request_stream_retry(
@@ -1333,6 +1356,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
+    run_id: str | None = None,
     include_interactive_questions: bool = True,
     media: MediaInputs | None = None,
     reply_to_event_id: str | None = None,
@@ -1356,6 +1380,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
+        run_id: Explicit Agno run identifier used for graceful stop/cancel handling.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
@@ -1445,6 +1470,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 attempt_prompt,
                 session_id=session_id,
                 user_id=user_id,
+                run_id=run_id,
                 audio=attempt_media_inputs.audio,
                 images=attempt_media_inputs.images,
                 files=attempt_media_inputs.files,
@@ -1491,6 +1517,27 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         if state.stream_exception is not None:
             yield get_user_friendly_error_message(state.stream_exception, agent_name)
             return
+
+        if state.cancelled_run_event is not None:
+            if run_metadata_collector is not None:
+                fallback_metrics = _build_model_request_metrics_fallback(
+                    state.request_metric_totals,
+                    state.first_token_latency,
+                )
+                cancelled_metadata = _build_ai_run_metadata_content(
+                    agent_name=agent_name,
+                    config=config,
+                    run_id=state.cancelled_run_event.run_id,
+                    session_id=state.cancelled_run_event.session_id or session_id,
+                    status=RunStatus.cancelled,
+                    model=state.latest_model_id,
+                    model_provider=state.latest_model_provider,
+                    metrics=fallback_metrics,
+                    tool_count=state.observed_tool_calls,
+                )
+                if cancelled_metadata:
+                    run_metadata_collector.update(cancelled_metadata)
+            raise asyncio.CancelledError(state.cancelled_run_event.reason or "Run cancelled")
 
         break
 
