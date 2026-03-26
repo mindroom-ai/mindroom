@@ -171,6 +171,7 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 
 # Constants
 _SYNC_TIMEOUT_MS = 30000
+_CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
 
 
 def _create_task_wrapper(
@@ -2064,25 +2065,31 @@ class AgentBot:
                 )
             else:
                 # Show typing indicator while team generates non-streaming response
-                async with typing_indicator(client, room_id):
-                    with (
-                        tool_execution_identity(execution_identity),
-                        tool_runtime_context(tool_context),
-                    ):
-                        response_text = await team_response(
-                            agent_names=agent_names,
-                            mode=mode,
-                            message=model_message,
-                            orchestrator=orchestrator,
-                            execution_identity=execution_identity,
-                            thread_history=thread_history,
-                            model_name=model_name,
-                            media=payload.media,
-                            session_id=session_id,
-                            run_id=response_run_id,
-                            user_id=requester_user_id,
-                            reason_prefix=reason_prefix,
-                        )
+                try:
+                    async with typing_indicator(client, room_id):
+                        with (
+                            tool_execution_identity(execution_identity),
+                            tool_runtime_context(tool_context),
+                        ):
+                            response_text = await team_response(
+                                agent_names=agent_names,
+                                mode=mode,
+                                message=model_message,
+                                orchestrator=orchestrator,
+                                execution_identity=execution_identity,
+                                thread_history=thread_history,
+                                model_name=model_name,
+                                media=payload.media,
+                                session_id=session_id,
+                                run_id=response_run_id,
+                                user_id=requester_user_id,
+                                reason_prefix=reason_prefix,
+                            )
+                except asyncio.CancelledError:
+                    self.logger.info("Team non-streaming response cancelled by user", message_id=message_id)
+                    if message_id:
+                        await self._edit_message(room_id, message_id, _CANCELLED_RESPONSE_TEXT, thread_id)
+                    raise
 
                 # Either edit the thinking message or send new
                 if message_id:
@@ -2323,8 +2330,7 @@ class AgentBot:
             # Handle cancellation - send a message showing it was stopped
             self.logger.info("Non-streaming response cancelled by user", message_id=existing_event_id)
             if existing_event_id:
-                cancelled_text = "**[Response cancelled by user]**"
-                await self._edit_message(room_id, existing_event_id, cancelled_text, thread_id)
+                await self._edit_message(room_id, existing_event_id, _CANCELLED_RESPONSE_TEXT, thread_id)
             raise
         except Exception as e:
             self.logger.exception("Error in non-streaming response", error=str(e))

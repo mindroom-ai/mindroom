@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -112,6 +113,58 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
             thread_history=[],
             requester_user_id="@user:localhost",
         )
+
+
+@pytest.mark.asyncio
+async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path) -> None:
+    """Cancelled team runs should replace the thinking placeholder with a cancellation note."""
+    bot = _make_bot(tmp_path)
+    team_agents = [
+        MatrixID.from_agent(
+            "general",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
+        MatrixID.from_agent(
+            "research",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
+    ]
+
+    async def fake_run_cancellable_response(**kwargs: object) -> None:
+        response_function = kwargs["response_function"]
+        with suppress(asyncio.CancelledError):
+            await response_function("$thinking")
+
+    async def fake_team_response(*_args: object, **_kwargs: object) -> str:
+        raise asyncio.CancelledError
+
+    bot._run_cancellable_response = AsyncMock(side_effect=fake_run_cancellable_response)
+    bot._edit_message = AsyncMock()
+
+    with (
+        patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.bot.typing_indicator", new=_noop_typing_indicator),
+        patch("mindroom.bot.team_response", new=fake_team_response),
+    ):
+        await bot._generate_team_response_helper(
+            room_id="!team:localhost",
+            reply_to_event_id="$user_event",
+            thread_id="$thread_root",
+            payload=_DispatchPayload(prompt="Please coordinate and schedule a reminder"),
+            team_agents=team_agents,
+            team_mode="coordinate",
+            thread_history=[],
+            requester_user_id="@user:localhost",
+        )
+
+    bot._edit_message.assert_awaited_once_with(
+        "!team:localhost",
+        "$thinking",
+        "**[Response cancelled by user]**",
+        "$thread_root",
+    )
 
 
 @pytest.mark.asyncio

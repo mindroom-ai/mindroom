@@ -92,11 +92,6 @@ class StopManager:
                         message_id=message_id,
                         run_id=tracked.run_id,
                     )
-                    continue
-
-                if cancel_requested:
-                    await asyncio.sleep(0.05)
-                    continue
 
                 if loop.time() >= deadline:
                     break

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -169,6 +170,39 @@ async def test_stop_emoji_prefers_graceful_agno_cancel_when_run_id_present(tmp_p
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com")
     task.cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_manager_force_cancels_task_when_graceful_cancel_hangs() -> None:
+    """Graceful cancellation should still force-cancel the task when Agno never stops it."""
+    stop_manager = StopManager(graceful_cancel_fallback_seconds=0.01)
+    started = asyncio.Event()
+    task_cancelled = asyncio.Event()
+
+    async def hung_response() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(999)
+        except asyncio.CancelledError:
+            task_cancelled.set()
+            raise
+
+    task = asyncio.create_task(hung_response())
+    await started.wait()
+
+    stop_manager.set_current(
+        message_id="$message:example.com",
+        room_id="!test:example.com",
+        task=task,
+        run_id="run-123",
+    )
+
+    with patch("mindroom.stop.cancel_run", return_value=True):
+        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        await asyncio.wait_for(task_cancelled.wait(), timeout=0.2)
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio
