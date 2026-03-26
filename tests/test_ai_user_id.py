@@ -114,6 +114,7 @@ class TestUserIdPassthrough:
 
             mock_ai.assert_called_once()
             assert mock_ai.call_args.kwargs["user_id"] == "@alice:localhost"
+            assert callable(mock_ai.call_args.kwargs["run_id_callback"])
 
     @pytest.mark.asyncio
     async def test_streaming_passes_user_id(self, tmp_path: Path) -> None:
@@ -181,6 +182,7 @@ class TestUserIdPassthrough:
 
                 mock_stream.assert_called_once()
                 assert mock_stream.call_args.kwargs["user_id"] == "@bob:localhost"
+                assert callable(mock_stream.call_args.kwargs["run_id_callback"])
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:
@@ -426,6 +428,33 @@ class TestUserIdPassthrough:
                 )
 
     @pytest.mark.asyncio
+    async def test_ai_response_returns_friendly_error_for_error_status(self, tmp_path: Path) -> None:
+        """Errored Agno RunOutput values must not be surfaced as successful replies."""
+        mock_agent = MagicMock()
+        mock_run_output = MagicMock()
+        mock_run_output.content = "validation failed in agno"
+        mock_run_output.status = RunStatus.error
+        mock_run_output.tools = None
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+            patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly-error") as mock_friendly_error,
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+
+            response = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+            )
+
+        assert response == "friendly-error"
+        mock_friendly_error.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_ai_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:
         """Vertex Claude path should not silently drop non-PDF file media."""
         mock_agent = MagicMock()
@@ -548,6 +577,53 @@ class TestUserIdPassthrough:
         assert "Inline media unavailable for this model" in second_call.args[0]
 
     @pytest.mark.asyncio
+    async def test_ai_response_retries_errored_run_output_with_fresh_run_id(self, tmp_path: Path) -> None:
+        """Inline-media retries must use a fresh Agno run_id after an errored run output."""
+        mock_agent = MagicMock()
+        error_output = MagicMock()
+        error_output.content = "Error code: 500 - audio input is not supported"
+        error_output.status = RunStatus.error
+        error_output.tools = None
+
+        success_output = MagicMock()
+        success_output.content = "Recovered response"
+        success_output.status = RunStatus.completed
+        success_output.tools = None
+
+        seen_run_ids: list[str | None] = []
+        callback_run_ids: list[str] = []
+        responses = [error_output, success_output]
+
+        async def fake_cached_run(*_args: object, **kwargs: object) -> MagicMock:
+            seen_run_ids.append(kwargs["run_id"])
+            run_id_callback = kwargs["run_id_callback"]
+            if run_id_callback is not None and kwargs["run_id"] is not None:
+                run_id_callback(kwargs["run_id"])
+            return responses.pop(0)
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._cached_agent_run", side_effect=fake_cached_run),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            response = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                run_id="run-123",
+                run_id_callback=callback_run_ids.append,
+                media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+            )
+
+        assert response == "Recovered response"
+        assert seen_run_ids[0] == "run-123"
+        assert seen_run_ids[1] is not None
+        assert seen_run_ids[1] != "run-123"
+        assert callback_run_ids == [run_id for run_id in seen_run_ids if run_id is not None]
+
+    @pytest.mark.asyncio
     async def test_stream_agent_response_retries_without_media_on_validation_error(self, tmp_path: Path) -> None:
         """When inline media is rejected, streaming should retry once without media."""
         mock_agent = MagicMock()
@@ -600,6 +676,52 @@ class TestUserIdPassthrough:
         assert list(second_call.kwargs["files"]) == []
         assert "Inline media unavailable for this model" in second_call.args[0]
         assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_retries_with_fresh_run_id(self, tmp_path: Path) -> None:
+        """Streaming inline-media retries must not reuse the cancelled attempt's run_id."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(content="Error code: 500 - audio input is not supported")
+
+        async def successful_stream() -> AsyncIterator[object]:
+            yield RunContentEvent(content="Recovered stream")
+
+        callback_run_ids: list[str] = []
+        mock_agent.arun = MagicMock(side_effect=[failing_stream(), successful_stream()])
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    run_id="run-456",
+                    run_id_callback=callback_run_ids.append,
+                    media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+                )
+            ]
+
+        assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
+        first_call = mock_agent.arun.call_args_list[0]
+        second_call = mock_agent.arun.call_args_list[1]
+        assert first_call.kwargs["run_id"] == "run-456"
+        assert second_call.kwargs["run_id"] is not None
+        assert second_call.kwargs["run_id"] != "run-456"
+        assert callback_run_ids == [first_call.kwargs["run_id"], second_call.kwargs["run_id"]]
 
     @pytest.mark.parametrize(
         ("error_text", "expected"),

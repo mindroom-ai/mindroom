@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import nio
-from agno.run.cancel import cancel_run
+from agno.run.cancel import acancel_run
 
 if TYPE_CHECKING:
     from nio import AsyncClient
@@ -16,6 +17,7 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 _GRACEFUL_CANCEL_FALLBACK_SECONDS = 10.0
+_GRACEFUL_CANCEL_PROBE_SECONDS = 0.25
 
 
 @dataclass
@@ -38,7 +40,7 @@ class StopManager:
         # Track multiple concurrent messages by message_id
         self.tracked_messages: dict[str, _TrackedMessage] = {}
         # Keep references to cleanup tasks
-        self.cleanup_tasks: list[asyncio.Task] = []
+        self.cleanup_tasks: list[asyncio.Task[None]] = []
         self.graceful_cancel_fallback_seconds = graceful_cancel_fallback_seconds
         logger.info("StopManager initialized")
 
@@ -67,49 +69,149 @@ class StopManager:
             total_tracked=len(self.tracked_messages),
         )
 
+    def update_run_id(self, message_id: str | None, run_id: str | None) -> None:
+        """Update the tracked Agno run_id for a message before a new attempt starts."""
+        if message_id is None:
+            return
+
+        tracked = self._get_active_tracked_message(message_id)
+        if tracked is None or tracked.run_id == run_id:
+            return
+
+        previous_run_id = tracked.run_id
+        tracked.run_id = run_id
+        logger.info(
+            "Updated tracked run id",
+            message_id=message_id,
+            previous_run_id=previous_run_id,
+            run_id=run_id,
+            cancel_requested=tracked.cancel_requested,
+        )
+
+        if tracked.cancel_requested and run_id:
+            logger.info(
+                "Stop already requested; scheduling cancellation for updated run id",
+                message_id=message_id,
+                run_id=run_id,
+            )
+            self._schedule_graceful_run_cancel(message_id)
+
+    def _discard_cleanup_task(self, task: asyncio.Task[None]) -> None:
+        """Drop finished background tasks from the strong-reference list."""
+        with suppress(ValueError):
+            self.cleanup_tasks.remove(task)
+
     def _track_cleanup_task(self, task: asyncio.Task[None]) -> None:
         """Keep a strong reference to background cleanup/fallback tasks."""
+        task.add_done_callback(self._discard_cleanup_task)
         self.cleanup_tasks.append(task)
-        self.cleanup_tasks = [existing for existing in self.cleanup_tasks if not existing.done()]
 
-    def _schedule_graceful_run_cancel(self, message_id: str) -> None:
-        """Request Agno run cancellation, then hard-cancel if it never stops."""
+    def _get_active_tracked_message(self, message_id: str) -> _TrackedMessage | None:
+        """Return the tracked message while its task is still active."""
+        tracked = self.tracked_messages.get(message_id)
+        if tracked is None or tracked.task.done():
+            return None
+        return tracked
 
-        async def graceful_cancel_then_force() -> None:
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + self.graceful_cancel_fallback_seconds
-            cancel_requested = False
+    async def _probe_graceful_cancel(self, message_id: str, deadline: float) -> tuple[str, _TrackedMessage | None]:
+        """Try to request graceful Agno cancellation during the short registration window."""
+        loop = asyncio.get_running_loop()
+        probe_deadline = min(deadline, loop.time() + _GRACEFUL_CANCEL_PROBE_SECONDS)
+        while loop.time() < probe_deadline:
+            tracked = self._get_active_tracked_message(message_id)
+            if tracked is None:
+                return "gone", None
 
-            while True:
-                tracked = self.tracked_messages.get(message_id)
-                if tracked is None or tracked.task.done():
-                    return
-
-                if tracked.run_id and not cancel_requested and cancel_run(tracked.run_id):
-                    cancel_requested = True
-                    logger.info(
-                        "Requested Agno run cancellation",
+            if tracked.run_id:
+                remaining_probe_window = probe_deadline - loop.time()
+                if remaining_probe_window <= 0:
+                    break
+                try:
+                    if await asyncio.wait_for(acancel_run(tracked.run_id), timeout=remaining_probe_window):
+                        logger.info(
+                            "Requested Agno run cancellation",
+                            message_id=message_id,
+                            run_id=tracked.run_id,
+                        )
+                        return "requested", tracked
+                except TimeoutError:
+                    logger.warning(
+                        "Agno run cancellation request timed out; force cancelling response task",
                         message_id=message_id,
                         run_id=tracked.run_id,
                     )
+                    return "manager_failed", tracked
+                except Exception as exc:
+                    logger.warning(
+                        "Agno run cancellation request failed; force cancelling response task",
+                        message_id=message_id,
+                        run_id=tracked.run_id,
+                        error=str(exc),
+                    )
+                    return "manager_failed", tracked
 
-                if loop.time() >= deadline:
-                    break
-                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.05)
 
-            tracked = self.tracked_messages.get(message_id)
-            if tracked is None or tracked.task.done():
+        return "not_live", self._get_active_tracked_message(message_id)
+
+    async def _graceful_cancel_then_force(self, message_id: str) -> None:
+        """Request Agno cancellation first, then fall back to hard cancellation."""
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self.graceful_cancel_fallback_seconds
+            outcome, tracked = await self._probe_graceful_cancel(message_id, deadline)
+            if tracked is None:
+                return
+
+            if outcome == "manager_failed":
+                logger.warning(
+                    "Agno cancellation manager unavailable; force cancelling response task",
+                    message_id=message_id,
+                    run_id=tracked.run_id,
+                )
+                tracked.task.cancel()
+                return
+
+            if outcome == "not_live":
+                logger.warning(
+                    "Agno run never became cancellable; force cancelling response task",
+                    message_id=message_id,
+                    run_id=tracked.run_id,
+                )
+                tracked.task.cancel()
+                return
+
+            remaining = max(0.0, deadline - loop.time())
+            if remaining > 0:
+                done, _ = await asyncio.wait({tracked.task}, timeout=remaining)
+                if tracked.task in done:
+                    return
+
+            tracked = self._get_active_tracked_message(message_id)
+            if tracked is None:
                 return
 
             logger.warning(
                 "Graceful Agno cancellation timed out; force cancelling response task",
                 message_id=message_id,
                 run_id=tracked.run_id,
-                cancel_requested=cancel_requested,
+                cancel_requested=True,
             )
             tracked.task.cancel()
+        except asyncio.CancelledError:
+            tracked = self._get_active_tracked_message(message_id)
+            if tracked is not None:
+                logger.warning(
+                    "Graceful cancellation probe was cancelled; force cancelling response task",
+                    message_id=message_id,
+                    run_id=tracked.run_id,
+                )
+                tracked.task.cancel()
+            raise
 
-        self._track_cleanup_task(asyncio.create_task(graceful_cancel_then_force()))
+    def _schedule_graceful_run_cancel(self, message_id: str) -> None:
+        """Request Agno run cancellation, then hard-cancel if it never stops."""
+        self._track_cleanup_task(asyncio.create_task(self._graceful_cancel_then_force(message_id)))
 
     def clear_message(
         self,
@@ -163,7 +265,7 @@ class StopManager:
     async def handle_stop_reaction(self, message_id: str) -> bool:
         """Handle a stop reaction for a message.
 
-        Returns True if the task was cancelled, False otherwise.
+        Returns True if cancellation was initiated or is already in progress, False otherwise.
         """
         logger.info(
             "Handling stop reaction",

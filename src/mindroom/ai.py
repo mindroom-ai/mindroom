@@ -9,6 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 import diskcache
 from agno.models.anthropic import Claude
@@ -64,7 +65,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Collection, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
     from pathlib import Path
 
     from agno.agent import Agent
@@ -121,6 +122,19 @@ def _empty_request_metric_totals() -> dict[str, int]:
         "cache_read_tokens": 0,
         "cache_write_tokens": 0,
     }
+
+
+def _next_retry_run_id(run_id: str | None) -> str | None:
+    """Return a fresh Agno run identifier for a retry attempt."""
+    if run_id is None:
+        return None
+    return str(uuid4())
+
+
+def _note_attempt_run_id(run_id_callback: Callable[[str], None] | None, run_id: str | None) -> None:
+    """Publish the current run_id before starting a real Agno run attempt."""
+    if run_id_callback is not None and run_id is not None:
+        run_id_callback(run_id)
 
 
 @dataclass
@@ -979,6 +993,7 @@ async def _cached_agent_run(
     runtime_paths: RuntimePaths,
     user_id: str | None = None,
     run_id: str | None = None,
+    run_id_callback: Callable[[str], None] | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> RunOutput:
@@ -993,6 +1008,7 @@ async def _cached_agent_run(
         else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
     )
     if cache is None:
+        _note_attempt_run_id(run_id_callback, run_id)
         return await agent.arun(
             full_prompt,
             session_id=session_id,
@@ -1013,6 +1029,7 @@ async def _cached_agent_run(
         logger.info("Cache hit", agent=agent_name)
         return cast("RunOutput", cached_result)
 
+    _note_attempt_run_id(run_id_callback, run_id)
     response = await agent.arun(
         full_prompt,
         session_id=session_id,
@@ -1123,7 +1140,7 @@ async def _prepare_agent_and_prompt(
     return agent, full_prompt, unseen_event_ids
 
 
-async def ai_response(
+async def ai_response(  # noqa: C901
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -1134,6 +1151,7 @@ async def ai_response(
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
     run_id: str | None = None,
+    run_id_callback: Callable[[str], None] | None = None,
     include_interactive_questions: bool = True,
     media: MediaInputs | None = None,
     reply_to_event_id: str | None = None,
@@ -1156,6 +1174,8 @@ async def ai_response(
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
         run_id: Explicit Agno run identifier used for graceful stop/cancel handling.
+        run_id_callback: Optional callback that receives the active Agno run_id
+            before each real run attempt starts.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
@@ -1201,47 +1221,58 @@ async def ai_response(
     metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
     # Execute the AI call - this can fail for network, rate limits, etc.
-    try:
-        response = await _cached_agent_run(
-            agent,
-            full_prompt,
-            session_id,
-            agent_name,
-            runtime_paths=runtime_paths,
-            user_id=user_id,
-            run_id=run_id,
-            media=media_inputs,
-            metadata=metadata,
-        )
-    except Exception as e:
-        if should_retry_without_inline_media(e, media_inputs):
-            logger.warning(
-                "Retrying AI response without inline media after validation error",
-                agent=agent_name,
-                error=str(e),
+    response: RunOutput | None = None
+    attempt_prompt = full_prompt
+    attempt_media_inputs = media_inputs
+    attempt_run_id = run_id
+
+    for retried_without_inline_media in (False, True):
+        try:
+            response = await _cached_agent_run(
+                agent,
+                attempt_prompt,
+                session_id,
+                agent_name,
+                runtime_paths=runtime_paths,
+                user_id=user_id,
+                run_id=attempt_run_id,
+                run_id_callback=run_id_callback,
+                media=attempt_media_inputs,
+                metadata=metadata,
             )
-            fallback_prompt = append_inline_media_fallback_prompt(full_prompt)
-            try:
-                response = await _cached_agent_run(
-                    agent,
-                    fallback_prompt,
-                    session_id,
-                    agent_name,
-                    runtime_paths=runtime_paths,
-                    user_id=user_id,
-                    run_id=run_id,
-                    media=MediaInputs(),
-                    metadata=metadata,
-                )
-            except Exception as retry_error:
-                logger.exception(
-                    "Error generating AI response after inline-media fallback",
+        except Exception as e:
+            if not retried_without_inline_media and should_retry_without_inline_media(e, attempt_media_inputs):
+                logger.warning(
+                    "Retrying AI response without inline media after validation error",
                     agent=agent_name,
+                    error=str(e),
                 )
-                return get_user_friendly_error_message(retry_error, agent_name)
-        else:
+                attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                attempt_media_inputs = MediaInputs()
+                attempt_run_id = _next_retry_run_id(run_id)
+                continue
+
             logger.exception("Error generating AI response", agent=agent_name)
             return get_user_friendly_error_message(e, agent_name)
+
+        if response.status == RunStatus.error:
+            error_text = str(response.content or "Unknown agent error")
+            if not retried_without_inline_media and should_retry_without_inline_media(error_text, attempt_media_inputs):
+                logger.warning(
+                    "Retrying AI response without inline media after errored run output",
+                    agent=agent_name,
+                    error=error_text,
+                )
+                attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                attempt_media_inputs = MediaInputs()
+                attempt_run_id = _next_retry_run_id(run_id)
+                continue
+
+            logger.warning("AI response returned errored run output", agent=agent_name, error=error_text)
+
+        break
+
+    assert response is not None
 
     if tool_trace_collector is not None:
         tool_trace_collector.extend(_extract_tool_trace(response))
@@ -1262,6 +1293,8 @@ async def ai_response(
 
     if response.status == RunStatus.cancelled:
         raise asyncio.CancelledError(response.content or "Run cancelled")
+    if response.status == RunStatus.error:
+        return get_user_friendly_error_message(Exception(str(response.content or "Unknown agent error")), agent_name)
 
     # Extract response content - this shouldn't fail
     return _extract_response_content(response, show_tool_calls=show_tool_calls)
@@ -1357,6 +1390,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
     run_id: str | None = None,
+    run_id_callback: Callable[[str], None] | None = None,
     include_interactive_questions: bool = True,
     media: MediaInputs | None = None,
     reply_to_event_id: str | None = None,
@@ -1381,6 +1415,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
         run_id: Explicit Agno run identifier used for graceful stop/cancel handling.
+        run_id_callback: Optional callback that receives the active Agno run_id
+            before each real streaming attempt starts.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
@@ -1459,6 +1495,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
     attempt_prompt = full_prompt
     attempt_media_inputs = media_inputs
+    attempt_run_id = run_id
     state = _StreamingAttemptState()
 
     for retried_without_inline_media in (False, True):
@@ -1466,11 +1503,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
         # Execute the streaming AI call - this can fail for network, rate limits, etc.
         try:
+            _note_attempt_run_id(run_id_callback, attempt_run_id)
             stream_generator = agent.arun(
                 attempt_prompt,
                 session_id=session_id,
                 user_id=user_id,
-                run_id=run_id,
+                run_id=attempt_run_id,
                 audio=attempt_media_inputs.audio,
                 images=attempt_media_inputs.images,
                 files=attempt_media_inputs.files,
@@ -1490,6 +1528,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             ):
                 attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
                 attempt_media_inputs = MediaInputs()
+                attempt_run_id = _next_retry_run_id(run_id)
                 continue
             logger.exception("Error starting streaming AI response")
             yield get_user_friendly_error_message(e, agent_name)
@@ -1508,6 +1547,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         if state.retry_requested:
             attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
             attempt_media_inputs = MediaInputs()
+            attempt_run_id = _next_retry_run_id(run_id)
             continue
 
         if state.user_error is not None:

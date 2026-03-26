@@ -171,6 +171,7 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 
 # Constants
 _SYNC_TIMEOUT_MS = 30000
+_STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
 
 
@@ -985,14 +986,14 @@ class AgentBot:
             # Only handle stop from users, not agents, and only if tracking this message
             if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
                 self.logger.info(
-                    "Stopped generation for message",
+                    "Stop requested for message",
                     message_id=event.reacts_to,
-                    stopped_by=event.sender,
+                    requested_by=event.sender,
                 )
                 # Remove the stop button immediately for user feedback
                 await self.stop_manager.remove_stop_button(self.client, event.reacts_to)
-                # Send a confirmation message
-                await self._send_response(room.room_id, event.reacts_to, "✅ Generation stopped", None)
+                # Acknowledge immediately without claiming the task has fully exited yet.
+                await self._send_response(room.room_id, event.reacts_to, _STOPPING_RESPONSE_TEXT, None)
                 return
             # Message is not being generated - let the reaction be handled for other purposes
             # (e.g., interactive questions). Don't return here so it can fall through!
@@ -2014,6 +2015,9 @@ class AgentBot:
         client = self.client
 
         async def generate_team_response(message_id: str | None) -> None:
+            def _note_attempt_run_id(current_run_id: str) -> None:
+                self.stop_manager.update_run_id(message_id, current_run_id)
+
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(client, room_id):
@@ -2033,6 +2037,7 @@ class AgentBot:
                             show_tool_calls=self.show_tool_calls,
                             session_id=session_id,
                             run_id=response_run_id,
+                            run_id_callback=_note_attempt_run_id,
                             user_id=requester_user_id,
                             reason_prefix=reason_prefix,
                         )
@@ -2082,6 +2087,7 @@ class AgentBot:
                                 media=payload.media,
                                 session_id=session_id,
                                 run_id=response_run_id,
+                                run_id_callback=_note_attempt_run_id,
                                 user_id=requester_user_id,
                                 reason_prefix=reason_prefix,
                             )
@@ -2296,6 +2302,10 @@ class AgentBot:
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(room_id)
+
+        def _note_attempt_run_id(current_run_id: str) -> None:
+            self.stop_manager.update_run_id(existing_event_id, current_run_id)
+
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
@@ -2318,6 +2328,7 @@ class AgentBot:
                         knowledge=knowledge,
                         user_id=user_id,
                         run_id=run_id,
+                        run_id_callback=_note_attempt_run_id,
                         media=media_inputs,
                         reply_to_event_id=reply_to_event_id,
                         active_event_ids=active_event_ids,
@@ -2618,6 +2629,10 @@ class AgentBot:
         )
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(room_id)
+
+        def _note_attempt_run_id(current_run_id: str) -> None:
+            self.stop_manager.update_run_id(existing_event_id, current_run_id)
+
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
@@ -2640,6 +2655,7 @@ class AgentBot:
                         knowledge=knowledge,
                         user_id=user_id,
                         run_id=run_id,
+                        run_id_callback=_note_attempt_run_id,
                         media=media_inputs,
                         reply_to_event_id=reply_to_event_id,
                         active_event_ids=active_event_ids,

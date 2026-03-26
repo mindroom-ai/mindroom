@@ -220,6 +220,87 @@ async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None
 
 
 @pytest.mark.asyncio
+async def test_team_response_returns_friendly_error_for_error_status() -> None:
+    """Errored TeamRunOutput values must not be formatted as successful team replies."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = MagicMock()
+    mock_team.arun = AsyncMock(
+        return_value=TeamRunOutput(content="validation failed in team", status=RunStatus.error),
+    )
+
+    fake_agent = MagicMock()
+    fake_agent.name = "GeneralAgent"
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error") as mock_friendly,
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+        )
+
+    assert response == "friendly-team-error"
+    mock_friendly.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> None:
+    """Inline-media team retries must use a fresh Agno run_id after errored output."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = MagicMock()
+    mock_team.arun = AsyncMock(
+        side_effect=[
+            TeamRunOutput(content="Error code: 500 - audio input is not supported", status=RunStatus.error),
+            TeamRunOutput(content="Recovered team response", status=RunStatus.completed),
+        ],
+    )
+
+    fake_agent = MagicMock()
+    fake_agent.name = "GeneralAgent"
+    callback_run_ids: list[str] = []
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+            run_id="run-123",
+            run_id_callback=callback_run_ids.append,
+        )
+
+    assert "Recovered team response" in response
+    first_call = mock_team.arun.await_args_list[0]
+    second_call = mock_team.arun.await_args_list[1]
+    assert first_call.kwargs["run_id"] == "run-123"
+    assert second_call.kwargs["run_id"] is not None
+    assert second_call.kwargs["run_id"] != "run-123"
+    assert callback_run_ids == [first_call.kwargs["run_id"], second_call.kwargs["run_id"]]
+
+
+@pytest.mark.asyncio
 async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelled_event() -> None:
     """Streaming team cancellation should propagate as CancelledError."""
     config = _build_test_config()
@@ -279,6 +360,222 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
         if isinstance(chunk, TeamRunContentEvent)
     ]
     assert any("partial consensus" in chunk for chunk in streamed_text)
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_emits_team_run_output_fallback() -> None:
+    """A non-streaming provider fallback should still emit one final team response chunk."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        assert _kwargs["run_id"] == "run-789"
+        yield TeamRunOutput(content="Fallback consensus", status=RunStatus.completed)
+
+    team_agent_ids = [
+        MatrixID.from_agent(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+
+    with (
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=team_agent_ids,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                mode=TeamMode.COORDINATE,
+                run_id="run-789",
+            )
+        ]
+
+    assert len(chunks) == 1
+    assert isinstance(chunks[0], str)
+    assert chunks[0].startswith("🤝 **Team Response** (GeneralAgent):")
+    assert "Fallback consensus" in chunks[0]
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_raises_cancelled_error_for_team_run_output_fallback() -> None:
+    """A cancelled TeamRunOutput fallback should propagate as CancelledError."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        assert _kwargs["run_id"] == "run-789"
+        yield TeamRunOutput(content="Run run-789 was cancelled", status=RunStatus.cancelled)
+
+    team_agent_ids = [
+        MatrixID.from_agent(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+
+    with (
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        async for _chunk in team_response_stream(
+            agent_ids=team_agent_ids,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            mode=TeamMode.COORDINATE,
+            run_id="run-789",
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_returns_friendly_error_for_errored_run_output() -> None:
+    """Errored TeamRunOutput fallbacks should use the normal team error path."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield TeamRunOutput(content="validation failed in team", status=RunStatus.error)
+
+    team_agent_ids = [
+        MatrixID.from_agent(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+
+    with (
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=team_agent_ids,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                mode=TeamMode.COORDINATE,
+            )
+        ]
+
+    assert chunks == ["friendly-team-error"]
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -> None:
+    """Streaming inline-media retries must rotate the team run_id after errored fallback output."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+
+    call_run_ids: list[str | None] = []
+    callback_run_ids: list[str] = []
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        call_run_ids.append(_kwargs["run_id"])
+        if len(call_run_ids) == 1:
+            yield TeamRunOutput(content="Error code: 500 - audio input is not supported", status=RunStatus.error)
+            return
+        yield TeamRunOutput(content="Recovered consensus", status=RunStatus.completed)
+
+    team_agent_ids = [
+        MatrixID.from_agent(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+
+    with (
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=team_agent_ids,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                mode=TeamMode.COORDINATE,
+                media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+                run_id="run-789",
+                run_id_callback=callback_run_ids.append,
+            )
+        ]
+
+    assert len(chunks) == 1
+    assert "Recovered consensus" in str(chunks[0])
+    assert call_run_ids[0] == "run-789"
+    assert call_run_ids[1] is not None
+    assert call_run_ids[1] != "run-789"
+    assert callback_run_ids == [run_id for run_id in call_run_ids if run_id is not None]
 
 
 @pytest.mark.asyncio
