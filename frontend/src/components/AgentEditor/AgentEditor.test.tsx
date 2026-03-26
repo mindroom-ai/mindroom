@@ -325,7 +325,7 @@ describe('AgentEditor', () => {
     expect(screen.getByText('Customized')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Shell Commands' }));
 
-    expect(screen.getByText('Shell Commands settings')).toBeInTheDocument();
+    expect(screen.getByText('Shell Commands — Per-Agent Settings')).toBeInTheDocument();
     expect(screen.getByDisplayValue('GITEA_TOKEN')).toBeInTheDocument();
   });
 

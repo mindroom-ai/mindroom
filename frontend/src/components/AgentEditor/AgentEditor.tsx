@@ -1364,7 +1364,8 @@ export function AgentEditor() {
                   agentId={selectedAgent.id}
                   toolName={activeToolNameSelected ? activeToolName : null}
                   toolDisplayName={activeTool?.display_name ?? activeToolName ?? undefined}
-                  fields={activeTool?.agent_override_fields ?? null}
+                  overrideFields={activeTool?.agent_override_fields ?? null}
+                  configFields={activeTool?.config_fields ?? null}
                 />
               </div>
             </>
