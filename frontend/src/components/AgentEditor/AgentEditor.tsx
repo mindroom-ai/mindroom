@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useState, useMemo, useRef } from 'react';
+import { useEffect, useCallback, useState, useMemo } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { useSwipeBack } from '@/hooks/useSwipeBack';
 import { Button } from '@/components/ui/button';
@@ -55,7 +55,6 @@ export function AgentEditor() {
   } = useConfigStore();
 
   const [activeToolName, setActiveToolName] = useState<string | null>(null);
-  const toolConfigRef = useRef<HTMLDivElement>(null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
   const defaultLearning = config?.defaults.learning ?? true;
   const defaultLearningMode = config?.defaults.learning_mode ?? 'always';
@@ -472,14 +471,6 @@ export function AgentEditor() {
     const n = parseInt(raw, 10);
     return Number.isNaN(n) || n < 0 ? null : n;
   };
-  const activeTool = activeToolName != null ? toolInfoByName.get(activeToolName) ?? null : null;
-  const activeToolNameSelected = activeToolName != null && effectiveTools.includes(activeToolName);
-  useEffect(() => {
-    if (activeToolNameSelected && toolConfigRef.current) {
-      toolConfigRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
-  }, [activeToolName, activeToolNameSelected]);
-
   const toolHasOverrides = (toolName: string): boolean => {
     if (selectedAgentId == null) {
       return false;
@@ -1073,67 +1064,94 @@ export function AgentEditor() {
                           const isChecked = field.value.includes(tool.name);
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
+                          const hasSettings =
+                            (tool.agent_override_fields?.length ?? 0) > 0 ||
+                            (tool.config_fields?.length ?? 0) > 0;
+                          const showSettings = hasSettings || hasOverrides;
 
                           return (
-                            <div
-                              className={`flex items-center justify-between rounded-lg p-2 transition-colors ${
-                                isActive
-                                  ? 'bg-blue-50 dark:bg-blue-500/10'
-                                  : 'hover:bg-gray-50 dark:hover:bg-white/5'
-                              }`}
-                            >
-                              <div className="flex items-center space-x-3 sm:space-x-2">
-                                <Checkbox
-                                  id={`configured-${tool.name}`}
-                                  checked={isChecked}
-                                  aria-label={isChecked ? tool.display_name : undefined}
-                                  onCheckedChange={checked => {
-                                    field.onChange(
-                                      updateSelectedTools(field.value, tool.name, checked === true)
-                                    );
-                                  }}
-                                  className="h-5 w-5 sm:h-4 sm:w-4"
-                                />
-                                {isChecked ? (
-                                  <button
+                            <>
+                              <div
+                                className={`flex items-center justify-between rounded-lg p-2 transition-colors ${
+                                  isActive && showSettings
+                                    ? 'bg-blue-50 dark:bg-blue-500/10'
+                                    : 'hover:bg-gray-50 dark:hover:bg-white/5'
+                                }`}
+                              >
+                                <div className="flex items-center space-x-3 sm:space-x-2">
+                                  <Checkbox
+                                    id={`configured-${tool.name}`}
+                                    checked={isChecked}
+                                    aria-label={isChecked ? tool.display_name : undefined}
+                                    onCheckedChange={checked => {
+                                      field.onChange(
+                                        updateSelectedTools(
+                                          field.value,
+                                          tool.name,
+                                          checked === true
+                                        )
+                                      );
+                                    }}
+                                    className="h-5 w-5 sm:h-4 sm:w-4"
+                                  />
+                                  {isChecked && showSettings ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setActiveToolName(prev =>
+                                          prev === tool.name ? null : tool.name
+                                        )
+                                      }
+                                      className="text-sm font-medium leading-none text-left"
+                                    >
+                                      {tool.display_name}
+                                    </button>
+                                  ) : (
+                                    <label
+                                      htmlFor={`configured-${tool.name}`}
+                                      className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
+                                    >
+                                      {tool.display_name}
+                                    </label>
+                                  )}
+                                  {hasOverrides && (
+                                    <Badge
+                                      variant="secondary"
+                                      className="text-[10px] uppercase tracking-wide"
+                                    >
+                                      Customized
+                                    </Badge>
+                                  )}
+                                </div>
+                                {isChecked && showSettings && (
+                                  <Button
                                     type="button"
-                                    onClick={() => setActiveToolName(tool.name)}
-                                    className="text-sm font-medium leading-none text-left"
+                                    variant={isActive ? 'secondary' : 'ghost'}
+                                    size="sm"
+                                    onClick={() =>
+                                      setActiveToolName(prev =>
+                                        prev === tool.name ? null : tool.name
+                                      )
+                                    }
+                                    className="h-8 px-2"
                                   >
-                                    {tool.display_name}
-                                  </button>
-                                ) : (
-                                  <label
-                                    htmlFor={`configured-${tool.name}`}
-                                    className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
-                                  >
-                                    {tool.display_name}
-                                  </label>
-                                )}
-                                {hasOverrides && (
-                                  <Badge
-                                    variant="secondary"
-                                    className="text-[10px] uppercase tracking-wide"
-                                  >
-                                    Customized
-                                  </Badge>
+                                    <Settings className="h-4 w-4 sm:mr-1" />
+                                    <span className="hidden sm:inline">
+                                      {hasOverrides ? 'Edit' : 'Settings'}
+                                    </span>
+                                  </Button>
                                 )}
                               </div>
-                              {isChecked && (
-                                <Button
-                                  type="button"
-                                  variant={isActive ? 'secondary' : 'ghost'}
-                                  size="sm"
-                                  onClick={() => setActiveToolName(tool.name)}
-                                  className="h-8 px-2"
-                                >
-                                  <Settings className="h-4 w-4 sm:mr-1" />
-                                  <span className="hidden sm:inline">
-                                    {hasOverrides ? 'Edit' : 'Settings'}
-                                  </span>
-                                </Button>
+                              {isChecked && isActive && showSettings && (
+                                <ToolConfigPanel
+                                  agentId={selectedAgent.id}
+                                  toolName={tool.name}
+                                  toolDisplayName={tool.display_name}
+                                  overrideFields={tool.agent_override_fields ?? null}
+                                  configFields={tool.config_fields ?? null}
+                                />
                               )}
-                            </div>
+                            </>
                           );
                         }}
                       />
@@ -1172,67 +1190,94 @@ export function AgentEditor() {
                           const isChecked = field.value.includes(tool.name);
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
+                          const hasSettings =
+                            (tool.agent_override_fields?.length ?? 0) > 0 ||
+                            (tool.config_fields?.length ?? 0) > 0;
+                          const showSettings = hasSettings || hasOverrides;
 
                           return (
-                            <div
-                              className={`flex items-center justify-between rounded-lg p-2 transition-colors ${
-                                isActive
-                                  ? 'bg-blue-50 dark:bg-blue-500/10'
-                                  : 'hover:bg-gray-50 dark:hover:bg-white/5'
-                              }`}
-                            >
-                              <div className="flex items-center space-x-3 sm:space-x-2">
-                                <Checkbox
-                                  id={`default-${tool.name}`}
-                                  checked={isChecked}
-                                  aria-label={isChecked ? tool.display_name : undefined}
-                                  onCheckedChange={checked => {
-                                    field.onChange(
-                                      updateSelectedTools(field.value, tool.name, checked === true)
-                                    );
-                                  }}
-                                  className="h-5 w-5 sm:h-4 sm:w-4"
-                                />
-                                {isChecked ? (
-                                  <button
+                            <>
+                              <div
+                                className={`flex items-center justify-between rounded-lg p-2 transition-colors ${
+                                  isActive && showSettings
+                                    ? 'bg-blue-50 dark:bg-blue-500/10'
+                                    : 'hover:bg-gray-50 dark:hover:bg-white/5'
+                                }`}
+                              >
+                                <div className="flex items-center space-x-3 sm:space-x-2">
+                                  <Checkbox
+                                    id={`default-${tool.name}`}
+                                    checked={isChecked}
+                                    aria-label={isChecked ? tool.display_name : undefined}
+                                    onCheckedChange={checked => {
+                                      field.onChange(
+                                        updateSelectedTools(
+                                          field.value,
+                                          tool.name,
+                                          checked === true
+                                        )
+                                      );
+                                    }}
+                                    className="h-5 w-5 sm:h-4 sm:w-4"
+                                  />
+                                  {isChecked && showSettings ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setActiveToolName(prev =>
+                                          prev === tool.name ? null : tool.name
+                                        )
+                                      }
+                                      className="text-sm font-medium leading-none text-left"
+                                    >
+                                      {tool.display_name}
+                                    </button>
+                                  ) : (
+                                    <label
+                                      htmlFor={`default-${tool.name}`}
+                                      className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
+                                    >
+                                      {tool.display_name}
+                                    </label>
+                                  )}
+                                  {hasOverrides && (
+                                    <Badge
+                                      variant="secondary"
+                                      className="text-[10px] uppercase tracking-wide"
+                                    >
+                                      Customized
+                                    </Badge>
+                                  )}
+                                </div>
+                                {isChecked && showSettings && (
+                                  <Button
                                     type="button"
-                                    onClick={() => setActiveToolName(tool.name)}
-                                    className="text-sm font-medium leading-none text-left"
+                                    variant={isActive ? 'secondary' : 'ghost'}
+                                    size="sm"
+                                    onClick={() =>
+                                      setActiveToolName(prev =>
+                                        prev === tool.name ? null : tool.name
+                                      )
+                                    }
+                                    className="h-8 px-2"
                                   >
-                                    {tool.display_name}
-                                  </button>
-                                ) : (
-                                  <label
-                                    htmlFor={`default-${tool.name}`}
-                                    className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
-                                  >
-                                    {tool.display_name}
-                                  </label>
-                                )}
-                                {hasOverrides && (
-                                  <Badge
-                                    variant="secondary"
-                                    className="text-[10px] uppercase tracking-wide"
-                                  >
-                                    Customized
-                                  </Badge>
+                                    <Settings className="h-4 w-4 sm:mr-1" />
+                                    <span className="hidden sm:inline">
+                                      {hasOverrides ? 'Edit' : 'Settings'}
+                                    </span>
+                                  </Button>
                                 )}
                               </div>
-                              {isChecked && (
-                                <Button
-                                  type="button"
-                                  variant={isActive ? 'secondary' : 'ghost'}
-                                  size="sm"
-                                  onClick={() => setActiveToolName(tool.name)}
-                                  className="h-8 px-2"
-                                >
-                                  <Settings className="h-4 w-4 sm:mr-1" />
-                                  <span className="hidden sm:inline">
-                                    {hasOverrides ? 'Edit' : 'Settings'}
-                                  </span>
-                                </Button>
+                              {isChecked && isActive && showSettings && (
+                                <ToolConfigPanel
+                                  agentId={selectedAgent.id}
+                                  toolName={tool.name}
+                                  toolDisplayName={tool.display_name}
+                                  overrideFields={tool.agent_override_fields ?? null}
+                                  configFields={tool.config_fields ?? null}
+                                />
                               )}
-                            </div>
+                            </>
                           );
                         }}
                       />
@@ -1272,85 +1317,108 @@ export function AgentEditor() {
                           const setupBlocked = tool.dashboard_configuration_supported === false;
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
+                          const hasSettings =
+                            (tool.agent_override_fields?.length ?? 0) > 0 ||
+                            (tool.config_fields?.length ?? 0) > 0;
+                          const showSettings = hasSettings || hasOverrides;
 
                           return (
-                            <div
-                              className={`rounded-lg p-2 transition-colors ${
-                                isActive
-                                  ? 'bg-blue-50 dark:bg-blue-500/10'
-                                  : 'hover:bg-gray-50 dark:hover:bg-white/5'
-                              }`}
-                            >
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center space-x-3 sm:space-x-2">
-                                  <Checkbox
-                                    id={`setup-${tool.name}`}
-                                    checked={isChecked}
-                                    aria-label={isChecked ? tool.display_name : undefined}
-                                    onCheckedChange={checked => {
-                                      field.onChange(
-                                        updateSelectedTools(
-                                          field.value,
-                                          tool.name,
-                                          checked === true
-                                        )
-                                      );
-                                    }}
-                                    className="h-5 w-5 sm:h-4 sm:w-4"
-                                  />
-                                  {isChecked ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => setActiveToolName(tool.name)}
-                                      className="text-sm font-medium leading-none text-left"
-                                    >
-                                      {tool.display_name}
-                                    </button>
-                                  ) : (
-                                    <label
-                                      htmlFor={`setup-${tool.name}`}
-                                      className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
-                                    >
-                                      {tool.display_name}
-                                    </label>
-                                  )}
-                                  {hasOverrides && (
-                                    <Badge
-                                      variant="secondary"
-                                      className="text-[10px] uppercase tracking-wide"
-                                    >
-                                      Customized
+                            <>
+                              <div
+                                className={`rounded-lg p-2 transition-colors ${
+                                  isActive && showSettings
+                                    ? 'bg-blue-50 dark:bg-blue-500/10'
+                                    : 'hover:bg-gray-50 dark:hover:bg-white/5'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center space-x-3 sm:space-x-2">
+                                    <Checkbox
+                                      id={`setup-${tool.name}`}
+                                      checked={isChecked}
+                                      aria-label={isChecked ? tool.display_name : undefined}
+                                      onCheckedChange={checked => {
+                                        field.onChange(
+                                          updateSelectedTools(
+                                            field.value,
+                                            tool.name,
+                                            checked === true
+                                          )
+                                        );
+                                      }}
+                                      className="h-5 w-5 sm:h-4 sm:w-4"
+                                    />
+                                    {isChecked && showSettings ? (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setActiveToolName(prev =>
+                                            prev === tool.name ? null : tool.name
+                                          )
+                                        }
+                                        className="text-sm font-medium leading-none text-left"
+                                      >
+                                        {tool.display_name}
+                                      </button>
+                                    ) : (
+                                      <label
+                                        htmlFor={`setup-${tool.name}`}
+                                        className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
+                                      >
+                                        {tool.display_name}
+                                      </label>
+                                    )}
+                                    {hasOverrides && (
+                                      <Badge
+                                        variant="secondary"
+                                        className="text-[10px] uppercase tracking-wide"
+                                      >
+                                        Customized
+                                      </Badge>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <Badge variant="secondary" className="text-xs">
+                                      Setup required
                                     </Badge>
-                                  )}
+                                    {isChecked && showSettings && (
+                                      <Button
+                                        type="button"
+                                        variant={isActive ? 'secondary' : 'ghost'}
+                                        size="sm"
+                                        onClick={() =>
+                                          setActiveToolName(prev =>
+                                            prev === tool.name ? null : tool.name
+                                          )
+                                        }
+                                        className="h-8 px-2"
+                                      >
+                                        <Settings className="h-4 w-4 sm:mr-1" />
+                                        <span className="hidden sm:inline">
+                                          {hasOverrides ? 'Edit' : 'Settings'}
+                                        </span>
+                                      </Button>
+                                    )}
+                                  </div>
                                 </div>
-                                <div className="flex items-center gap-2">
-                                  <Badge variant="secondary" className="text-xs">
-                                    Setup required
-                                  </Badge>
-                                  {isChecked && (
-                                    <Button
-                                      type="button"
-                                      variant={isActive ? 'secondary' : 'ghost'}
-                                      size="sm"
-                                      onClick={() => setActiveToolName(tool.name)}
-                                      className="h-8 px-2"
-                                    >
-                                      <Settings className="h-4 w-4 sm:mr-1" />
-                                      <span className="hidden sm:inline">
-                                        {hasOverrides ? 'Edit' : 'Settings'}
-                                      </span>
-                                    </Button>
-                                  )}
-                                </div>
+                                {setupBlocked && (
+                                  <p className="pl-8 pt-1 text-xs text-muted-foreground">
+                                    This scope can use runtime env credentials, but dashboard
+                                    credential setup is only supported for shared deployment
+                                    credentials.
+                                  </p>
+                                )}
                               </div>
-                              {setupBlocked && (
-                                <p className="pl-8 pt-1 text-xs text-muted-foreground">
-                                  This scope can use runtime env credentials, but dashboard
-                                  credential setup is only supported for shared deployment
-                                  credentials.
-                                </p>
+                              {isChecked && isActive && showSettings && (
+                                <ToolConfigPanel
+                                  agentId={selectedAgent.id}
+                                  toolName={tool.name}
+                                  toolDisplayName={tool.display_name}
+                                  overrideFields={tool.agent_override_fields ?? null}
+                                  configFields={tool.config_fields ?? null}
+                                />
                               )}
-                            </div>
+                            </>
                           );
                         }}
                       />
@@ -1358,16 +1426,6 @@ export function AgentEditor() {
                   </div>
                 </div>
               )}
-
-              <div ref={toolConfigRef} className="pt-3">
-                <ToolConfigPanel
-                  agentId={selectedAgent.id}
-                  toolName={activeToolNameSelected ? activeToolName : null}
-                  toolDisplayName={activeTool?.display_name ?? activeToolName ?? undefined}
-                  overrideFields={activeTool?.agent_override_fields ?? null}
-                  configFields={activeTool?.config_fields ?? null}
-                />
-              </div>
             </>
           )}
         </div>
