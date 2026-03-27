@@ -5,8 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from mindroom.logging_config import get_logger
+
 from .sender import get_hook_message_sender
-from .types import EnrichmentCachePolicy, EnrichmentItem
+from .types import (
+    EVENT_TOOL_AFTER_CALL,
+    EVENT_TOOL_BEFORE_CALL,
+    EnrichmentCachePolicy,
+    EnrichmentItem,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -17,6 +24,38 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
+
+
+def _resolve_plugin_state_root(
+    runtime_paths: RuntimePaths | None,
+    plugin_name: str,
+) -> Path:
+    """Return the plugin state root, creating it on first access."""
+    if runtime_paths is None:
+        msg = "runtime_paths are required to access hook state_root"
+        raise RuntimeError(msg)
+    plugin_root = runtime_paths.storage_root / "plugins" / plugin_name
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    return plugin_root
+
+
+async def _send_hook_message(
+    logger: structlog.stdlib.BoundLogger,
+    plugin_name: str,
+    event_name: str,
+    room_id: str,
+    text: str,
+    *,
+    thread_id: str | None = None,
+    extra_content: dict[str, Any] | None = None,
+) -> str | None:
+    """Send a Matrix message from a hook and return the event ID when available."""
+    sender = get_hook_message_sender()
+    if sender is None:
+        logger.warning("send_message called but no sender registered")
+        return None
+    source_hook = f"{plugin_name}:{event_name}"
+    return await sender(room_id, text, thread_id, source_hook, extra_content)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,9 +113,7 @@ class HookContext:
     @property
     def state_root(self) -> Path:
         """Return the plugin state root, creating it on first access."""
-        plugin_root = self.runtime_paths.storage_root / "plugins" / self.plugin_name
-        plugin_root.mkdir(parents=True, exist_ok=True)
-        return plugin_root
+        return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
 
     async def send_message(
         self,
@@ -87,17 +124,20 @@ class HookContext:
         extra_content: dict[str, Any] | None = None,
     ) -> str | None:
         """Send a Matrix message from a hook and return the event ID when available."""
-        sender = get_hook_message_sender()
-        if sender is None:
-            self.logger.warning("send_message called but no sender registered")
-            return None
-        source_hook = f"{self.plugin_name}:{self.event_name}"
-        return await sender(room_id, text, thread_id, source_hook, extra_content)
+        return await _send_hook_message(
+            self.logger,
+            self.plugin_name,
+            self.event_name,
+            room_id,
+            text,
+            thread_id=thread_id,
+            extra_content=extra_content,
+        )
 
 
 @dataclass(slots=True)
 class MessageReceivedContext(HookContext):
-    """Context for observer hooks that inspect inbound messages."""
+    """Context for message:received hooks."""
 
     envelope: MessageEnvelope
     suppress: bool = False
@@ -105,7 +145,7 @@ class MessageReceivedContext(HookContext):
 
 @dataclass(slots=True)
 class MessageEnrichContext(HookContext):
-    """Context for hooks that append model-facing message enrichment."""
+    """Context for message:enrich hooks."""
 
     envelope: MessageEnvelope
     target_entity_name: str
@@ -125,21 +165,21 @@ class MessageEnrichContext(HookContext):
 
 @dataclass(slots=True)
 class BeforeResponseContext(HookContext):
-    """Context for hooks that mutate or suppress an outbound draft."""
+    """Context for message:before_response hooks."""
 
     draft: ResponseDraft
 
 
 @dataclass(slots=True)
 class AfterResponseContext(HookContext):
-    """Context for observer hooks that inspect a sent response."""
+    """Context for message:after_response hooks."""
 
     result: ResponseResult
 
 
 @dataclass(slots=True)
 class AgentLifecycleContext(HookContext):
-    """Context emitted around agent and team startup or shutdown."""
+    """Context for agent lifecycle observer hooks."""
 
     entity_name: str
     entity_type: str
@@ -150,7 +190,7 @@ class AgentLifecycleContext(HookContext):
 
 @dataclass(slots=True)
 class ScheduleFiredContext(HookContext):
-    """Context for hooks that intercept scheduled workflow delivery."""
+    """Context for schedule:fired hooks."""
 
     task_id: str
     workflow: ScheduledWorkflow
@@ -163,7 +203,7 @@ class ScheduleFiredContext(HookContext):
 
 @dataclass(slots=True)
 class ReactionReceivedContext(HookContext):
-    """Context for hooks that observe Matrix reactions."""
+    """Context for reaction:received hooks."""
 
     room_id: str
     event_id: str
@@ -175,7 +215,7 @@ class ReactionReceivedContext(HookContext):
 
 @dataclass(slots=True)
 class ConfigReloadedContext(HookContext):
-    """Context for hooks fired after a config reload completes."""
+    """Context for config:reloaded hooks."""
 
     changed_entities: tuple[str, ...]
     added_entities: tuple[str, ...]
@@ -185,10 +225,109 @@ class ConfigReloadedContext(HookContext):
 
 @dataclass(slots=True)
 class CustomEventContext(HookContext):
-    """Context for plugin-defined custom events emitted from tools."""
+    """Context for custom plugin-emitted hook events."""
 
     payload: dict[str, Any]
     source_plugin: str
     room_id: str | None
     thread_id: str | None
     sender_id: str | None
+
+
+@dataclass(slots=True)
+class ToolBeforeCallContext:
+    """Context passed to tool:before_call hook callbacks."""
+
+    tool_name: str
+    arguments: dict[str, Any]
+    agent_name: str
+    room_id: str | None
+    thread_id: str | None
+    requester_id: str | None
+    session_id: str | None
+    declined: bool = False
+    decline_reason: str = ""
+    event_name: str = EVENT_TOOL_BEFORE_CALL
+    plugin_name: str = ""
+    settings: dict[str, Any] = field(default_factory=dict)
+    config: Config | None = None
+    runtime_paths: RuntimePaths | None = None
+    logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
+    correlation_id: str = ""
+
+    def decline(self, reason: str) -> None:
+        """Mark the tool call as declined with one model-facing reason."""
+        self.declined = True
+        self.decline_reason = reason
+
+    @property
+    def state_root(self) -> Path:
+        """Return the plugin state root when runtime paths are available."""
+        return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
+
+    async def send_message(
+        self,
+        room_id: str,
+        text: str,
+        *,
+        thread_id: str | None = None,
+        extra_content: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Send a Matrix message from a tool hook and return the event ID when available."""
+        return await _send_hook_message(
+            self.logger,
+            self.plugin_name,
+            self.event_name,
+            room_id,
+            text,
+            thread_id=thread_id,
+            extra_content=extra_content,
+        )
+
+
+@dataclass(slots=True)
+class ToolAfterCallContext:
+    """Context passed to tool:after_call hook callbacks."""
+
+    tool_name: str
+    arguments: dict[str, Any]
+    agent_name: str
+    room_id: str | None
+    thread_id: str | None
+    requester_id: str | None
+    session_id: str | None
+    result: object | None
+    error: BaseException | None
+    blocked: bool
+    duration_ms: float
+    event_name: str = EVENT_TOOL_AFTER_CALL
+    plugin_name: str = ""
+    settings: dict[str, Any] = field(default_factory=dict)
+    config: Config | None = None
+    runtime_paths: RuntimePaths | None = None
+    logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
+    correlation_id: str = ""
+
+    @property
+    def state_root(self) -> Path:
+        """Return the plugin state root when runtime paths are available."""
+        return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
+
+    async def send_message(
+        self,
+        room_id: str,
+        text: str,
+        *,
+        thread_id: str | None = None,
+        extra_content: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Send a Matrix message from a tool hook and return the event ID when available."""
+        return await _send_hook_message(
+            self.logger,
+            self.plugin_name,
+            self.event_name,
+            room_id,
+            text,
+            thread_id=thread_id,
+            extra_content=extra_content,
+        )

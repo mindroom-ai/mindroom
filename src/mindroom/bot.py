@@ -747,6 +747,7 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             knowledge=knowledge,
             execution_identity=execution_identity,
+            hook_registry=self.hook_registry,
         )
 
     @cached_property

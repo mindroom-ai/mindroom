@@ -1,0 +1,332 @@
+"""Bridge Agno per-function tool hooks into MindRoom's hook registry."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import time
+from contextvars import copy_context
+from copy import deepcopy
+from threading import Thread
+from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
+from weakref import WeakKeyDictionary
+
+from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, emit, emit_gate
+from mindroom.hooks.types import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.worker_routing import active_tool_execution_identity
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Coroutine
+
+    from agno.tools import Toolkit
+    from agno.tools.function import Function
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.hooks.registry import HookRegistry
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+_DECLINED_RESULT_TEMPLATE = (
+    "[TOOL CALL DECLINED]\n"
+    "Tool: {tool_name}\n"
+    "Reason: {reason}\n\n"
+    "Adjust your approach — try a different tool or different arguments."
+)
+_SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
+
+
+def _resolved_thread_id(
+    default_thread_id: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    request_execution_identity: ToolExecutionIdentity | None,
+    runtime_context: ToolRuntimeContext | None,
+) -> str | None:
+    if runtime_context is not None:
+        return runtime_context.resolved_thread_id or runtime_context.thread_id
+
+    if execution_identity is not None and (
+        execution_identity.resolved_thread_id is not None or execution_identity.thread_id is not None
+    ):
+        return execution_identity.resolved_thread_id or execution_identity.thread_id
+
+    if request_execution_identity is not None:
+        return request_execution_identity.resolved_thread_id or request_execution_identity.thread_id
+
+    return default_thread_id
+
+
+def _build_context_kwargs(  # noqa: C901
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    agent_name: str | None,
+    room_id: str | None,
+    thread_id: str | None,
+    requester_id: str | None,
+    session_id: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    config: Config | None,
+    runtime_paths: RuntimePaths | None,
+) -> dict[str, Any]:
+    runtime_context = get_tool_runtime_context()
+    request_execution_identity = active_tool_execution_identity(None)
+
+    resolved_agent_name = agent_name
+    if not resolved_agent_name and runtime_context is not None:
+        resolved_agent_name = runtime_context.agent_name
+    elif not resolved_agent_name and execution_identity is not None:
+        resolved_agent_name = execution_identity.agent_name
+
+    resolved_room_id = room_id
+    if runtime_context is not None:
+        resolved_room_id = runtime_context.room_id
+    elif execution_identity is not None and execution_identity.room_id is not None:
+        resolved_room_id = execution_identity.room_id
+    elif request_execution_identity is not None and request_execution_identity.room_id is not None:
+        resolved_room_id = request_execution_identity.room_id
+
+    resolved_requester_id = requester_id
+    if runtime_context is not None:
+        resolved_requester_id = runtime_context.requester_id
+    elif execution_identity is not None and execution_identity.requester_id is not None:
+        resolved_requester_id = execution_identity.requester_id
+    elif request_execution_identity is not None and request_execution_identity.requester_id is not None:
+        resolved_requester_id = request_execution_identity.requester_id
+
+    resolved_session_id = session_id
+    if execution_identity is not None and execution_identity.session_id is not None:
+        resolved_session_id = execution_identity.session_id
+    elif request_execution_identity is not None and request_execution_identity.session_id is not None:
+        resolved_session_id = request_execution_identity.session_id
+
+    correlation_id = "tool-hook:" + uuid4().hex
+    if runtime_context is not None and runtime_context.correlation_id:
+        correlation_id = runtime_context.correlation_id
+
+    return {
+        "tool_name": tool_name,
+        "arguments": deepcopy(arguments),
+        "agent_name": resolved_agent_name or "",
+        "room_id": resolved_room_id,
+        "thread_id": _resolved_thread_id(thread_id, execution_identity, request_execution_identity, runtime_context),
+        "requester_id": resolved_requester_id,
+        "session_id": resolved_session_id,
+        "config": runtime_context.config if runtime_context is not None else config,
+        "runtime_paths": runtime_context.runtime_paths if runtime_context is not None else runtime_paths,
+        "correlation_id": correlation_id,
+    }
+
+
+def _format_declined_result(tool_name: str, reason: str) -> str:
+    return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
+
+
+async def _await_result(awaitable: Awaitable[object]) -> object:
+    return await awaitable
+
+
+def _run_coroutine_from_sync(coroutine: object) -> object:
+    if not inspect.isawaitable(coroutine):
+        return coroutine
+    runner_coroutine = cast("Coroutine[Any, Any, object]", _await_result(coroutine))
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(runner_coroutine)
+
+    result: object | None = None
+    error: BaseException | None = None
+    context = copy_context()
+
+    def runner() -> None:
+        nonlocal error, result
+        try:
+            result = context.run(asyncio.run, runner_coroutine)
+        except BaseException as exc:  # pragma: no cover - re-raised in caller thread
+            error = exc
+
+    thread = Thread(target=runner)
+    thread.start()
+    thread.join()
+    if error is not None:
+        raise error
+    return result
+
+
+async def _call_tool(func: Callable[..., Any], args: dict[str, Any]) -> object:
+    result = func(**args)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+async def _execute_bridge(
+    *,
+    hook_registry: HookRegistry,
+    tool_name: str,
+    func: Callable[..., Any],
+    args: dict[str, Any],
+    agent_name: str | None,
+    room_id: str | None,
+    thread_id: str | None,
+    requester_id: str | None,
+    session_id: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    config: Config | None,
+    runtime_paths: RuntimePaths | None,
+    has_before_hooks: bool,
+    has_after_hooks: bool,
+) -> object:
+    started_at = time.perf_counter()
+    context_kwargs = _build_context_kwargs(
+        tool_name=tool_name,
+        arguments=args,
+        agent_name=agent_name,
+        room_id=room_id,
+        thread_id=thread_id,
+        requester_id=requester_id,
+        session_id=session_id,
+        execution_identity=execution_identity,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    if has_before_hooks:
+        before_context = ToolBeforeCallContext(**context_kwargs)
+        await emit_gate(hook_registry, EVENT_TOOL_BEFORE_CALL, before_context)
+        if before_context.declined:
+            result = _format_declined_result(tool_name, before_context.decline_reason)
+            if has_after_hooks:
+                after_context = ToolAfterCallContext(
+                    **context_kwargs,
+                    result=result,
+                    error=None,
+                    blocked=True,
+                    duration_ms=(time.perf_counter() - started_at) * 1000,
+                )
+                await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
+            return result
+
+    result: object | None = None
+    error: BaseException | None = None
+    try:
+        result = await _call_tool(func, args)
+    except BaseException as exc:
+        error = exc
+        if has_after_hooks:
+            after_context = ToolAfterCallContext(
+                **context_kwargs,
+                result=None,
+                error=error,
+                blocked=False,
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+            )
+            await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
+        raise
+
+    if has_after_hooks:
+        after_context = ToolAfterCallContext(
+            **context_kwargs,
+            result=result,
+            error=error,
+            blocked=False,
+            duration_ms=(time.perf_counter() - started_at) * 1000,
+        )
+        await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
+    return result
+
+
+def build_tool_hook_bridge(
+    hook_registry: HookRegistry,
+    agent_name: str | None,
+    room_id: str | None = None,
+    thread_id: str | None = None,
+    requester_id: str | None = None,
+    session_id: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+    config: Config | None = None,
+    runtime_paths: RuntimePaths | None = None,
+) -> Callable[..., Any] | None:
+    """Return one Agno-compatible tool hook bridge when any tool hooks are registered."""
+    has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
+    has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
+    if not has_before_hooks and not has_after_hooks:
+        return None
+
+    async def bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> object:
+        return await _execute_bridge(
+            hook_registry=hook_registry,
+            tool_name=name,
+            func=func,
+            args=args,
+            agent_name=agent_name,
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=requester_id,
+            session_id=session_id,
+            execution_identity=execution_identity,
+            config=config,
+            runtime_paths=runtime_paths,
+            has_before_hooks=has_before_hooks,
+            has_after_hooks=has_after_hooks,
+        )
+
+    def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> object:
+        if inspect.iscoroutinefunction(func):
+            return _run_coroutine_from_sync(_call_tool(func, args))
+
+        return _run_coroutine_from_sync(
+            _execute_bridge(
+                hook_registry=hook_registry,
+                tool_name=name,
+                func=func,
+                args=args,
+                agent_name=agent_name,
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=requester_id,
+                session_id=session_id,
+                execution_identity=execution_identity,
+                config=config,
+                runtime_paths=runtime_paths,
+                has_before_hooks=has_before_hooks,
+                has_after_hooks=has_after_hooks,
+            ),
+        )
+
+    _SYNC_BRIDGES[bridge] = sync_bridge
+    return bridge
+
+
+def prepend_tool_hook_bridge(
+    toolkit: Toolkit,
+    bridge: Callable[..., Any] | None,
+) -> Toolkit:
+    """Prepend one bridge hook to every function in a toolkit, preserving existing hooks."""
+    if bridge is None:
+        return toolkit
+
+    seen_functions: set[int] = set()
+    for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
+        if id(function) in seen_functions:
+            continue
+        seen_functions.add(id(function))
+        _prepend_function_tool_hook(function, bridge)
+    return toolkit
+
+
+def _prepend_function_tool_hook(function: Function, bridge: Callable[..., Any]) -> None:
+    sync_bridge = _SYNC_BRIDGES.get(bridge)
+    is_async_entrypoint = inspect.iscoroutinefunction(function.entrypoint) or inspect.isasyncgenfunction(
+        function.entrypoint,
+    )
+    bridge_hooks = [bridge]
+    if not is_async_entrypoint and sync_bridge is not None:
+        bridge_hooks.append(sync_bridge)
+
+    existing_hooks = [hook for hook in list(function.tool_hooks or []) if hook not in bridge_hooks]
+    function.tool_hooks = [*bridge_hooks, *existing_hooks]

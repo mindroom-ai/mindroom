@@ -14,6 +14,8 @@ from .context import (
     ResponseDraft,
     ResponseResult,
     ScheduleFiredContext,
+    ToolAfterCallContext,
+    ToolBeforeCallContext,
 )
 from .decorators import hook
 from .enrichment import (
@@ -22,7 +24,7 @@ from .enrichment import (
     strip_enrichment_block,
     strip_enrichment_from_session_storage,
 )
-from .execution import emit, emit_collect, emit_transform
+from .execution import emit, emit_collect, emit_gate, emit_transform
 from .registry import HookRegistry
 from .sender import (
     HookMessageSender,
@@ -41,6 +43,8 @@ from .types import (
     EVENT_MESSAGE_RECEIVED,
     EVENT_REACTION_RECEIVED,
     EVENT_SCHEDULE_FIRED,
+    EVENT_TOOL_AFTER_CALL,
+    EVENT_TOOL_BEFORE_CALL,
     EnrichmentItem,
     RegisteredHook,
 )
@@ -56,6 +60,8 @@ __all__ = [
     "EVENT_MESSAGE_RECEIVED",
     "EVENT_REACTION_RECEIVED",
     "EVENT_SCHEDULE_FIRED",
+    "EVENT_TOOL_AFTER_CALL",
+    "EVENT_TOOL_BEFORE_CALL",
     "AfterResponseContext",
     "AgentLifecycleContext",
     "BeforeResponseContext",
@@ -73,10 +79,13 @@ __all__ = [
     "ResponseDraft",
     "ResponseResult",
     "ScheduleFiredContext",
+    "ToolAfterCallContext",
+    "ToolBeforeCallContext",
     "clear_hook_message_sender",
     "compute_enrichment_digest",
     "emit",
     "emit_collect",
+    "emit_gate",
     "emit_transform",
     "get_hook_message_sender",
     "hook",
