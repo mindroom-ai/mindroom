@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
+from uuid import uuid4
 
 from agno.agent import Agent
 from agno.models.message import Message
@@ -12,6 +14,8 @@ from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
 from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
 from agno.run.agent import ToolCallStartedEvent as AgentToolCallStartedEvent
+from agno.run.base import RunStatus
+from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
@@ -71,6 +75,13 @@ class TeamMode(str, Enum):
 
     COORDINATE = "coordinate"  # Leader delegates and synthesizes (can be sequential OR parallel)
     COLLABORATE = "collaborate"  # All members work on same task in parallel
+
+
+def _next_retry_run_id(run_id: str | None) -> str | None:
+    """Return a fresh Agno run identifier for a retry attempt."""
+    if run_id is None:
+        return None
+    return str(uuid4())
 
 
 class _TeamModeDecision(BaseModel):
@@ -1116,7 +1127,7 @@ def select_model_for_team(
     return "default"
 
 
-async def team_response(
+async def team_response(  # noqa: C901, PLR0915
     agent_names: list[str],
     mode: TeamMode,
     message: str,
@@ -1126,6 +1137,8 @@ async def team_response(
     model_name: str | None = None,
     media: MediaInputs | None = None,
     session_id: str | None = None,
+    run_id: str | None = None,
+    run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
     *,
     reason_prefix: str = "Team request",
@@ -1160,10 +1173,13 @@ async def team_response(
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
     logger.info(f"TEAM PROMPT: {prompt[:500]}")
 
-    async def _run(current_prompt: str, current_media_inputs: MediaInputs) -> object:
+    async def _run(current_prompt: str, current_media_inputs: MediaInputs, current_run_id: str | None) -> object:
+        if run_id_callback is not None and current_run_id is not None:
+            run_id_callback(current_run_id)
         return await team.arun(
             current_prompt,
             session_id=session_id,
+            run_id=current_run_id,
             user_id=user_id,
             audio=current_media_inputs.audio,
             images=current_media_inputs.images,
@@ -1171,22 +1187,51 @@ async def team_response(
             videos=current_media_inputs.videos,
         )
 
-    try:
-        response = await _run(prompt, media_inputs)
-    except Exception as e:
-        if not should_retry_without_inline_media(e, media_inputs):
+    response: object | None = None
+    attempt_prompt = prompt
+    attempt_media_inputs = media_inputs
+    attempt_run_id = run_id
+
+    for retried_without_inline_media in (False, True):
+        try:
+            response = await _run(attempt_prompt, attempt_media_inputs, attempt_run_id)
+        except Exception as e:
+            if not retried_without_inline_media and should_retry_without_inline_media(e, attempt_media_inputs):
+                logger.warning(
+                    "Retrying team response without inline media after validation error",
+                    agents=agent_list,
+                    error=str(e),
+                )
+                attempt_prompt = append_inline_media_fallback_prompt(prompt)
+                attempt_media_inputs = MediaInputs()
+                attempt_run_id = _next_retry_run_id(run_id)
+                continue
+
             logger.exception(f"Error in team response with agents {agent_list}")
             return get_user_friendly_error_message(e, team_name)
-        logger.warning(
-            "Retrying team response without inline media after validation error",
-            agents=agent_list,
-            error=str(e),
-        )
-        try:
-            response = await _run(append_inline_media_fallback_prompt(prompt), MediaInputs())
-        except Exception as retry_error:
-            logger.exception(f"Error in team response with agents {agent_list}")
-            return get_user_friendly_error_message(retry_error, team_name)
+
+        if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
+            error_text = str(response.content or "Unknown team error")
+            if not retried_without_inline_media and should_retry_without_inline_media(error_text, attempt_media_inputs):
+                logger.warning(
+                    "Retrying team response without inline media after errored run output",
+                    agents=agent_list,
+                    error=error_text,
+                )
+                attempt_prompt = append_inline_media_fallback_prompt(prompt)
+                attempt_media_inputs = MediaInputs()
+                attempt_run_id = _next_retry_run_id(run_id)
+                continue
+            logger.warning("Team response returned errored run output", agents=agent_list, error=error_text)
+
+        break
+
+    assert response is not None
+
+    if isinstance(response, TeamRunOutput) and response.status == RunStatus.cancelled:
+        raise asyncio.CancelledError(response.content or "Run cancelled")
+    if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
+        return get_user_friendly_error_message(Exception(str(response.content or "Unknown team error")), team_name)
 
     if isinstance(response, TeamRunOutput):
         if response.member_responses:
@@ -1217,6 +1262,7 @@ async def _team_response_stream_raw(
     model_name: str | None = None,
     media: MediaInputs | None = None,
     session_id: str | None = None,
+    run_id: str | None = None,
     user_id: str | None = None,
 ) -> AsyncIterator[Any]:
     """Yield raw team events (for structured live rendering). Falls back to a final response.
@@ -1246,6 +1292,7 @@ async def _team_response_stream_raw(
             stream=True,
             stream_events=True,
             session_id=session_id,
+            run_id=run_id,
             user_id=user_id,
             audio=current_media_inputs.audio,
             images=current_media_inputs.images,
@@ -1276,6 +1323,8 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
     session_id: str | None = None,
+    run_id: str | None = None,
+    run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
     *,
     reason_prefix: str = "Team request",
@@ -1314,6 +1363,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     attempt_message = message
     attempt_media_inputs = media_inputs
+    attempt_run_id = run_id
     team_name = f"Team ({', '.join(agent_names)})"
 
     per_member: dict[str, str] = {}
@@ -1456,6 +1506,9 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         emitted_output = False
         retry_requested = False
 
+        if run_id_callback is not None and attempt_run_id is not None:
+            run_id_callback(attempt_run_id)
+
         raw_stream = await _team_response_stream_raw(
             team_members=team_members,
             mode=mode,
@@ -1465,6 +1518,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             model_name=model_name,
             media=attempt_media_inputs,
             session_id=session_id,
+            run_id=attempt_run_id,
             user_id=user_id,
         )
         async for event in raw_stream:
@@ -1472,6 +1526,35 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             if isinstance(event, RunOutput):
                 content = _get_response_content(event)
                 yield content
+                return
+
+            if isinstance(event, TeamRunOutput):
+                if event.status == RunStatus.cancelled:
+                    raise asyncio.CancelledError(event.content or "Run cancelled")
+                if event.status == RunStatus.error:
+                    error_text = str(event.content or "Unknown team error")
+                    if (
+                        not retried_without_inline_media
+                        and not emitted_output
+                        and should_retry_without_inline_media(error_text, attempt_media_inputs)
+                    ):
+                        logger.warning(
+                            "Retrying team streaming without inline media after errored run output",
+                            agents=", ".join(agent_names),
+                            error=error_text,
+                        )
+                        attempt_message = append_inline_media_fallback_prompt(message)
+                        attempt_media_inputs = MediaInputs()
+                        attempt_run_id = _next_retry_run_id(run_id)
+                        retry_requested = True
+                        break
+                    yield get_user_friendly_error_message(Exception(error_text), team_name)
+                    return
+                parts = format_team_response(event)
+                team_response_text = (
+                    "\n\n".join(parts) if parts else str(event.content or "No team response generated.")
+                )
+                yield _format_team_header(team_members.display_names) + team_response_text
                 return
 
             # Handle setup/stream-time team errors from provider/model
@@ -1487,12 +1570,16 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                         agents=", ".join(agent_names),
                         error=error_text,
                     )
-                    attempt_message = append_inline_media_fallback_prompt(attempt_message)
+                    attempt_message = append_inline_media_fallback_prompt(message)
                     attempt_media_inputs = MediaInputs()
+                    attempt_run_id = _next_retry_run_id(run_id)
                     retry_requested = True
                     break
                 yield get_user_friendly_error_message(Exception(error_text), team_name)
                 return
+
+            if isinstance(event, TeamRunCancelledEvent):
+                raise asyncio.CancelledError(event.reason or "Run cancelled")
 
             # Individual agent response event
             if isinstance(event, AgentRunContentEvent):
