@@ -18,6 +18,11 @@ logger = get_logger(__name__)
 _mxc_cache: dict[str, tuple[str, float]] = {}
 _cache_ttl = 3600.0  # 1 hour TTL
 
+if hasattr(nio, "RoomMessageFormatted"):
+    type ReadableMessageEvent = nio.RoomMessageFormatted
+else:
+    type ReadableMessageEvent = nio.RoomMessageText | nio.RoomMessageNotice
+
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
     """Extract canonical content dict from a v2 large-message sidecar JSON payload."""
@@ -28,6 +33,17 @@ def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | Non
     if not isinstance(payload, dict):
         return None
     return {key: value for key, value in payload.items() if isinstance(key, str)}
+
+
+def non_text_msgtype(content: dict[str, Any] | None) -> str | None:
+    """Return the Matrix msgtype only when it differs from plain text."""
+    if not isinstance(content, dict):
+        return None
+
+    msgtype = content.get("msgtype")
+    if not isinstance(msgtype, str) or msgtype == "m.text":
+        return None
+    return msgtype
 
 
 def _normalized_content_dict(content: object) -> dict[str, Any]:
@@ -172,7 +188,7 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
 
 
 async def extract_and_resolve_message(
-    event: nio.RoomMessageText | nio.RoomMessageNotice,
+    event: ReadableMessageEvent,
     client: nio.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Extract message data and resolve large message content if needed.
@@ -193,17 +209,16 @@ async def extract_and_resolve_message(
     # Extract basic message data
     preview_content = _normalized_content_dict(event.source.get("content", {}))
     resolved_content = await _resolve_canonical_content(preview_content, client)
-    message_data = {
+    data = {
         "sender": event.sender,
         "body": _content_body(resolved_content, event.body),
         "timestamp": event.server_timestamp,
         "event_id": event.event_id,
         "content": resolved_content,
     }
-    msgtype = resolved_content.get("msgtype")
-    if isinstance(msgtype, str):
-        message_data["msgtype"] = msgtype
-    return message_data
+    if msgtype := non_text_msgtype(data["content"]):
+        data["msgtype"] = msgtype
+    return data
 
 
 async def extract_edit_body(

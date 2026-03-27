@@ -335,3 +335,127 @@ class TestDownloadMxcText:
 
         result = await _download_mxc_text(client, "mxc://server/media123")
         assert result is None
+
+
+class TestCanonicalContentResolution:
+    """Tests for sidecar-backed canonical content extraction."""
+
+    def setup_method(self) -> None:
+        """Clear cache before each test."""
+        _clear_mxc_cache()
+
+    @pytest.mark.asyncio
+    async def test_extract_and_resolve_message_hydrates_v2_content_metadata(self) -> None:
+        """Large-message v2 previews should resolve canonical content keys from the sidecar."""
+        client = AsyncMock()
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b'{"body":"Full body","msgtype":"m.text","io.mindroom.tool_trace":{"version":1,"events":[{"tool":"shell"}]}}'
+        client.download.return_value = response
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "Preview...",
+                    "info": {"mimetype": "application/json"},
+                    "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+                    "io.mindroom.ai_run": {"version": 1, "run_id": "run-preview"},
+                    "url": "mxc://server/file-json",
+                },
+                "event_id": "$event",
+                "sender": "@agent:example.com",
+                "origin_server_ts": 123,
+                "type": "m.room.message",
+                "room_id": "!room:example.com",
+            },
+        )
+
+        result = await extract_and_resolve_message(event, client)
+
+        assert result["body"] == "Full body"
+        assert result["content"]["io.mindroom.tool_trace"] == {"version": 1, "events": [{"tool": "shell"}]}
+        assert "io.mindroom.long_text" not in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_extract_edit_body_hydrates_v2_sidecar_new_content(self) -> None:
+        """Edit extraction should use canonical m.new_content from a v2 sidecar payload."""
+        client = AsyncMock()
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = (
+            b'{"msgtype":"m.text","body":"* Full edit wrapper","m.new_content":{"body":"Full edit body","msgtype":"m.text",'
+            b'"io.mindroom.tool_trace":{"version":1,"events":[{"tool":"web_search"}]}}}'
+        )
+        client.download.return_value = response
+        event_source = {
+            "content": {
+                "body": "* Preview edit",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "Preview edit...",
+                    "msgtype": "m.file",
+                    "info": {"mimetype": "application/json"},
+                    "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+                    "url": "mxc://server/edit-json",
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            },
+        }
+
+        body, resolved_content = await extract_edit_body(event_source, client)
+
+        assert body == "Full edit body"
+        assert resolved_content == {
+            "body": "Full edit body",
+            "msgtype": "m.text",
+            "io.mindroom.tool_trace": {"version": 1, "events": [{"tool": "web_search"}]},
+        }
+
+
+class TestExtractAndResolveMessage:
+    """Tests for extracted read/thread payload formatting."""
+
+    @pytest.mark.asyncio
+    async def test_text_message_omits_msgtype_for_backward_compatibility(self) -> None:
+        """Plain text messages should keep the legacy payload shape."""
+        event = nio.RoomMessageText.from_dict(
+            {
+                "type": "m.room.message",
+                "event_id": "$text",
+                "sender": "@alice:localhost",
+                "origin_server_ts": 1,
+                "content": {"msgtype": "m.text", "body": "hello"},
+            },
+        )
+
+        result = await extract_and_resolve_message(event)
+
+        assert result == {
+            "sender": "@alice:localhost",
+            "body": "hello",
+            "timestamp": 1,
+            "event_id": "$text",
+            "content": {"msgtype": "m.text", "body": "hello"},
+        }
+
+    @pytest.mark.asyncio
+    async def test_notice_message_includes_msgtype(self) -> None:
+        """Notices should expose msgtype so callers can distinguish them from text."""
+        event = nio.RoomMessageNotice.from_dict(
+            {
+                "type": "m.room.message",
+                "event_id": "$notice",
+                "sender": "@mindroom:localhost",
+                "origin_server_ts": 2,
+                "content": {"msgtype": "m.notice", "body": "Compacted 12 messages"},
+            },
+        )
+
+        result = await extract_and_resolve_message(event)
+
+        assert result == {
+            "sender": "@mindroom:localhost",
+            "body": "Compacted 12 messages",
+            "timestamp": 2,
+            "event_id": "$notice",
+            "content": {"msgtype": "m.notice", "body": "Compacted 12 messages"},
+            "msgtype": "m.notice",
+        }

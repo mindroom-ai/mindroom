@@ -14,6 +14,7 @@ from nio.responses import RoomThreadsError, RoomThreadsResponse
 
 from mindroom.matrix.client import (
     RoomThreadsPageError,
+    _fetch_thread_history_via_room_messages,
     _latest_thread_event_id,
     build_threaded_edit_content,
     fetch_thread_history,
@@ -38,6 +39,26 @@ class TestThreadHistory:
         source_content: dict,
     ) -> MagicMock:
         event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = event_id
+        event.sender = sender
+        event.body = body
+        event.server_timestamp = server_timestamp
+        event.source = {
+            "type": "m.room.message",
+            "content": source_content,
+        }
+        return event
+
+    @staticmethod
+    def _make_notice_event(
+        *,
+        event_id: str,
+        sender: str,
+        body: str,
+        server_timestamp: int,
+        source_content: dict,
+    ) -> MagicMock:
+        event = MagicMock(spec=nio.RoomMessageNotice)
         event.event_id = event_id
         event.sender = sender
         event.body = body
@@ -338,6 +359,75 @@ class TestThreadHistory:
         assert history[1].body == "Final answer"
         assert history[1].visible_event_id == "$reply_edit"
         client.room_messages.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_relations_path_includes_notice_reply(self) -> None:
+        """Relations-first fetch should keep notice messages in thread history."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"msgtype": "m.text", "body": "Root message"},
+        )
+        notice_event = self._make_notice_event(
+            event_id="$notice_reply",
+            sender="@mindroom:localhost",
+            body="Compacted 12 messages",
+            server_timestamp=2000,
+            source_content={
+                "msgtype": "m.notice",
+                "body": "Compacted 12 messages",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        client = self._make_relations_client(
+            root_event=root_event,
+            relations={
+                self._relation_key("$thread_root", RelationshipType.thread): [notice_event],
+            },
+        )
+
+        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+
+        assert [message.event_id for message in history] == ["$thread_root", "$notice_reply"]
+        assert history[0].to_dict().get("msgtype") is None
+        assert history[1].body == "Compacted 12 messages"
+        assert history[1].content["msgtype"] == "m.notice"
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_relations_path_includes_notice_root(self) -> None:
+        """Relations-first fetch should keep a notice thread root."""
+        root_event = self._make_notice_event(
+            event_id="$thread_root",
+            sender="@mindroom:localhost",
+            body="Compacted summary",
+            server_timestamp=1000,
+            source_content={"msgtype": "m.notice", "body": "Compacted summary"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@user:localhost",
+            body="thanks",
+            server_timestamp=2000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "thanks",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        client = self._make_relations_client(
+            root_event=root_event,
+            relations={
+                self._relation_key("$thread_root", RelationshipType.thread): [reply_event],
+            },
+        )
+
+        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+
+        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert history[0].content["msgtype"] == "m.notice"
+        assert history[0].body == "Compacted summary"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_falls_back_when_relations_lookup_fails(self) -> None:
@@ -984,6 +1074,91 @@ class TestThreadHistory:
         assert history[1].body == "Preview edit"
         assert history[1].content["body"] == "Preview edit"
         client.download.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_room_message_scan_includes_notice_messages(self) -> None:
+        """Room-message fallback should keep notice replies in thread history."""
+        client = AsyncMock()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"msgtype": "m.text", "body": "root"},
+        )
+        notice_event = self._make_notice_event(
+            event_id="$notice_reply",
+            sender="@mindroom:localhost",
+            body="Compacted 12 messages",
+            server_timestamp=2000,
+            source_content={
+                "msgtype": "m.notice",
+                "body": "Compacted 12 messages",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [notice_event, root_event]
+        response.end = None
+        client.room_messages.return_value = response
+
+        history = await _fetch_thread_history_via_room_messages(client, "!room:localhost", "$thread_root")
+
+        assert [msg.event_id for msg in history] == ["$thread_root", "$notice_reply"]
+        assert history[1].content["msgtype"] == "m.notice"
+
+    @pytest.mark.asyncio
+    async def test_notice_edit_event_sets_effective_msgtype_from_new_content(self) -> None:
+        """Notice edit events should update the final msgtype from m.new_content."""
+        client = AsyncMock()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"msgtype": "m.text", "body": "root"},
+        )
+        original_message = self._make_text_event(
+            event_id="$agent_msg",
+            sender="@mindroom:localhost",
+            body="Initial text",
+            server_timestamp=2000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "Initial text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        notice_edit = self._make_notice_event(
+            event_id="$edit1",
+            sender="@mindroom:localhost",
+            body="* Compacted 12 messages",
+            server_timestamp=3000,
+            source_content={
+                "msgtype": "m.notice",
+                "body": "* Compacted 12 messages",
+                "m.new_content": {
+                    "msgtype": "m.notice",
+                    "body": "Compacted 12 messages",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$agent_msg"},
+            },
+        )
+
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [notice_edit, original_message, root_event]
+        response.end = None
+        client.room_messages.return_value = response
+
+        history = await _fetch_thread_history_via_room_messages(client, "!room:localhost", "$thread_root")
+
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Compacted 12 messages"
+        assert history[1].content["msgtype"] == "m.notice"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_multiple_edits_keeps_latest(self) -> None:

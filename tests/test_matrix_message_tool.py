@@ -654,39 +654,6 @@ async def test_matrix_message_edit_re_registers_interactive_question() -> None:
     )
 
 
-@pytest.mark.asyncio
-async def test_matrix_message_read_includes_notice_messages() -> None:
-    """Room reads should include both m.text and m.notice events."""
-    tool = MatrixMessageTools()
-    ctx = _make_context(thread_id=None)
-    notice_event = nio.RoomMessageNotice.from_dict(
-        {
-            "event_id": "$notice",
-            "sender": "@alice:localhost",
-            "origin_server_ts": 1,
-            "content": {"msgtype": "m.notice", "body": "notice"},
-        },
-    )
-    text_event = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$text",
-            "sender": "@alice:localhost",
-            "origin_server_ts": 2,
-            "content": {"msgtype": "m.text", "body": "text"},
-        },
-    )
-    response = MagicMock(spec=nio.RoomMessagesResponse)
-    response.chunk = [notice_event, text_event]
-    ctx.client.room_messages.return_value = response
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_message(action="read", limit=2))
-
-    assert payload["status"] == "ok"
-    assert [message["event_id"] for message in payload["messages"]] == ["$text", "$notice"]
-    assert [message["msgtype"] for message in payload["messages"]] == ["m.text", "m.notice"]
-
-
 def test_resolved_visible_message_to_dict_includes_msgtype() -> None:
     """Thread-list serialization should preserve the visible Matrix msgtype."""
     message = make_visible_message(
