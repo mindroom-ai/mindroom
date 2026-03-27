@@ -22,8 +22,11 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
-from mindroom.thread_resolution import THREAD_RESOLUTION_EVENT_TYPE
+from mindroom.matrix.message_content import (
+    extract_and_resolve_message,
+    extract_edit_body,
+)
+from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 logger = get_logger(__name__)
 
@@ -36,7 +39,7 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
     },
 )
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
-_THREAD_RESOLUTION_POWER_LEVEL = 0
+_THREAD_TAGS_POWER_LEVEL = 0
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _THREAD_EDIT_FETCH_CONCURRENCY = 8
 
@@ -398,7 +401,7 @@ async def create_room(
     power_level_content: dict[str, Any] = {
         "state_default": _DEFAULT_STATE_EVENT_POWER_LEVEL,
         "events": {
-            THREAD_RESOLUTION_EVENT_TYPE: _THREAD_RESOLUTION_POWER_LEVEL,
+            THREAD_TAGS_EVENT_TYPE: _THREAD_TAGS_POWER_LEVEL,
         },
     }
     users: dict[str, int] = {}
@@ -427,17 +430,17 @@ async def create_room(
     return None
 
 
-def _with_thread_resolution_power_level(power_levels_content: dict[str, Any]) -> dict[str, Any]:
+def _with_thread_tags_power_level(power_levels_content: dict[str, Any]) -> dict[str, Any]:
     """Return power-level content with the thread-resolution override applied."""
     next_content = dict(power_levels_content)
     existing_events = power_levels_content.get("events")
     next_events = dict(existing_events) if isinstance(existing_events, dict) else {}
-    next_events[THREAD_RESOLUTION_EVENT_TYPE] = _THREAD_RESOLUTION_POWER_LEVEL
+    next_events[THREAD_TAGS_EVENT_TYPE] = _THREAD_TAGS_POWER_LEVEL
     next_content["events"] = next_events
     return next_content
 
 
-async def ensure_thread_resolution_power_level(
+async def ensure_thread_tags_power_level(
     client: nio.AsyncClient,
     room_id: str,
 ) -> bool:
@@ -458,13 +461,13 @@ async def ensure_thread_resolution_power_level(
         )
         return False
 
-    desired_content = _with_thread_resolution_power_level(current_response.content)
+    desired_content = _with_thread_tags_power_level(current_response.content)
     if desired_content == current_response.content:
         logger.debug(
             "Thread resolution power level already configured",
             room_id=room_id,
-            event_type=THREAD_RESOLUTION_EVENT_TYPE,
-            power_level=_THREAD_RESOLUTION_POWER_LEVEL,
+            event_type=THREAD_TAGS_EVENT_TYPE,
+            power_level=_THREAD_TAGS_POWER_LEVEL,
         )
         return True
 
@@ -477,8 +480,8 @@ async def ensure_thread_resolution_power_level(
         logger.info(
             "Updated room power levels for thread resolution",
             room_id=room_id,
-            event_type=THREAD_RESOLUTION_EVENT_TYPE,
-            power_level=_THREAD_RESOLUTION_POWER_LEVEL,
+            event_type=THREAD_TAGS_EVENT_TYPE,
+            power_level=_THREAD_TAGS_POWER_LEVEL,
         )
         return True
 

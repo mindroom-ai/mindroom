@@ -75,7 +75,7 @@ The router creates and manages rooms:
 
 By default (`matrix_room_access.mode: single_user_private`), rooms remain invite-only and private in the room directory.
 In `multi_user` mode, the router can set join rules (`public`/`knock`) and optionally publish rooms to the server directory.
-That same reconciliation path also updates `m.room.power_levels` for managed rooms, so the router must be joined and able to edit room power levels when thread resolution is enabled.
+That same reconciliation path also updates `m.room.power_levels` for managed rooms, so the router must be joined and able to edit room power levels when thread tags are enabled.
 
 ### Voice Message Processing
 

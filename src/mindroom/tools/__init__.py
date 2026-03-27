@@ -112,7 +112,7 @@ from mindroom.tools.sql import sql_tools
 from mindroom.tools.subagents import subagents_tools
 from mindroom.tools.tavily import tavily_tools
 from mindroom.tools.telegram import telegram_tools
-from mindroom.tools.thread_resolution import thread_resolution_tools
+from mindroom.tools.thread_tags import thread_tags_tools
 from mindroom.tools.todoist import todoist_tools
 from mindroom.tools.trafilatura import trafilatura_tools
 from mindroom.tools.trello import trello_tools
@@ -228,7 +228,7 @@ __all__ = [
     "subagents_tools",
     "tavily_tools",
     "telegram_tools",
-    "thread_resolution_tools",
+    "thread_tags_tools",
     "todoist_tools",
     "trafilatura_tools",
     "trello_tools",
