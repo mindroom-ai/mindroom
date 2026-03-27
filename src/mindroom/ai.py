@@ -854,10 +854,13 @@ def _build_cache_key(
     session_id: str,
     *,
     show_tool_calls: bool | None = None,
+    enrichment_digest: str | None = None,
 ) -> str:
     model = agent.model
     assert model is not None
     key = f"{agent.name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
+    if enrichment_digest is not None:
+        key = f"{key}:enrichment={enrichment_digest}"
     if show_tool_calls is None:
         return key
     visibility = "show" if show_tool_calls else "hide"
@@ -977,6 +980,7 @@ async def _cached_agent_run(
     user_id: str | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
+    enrichment_digest: str | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
     media_inputs = media or MediaInputs()
@@ -1002,7 +1006,7 @@ async def _cached_agent_run(
 
     model = agent.model
     assert model is not None
-    cache_key = _build_cache_key(agent, full_prompt, session_id)
+    cache_key = _build_cache_key(agent, full_prompt, session_id, enrichment_digest=enrichment_digest)
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         logger.info("Cache hit", agent=agent_name)
@@ -1129,6 +1133,7 @@ async def ai_response(
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    enrichment_digest: str | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -1157,6 +1162,7 @@ async def ai_response(
             run/model/token metadata for Matrix message content.
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
+        enrichment_digest: Optional digest of hook-provided enrichment used to vary the local cache key.
 
     Returns:
         Agent response string
@@ -1197,6 +1203,7 @@ async def ai_response(
             user_id=user_id,
             media=media_inputs,
             metadata=metadata,
+            enrichment_digest=enrichment_digest,
         )
     except Exception as e:
         if should_retry_without_inline_media(e, media_inputs):
@@ -1216,6 +1223,7 @@ async def ai_response(
                     user_id=user_id,
                     media=MediaInputs(),
                     metadata=metadata,
+                    enrichment_digest=enrichment_digest,
                 )
             except Exception as retry_error:
                 logger.exception(
@@ -1340,6 +1348,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     show_tool_calls: bool = True,
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    enrichment_digest: str | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -1369,6 +1378,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             run/model/token metadata for Matrix message content.
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
+        enrichment_digest: Optional digest of hook-provided enrichment used to vary the local cache key.
 
     Yields:
         Streaming chunks/events as they become available
@@ -1409,7 +1419,13 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     if cache is not None:
         model = agent.model
         assert model is not None
-        cache_key = _build_cache_key(agent, full_prompt, session_id, show_tool_calls=show_tool_calls)
+        cache_key = _build_cache_key(
+            agent,
+            full_prompt,
+            session_id,
+            show_tool_calls=show_tool_calls,
+            enrichment_digest=enrichment_digest,
+        )
         cached_result = cache.get(cache_key)
         if cached_result is not None:
             cached_run = cast("RunOutput", cached_result)

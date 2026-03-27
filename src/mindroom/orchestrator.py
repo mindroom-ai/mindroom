@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
 import uvicorn
 
@@ -15,6 +16,9 @@ from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entity
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.hooks import ConfigReloadedContext, HookRegistry, emit
+from mindroom.hooks.execution import reset_hook_execution_state
+from mindroom.hooks.types import EVENT_CONFIG_RELOADED
 from mindroom.knowledge.manager import (
     initialize_shared_knowledge_managers,
     shutdown_shared_knowledge_managers,
@@ -43,6 +47,7 @@ from mindroom.runtime_state import (
     set_runtime_ready,
     set_runtime_starting,
 )
+from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
@@ -183,6 +188,7 @@ class MultiAgentOrchestrator:
     _knowledge_refresh_task: asyncio.Task | None = field(default=None, init=False)
     _config_reload_task: asyncio.Task | None = field(default=None, init=False)
     _config_reload_requested_at: float | None = field(default=None, init=False)
+    hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
 
     def __post_init__(self) -> None:
         """Store canonical derived paths from the explicit runtime context."""
@@ -592,8 +598,20 @@ class MultiAgentOrchestrator:
             ),
         )
         bot.orchestrator = self
+        bot.hook_registry = self.hook_registry
         self.agent_bots[entity_name] = bot
         return bot
+
+    def _build_hook_registry(self, config: Config) -> HookRegistry:
+        """Load plugins and rebuild the immutable hook-registry snapshot."""
+        plugins = load_plugins(config, self.runtime_paths)
+        return HookRegistry.from_plugins(plugins)
+
+    def _activate_hook_registry(self, hook_registry: HookRegistry) -> None:
+        """Commit one hook-registry snapshot to the live runtime."""
+        reset_hook_execution_state()
+        set_scheduling_hook_registry(hook_registry)
+        self.hook_registry = hook_registry
 
     async def _start_entities_once(
         self,
@@ -645,9 +663,10 @@ class MultiAgentOrchestrator:
         logger.info("Initializing multi-agent system...")
 
         config = load_config(self.runtime_paths)
-        load_plugins(config, self.runtime_paths)
+        hook_registry = self._build_hook_registry(config)
         await self._prepare_user_account(config, update_runtime_state=True)
         self.config = config
+        self._activate_hook_registry(hook_registry)
         for entity_name in self._configured_entity_names(config):
             self._create_managed_bot(entity_name, config)
 
@@ -743,10 +762,11 @@ class MultiAgentOrchestrator:
         # Run all sync tasks until shutdown.
         await asyncio.gather(*tuple(self._sync_tasks.values()))
 
-    async def _load_initial_config(self, new_config: Config) -> bool:
+    async def _load_initial_config(self, new_config: Config, hook_registry: HookRegistry) -> bool:
         """Handle config loading before the runtime has an active config."""
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
         self.config = new_config
+        self._activate_hook_registry(hook_registry)
         await self._sync_runtime_support_services(new_config, start_watcher=self.running)
         return False
 
@@ -757,8 +777,47 @@ class MultiAgentOrchestrator:
                 continue
             bot.config = plan.new_config
             bot.enable_streaming = plan.new_config.defaults.enable_streaming
+            bot.hook_registry = self.hook_registry
             await bot._set_presence_with_model_info()
             logger.debug(f"Updated config for {entity_name}")
+
+    @staticmethod
+    def _plugin_change_paths(current_config: Config, new_config: Config) -> tuple[str, ...]:
+        """Return plugin paths whose entry config changed across a reload."""
+        old_entries = {entry.path: entry.model_dump(mode="python") for entry in current_config.plugins}
+        new_entries = {entry.path: entry.model_dump(mode="python") for entry in new_config.plugins}
+        changed_paths = {
+            path for path in set(old_entries) | set(new_entries) if old_entries.get(path) != new_entries.get(path)
+        }
+        return tuple(sorted(changed_paths))
+
+    async def _emit_config_reloaded(
+        self,
+        *,
+        new_config: Config,
+        changed_entities: set[str],
+        added_entities: set[str],
+        removed_entities: set[str],
+        plugin_changes: tuple[str, ...],
+    ) -> None:
+        """Emit the config:reloaded observer event after applying a new snapshot."""
+        if not self.hook_registry.has_hooks(EVENT_CONFIG_RELOADED):
+            return
+
+        context = ConfigReloadedContext(
+            event_name=EVENT_CONFIG_RELOADED,
+            plugin_name="",
+            settings={},
+            config=new_config,
+            runtime_paths=self.runtime_paths,
+            logger=logger.bind(event_name=EVENT_CONFIG_RELOADED),
+            correlation_id=f"config-reload:{uuid4().hex}",
+            changed_entities=tuple(sorted(changed_entities)),
+            added_entities=tuple(sorted(added_entities)),
+            removed_entities=tuple(sorted(removed_entities)),
+            plugin_changes=plugin_changes,
+        )
+        await emit(self.hook_registry, EVENT_CONFIG_RELOADED, context)
 
     async def _remove_deleted_entities(self, removed_entities: set[str]) -> None:
         """Cancel, clean up, and unregister entities removed from config."""
@@ -809,10 +868,10 @@ class MultiAgentOrchestrator:
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
         new_config = load_config(self.runtime_paths)
-        load_plugins(new_config, self.runtime_paths)
+        new_hook_registry = self._build_hook_registry(new_config)
 
         if not self.config:
-            return await self._load_initial_config(new_config)
+            return await self._load_initial_config(new_config, new_hook_registry)
 
         current_config = self._require_config()
         plan = build_config_update_plan(
@@ -828,11 +887,20 @@ class MultiAgentOrchestrator:
 
         # Only apply the new config after validation and account checks succeed.
         self.config = new_config
+        self._activate_hook_registry(new_hook_registry)
         logger.info(f"Updating config. New authorization: {new_config.authorization.global_users}")
         await self._update_unchanged_bots(plan)
+        plugin_changes = self._plugin_change_paths(current_config, new_config)
 
         if plan.only_support_service_changes:
             await self._sync_runtime_support_services(new_config, start_watcher=self.running)
+            await self._emit_config_reloaded(
+                new_config=new_config,
+                changed_entities=set(),
+                added_entities=plan.new_entities,
+                removed_entities=plan.removed_entities,
+                plugin_changes=plugin_changes,
+            )
             return False
 
         changed_entities, retryable_entities, permanently_failed_entities = await self._restart_changed_entities(plan)
@@ -848,6 +916,13 @@ class MultiAgentOrchestrator:
             )
 
         await self._sync_runtime_support_services(new_config, start_watcher=self.running)
+        await self._emit_config_reloaded(
+            new_config=new_config,
+            changed_entities=changed_entities,
+            added_entities=plan.new_entities,
+            removed_entities=plan.removed_entities,
+            plugin_changes=plugin_changes,
+        )
 
         logger.info(
             f"Configuration update complete: {len(plan.entities_to_restart) + len(plan.new_entities)} bots affected",
@@ -1114,7 +1189,7 @@ class MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.running = False
 
-        stop_tasks = [bot.stop() for bot in self.agent_bots.values()]
+        stop_tasks = [bot.stop(reason="shutdown") for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         logger.info("All agent bots stopped")
 

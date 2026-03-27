@@ -392,7 +392,11 @@ async def stop_entities(
     for entity_name in entities_to_restart:
         await cancel_sync_task(entity_name, sync_tasks)
 
-    stop_tasks = [agent_bots[entity_name].stop() for entity_name in entities_to_restart if entity_name in agent_bots]
+    stop_tasks = [
+        agent_bots[entity_name].stop(reason="restart")
+        for entity_name in entities_to_restart
+        if entity_name in agent_bots
+    ]
     if stop_tasks:
         await asyncio.gather(*stop_tasks)
 

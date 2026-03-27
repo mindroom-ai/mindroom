@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import mindroom.tool_system.plugins as plugin_module
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
@@ -79,6 +80,7 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
     try:
         plugins = load_plugins(config, runtime_paths_for(config))
@@ -96,6 +98,8 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
         plugin_module._TOOL_MODULE_CACHE.clear()
         plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
         set_plugin_skill_roots(original_plugin_roots)
 
 
@@ -151,6 +155,7 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
     try:
         plugins = load_plugins(config, runtime_paths_for(config))
@@ -169,6 +174,8 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
         plugin_module._TOOL_MODULE_CACHE.clear()
         plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
         set_plugin_skill_roots(original_plugin_roots)
 
 
@@ -208,3 +215,155 @@ def test_load_plugins_uses_bound_runtime_paths(tmp_path: Path) -> None:
     plugins = load_plugins(config, runtime_paths_for(config))
 
     assert [plugin.name for plugin in plugins] == ["demo-plugin"]
+
+
+def test_config_normalizes_string_and_object_plugin_entries() -> None:
+    """Root config should normalize bare strings into structured plugin entries."""
+    config = Config(
+        plugins=[
+            "./plugins/simple",
+            {
+                "path": "./plugins/advanced",
+                "settings": {"api_key": "secret"},
+                "hooks": {"audit": {"enabled": False}},
+            },
+        ],
+    )
+
+    assert [plugin.path for plugin in config.plugins] == ["./plugins/simple", "./plugins/advanced"]
+    assert config.plugins[0].settings == {}
+    assert config.plugins[1].settings == {"api_key": "secret"}
+    assert config.plugins[1].hooks["audit"].enabled is False
+
+
+def test_load_plugins_discovers_hooks_from_tools_module_when_hooks_module_missing(tmp_path: Path) -> None:
+    """Decorated hooks in tools_module should be auto-discovered."""
+    plugin_root = tmp_path / "plugins" / "tools-hooks"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "tools-hooks", "tools_module": "plugin.py"}),
+        encoding="utf-8",
+    )
+    (plugin_root / "plugin.py").write_text(
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    ctx.suppress = True\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/tools-hooks"]), config_path)
+
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    try:
+        plugins = load_plugins(config, runtime_paths_for(config))
+        registry = HookRegistry.from_plugins(plugins)
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._TOOL_MODULE_CACHE.clear()
+        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+
+    assert [hook.hook_name for hook in registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == ["audit"]
+
+
+def test_load_plugins_discovers_hooks_from_dedicated_hooks_module(tmp_path: Path) -> None:
+    """A manifest hooks_module should be scanned independently from tools_module."""
+    plugin_root = tmp_path / "plugins" / "separate-hooks"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "separate-hooks",
+                "tools_module": "tools.py",
+                "hooks_module": "hooks.py",
+            },
+        ),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text("TOOLS_IMPORTED = True\n", encoding="utf-8")
+    (plugin_root / "hooks.py").write_text(
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received', name='from-hooks-module')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/separate-hooks"]), config_path)
+
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    try:
+        plugins = load_plugins(config, runtime_paths_for(config))
+        registry = HookRegistry.from_plugins(plugins)
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._TOOL_MODULE_CACHE.clear()
+        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+
+    assert [hook.hook_name for hook in registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == ["from-hooks-module"]
+
+
+def test_load_plugins_reuses_same_module_when_tools_and_hooks_share_file(tmp_path: Path) -> None:
+    """One shared tools/hooks file should be imported only once."""
+    plugin_root = tmp_path / "plugins" / "same-file"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "same-file",
+                "tools_module": "plugin.py",
+                "hooks_module": "plugin.py",
+            },
+        ),
+        encoding="utf-8",
+    )
+    counter_path = plugin_root / "imports.txt"
+    (plugin_root / "plugin.py").write_text(
+        "from pathlib import Path\n"
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "_COUNTER = Path(__file__).with_name('imports.txt')\n"
+        "count = int(_COUNTER.read_text() or '0') if _COUNTER.exists() else 0\n"
+        "_COUNTER.write_text(str(count + 1))\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(
+        Config(plugins=[{"path": "./plugins/same-file"}]),
+        config_path,
+    )
+
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    try:
+        plugins = load_plugins(config, runtime_paths_for(config))
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._TOOL_MODULE_CACHE.clear()
+        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+
+    assert len(plugins[0].discovered_hooks) == 1
+    assert counter_path.read_text(encoding="utf-8") == "1"

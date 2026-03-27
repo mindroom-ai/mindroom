@@ -40,6 +40,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import STREAM_STATUS_STREAMING, RuntimePaths, resolve_runtime_paths
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
@@ -1031,7 +1032,7 @@ class TestEditRemovesStaleRun:
                 is_thread=False,
                 thread_id=None,
                 thread_history=[],
-                mentioned_agents=["test_agent"],
+                mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
                 has_non_agent_mentions=False,
             )
             mock_should_respond.return_value = True
@@ -1114,7 +1115,7 @@ class TestEditRemovesStaleRun:
                 is_thread=True,
                 thread_id="$thread_root:example.com",
                 thread_history=[],
-                mentioned_agents=["test_agent"],
+                mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
                 has_non_agent_mentions=False,
             )
             mock_should_respond.return_value = True

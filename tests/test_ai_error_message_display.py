@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
+from mindroom.hooks import HookRegistry
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -34,7 +35,17 @@ def _mock_bot(tmp_path: Path) -> MagicMock:
     bot.storage_path = tmp_path
     bot.config = _runtime_bound_config()
     bot.runtime_paths = runtime_paths_for(bot.config)
-    bot._build_runtime_tool_contexts = MagicMock(return_value=(None, None))
+    bot.matrix_id = MagicMock(full_id="@mindroom_test_agent:localhost", domain="localhost")
+    bot.hook_registry = HookRegistry.empty()
+    bot.show_tool_calls = True
+    bot._agent_has_matrix_messaging_tool = MagicMock(return_value=False)
+    bot._append_matrix_prompt_context = MagicMock(side_effect=lambda prompt, **_kwargs: prompt)
+    bot._build_tool_runtime_context = MagicMock(return_value=None)
+    bot._build_tool_execution_identity = MagicMock(return_value=None)
+    bot._resolve_reply_thread_id = MagicMock(return_value=None)
+    bot._apply_before_response_hooks = AgentBot._apply_before_response_hooks.__get__(bot, AgentBot)
+    bot._emit_after_response_hooks = AgentBot._emit_after_response_hooks.__get__(bot, AgentBot)
+    bot._deliver_generated_response = AgentBot._deliver_generated_response.__get__(bot, AgentBot)
     bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
     return bot
 
@@ -269,7 +280,7 @@ class TestAIErrorDisplay:
         ):
             mock_ai.return_value = "Response without knowledge"
 
-            event_id = await process_method(
+            delivery = await process_method(
                 bot,
                 room_id="!test:localhost",
                 prompt="Help me with something",
@@ -278,6 +289,6 @@ class TestAIErrorDisplay:
                 thread_history=[],
             )
 
-        assert event_id == "$response_id"
+        assert delivery.event_id == "$response_id"
         assert mock_ai.call_args.kwargs["knowledge"] is None
         bot.logger.exception.assert_called_once()

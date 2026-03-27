@@ -491,6 +491,7 @@ async def send_streaming_response(
     room_mode: bool = False,
     show_tool_calls: bool = True,
     extra_content: dict[str, Any] | None = None,
+    tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> tuple[str | None, str]:
     """Stream chunks to a Matrix room, returning (event_id, accumulated_text).
 
@@ -512,6 +513,7 @@ async def send_streaming_response(
         room_mode: If True, skip thread relations (for bridges/mobile)
         show_tool_calls: Whether to include tool call text inline in the streamed message
         extra_content: Optional custom metadata fields merged into each event
+        tool_trace_collector: Optional list updated with the final tool trace
 
     Returns:
         Tuple of (final event_id or None, full accumulated text)
@@ -567,5 +569,8 @@ async def send_streaming_response(
         raise
     else:
         await streaming.finalize(client)
+
+    if tool_trace_collector is not None:
+        tool_trace_collector[:] = streaming.tool_trace
 
     return streaming.event_id, streaming.accumulated_text
