@@ -24,7 +24,7 @@ from mindroom.constants import (
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.logging_config import get_logger
-from mindroom.matrix.avatar import set_room_avatar_from_file
+from mindroom.matrix.avatar import room_has_avatar, set_room_avatar_from_file
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import get_room_id
 from mindroom.matrix.state import MatrixState
@@ -311,8 +311,12 @@ async def _sync_avatar_target(
     avatar_path: Path,
     room_id: str,
     label: str,
-) -> bool:
-    """Apply one managed avatar target by replacing the current room avatar."""
+) -> bool | None:
+    """Apply one managed avatar target unless the room already has an avatar."""
+    if await room_has_avatar(client, room_id):
+        get_console().print(f"[dim]⊘ Skipped avatar for {label} (already set)[/dim]")
+        return None
+
     if await set_room_avatar_from_file(client, room_id, avatar_path):
         get_console().print(f"[green]✓ Set avatar for {label}[/green]")
         return True
@@ -347,8 +351,11 @@ async def _sync_configured_room_avatars(
             room_id=room_id,
             label=label,
         )
-        success_count += int(success)
-        if not success:
+        if success is True:
+            success_count += 1
+        elif success is None:
+            skip_count += 1
+        else:
             failed_labels.append(label)
     return success_count, skip_count, failed_labels
 
@@ -417,7 +424,7 @@ async def set_room_avatars_in_matrix(runtime_paths: constants.RuntimePaths) -> N
     if success_count > 0:
         console.print(f"\n[green]✓ Set {success_count} room avatars[/green]")
     if skip_count > 0:
-        console.print(f"[dim]⊘ Skipped {skip_count} rooms (no avatar file)[/dim]")
+        console.print(f"[dim]⊘ Skipped {skip_count} rooms (no avatar file or avatar already set)[/dim]")
     if failed_labels:
         formatted_labels = ", ".join(failed_labels)
         msg = f"Failed to set avatars for: {formatted_labels}"

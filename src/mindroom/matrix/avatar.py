@@ -128,12 +128,8 @@ async def check_and_set_avatar(
 
     """
     if room_id:
-        # Check room avatar
-        response = await client.room_get_state_event(room_id, "m.room.avatar")
-        if isinstance(response, nio.RoomGetStateEventResponse) and response.content and response.content.get("url"):
-            logger.debug(f"Avatar already set for room {room_id}")
+        if await room_has_avatar(client, room_id):
             return True
-        # Set room avatar
         return await set_room_avatar_from_file(client, room_id, avatar_path)
     # Check user avatar
     response = await client.get_profile(client.user_id)
@@ -176,4 +172,13 @@ async def set_room_avatar_from_file(
         return True
 
     logger.error(f"Failed to set avatar for room {room_id}: {response}")
+    return False
+
+
+async def room_has_avatar(client: nio.AsyncClient, room_id: str) -> bool:
+    """Return whether the Matrix room already has an avatar URL configured."""
+    response = await client.room_get_state_event(room_id, "m.room.avatar")
+    if isinstance(response, nio.RoomGetStateEventResponse) and response.content and response.content.get("url"):
+        logger.debug(f"Avatar already set for room {room_id}")
+        return True
     return False

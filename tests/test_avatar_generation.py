@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
+import nio
 import pytest
 from google.genai import types
 
@@ -575,6 +576,7 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     )
     monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
+    monkeypatch.setattr(generate_avatars, "room_has_avatar", AsyncMock(return_value=False))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
     monkeypatch.setattr(generate_avatars, "get_room_id", _get_room_id)
     monkeypatch.setattr(
@@ -588,6 +590,76 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     synced_targets = {(call.args[1], call.args[2].name) for call in set_room_avatar_from_file.await_args_list}
     assert ("!war:localhost", "war_room.png") in synced_targets
     assert ("!space:localhost", "root_space.png") in synced_targets
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_set_room_avatars_in_matrix_skips_rooms_with_existing_matrix_avatars(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_avatar_dir: Path,
+) -> None:
+    """Matrix avatar sync should not rewrite room avatars that are already set."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+                "rooms": ["war_room"],
+            },
+        },
+        "matrix_space": {"enabled": False},
+    }
+    room_avatar_path = workspace_avatar_dir / "rooms" / "war_room.png"
+    room_avatar_path.parent.mkdir(parents=True)
+    room_avatar_path.write_bytes(b"room-bytes")
+
+    router_account = SimpleNamespace(username="router")
+    router_account.password = b"pw".decode()
+
+    def _get_account(key: str) -> object | None:
+        return router_account if key == "agent_router" else None
+
+    state = SimpleNamespace(
+        space_room_id=None,
+        get_account=_get_account,
+    )
+    client = AsyncMock()
+    client.close = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"url": "mxc://localhost/existing-avatar"},
+        event_type="m.room.avatar",
+        state_key="",
+        room_id="!war:localhost",
+    )
+
+    monkeypatch.setattr(
+        generate_avatars,
+        "load_validated_config",
+        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
+    )
+    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
+    monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
+    monkeypatch.setattr(
+        generate_avatars,
+        "set_room_avatar_from_file",
+        AsyncMock(side_effect=lambda *_args, **_kwargs: pytest.fail("existing room avatar should not be replaced")),
+    )
+    monkeypatch.setattr(
+        generate_avatars,
+        "get_room_id",
+        lambda room_name, _runtime_paths: "!war:localhost" if room_name == "war_room" else None,
+    )
+    monkeypatch.setattr(
+        generate_avatars.constants,
+        "runtime_matrix_homeserver",
+        lambda *_args, **_kwargs: "http://localhost:8008",
+    )
+
+    await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(workspace_avatar_dir.parent))
+
+    client.room_get_state_event.assert_awaited_once_with("!war:localhost", "m.room.avatar")
     client.close.assert_awaited_once()
 
 
@@ -632,6 +704,7 @@ async def test_set_room_avatars_in_matrix_raises_when_room_avatar_updates_fail(
     )
     monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
+    monkeypatch.setattr(generate_avatars, "room_has_avatar", AsyncMock(return_value=False))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", AsyncMock(return_value=False))
     monkeypatch.setattr(
         generate_avatars,
