@@ -282,7 +282,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
         ):
             mock_prepare.return_value = (mock_agent, "test prompt", [])
 

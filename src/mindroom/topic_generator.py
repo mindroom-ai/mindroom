@@ -8,7 +8,7 @@ import nio
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom.ai import _cached_agent_run, get_model_instance
+from mindroom.ai import cached_agent_run, get_model_instance
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -96,7 +96,7 @@ Generate the topic:"""
 
     session_id = f"topic_{room_key}"
     try:
-        response = await _cached_agent_run(
+        response = await cached_agent_run(
             agent=agent,
             full_prompt=prompt,
             session_id=session_id,

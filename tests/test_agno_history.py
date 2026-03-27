@@ -852,7 +852,7 @@ class TestMetadataPassing:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prep,
-            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock) as mock_run,
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock) as mock_run,
         ):
             mock_agent = MagicMock(spec=Agent)
             mock_agent.add_history_to_context = True
@@ -882,7 +882,7 @@ class TestMetadataPassing:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prep,
-            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock) as mock_run,
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock) as mock_run,
         ):
             mock_agent = MagicMock(spec=Agent)
             mock_agent.add_history_to_context = True
