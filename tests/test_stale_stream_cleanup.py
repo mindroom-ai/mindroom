@@ -949,6 +949,167 @@ async def test_orchestrator_auto_resume_uses_router_client(tmp_path: Path) -> No
     assert mock_auto_resume.await_args.kwargs["runtime_paths"] == runtime_paths_for(config)
 
 
+@pytest.mark.asyncio
+async def test_restart_marked_message_still_redacts_stale_stop_reactions(tmp_path: Path) -> None:
+    """Stop reactions on restart-noted messages should still be redacted during cleanup."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    restart_body = stale_stream_cleanup_module.build_restart_interrupted_body("Partial answer ⋯")
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$message",
+            body=restart_body,
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+        ),
+        _make_reaction_event(
+            event_id="$stop-reaction",
+            target_event_id="$message",
+            key="🛑",
+            timestamp_ms=NOW_MS - STALE_AGE_MS + 100,
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message",
+        new=AsyncMock(return_value="$edit"),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    mock_edit.assert_not_awaited()
+    client.room_redact.assert_awaited_once()
+    assert client.room_redact.await_args.kwargs["event_id"] == "$stop-reaction"
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_continues_after_send_exception(tmp_path: Path) -> None:
+    """A send_message exception on one thread should not abort the remaining resumes."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id=f"$thread-{index}",
+            target_event_id=f"$target-{index}",
+            partial_text=f"Part {index}",
+            agent_name="test_agent",
+        )
+        for index in range(3)
+    ]
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.send_message",
+            new=AsyncMock(side_effect=["$resume0", RuntimeError("deleted room"), "$resume2"]),
+        ) as mock_send,
+        patch("mindroom.matrix.stale_stream_cleanup.asyncio.sleep", new=AsyncMock()),
+    ):
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+
+    assert resumed_count == 2
+    assert mock_send.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_requester_resolution_exception_degrades_gracefully(tmp_path: Path) -> None:
+    """A room_get_event exception during requester resolution should not skip room cleanup."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    # Bot message replies to $external-user-msg which is NOT in scanned history,
+    # forcing a room_get_event fetch that will raise.
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$message",
+            body="Needs cleanup ⋯",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$external-user-msg"),
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_get_event = AsyncMock(side_effect=RuntimeError("network timeout"))
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message",
+        new=AsyncMock(return_value="$edit"),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert len(interrupted) == 1
+    assert interrupted[0].original_sender_id is None
+
+
+@pytest.mark.asyncio
+async def test_requester_resolution_respects_max_depth(tmp_path: Path) -> None:
+    """Requester resolution should stop after max_depth to prevent unbounded API calls."""
+    config = _make_config(tmp_path)
+    other_agent_user_id = config.get_ids(runtime_paths_for(config))["other"].full_id
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$original",
+            body="Needs cleanup ⋯",
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+            relates_to=_thread_reply_relation("$thread-root", "$agent-hop-0"),
+        ),
+        _make_message_event(
+            event_id="$latest-edit",
+            body="* Needs cleanup",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to={"rel_type": "m.replace", "event_id": "$original"},
+            new_content={"body": "Needs cleanup ⋯", "msgtype": "m.text"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    # Build a chain of 15 agent hops — deeper than _MAX_REQUESTER_RESOLUTION_DEPTH (10)
+    def _make_hop_response(hop_index: int) -> nio.RoomGetEventResponse:
+        next_hop = f"$agent-hop-{hop_index + 1}" if hop_index < 14 else "$user-root"
+        return _room_get_event_response(
+            _make_message_event(
+                event_id=f"$agent-hop-{hop_index}",
+                body=f"Relay {hop_index}",
+                sender=other_agent_user_id,
+                timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000 + hop_index * 1000),
+                relates_to=_thread_reply_relation("$thread-root", next_hop),
+            ),
+        )
+
+    client.room_get_event = AsyncMock(
+        side_effect=[
+            _room_get_event_response(
+                _make_message_event(
+                    event_id="$original",
+                    body="Needs cleanup ⋯",
+                    timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+                    relates_to=_thread_reply_relation("$thread-root", "$agent-hop-0"),
+                ),
+            ),
+            *[_make_hop_response(i) for i in range(15)],
+        ],
+    )
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message",
+        new=AsyncMock(return_value="$edit"),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    # Should have stopped before reaching $user-root due to depth limit
+    assert len(interrupted) == 1
+    assert interrupted[0].original_sender_id is None
+    # Verify we didn't make 15+ API calls — depth limit should cap it
+    assert client.room_get_event.await_count <= 13
+
+
 def test_bot_module_does_not_import_stale_stream_cleanup() -> None:
     """bot.py must not import cleanup_stale_streaming_messages (ISSUE-024b).
 

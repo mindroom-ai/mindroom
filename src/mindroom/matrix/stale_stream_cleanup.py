@@ -53,6 +53,7 @@ _MAX_ROOM_HISTORY_PAGES = 2
 _STALE_STREAM_RECENCY_GUARD_MS = 10_000
 _RATE_LIMIT_DELAY_SECONDS = 0.15
 _STOP_REACTION_KEYS = frozenset({"🛑", "⏹️"})
+_MAX_REQUESTER_RESOLUTION_DEPTH = 10
 _INTERRUPTED_PARTIAL_TEXT_LIMIT = 280
 _AUTO_RESUME_MESSAGE = (
     "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
@@ -145,27 +146,36 @@ async def auto_resume_interrupted_threads(
 
     resumed_count = 0
     for index, interrupted_thread in enumerate(selected_threads):
-        content = _build_auto_resume_content(
-            interrupted_thread,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-        response_event_id = await send_message(client, interrupted_thread.room_id, content)
-        if response_event_id:
-            logger.info(
-                "Queued auto-resume after restart",
-                room_id=interrupted_thread.room_id,
-                thread_id=interrupted_thread.thread_id,
-                target_event_id=interrupted_thread.target_event_id,
-                event_id=response_event_id,
+        try:
+            content = _build_auto_resume_content(
+                interrupted_thread,
+                config=config,
+                runtime_paths=runtime_paths,
             )
-            resumed_count += 1
-        else:
+            response_event_id = await send_message(client, interrupted_thread.room_id, content)
+            if response_event_id:
+                logger.info(
+                    "Queued auto-resume after restart",
+                    room_id=interrupted_thread.room_id,
+                    thread_id=interrupted_thread.thread_id,
+                    target_event_id=interrupted_thread.target_event_id,
+                    event_id=response_event_id,
+                )
+                resumed_count += 1
+            else:
+                logger.warning(
+                    "Failed to queue auto-resume after restart",
+                    room_id=interrupted_thread.room_id,
+                    thread_id=interrupted_thread.thread_id,
+                    target_event_id=interrupted_thread.target_event_id,
+                )
+        except Exception as exc:
             logger.warning(
-                "Failed to queue auto-resume after restart",
+                "Failed to send auto-resume message",
                 room_id=interrupted_thread.room_id,
                 thread_id=interrupted_thread.thread_id,
                 target_event_id=interrupted_thread.target_event_id,
+                error=str(exc),
             )
         if index < len(selected_threads) - 1:
             await asyncio.sleep(delay)
@@ -510,17 +520,26 @@ async def _derive_requester_ids_for_bot_messages(
         if sender != bot_user_id:
             continue
 
-        requester_user_id = await _resolve_requester_for_bot_message(
-            client,
-            room_id=room_id,
-            target_event_id=target_event_id,
-            message_data=message_data,
-            resolved_messages=resolved_messages,
-            requester_cache=requester_cache,
-            fetched_message_data_by_event_id=fetched_message_data_by_event_id,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
+        try:
+            requester_user_id = await _resolve_requester_for_bot_message(
+                client,
+                room_id=room_id,
+                target_event_id=target_event_id,
+                message_data=message_data,
+                resolved_messages=resolved_messages,
+                requester_cache=requester_cache,
+                fetched_message_data_by_event_id=fetched_message_data_by_event_id,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve requester for bot message",
+                room_id=room_id,
+                event_id=target_event_id,
+                error=str(exc),
+            )
+            continue
         if requester_user_id is None:
             continue
         requester_ids_by_event_id[target_event_id] = requester_user_id
@@ -578,11 +597,14 @@ async def _resolve_requester_for_event_id(
     config: Config,
     runtime_paths: RuntimePaths,
     visited_event_ids: set[str],
+    max_depth: int = _MAX_REQUESTER_RESOLUTION_DEPTH,
 ) -> str | None:
     """Resolve the effective requester for one event by following reply-chain edges."""
     if event_id in requester_cache:
         return requester_cache[event_id]
     if event_id in visited_event_ids:
+        return None
+    if max_depth <= 0:
         return None
 
     requester_user_id: str | None = None
@@ -615,6 +637,7 @@ async def _resolve_requester_for_event_id(
                 config=config,
                 runtime_paths=runtime_paths,
                 visited_event_ids=visited_event_ids,
+                max_depth=max_depth - 1,
             )
     requester_cache[event_id] = requester_user_id
     return requester_user_id
@@ -655,6 +678,7 @@ async def _resolve_requester_from_internal_reply(
     config: Config,
     runtime_paths: RuntimePaths,
     visited_event_ids: set[str],
+    max_depth: int = _MAX_REQUESTER_RESOLUTION_DEPTH,
 ) -> str | None:
     """Follow an internal sender's reply edge until a real requester is found."""
     reply_to_event_id = _reply_to_event_id_for_message(message_data)
@@ -680,6 +704,7 @@ async def _resolve_requester_from_internal_reply(
         config=config,
         runtime_paths=runtime_paths,
         visited_event_ids=visited_event_ids | {event_id},
+        max_depth=max_depth - 1,
     )
 
 
@@ -999,6 +1024,8 @@ def _select_threads_to_resume(
             return list(selected_by_key.values())
 
     return list(selected_by_key.values())
+
+
 def _has_restart_interrupted_note(body: str) -> bool:
     """Return whether the body already contains the restart interruption note."""
     return body.rstrip().endswith(_RESTART_INTERRUPTED_RESPONSE_NOTE)
