@@ -1,6 +1,7 @@
 {
   "tools": [
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
       "config_fields": [
@@ -104,6 +105,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
       "config_fields": null,
@@ -122,6 +124,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
       "config_fields": [
@@ -225,6 +228,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
       "config_fields": [
@@ -292,6 +296,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
       "config_fields": null,
@@ -310,6 +315,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
       "config_fields": [
@@ -461,6 +467,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
       "config_fields": [
@@ -528,6 +535,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
       "config_fields": [
@@ -607,6 +615,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -672,6 +681,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -715,6 +725,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -782,6 +793,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -885,6 +897,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -1013,6 +1026,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
@@ -1031,6 +1045,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -1134,6 +1149,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -1333,6 +1349,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -1362,6 +1379,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
@@ -1382,6 +1400,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -1461,6 +1480,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -1588,6 +1608,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -1703,6 +1724,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -1938,6 +1960,41 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": null,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Demo package plugin tool",
+      "display_name": "Demo Package Plugin",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": null,
+      "icon_color": null,
+      "name": "demo_pkg_tool",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": null,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Demo plugin tool",
+      "display_name": "Demo Plugin",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": null,
+      "icon_color": null,
+      "name": "demo_plugin",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -2017,6 +2074,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
@@ -2035,6 +2093,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -2090,6 +2149,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -2217,6 +2277,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -2296,6 +2357,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -2471,6 +2533,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -2562,6 +2625,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -2593,6 +2657,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -2720,6 +2785,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -2787,6 +2853,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -2830,6 +2897,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -2945,6 +3013,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -2977,6 +3046,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": "google",
       "category": "development",
       "config_fields": [
@@ -3070,6 +3140,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -3197,6 +3268,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -3336,6 +3408,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -3367,6 +3440,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -3470,6 +3544,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -3549,6 +3624,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -3616,6 +3692,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -3743,6 +3820,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -3918,6 +3996,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": null,
@@ -3934,6 +4013,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -4037,6 +4117,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -4140,6 +4221,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -4207,6 +4289,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -4308,6 +4391,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -4507,6 +4591,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -4574,6 +4659,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
@@ -4590,6 +4676,30 @@
       "status": "available"
     },
     {
+      "agent_override_fields": [
+        {
+          "default": null,
+          "description": "Extra env var names or glob patterns exposed to shell execution for this agent only.",
+          "label": "Env Passthrough",
+          "name": "extra_env_passthrough",
+          "options": null,
+          "placeholder": "GITEA_TOKEN",
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Path entries prepended to PATH for this agent's shell tool only.",
+          "label": "PATH Prepend",
+          "name": "shell_path_prepend",
+          "options": null,
+          "placeholder": "/run/wrappers/bin",
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        }
+      ],
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -4667,6 +4777,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -4710,6 +4821,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": null,
@@ -4728,6 +4840,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -4783,6 +4896,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -4886,6 +5000,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -4927,6 +5042,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [
@@ -5006,6 +5122,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "email",
       "config_fields": [
@@ -5085,6 +5202,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "email",
       "config_fields": [
@@ -5174,6 +5292,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": "google",
       "category": "email",
       "config_fields": [
@@ -5292,6 +5411,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "email",
       "config_fields": [
@@ -5359,6 +5479,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "entertainment",
       "config_fields": [
@@ -5414,6 +5535,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "entertainment",
       "config_fields": [
@@ -5505,6 +5627,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "integrations",
       "config_fields": [
@@ -5716,6 +5839,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "integrations",
       "config_fields": [
@@ -5783,6 +5907,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
@@ -5799,6 +5924,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
@@ -5842,6 +5968,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
@@ -5969,6 +6096,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
@@ -5985,6 +6113,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
@@ -6064,6 +6193,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": "google",
       "category": "productivity",
       "config_fields": [
@@ -6110,6 +6240,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
@@ -6261,6 +6392,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
@@ -6277,6 +6409,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
@@ -6368,6 +6501,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
@@ -6495,6 +6629,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
@@ -6550,6 +6685,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": null,
@@ -6568,6 +6704,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
@@ -6743,6 +6880,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
@@ -6774,6 +6912,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
@@ -6805,6 +6944,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
@@ -6944,6 +7084,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -7024,6 +7165,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -7092,6 +7234,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -7208,6 +7351,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -7323,6 +7467,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -7462,6 +7607,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -7493,6 +7639,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -7633,6 +7780,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -7772,6 +7920,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -7875,6 +8024,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -8182,6 +8332,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -8333,6 +8484,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -8436,6 +8588,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -8491,6 +8644,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -8619,6 +8773,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -8698,6 +8853,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -8766,6 +8922,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -8809,6 +8966,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -8888,6 +9046,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -9015,6 +9174,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -9068,6 +9228,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -9135,6 +9296,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -9274,6 +9436,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -9377,6 +9540,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -9576,6 +9740,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -9835,6 +10000,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -9924,6 +10090,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -9956,6 +10123,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
       "config_fields": [
@@ -9999,6 +10167,7 @@
       "status": "available"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "smart_home",
       "config_fields": [
@@ -10042,6 +10211,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "social",
       "config_fields": [
@@ -10133,6 +10303,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "social",
       "config_fields": [
@@ -10236,6 +10407,7 @@
       "status": "requires_config"
     },
     {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "social",
       "config_fields": [

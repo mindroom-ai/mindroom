@@ -142,7 +142,7 @@ class DefaultsConfig(BaseModel):
 
     tools: list[ToolConfigEntry] = Field(
         default_factory=lambda: [ToolConfigEntry(name=name) for name in _DEFAULT_DEFAULT_TOOLS],
-        description="Tool names automatically added to every agent",
+        description="Tool entries automatically added to every agent, with optional inline overrides",
     )
     markdown: bool = Field(default=True, description="Default markdown setting")
     enable_streaming: bool = Field(

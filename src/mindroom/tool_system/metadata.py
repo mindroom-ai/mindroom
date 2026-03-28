@@ -481,7 +481,7 @@ class ConfigField:
 
     name: str  # Environment variable name (e.g., "SMTP_HOST")
     label: str  # Display label (e.g., "SMTP Host")
-    type: Literal["boolean", "number", "password", "text", "url", "select"] = "text"
+    type: Literal["boolean", "number", "password", "text", "url", "select", "string[]"] = "text"
     required: bool = True
     default: Any = None
     placeholder: str | None = None
@@ -505,6 +505,7 @@ class ToolMetadata:
     icon: str | None = None  # Icon identifier for frontend
     icon_color: str | None = None  # Tailwind color class like "text-blue-500"
     config_fields: list[ConfigField] | None = None  # Detailed field definitions
+    agent_override_fields: list[ConfigField] | None = None  # Safe per-agent override field definitions
     dependencies: list[str] | None = None  # Required pip packages
     auth_provider: str | None = None  # Name of integration that provides auth (e.g., "google")
     docs_url: str | None = None  # Documentation URL
@@ -529,6 +530,7 @@ def register_tool_with_metadata(
     icon: str | None = None,
     icon_color: str | None = None,
     config_fields: list[ConfigField] | None = None,
+    agent_override_fields: list[ConfigField] | None = None,
     dependencies: list[str] | None = None,
     auth_provider: str | None = None,
     docs_url: str | None = None,
@@ -551,6 +553,7 @@ def register_tool_with_metadata(
         icon: Icon identifier for frontend
         icon_color: CSS color class for the icon
         config_fields: List of configuration fields
+        agent_override_fields: Safe per-agent override fields serialized via config.yaml
         dependencies: Required Python packages
         auth_provider: Name of integration that provides authentication
         docs_url: Link to documentation
@@ -575,6 +578,7 @@ def register_tool_with_metadata(
             icon=icon,
             icon_color=icon_color,
             config_fields=config_fields,
+            agent_override_fields=agent_override_fields,
             dependencies=dependencies,
             auth_provider=auth_provider,
             docs_url=docs_url,
@@ -633,3 +637,102 @@ def export_tools_metadata() -> list[dict[str, Any]]:
 
     tools.sort(key=lambda tool: (tool["category"], tool["name"]))
     return tools
+
+
+def _normalize_string_array_override(value: object) -> list[str] | None:
+    """Normalize a string-array authored override from a list or legacy text value."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        values = [part.strip() for part in value.replace("\n", ",").split(",") if part.strip()]
+        return values or None
+    if not isinstance(value, list):
+        msg = "expected a list of strings or a comma/newline-separated string"
+        raise TypeError(msg)
+    normalized: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str):
+            msg = "expected a list of strings"
+            raise TypeError(msg)
+        stripped = entry.strip()
+        if stripped:
+            normalized.append(stripped)
+    return normalized or None
+
+
+def _normalize_agent_override_field_value(field: ConfigField, value: object) -> object | None:
+    """Normalize one authored agent override value according to its declared schema."""
+    if field.type == "string[]":
+        return _normalize_string_array_override(value)
+    if field.type == "boolean":
+        if value is None or isinstance(value, bool):
+            return value
+        msg = "expected a boolean or null"
+        raise ValueError(msg)
+    if field.type == "number":
+        if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)):
+            return value
+        msg = "expected a number or null"
+        raise ValueError(msg)
+    if field.type in {"password", "select", "text", "url"}:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        msg = "expected a string or null"
+        raise ValueError(msg)
+    return value
+
+
+def normalize_authored_tool_overrides(tool_name: str, overrides: dict[str, object] | None) -> dict[str, object]:
+    """Validate and normalize one tool's authored per-agent overrides."""
+    if not overrides:
+        return {}
+
+    metadata = TOOL_METADATA.get(tool_name)
+    if metadata is None:
+        msg = f"Unknown tool '{tool_name}' cannot declare per-agent overrides."
+        raise ValueError(msg)
+
+    field_map = {field.name: field for field in metadata.agent_override_fields or []}
+    if not field_map:
+        msg = f"Tool '{tool_name}' does not support per-agent overrides."
+        raise ValueError(msg)
+
+    unexpected_fields = sorted(set(overrides) - set(field_map))
+    if unexpected_fields:
+        allowed = ", ".join(sorted(field_map)) or "none"
+        unexpected = ", ".join(unexpected_fields)
+        msg = f"Unsupported per-agent override(s) for '{tool_name}': {unexpected}. Allowed overrides: {allowed}."
+        raise ValueError(msg)
+
+    normalized: dict[str, object] = {}
+    for field_name, raw_value in overrides.items():
+        field = field_map[field_name]
+        try:
+            normalized_value = _normalize_agent_override_field_value(field, raw_value)
+        except (TypeError, ValueError) as exc:
+            msg = f"Invalid per-agent override for '{tool_name}.{field_name}': {exc}"
+            raise ValueError(msg) from exc
+        if normalized_value is not None:
+            normalized[field_name] = normalized_value
+    return normalized
+
+
+def authored_tool_overrides_to_runtime(tool_name: str, overrides: dict[str, object] | None) -> dict[str, object] | None:
+    """Convert normalized authored per-agent overrides into runtime kwargs."""
+    normalized = normalize_authored_tool_overrides(tool_name, overrides)
+    if not normalized:
+        return None
+
+    metadata = TOOL_METADATA[tool_name]
+    field_map = {field.name: field for field in metadata.agent_override_fields or []}
+    runtime_overrides: dict[str, object] = {}
+    for field_name, value in normalized.items():
+        field = field_map[field_name]
+        if field.type == "string[]":
+            runtime_overrides[field_name] = ", ".join(cast("list[str]", value))
+        else:
+            runtime_overrides[field_name] = value
+    return runtime_overrides or None

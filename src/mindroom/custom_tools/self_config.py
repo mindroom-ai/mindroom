@@ -54,7 +54,7 @@ class SelfConfigTools(Toolkit):
         if self.agent_name not in config.agents:
             return f"Error: Agent '{self.agent_name}' not found in configuration."
 
-        agent_dict = config.agents[self.agent_name].model_dump(exclude_none=True)
+        agent_dict = config.agents[self.agent_name].authored_model_dump()
         yaml_str = yaml.dump(agent_dict, default_flow_style=False, sort_keys=False)
         return f"## Configuration for '{self.agent_name}':\n\n```yaml\n{yaml_str}```"
 

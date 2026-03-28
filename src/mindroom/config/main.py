@@ -6,7 +6,7 @@ import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import yaml
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
@@ -582,6 +582,10 @@ class Config(BaseModel):
         config._validate_authored_tool_entries(runtime_paths)
         return config
 
+    def authored_model_dump(self) -> dict[str, Any]:
+        """Serialize authored config."""
+        return self.model_dump(exclude_none=True)
+
     @classmethod
     def from_yaml(
         cls,
@@ -805,6 +809,29 @@ class Config(BaseModel):
     def get_agent_tools(self, agent_name: str) -> list[str]:
         """Get effective tool names for an agent."""
         return [entry.name for entry in self.get_agent_tool_configs(agent_name)]
+
+    def get_agent_tool_runtime_overrides(
+        self,
+        agent_name: str,
+        tool_name: str,
+        *,
+        runtime_paths: RuntimePaths | None = None,
+    ) -> dict[str, object] | None:
+        """Return runtime kwargs derived from one agent's authored tool overrides."""
+        agent_config = self.get_agent(agent_name)
+        overrides = agent_config.get_tool_overrides(tool_name)
+        if not overrides:
+            return None
+
+        from mindroom.tool_system.metadata import (  # noqa: PLC0415
+            authored_tool_overrides_to_runtime,
+            ensure_tool_registry_loaded,
+        )
+
+        if runtime_paths is not None:
+            ensure_tool_registry_loaded(runtime_paths, self)
+
+        return authored_tool_overrides_to_runtime(tool_name, overrides)
 
     def get_private_agent_names(self) -> frozenset[str]:
         """Return agent names that materialize requester-private state."""
@@ -1097,7 +1124,7 @@ class Config(BaseModel):
             config_path: Path to save the config to.
 
         """
-        config_dict = self.model_dump(exclude_none=True)
+        config_dict = self.authored_model_dump()
         path_obj = Path(config_path)
         path_obj.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path_obj.with_suffix(path_obj.suffix + ".tmp")

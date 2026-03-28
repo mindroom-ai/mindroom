@@ -36,7 +36,7 @@ def _make_config(runtime_paths: constants_mod.RuntimePaths) -> Config:
         },
         models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
-    bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound
 

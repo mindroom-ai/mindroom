@@ -287,7 +287,12 @@ agents:
     - transcribe
     tools:
     - file
-    - shell
+    - shell:
+        extra_env_passthrough:
+        - GITEA_TOKEN
+        - WHISPER_URL
+        shell_path_prepend:
+        - /run/wrappers/bin
     - scheduler
     - duckduckgo
     - website

@@ -129,6 +129,58 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
     )
 
 
+def test_config_round_trips_structured_agent_tool_entries() -> None:
+    """Structured tool entries should stay authored while runtime access stays name-based."""
+    runtime_paths = _runtime_paths(Path(tempfile.mkdtemp()))
+    config = Config.validate_with_runtime(
+        {
+            "agents": {
+                "openclaw": {
+                    "display_name": "OpenClaw",
+                    "role": "Coding agent",
+                    "tools": [
+                        {
+                            "shell": {
+                                "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
+                                "shell_path_prepend": "/run/wrappers/bin",
+                            },
+                        },
+                        "browser",
+                    ],
+                    "rooms": ["lobby"],
+                },
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-4o-mini",
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+    agent_config = config.agents["openclaw"]
+    assert agent_config.tool_names == ["shell", "browser"]
+    assert agent_config.get_tool_overrides("shell") == {
+        "extra_env_passthrough": ["GITEA_TOKEN", "WHISPER_URL"],
+        "shell_path_prepend": ["/run/wrappers/bin"],
+    }
+    assert config.authored_model_dump()["agents"]["openclaw"]["tools"] == [
+        {
+            "shell": {
+                "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
+                "shell_path_prepend": "/run/wrappers/bin",
+            },
+        },
+        "browser",
+    ]
+    assert config.get_agent_tool_runtime_overrides("openclaw", "shell") == {
+        "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
+        "shell_path_prepend": "/run/wrappers/bin",
+    }
+
+
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the calculator agent is created correctly."""
@@ -887,6 +939,37 @@ def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
     }
     assert runtime_overrides_by_tool["browser"] is None
     assert runtime_overrides_by_tool["visualization"] is None
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_passes_authored_shell_runtime_overrides(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+) -> None:
+    """Authored per-agent shell overrides should be converted into runtime kwargs."""
+    mock_get_tool_by_name.return_value = MagicMock()
+
+    config = _test_config()
+    config.agents["general"].tools = [
+        {
+            "shell": {
+                "extra_env_passthrough": ["GITEA_TOKEN", "WHISPER_URL"],
+                "shell_path_prepend": ["/run/wrappers/bin"],
+            },
+        },
+    ]
+    config.agents["general"].include_default_tools = False
+
+    _create_agent_for_test("general", config=config)
+
+    runtime_overrides_by_tool = {
+        call.args[0]: call.kwargs.get("runtime_overrides") for call in mock_get_tool_by_name.call_args_list
+    }
+    assert runtime_overrides_by_tool["shell"] == {
+        "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
+        "shell_path_prepend": "/run/wrappers/bin",
+    }
 
 
 @patch("mindroom.agents.get_tool_by_name")

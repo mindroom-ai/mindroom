@@ -5,11 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.memory import MemoryBackend  # noqa: TC001
 from mindroom.config.models import AgentLearningMode, ToolConfigEntry, validate_unique_tool_entries
+from mindroom.tool_system.metadata import TOOL_METADATA, normalize_authored_tool_overrides
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 CultureMode = Literal["automatic", "agentic", "manual"]
@@ -159,7 +166,10 @@ class AgentConfig(BaseModel):
 
     display_name: str = Field(description="Human-readable name for the agent")
     role: str = Field(default="", description="Description of the agent's purpose")
-    tools: list[ToolConfigEntry] = Field(default_factory=list, description="List of tool names")
+    tools: list[ToolConfigEntry] = Field(
+        default_factory=list,
+        description="List of tool entries with optional inline per-agent overrides",
+    )
     include_default_tools: bool = Field(
         default=True,
         description="Whether to merge defaults.tools into this agent's tools",
@@ -244,6 +254,25 @@ class AgentConfig(BaseModel):
     def tool_names(self) -> list[str]:
         """Return authored tool names without inline override details."""
         return [entry.name for entry in self.tools]
+
+    def get_tool_overrides(self, tool_name: str) -> dict[str, object] | None:
+        """Return normalized per-agent runtime overrides for one configured tool."""
+        for entry in self.tools:
+            if entry.name == tool_name and entry.overrides:
+                metadata = TOOL_METADATA.get(tool_name)
+                allowed_fields = {field.name for field in metadata.agent_override_fields or []} if metadata else set()
+                if not allowed_fields:
+                    return None
+                overrides = {name: value for name, value in entry.overrides.items() if name in allowed_fields}
+                if not overrides:
+                    return None
+                normalized = normalize_authored_tool_overrides(tool_name, overrides)
+                return normalized or None
+        return None
+
+    def authored_model_dump(self) -> dict[str, object]:
+        """Serialize the authored agent config."""
+        return self.model_dump(exclude_none=True)
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:

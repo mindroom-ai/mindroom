@@ -36,7 +36,7 @@ def _make_config(
         config_path = Path(tmp.name)
     runtime_paths = resolve_runtime_paths(config_path=config_path)
     config.save_to_yaml(config_path)
-    bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound, config_path
 

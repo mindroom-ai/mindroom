@@ -824,6 +824,37 @@ def test_get_tools(test_client: TestClient) -> None:
     assert "category" in first_tool
     assert "icon_color" in first_tool  # New field we added
 
+    shell_tool = next(tool for tool in data["tools"] if tool["name"] == "shell")
+    assert shell_tool["agent_override_fields"] == [
+        {
+            "authored_override": True,
+            "default": None,
+            "description": "Extra env var names or glob patterns exposed to shell execution for this agent only.",
+            "label": "Env Passthrough",
+            "name": "extra_env_passthrough",
+            "options": None,
+            "placeholder": "GITEA_TOKEN",
+            "required": False,
+            "type": "string[]",
+            "validation": None,
+        },
+        {
+            "authored_override": True,
+            "default": None,
+            "description": "Path entries prepended to PATH for this agent's shell tool only.",
+            "label": "PATH Prepend",
+            "name": "shell_path_prepend",
+            "options": None,
+            "placeholder": "/run/wrappers/bin",
+            "required": False,
+            "type": "string[]",
+            "validation": None,
+        },
+    ]
+
+    calculator_tool = next(tool for tool in data["tools"] if tool["name"] == "calculator")
+    assert calculator_tool["agent_override_fields"] is None
+
 
 def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_worker_scope(
     test_client: TestClient,

@@ -335,6 +335,7 @@ def _build_registered_agent_tool(
     workspace_path: Path | None,
     routing_agent_is_private: bool,
     execution_identity: ToolExecutionIdentity | None,
+    runtime_overrides: dict[str, object] | None,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
     worker_target = build_worker_target_from_runtime_env(
@@ -358,6 +359,7 @@ def _build_registered_agent_tool(
             tool_name,
             workspace_path=workspace_path,
         ),
+        runtime_overrides=runtime_overrides,
         shared_storage_root_path=shared_storage_path,
         worker_tools_override=worker_tools,
         worker_target=worker_target,
@@ -467,6 +469,7 @@ def build_agent_toolkit(
         tool_init_context.workspace_path,
         tool_init_context.routing_agent_is_private,
         execution_identity,
+        config.get_agent_tool_runtime_overrides(agent_name, tool_name, runtime_paths=runtime_paths),
     )
 
 

@@ -69,7 +69,7 @@ def validate_knowledge_bases(
 
 def _save_runtime_validated_config(config: Config, runtime_paths: RuntimePaths, config_path: Path) -> None:
     """Revalidate the full config against the active runtime before writing it."""
-    validated = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    validated = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     validated.save_to_yaml(config_path)
 
 
@@ -785,7 +785,7 @@ class ConfigManagerTools(Toolkit):
                 return f"Error: Agent '{agent_name}' not found."
 
             agent = config.agents[agent_name]
-            agent_dict = agent.model_dump(exclude_none=True)
+            agent_dict = agent.authored_model_dump()
 
             yaml_str = yaml.dump(agent_dict, default_flow_style=False, sort_keys=False)
         except Exception as e:
