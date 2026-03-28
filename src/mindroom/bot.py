@@ -161,7 +161,7 @@ from .logging_config import emoji, get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
     PermanentMatrixStartupError,
-    _latest_thread_event_id,
+    build_threaded_edit_content,
     edit_message,
     fetch_thread_history,
     get_joined_rooms,
@@ -3738,26 +3738,16 @@ class AgentBot:
                 extra_content=extra_content,
             )
         else:
-            # For edits in threads, we need to get the latest thread event ID for MSC3440 compliance
-            # When editing, we still need the latest thread event for the fallback behavior
-            # So we fetch it directly rather than using get_latest_thread_event_id_if_needed
-            latest_thread_event_id = None
-            if thread_id:
-                assert self.client is not None
-                # For edits, we always need the latest thread event ID
-                # We can use the event being edited as the fallback if we can't get the latest
-                latest_thread_event_id = await _latest_thread_event_id(self.client, room_id, thread_id)
-                # If we couldn't get the latest, use the event being edited as fallback
-                if latest_thread_event_id is None:
-                    latest_thread_event_id = event_id
-
-            content = format_message_with_mentions(
-                self.config,
-                self.runtime_paths,
-                new_text,
+            assert self.client is not None
+            content = await build_threaded_edit_content(
+                self.client,
+                room_id=room_id,
+                event_id=event_id,
+                new_text=new_text,
+                thread_id=thread_id,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
                 sender_domain=sender_domain,
-                thread_event_id=thread_id,
-                latest_thread_event_id=latest_thread_event_id,
                 tool_trace=tool_trace,
                 extra_content=extra_content,
             )

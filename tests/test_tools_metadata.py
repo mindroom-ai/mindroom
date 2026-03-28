@@ -25,6 +25,17 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
 
+_BASE_TOOL_REGISTRY = _TOOL_REGISTRY.copy()
+_BASE_TOOL_METADATA = TOOL_METADATA.copy()
+
+
+def _restore_builtin_tool_metadata_state() -> None:
+    """Reset tool registries to the built-in metadata snapshot."""
+    _TOOL_REGISTRY.clear()
+    _TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
+    TOOL_METADATA.clear()
+    TOOL_METADATA.update(_BASE_TOOL_METADATA)
+
 
 def test_export_tools_metadata_json() -> None:
     """Export tool metadata to JSON file for dashboard consumption.
@@ -33,6 +44,7 @@ def test_export_tools_metadata_json() -> None:
     avoiding the need to import the entire mindroom.tools module at runtime.
     """
     output_path = Path(__file__).parent.parent / "src/mindroom/tools_metadata.json"
+    _restore_builtin_tool_metadata_state()
 
     tools = export_tools_metadata()
 
@@ -54,6 +66,36 @@ def test_export_tools_metadata_json() -> None:
         for field in required_fields:
             assert field in first_tool, f"Missing required field: {field}"
         assert "managed_init_args" not in first_tool
+
+
+def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
+    """Export should ignore temporary registry contamination from earlier tests."""
+    tool_name = "test_leaked_tool"
+
+    class LeakedTool(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="leaked", tools=[])
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="Leaked Tool",
+        description="Temporary leaked tool metadata",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def leaked_tool_factory() -> type[Toolkit]:
+        return LeakedTool
+
+    try:
+        assert tool_name in TOOL_METADATA
+
+        _restore_builtin_tool_metadata_state()
+
+        exported_names = {tool["name"] for tool in export_tools_metadata()}
+        assert tool_name not in exported_names
+    finally:
+        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+        _restore_builtin_tool_metadata_state()
 
 
 def test_tool_metadata_consistency() -> None:
