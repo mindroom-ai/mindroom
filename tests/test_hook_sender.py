@@ -261,8 +261,8 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
         return "$hook-event"
 
     with (
-        patch("mindroom.bot.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value="$latest")),
-        patch("mindroom.bot.send_message", side_effect=mock_send),
+        patch("mindroom.matrix.client.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value="$latest")),
+        patch("mindroom.matrix.client.send_message", side_effect=mock_send),
     ):
         event_id = await bot._hook_send_message(
             "!room:localhost",
@@ -294,8 +294,8 @@ async def test_hook_send_message_preserves_original_sender_for_downstream_dispat
         return "$hook-event"
 
     with (
-        patch("mindroom.bot.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
-        patch("mindroom.bot.send_message", side_effect=mock_send),
+        patch("mindroom.matrix.client.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
+        patch("mindroom.matrix.client.send_message", side_effect=mock_send),
     ):
         event_id = await bot._hook_send_message(
             "!room:localhost",
@@ -394,6 +394,47 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
 
 
 @pytest.mark.asyncio
+async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_hooks(tmp_path: Path) -> None:
+    """User-authored events must not bypass message:received via hook metadata spoofing."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$spoofed-hook-origin",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "pretend automation",
+                "com.mindroom.source_kind": "hook",
+                "com.mindroom.hook_source": "hook-plugin:message:received",
+            },
+        },
+    )
+    hook_calls: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def received(_ctx: MessageReceivedContext) -> None:
+        hook_calls.append("called")
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot.response_tracker.mark_responded = MagicMock()
+
+    dispatch = await bot._prepare_dispatch(
+        room,
+        event,
+        requester_user_id="@user:localhost",
+        event_label="message",
+    )
+
+    assert dispatch is not None
+    assert hook_calls == ["called"]
+    assert dispatch.envelope.source_kind == "message"
+    bot.response_tracker.mark_responded.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_path: Path) -> None:
     """Agent lifecycle hooks should receive a bound sender directly on the context."""
     bot = _hook_bot(tmp_path)
@@ -415,8 +456,8 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
 
     with (
-        patch("mindroom.bot.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
-        patch("mindroom.bot.send_message", side_effect=mock_send),
+        patch("mindroom.matrix.client.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
+        patch("mindroom.matrix.client.send_message", side_effect=mock_send),
     ):
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
 

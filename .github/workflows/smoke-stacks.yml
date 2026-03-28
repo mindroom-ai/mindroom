@@ -36,7 +36,7 @@ jobs:
       - name: Checkout mindroom
         uses: actions/checkout@v5
         with:
-          lfs: false
+          lfs: true
 
       - name: Checkout mindroom-stack
         uses: actions/checkout@v5
