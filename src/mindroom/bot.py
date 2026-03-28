@@ -176,6 +176,7 @@ from .scheduling import (
     cancel_all_running_scheduled_tasks,
     restore_scheduled_tasks,
 )
+from .thread_summary import maybe_generate_thread_summary
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -3593,6 +3594,22 @@ class AgentBot:
         else:
             resolved_event_id = tracked_event_id or existing_event_id
 
+        if (
+            thread_id is not None
+            and resolved_event_id is not None
+            and not (delivery_result is not None and delivery_result.suppressed)
+        ):
+            create_background_task(
+                maybe_generate_thread_summary(
+                    client=self.client,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
+                ),
+                name=f"thread_summary_{room_id}_{thread_id}",
+            )
+
         return resolved_event_id
 
     async def _send_response(
@@ -4080,7 +4097,7 @@ class TeamBot(AgentBot):
         media_inputs = media or MediaInputs()
 
         # Use the shared team response helper
-        return await self._generate_team_response_helper(
+        event_id = await self._generate_team_response_helper(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
@@ -4113,3 +4130,17 @@ class TeamBot(AgentBot):
             correlation_id=correlation_id or reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
         )
+
+        if thread_id is not None and event_id is not None:
+            create_background_task(
+                maybe_generate_thread_summary(
+                    client=self.client,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
+                ),
+                name=f"thread_summary_{room_id}_{thread_id}",
+            )
+
+        return event_id
