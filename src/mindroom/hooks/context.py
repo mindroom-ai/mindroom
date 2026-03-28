@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .sender import get_hook_message_sender
 from .types import EnrichmentCachePolicy, EnrichmentItem
 
 if TYPE_CHECKING:
@@ -76,6 +77,22 @@ class HookContext:
         plugin_root = self.runtime_paths.storage_root / "plugins" / self.plugin_name
         plugin_root.mkdir(parents=True, exist_ok=True)
         return plugin_root
+
+    async def send_message(
+        self,
+        room_id: str,
+        text: str,
+        *,
+        thread_id: str | None = None,
+        extra_content: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Send a Matrix message from a hook and return the event ID when available."""
+        sender = get_hook_message_sender()
+        if sender is None:
+            self.logger.warning("send_message called but no sender registered")
+            return None
+        source_hook = f"{self.plugin_name}:{self.event_name}"
+        return await sender(room_id, text, thread_id, source_hook, extra_content)
 
 
 @dataclass(slots=True)

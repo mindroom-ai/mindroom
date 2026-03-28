@@ -550,6 +550,14 @@ class AgentBot:
         correlation_id: str,
     ) -> bool:
         """Emit message:received and return whether hooks suppressed processing."""
+        if envelope.source_kind == "hook":
+            self.logger.debug(
+                "Skipping message:received hooks for hook-originated automation message",
+                event_id=envelope.source_event_id,
+                room_id=envelope.room_id,
+            )
+            return False
+
         if not self.hook_registry.has_hooks(EVENT_MESSAGE_RECEIVED):
             return False
 
@@ -3707,6 +3715,41 @@ class AgentBot:
             self.logger.info("Sent response", event_id=event_id, room_id=room_id)
             return event_id
         self.logger.error("Failed to send response to room", room_id=room_id)
+        return None
+
+    async def _hook_send_message(
+        self,
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Send a hook-originated Matrix message with stable metadata tags."""
+        if self.client is None:
+            self.logger.warning("Hook send requested before Matrix client is ready", room_id=room_id)
+            return None
+
+        content_extra = dict(extra_content or {})
+        content_extra["com.mindroom.source_kind"] = "hook"
+        content_extra["com.mindroom.hook_source"] = source_hook
+
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(self.client, room_id, thread_id)
+        content = format_message_with_mentions(
+            self.config,
+            self.runtime_paths,
+            body,
+            sender_domain=self.matrix_id.domain,
+            thread_event_id=thread_id,
+            latest_thread_event_id=latest_thread_event_id,
+            extra_content=content_extra,
+        )
+
+        event_id = await send_message(self.client, room_id, content)
+        if event_id:
+            self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)
+            return event_id
+        self.logger.error("Failed to send hook message", room_id=room_id, source_hook=source_hook)
         return None
 
     async def _edit_message(
