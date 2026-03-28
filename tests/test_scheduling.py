@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom import scheduling
 from mindroom.constants import resolve_runtime_paths
 from mindroom.scheduling import (
     _SCHEDULED_TASK_EVENT_TYPE,
@@ -18,9 +20,12 @@ from mindroom.scheduling import (
     _run_cron_task,
     _run_once_task,
     cancel_all_scheduled_tasks,
+    clear_deferred_overdue_tasks,
+    drain_deferred_overdue_tasks,
     edit_scheduled_task,
     get_scheduled_tasks_for_room,
     list_scheduled_tasks,
+    restore_scheduled_tasks,
     save_edited_scheduled_task,
     schedule_task,
 )
@@ -44,6 +49,290 @@ def _record(
         created_at=datetime.now(UTC),
         workflow=workflow,
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_deferred_overdue_queue() -> Generator[None, None, None]:
+    clear_deferred_overdue_tasks()
+    yield
+    clear_deferred_overdue_tasks()
+
+
+@pytest.mark.asyncio
+async def test_restore_scheduled_tasks_queues_overdue_one_time_tasks() -> None:
+    """Overdue one-time tasks should wait for sync instead of firing during restore."""
+    client = AsyncMock()
+    overdue_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(minutes=5),
+        message="Send the overdue reminder",
+        description="Overdue reminder",
+        thread_id="$thread123",
+        room_id="!test:server",
+    )
+    state_response = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "type": _SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task_overdue",
+                "content": {
+                    "workflow": overdue_workflow.model_dump_json(),
+                    "status": "pending",
+                },
+                "event_id": "$state_task_overdue",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567890,
+            },
+        ],
+        room_id="!test:server",
+    )
+    client.room_get_state = AsyncMock(return_value=state_response)
+
+    with patch("mindroom.scheduling._start_scheduled_task") as mock_start:
+        restored = await restore_scheduled_tasks(
+            client=client,
+            room_id="!test:server",
+            config=MagicMock(),
+            runtime_paths=_runtime_paths(),
+        )
+
+    assert restored == 1
+    mock_start.assert_not_called()
+    assert len(scheduling._deferred_overdue_tasks) == 1
+    assert scheduling._deferred_overdue_tasks[0].task_id == "task_overdue"
+
+
+@pytest.mark.asyncio
+async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> None:
+    """Queued overdue tasks should start in order once sync is ready."""
+    client = AsyncMock()
+    config = MagicMock()
+    overdue_workflow_1 = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(minutes=10),
+        message="First overdue reminder",
+        description="First overdue reminder",
+        thread_id="$thread123",
+        room_id="!test:server",
+    )
+    overdue_workflow_2 = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(minutes=3),
+        message="Second overdue reminder",
+        description="Second overdue reminder",
+        thread_id="$thread123",
+        room_id="!test:server",
+    )
+    state_response = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "type": _SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task_overdue_1",
+                "content": {
+                    "workflow": overdue_workflow_1.model_dump_json(),
+                    "status": "pending",
+                },
+                "event_id": "$state_task_overdue_1",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567890,
+            },
+            {
+                "type": _SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task_overdue_2",
+                "content": {
+                    "workflow": overdue_workflow_2.model_dump_json(),
+                    "status": "pending",
+                },
+                "event_id": "$state_task_overdue_2",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567891,
+            },
+        ],
+        room_id="!test:server",
+    )
+    client.room_get_state = AsyncMock(return_value=state_response)
+
+    with patch("mindroom.scheduling._start_scheduled_task") as mock_start_during_restore:
+        await restore_scheduled_tasks(
+            client=client,
+            room_id="!test:server",
+            config=config,
+            runtime_paths=_runtime_paths(),
+        )
+
+    mock_start_during_restore.assert_not_called()
+
+    with (
+        patch("mindroom.scheduling._start_scheduled_task", side_effect=[True, True]) as mock_start,
+        patch("mindroom.scheduling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
+        drained = await drain_deferred_overdue_tasks(client, config, _runtime_paths())
+
+    assert drained == 2
+    assert [call.args[1] for call in mock_start.call_args_list] == ["task_overdue_1", "task_overdue_2"]
+    mock_sleep.assert_awaited_once_with(scheduling._DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS)
+    assert len(scheduling._deferred_overdue_tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() -> None:
+    """One deferred task failure should not strand later queued tasks."""
+    client = AsyncMock()
+    config = MagicMock()
+    overdue_workflow_1 = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(minutes=10),
+        message="First overdue reminder",
+        description="First overdue reminder",
+        thread_id="$thread123",
+        room_id="!test:server",
+    )
+    overdue_workflow_2 = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(minutes=3),
+        message="Second overdue reminder",
+        description="Second overdue reminder",
+        thread_id="$thread123",
+        room_id="!test:server",
+    )
+    state_response = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "type": _SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task_overdue_1",
+                "content": {
+                    "workflow": overdue_workflow_1.model_dump_json(),
+                    "status": "pending",
+                },
+                "event_id": "$state_task_overdue_1",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567890,
+            },
+            {
+                "type": _SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task_overdue_2",
+                "content": {
+                    "workflow": overdue_workflow_2.model_dump_json(),
+                    "status": "pending",
+                },
+                "event_id": "$state_task_overdue_2",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567891,
+            },
+        ],
+        room_id="!test:server",
+    )
+    client.room_get_state = AsyncMock(return_value=state_response)
+
+    with patch("mindroom.scheduling._start_scheduled_task") as mock_start_during_restore:
+        await restore_scheduled_tasks(
+            client=client,
+            room_id="!test:server",
+            config=config,
+            runtime_paths=_runtime_paths(),
+        )
+
+    mock_start_during_restore.assert_not_called()
+
+    with (
+        patch(
+            "mindroom.scheduling._start_scheduled_task",
+            side_effect=[RuntimeError("boom"), True],
+        ) as mock_start,
+        patch("mindroom.scheduling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
+        drained = await drain_deferred_overdue_tasks(client, config, _runtime_paths())
+
+    assert drained == 1
+    assert [call.args[1] for call in mock_start.call_args_list] == ["task_overdue_1", "task_overdue_2"]
+    mock_sleep.assert_awaited_once_with(scheduling._DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS)
+    assert len(scheduling._deferred_overdue_tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_restore_scheduled_tasks_keeps_cron_restoration_unchanged() -> None:
+    """Recurring cron tasks should still be restored immediately."""
+    client = AsyncMock()
+    cron_workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+        message="Run the daily report",
+        description="Daily report",
+        thread_id="$thread123",
+        room_id="!test:server",
+    )
+    state_response = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "type": _SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task_cron",
+                "content": {
+                    "workflow": cron_workflow.model_dump_json(),
+                    "status": "pending",
+                },
+                "event_id": "$state_task_cron",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567890,
+            },
+        ],
+        room_id="!test:server",
+    )
+    client.room_get_state = AsyncMock(return_value=state_response)
+
+    with patch("mindroom.scheduling._start_scheduled_task", return_value=True) as mock_start:
+        restored = await restore_scheduled_tasks(
+            client=client,
+            room_id="!test:server",
+            config=MagicMock(),
+            runtime_paths=_runtime_paths(),
+        )
+
+    assert restored == 1
+    mock_start.assert_called_once()
+    assert len(scheduling._deferred_overdue_tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_restore_scheduled_tasks_does_not_queue_when_nothing_is_overdue() -> None:
+    """Future one-time tasks should still start normally and leave no deferred queue."""
+    client = AsyncMock()
+    future_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=15),
+        message="Future reminder",
+        description="Future reminder",
+        thread_id="$thread123",
+        room_id="!test:server",
+    )
+    state_response = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "type": _SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task_future",
+                "content": {
+                    "workflow": future_workflow.model_dump_json(),
+                    "status": "pending",
+                },
+                "event_id": "$state_task_future",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567890,
+            },
+        ],
+        room_id="!test:server",
+    )
+    client.room_get_state = AsyncMock(return_value=state_response)
+
+    with patch("mindroom.scheduling._start_scheduled_task", return_value=True) as mock_start:
+        restored = await restore_scheduled_tasks(
+            client=client,
+            room_id="!test:server",
+            config=MagicMock(),
+            runtime_paths=_runtime_paths(),
+        )
+
+    assert restored == 1
+    mock_start.assert_called_once()
+    assert len(scheduling._deferred_overdue_tasks) == 0
 
 
 @pytest.mark.asyncio
