@@ -176,6 +176,7 @@ from .scheduling import (
     cancel_all_running_scheduled_tasks,
     restore_scheduled_tasks,
 )
+from .thread_summary import maybe_generate_thread_summary
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -3404,6 +3405,18 @@ class AgentBot:
 
         return delivery
 
+    def _resolve_response_event_id(
+        self,
+        delivery_result: _ResponseDispatchResult | None,
+        tracked_event_id: str | None,
+        existing_event_id: str | None,
+    ) -> str | None:
+        if delivery_result is not None and delivery_result.event_id is not None:
+            return delivery_result.event_id
+        if delivery_result is not None and existing_event_id is not None:
+            return existing_event_id
+        return tracked_event_id or existing_event_id
+
     async def _generate_response(
         self,
         room_id: str,
@@ -3586,12 +3599,27 @@ class AgentBot:
                 thread_id=thread_id,
             )
 
-        if delivery_result is not None and delivery_result.event_id is not None:
-            resolved_event_id = delivery_result.event_id
-        elif delivery_result is not None and existing_event_id is not None:
-            resolved_event_id = existing_event_id
-        else:
-            resolved_event_id = tracked_event_id or existing_event_id
+        resolved_event_id = self._resolve_response_event_id(
+            delivery_result=delivery_result,
+            tracked_event_id=tracked_event_id,
+            existing_event_id=existing_event_id,
+        )
+
+        if (
+            thread_id is not None
+            and resolved_event_id is not None
+            and not (delivery_result is not None and delivery_result.suppressed)
+        ):
+            create_background_task(
+                maybe_generate_thread_summary(
+                    client=self.client,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
+                ),
+                name=f"thread_summary_{room_id}_{thread_id}",
+            )
 
         return resolved_event_id
 
@@ -4070,7 +4098,7 @@ class TeamBot(AgentBot):
         media_inputs = media or MediaInputs()
 
         # Use the shared team response helper
-        return await self._generate_team_response_helper(
+        event_id = await self._generate_team_response_helper(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
@@ -4103,3 +4131,17 @@ class TeamBot(AgentBot):
             correlation_id=correlation_id or reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
         )
+
+        if thread_id is not None and event_id is not None:
+            create_background_task(
+                maybe_generate_thread_summary(
+                    client=self.client,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
+                ),
+                name=f"thread_summary_{room_id}_{thread_id}",
+            )
+
+        return event_id

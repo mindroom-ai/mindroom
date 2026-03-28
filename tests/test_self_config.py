@@ -513,7 +513,7 @@ class TestAgentCreationInjection:
                 config=config,
             )
             self_config_tool = next(t for t in agent.tools if getattr(t, "name", None) == "self_config")
-            assert self_config_tool.config_path == config_path
+            assert self_config_tool.config_path == config_path.resolve()
 
             # The tool should be able to read this agent's config from the temp file
             result = self_config_tool.get_own_config()
@@ -534,7 +534,7 @@ class TestAgentCreationInjection:
                 config=config,
             )
             self_config_tool = next(t for t in agent.tools if getattr(t, "name", None) == "self_config")
-            assert self_config_tool.config_path == config_path
+            assert self_config_tool.config_path == config_path.resolve()
 
             result = self_config_tool.get_own_config()
             assert "Writer" in result
@@ -554,7 +554,7 @@ class TestAgentCreationInjection:
                 config=config,
             )
             config_manager_tool = next(t for t in agent.tools if getattr(t, "name", None) == "config_manager")
-            assert config_manager_tool.config_path == config_path
+            assert config_manager_tool.config_path == config_path.resolve()
 
             result = config_manager_tool.get_info(info_type="agents")
             assert "Writer" in result
