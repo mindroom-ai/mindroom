@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -18,7 +18,6 @@ from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import (
     ConfigReloadedContext,
-    HookMessageSender,
     HookRegistry,
     emit,
 )
@@ -99,6 +98,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
     from pathlib import Path
     from types import FrameType
+
+    from mindroom.hooks.sender import HookMessageSender
 
     from .constants import RuntimePaths
     from .knowledge.manager import KnowledgeManager
@@ -969,6 +970,7 @@ class MultiAgentOrchestrator:
             return await self._load_initial_config(new_config, new_hook_registry)
 
         current_config = self._require_config()
+        plugin_changes = self._plugin_change_paths(current_config, new_config)
         plan = build_config_update_plan(
             current_config=current_config,
             new_config=new_config,
@@ -976,6 +978,8 @@ class MultiAgentOrchestrator:
             existing_entities=set(self.agent_bots.keys()),
             agent_bots=self.agent_bots,
         )
+        if plugin_changes:
+            plan = replace(plan, entities_to_restart=plan.entities_to_restart | set(self.agent_bots))
 
         if plan.mindroom_user_changed:
             await self._prepare_user_account(new_config, update_runtime_state=not self.running)
@@ -985,7 +989,6 @@ class MultiAgentOrchestrator:
         self._activate_hook_registry(new_hook_registry)
         logger.info(f"Updating config. New authorization: {new_config.authorization.global_users}")
         await self._update_unchanged_bots(plan)
-        plugin_changes = self._plugin_change_paths(current_config, new_config)
 
         if plan.only_support_service_changes:
             await self._sync_runtime_support_services(new_config, start_watcher=self.running)

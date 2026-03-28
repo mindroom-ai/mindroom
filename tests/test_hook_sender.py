@@ -26,6 +26,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.hooks.execution import emit
+from mindroom.hooks.sender import HookMessageSender as SenderAlias
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
@@ -50,6 +51,11 @@ def _config(tmp_path: Path) -> Config:
         ),
         runtime_paths,
     )
+
+
+def test_hooks_package_reexports_hook_message_sender() -> None:
+    """The public hooks package should keep exporting HookMessageSender."""
+    assert HookMessageSender is SenderAlias
 
 
 def _plugin(name: str, callbacks: list[object]) -> object:
@@ -261,8 +267,8 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
         return "$hook-event"
 
     with (
-        patch("mindroom.matrix.client.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value="$latest")),
-        patch("mindroom.matrix.client.send_message", side_effect=mock_send),
+        patch("mindroom.hooks.sender.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value="$latest")),
+        patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
     ):
         event_id = await bot._hook_send_message(
             "!room:localhost",
@@ -294,8 +300,8 @@ async def test_hook_send_message_preserves_original_sender_for_downstream_dispat
         return "$hook-event"
 
     with (
-        patch("mindroom.matrix.client.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
-        patch("mindroom.matrix.client.send_message", side_effect=mock_send),
+        patch("mindroom.hooks.sender.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
+        patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
     ):
         event_id = await bot._hook_send_message(
             "!room:localhost",
@@ -456,8 +462,8 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
 
     with (
-        patch("mindroom.matrix.client.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
-        patch("mindroom.matrix.client.send_message", side_effect=mock_send),
+        patch("mindroom.hooks.sender.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
+        patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
     ):
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
 

@@ -87,6 +87,15 @@ def get_tool_execution_identity() -> ToolExecutionIdentity | None:
     return _TOOL_EXECUTION_IDENTITY.get()
 
 
+def active_tool_execution_identity(
+    execution_identity: ToolExecutionIdentity | None,
+) -> ToolExecutionIdentity | None:
+    """Return the explicit execution identity or the active boundary context."""
+    if execution_identity is not None:
+        return execution_identity
+    return get_tool_execution_identity()
+
+
 @contextmanager
 def tool_execution_identity(identity: ToolExecutionIdentity | None) -> Iterator[None]:
     """Set the current tool execution identity for the active execution scope."""

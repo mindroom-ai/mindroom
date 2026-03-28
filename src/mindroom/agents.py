@@ -21,6 +21,7 @@ import mindroom.tools  # noqa: F401
 from mindroom import agent_prompts, constants
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
@@ -30,6 +31,7 @@ from mindroom.runtime_resolution import (
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_worker_target_from_runtime_env,
@@ -725,6 +727,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     runtime_paths: constants.RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,
+    hook_registry: HookRegistry | None = None,
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
     delegation_depth: int = 0,
@@ -737,6 +740,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         runtime_paths: Explicit runtime context for paths, env, and credentials.
         execution_identity: Request execution identity used to resolve scoped
             state, workspaces, worker routing, and requester-local storage.
+        hook_registry: Optional hook registry for plugin-based tool call
+            interception and event hooks.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
@@ -766,7 +771,15 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
-    load_plugins(config, runtime_paths)
+    plugins = load_plugins(config, runtime_paths)
+    active_hook_registry = hook_registry if hook_registry is not None else HookRegistry.from_plugins(plugins)
+    tool_hook_bridge = build_tool_hook_bridge(
+        active_hook_registry,
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
 
     tool_names = get_agent_toolkit_names(
         agent_name,
@@ -793,7 +806,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
             ):
-                tools.append(toolkit)
+                tools.append(prepend_tool_hook_bridge(toolkit, tool_hook_bridge))
         except (ValueError, ImportError) as exc:
             logger.warning(
                 "Could not load tool for agent construction",

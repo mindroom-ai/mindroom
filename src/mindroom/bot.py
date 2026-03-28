@@ -18,7 +18,6 @@ from mindroom.hooks import (
     AfterResponseContext,
     AgentLifecycleContext,
     BeforeResponseContext,
-    HookMessageSender,
     HookRegistry,
     MessageEnrichContext,
     MessageEnvelope,
@@ -33,7 +32,7 @@ from mindroom.hooks import (
     render_enrichment_block,
     strip_enrichment_from_session_storage,
 )
-from mindroom.hooks.sender import send_hook_message
+from mindroom.hooks.sender import HookMessageSender, send_hook_message
 from mindroom.hooks.types import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -763,6 +762,7 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             knowledge=knowledge,
             execution_identity=execution_identity,
+            hook_registry=self.hook_registry,
         )
 
     @cached_property
