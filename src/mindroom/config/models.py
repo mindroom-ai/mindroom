@@ -150,6 +150,10 @@ class DefaultsConfig(BaseModel):
         description="Enable streaming responses via progressive message edits",
     )
     show_stop_button: bool = Field(default=True, description="Whether to automatically show stop button on messages")
+    auto_resume_after_restart: bool = Field(
+        default=False,
+        description="Whether restart cleanup should post a real system message to resume interrupted threaded conversations",
+    )
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
     num_history_runs: int | None = Field(

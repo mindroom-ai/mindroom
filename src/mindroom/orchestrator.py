@@ -38,7 +38,11 @@ from mindroom.matrix.rooms import (
     load_rooms,
     resolve_room_aliases,
 )
-from mindroom.matrix.stale_stream_cleanup import cleanup_stale_streaming_messages
+from mindroom.matrix.stale_stream_cleanup import (
+    InterruptedThread,
+    auto_resume_interrupted_threads,
+    cleanup_stale_streaming_messages,
+)
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
     INTERNAL_USER_ACCOUNT_KEY,
@@ -723,18 +727,19 @@ class MultiAgentOrchestrator:
         self,
         bots: list[AgentBot | TeamBot],
         config: Config,
-    ) -> None:
+    ) -> list[InterruptedThread]:
         """Cleanup stale streams for started bots before sync loops begin."""
         bot_user_ids = {bot.agent_user.user_id for bot in bots if bot.client is not None and bot.agent_user.user_id}
         if not bot_user_ids:
-            return
+            return []
 
         cleaned_count = 0
+        interrupted_threads: list[InterruptedThread] = []
         for bot in bots:
             if bot.client is None or not bot.agent_user.user_id:
                 continue
             try:
-                bot_cleaned_count = await cleanup_stale_streaming_messages(
+                bot_cleaned_count, bot_interrupted_threads = await cleanup_stale_streaming_messages(
                     bot.client,
                     bot_user_id=bot.agent_user.user_id,
                     bot_user_ids=bot_user_ids,
@@ -742,6 +747,7 @@ class MultiAgentOrchestrator:
                     runtime_paths=self.runtime_paths,
                 )
                 cleaned_count += bot_cleaned_count
+                interrupted_threads.extend(bot_interrupted_threads)
             except Exception as exc:
                 logger.warning(
                     "Could not cleanup stale streaming messages (non-critical)",
@@ -751,6 +757,32 @@ class MultiAgentOrchestrator:
 
         if cleaned_count > 0:
             logger.info("Cleaned stale streaming messages", count=cleaned_count)
+        return interrupted_threads
+
+    async def _auto_resume_after_restart(
+        self,
+        interrupted_threads: list[InterruptedThread],
+        config: Config,
+    ) -> None:
+        """Queue visible Matrix resume relays from the router."""
+        if not config.defaults.auto_resume_after_restart or not interrupted_threads:
+            return
+        router_bot = self._router_bot()
+        if router_bot is None or router_bot.client is None:
+            logger.warning("Auto-resume after restart skipped because the router client is unavailable")
+            return
+
+        try:
+            resumed_count = await auto_resume_interrupted_threads(
+                router_bot.client,
+                interrupted_threads,
+                config=config,
+                runtime_paths=self.runtime_paths,
+            )
+            if resumed_count > 0:
+                logger.info("Queued auto-resume messages after restart", count=resumed_count)
+        except Exception as exc:
+            logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
@@ -777,7 +809,8 @@ class MultiAgentOrchestrator:
             "Setting up Matrix rooms and memberships",
             lambda: self._setup_rooms_and_memberships(started_bots),
         )
-        await self._cleanup_stale_streams_after_restart(started_bots, config)
+        interrupted_threads = await self._cleanup_stale_streams_after_restart(started_bots, config)
+        await self._auto_resume_after_restart(interrupted_threads, config)
 
         self.running = True
 
