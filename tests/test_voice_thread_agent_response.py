@@ -107,7 +107,6 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
     voice_transcription_event.event_id = "$transcription123"
     voice_transcription_event.sender = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"  # Router's user ID
     voice_transcription_event.body = f"{VOICE_PREFIX}turn on the guest room lights"
-    voice_transcription_event.server_timestamp = 1000
     voice_transcription_event.source = {
         "content": {
             "body": f"{VOICE_PREFIX}turn on the guest room lights",
@@ -169,7 +168,6 @@ async def test_voice_transcription_permissions_use_original_sender(mock_home_bot
     voice_transcription_event.event_id = "$transcription_permissions"
     voice_transcription_event.sender = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
     voice_transcription_event.body = f"{VOICE_PREFIX}turn on the guest room lights"
-    voice_transcription_event.server_timestamp = 1000
     voice_transcription_event.source = {
         "content": {
             "body": f"{VOICE_PREFIX}turn on the guest room lights",
@@ -220,7 +218,6 @@ async def test_agent_ignores_non_voice_router_messages(mock_home_bot: AgentBot) 
     router_message.event_id = "$router_msg"
     router_message.sender = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
     router_message.body = "I'll help you with that"  # No voice prefix
-    router_message.server_timestamp = 1000
     router_message.source = {
         "content": {
             "body": "I'll help you with that",
@@ -256,7 +253,6 @@ async def test_agent_ignores_visible_router_voice_echo(mock_home_bot: AgentBot) 
     router_voice_echo.event_id = "$router_voice_echo"
     router_voice_echo.sender = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
     router_voice_echo.body = f"{VOICE_PREFIX}@home turn on the guest room lights"
-    router_voice_echo.server_timestamp = 1000
     router_voice_echo.source = {
         "content": {
             "body": f"{VOICE_PREFIX}@home turn on the guest room lights",
@@ -284,7 +280,6 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
     fallback_event.event_id = "$voice_fallback_event"
     fallback_event.sender = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
     fallback_event.body = f"{VOICE_PREFIX}[Attached voice message]"
-    fallback_event.server_timestamp = 1000
     fallback_event.source = {
         "content": {
             "body": f"{VOICE_PREFIX}[Attached voice message]",
@@ -347,7 +342,6 @@ async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_h
     fallback_event.event_id = "$voice_fallback_attached"
     fallback_event.sender = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
     fallback_event.body = f"{VOICE_PREFIX}[Attached voice message]"
-    fallback_event.server_timestamp = 1000
     fallback_event.source = {
         "content": {
             "body": f"{VOICE_PREFIX}[Attached voice message]",
@@ -403,7 +397,6 @@ async def test_followup_text_in_voice_thread_recovers_audio(mock_home_bot: Agent
     followup_event.event_id = "$followup_text"
     followup_event.sender = "@user:example.com"
     followup_event.body = "Can you repeat that?"
-    followup_event.server_timestamp = 1000
     followup_event.source = {
         "content": {
             "body": "Can you repeat that?",
