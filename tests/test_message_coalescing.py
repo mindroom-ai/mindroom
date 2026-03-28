@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot, _MessageContext
+from mindroom.bot import AgentBot, _MessageContext, _SyntheticTextEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -214,10 +214,20 @@ class TestHasNewerUnrespondedInScope:
     def test_synthetic_event_no_server_timestamp(self, tmp_path: Path) -> None:
         """Events without server_timestamp (e.g. _SyntheticTextEvent for voice) should not skip."""
         bot = _make_bot(tmp_path)
-        event = MagicMock()
-        del event.server_timestamp  # simulate no server_timestamp attr
-        event.sender = "@user:localhost"
-        event.event_id = "$m1"
+
+        class _SyntheticEventWithoutTimestampAccess(_SyntheticTextEvent):
+            def __getattribute__(self, name: str) -> object:
+                if name == "server_timestamp":
+                    msg = "Synthetic events should not access server_timestamp."
+                    raise AssertionError(msg)
+                return super().__getattribute__(name)
+
+        event = _SyntheticEventWithoutTimestampAccess(
+            sender="@user:localhost",
+            event_id="$m1",
+            body="hello",
+            source={"content": {"body": "hello"}},
+        )
         context = _make_context(
             [
                 {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "first"},

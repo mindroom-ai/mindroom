@@ -1670,8 +1670,9 @@ class AgentBot:
         if not context.thread_history:
             return False
 
-        # _SyntheticTextEvent (voice) has no server_timestamp — skip coalescing.
-        current_ts = getattr(event, "server_timestamp", None)
+        if isinstance(event, _SyntheticTextEvent):
+            return False
+        current_ts = event.server_timestamp
         if not isinstance(current_ts, int):
             return False
 
