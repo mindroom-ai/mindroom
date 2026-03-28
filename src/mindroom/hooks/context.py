@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.logging_config import get_logger
 
-from .sender import get_hook_message_sender
 from .types import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -26,6 +25,8 @@ if TYPE_CHECKING:
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
 
+    from .sender import HookMessageSender
+
 
 def _resolve_plugin_state_root(
     runtime_paths: RuntimePaths | None,
@@ -40,8 +41,9 @@ def _resolve_plugin_state_root(
     return plugin_root
 
 
-async def _send_hook_message(
+async def _send_bound_message(
     logger: structlog.stdlib.BoundLogger,
+    message_sender: HookMessageSender | None,
     plugin_name: str,
     event_name: str,
     room_id: str,
@@ -51,16 +53,15 @@ async def _send_hook_message(
     extra_content: dict[str, Any] | None = None,
     requester_id: str | None = None,
 ) -> str | None:
-    """Send a Matrix message from a hook and return the event ID when available."""
-    sender = get_hook_message_sender()
-    if sender is None:
+    """Send one hook-originated Matrix message through a bound sender."""
+    if message_sender is None:
         logger.warning("send_message called but no sender registered")
         return None
     source_hook = f"{plugin_name}:{event_name}"
     resolved_extra_content = dict(extra_content or {})
     if requester_id:
         resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
-    return await sender(room_id, text, thread_id, source_hook, resolved_extra_content or None)
+    return await message_sender(room_id, text, thread_id, source_hook, resolved_extra_content or None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +115,7 @@ class HookContext:
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
     correlation_id: str
+    message_sender: HookMessageSender | None = field(default=None, kw_only=True)
 
     @property
     def state_root(self) -> Path:
@@ -129,8 +131,9 @@ class HookContext:
         extra_content: dict[str, Any] | None = None,
     ) -> str | None:
         """Send a Matrix message from a hook and return the event ID when available."""
-        return await _send_hook_message(
+        return await _send_bound_message(
             self.logger,
+            self.message_sender,
             self.plugin_name,
             self.event_name,
             room_id,
@@ -280,8 +283,9 @@ class ToolBeforeCallContext:
         extra_content: dict[str, Any] | None = None,
     ) -> str | None:
         """Send a Matrix message from a tool hook and return the event ID when available."""
-        return await _send_hook_message(
+        return await _send_bound_message(
             self.logger,
+            None,
             self.plugin_name,
             self.event_name,
             room_id,
@@ -329,8 +333,9 @@ class ToolAfterCallContext:
         extra_content: dict[str, Any] | None = None,
     ) -> str | None:
         """Send a Matrix message from a tool hook and return the event ID when available."""
-        return await _send_hook_message(
+        return await _send_bound_message(
             self.logger,
+            None,
             self.plugin_name,
             self.event_name,
             room_id,

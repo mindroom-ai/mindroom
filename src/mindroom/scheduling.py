@@ -22,6 +22,7 @@ from mindroom.ai import get_model_instance
 from mindroom.authorization import get_available_agents_for_sender
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.hooks import HookRegistry, ScheduleFiredContext, emit
+from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.hooks.types import EVENT_SCHEDULE_FIRED
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
@@ -643,6 +644,7 @@ async def _execute_scheduled_workflow(
                 runtime_paths=runtime_paths,
                 logger=logger.bind(event_name=EVENT_SCHEDULE_FIRED),
                 correlation_id=f"{EVENT_SCHEDULE_FIRED}:{task_id}",
+                message_sender=build_hook_message_sender(client, config, runtime_paths),
                 task_id=task_id,
                 workflow=workflow,
                 room_id=workflow.room_id,

@@ -26,12 +26,7 @@ from .enrichment import (
 )
 from .execution import emit, emit_collect, emit_gate, emit_transform
 from .registry import HookRegistry
-from .sender import (
-    HookMessageSender,
-    clear_hook_message_sender,
-    get_hook_message_sender,
-    set_hook_message_sender,
-)
+from .sender import HookMessageSender
 from .types import (
     BUILTIN_EVENT_NAMES,
     EVENT_AGENT_STARTED,
@@ -81,16 +76,13 @@ __all__ = [
     "ScheduleFiredContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
-    "clear_hook_message_sender",
     "compute_enrichment_digest",
     "emit",
     "emit_collect",
     "emit_gate",
     "emit_transform",
-    "get_hook_message_sender",
     "hook",
     "render_enrichment_block",
-    "set_hook_message_sender",
     "strip_enrichment_block",
     "strip_enrichment_from_session_storage",
 ]

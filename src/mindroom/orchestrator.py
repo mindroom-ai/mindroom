@@ -7,7 +7,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import uvicorn
@@ -18,10 +18,9 @@ from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import (
     ConfigReloadedContext,
+    HookMessageSender,
     HookRegistry,
-    clear_hook_message_sender,
     emit,
-    set_hook_message_sender,
 )
 from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.types import EVENT_CONFIG_RELOADED
@@ -714,23 +713,22 @@ class MultiAgentOrchestrator:
         )
         return router_bot
 
-    def _refresh_hook_message_sender(self) -> None:
-        """Register the active router-backed sender for hook contexts."""
+    def _hook_message_sender(self) -> HookMessageSender | None:
+        """Return a router-backed sender for hook contexts when available."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is None:
-            clear_hook_message_sender()
-            return
+            return None
 
         async def _send(
             room_id: str,
             body: str,
             thread_id: str | None,
             source_hook: str,
-            extra_content: dict[str, Any] | None,
+            extra_content: dict[str, object] | None,
         ) -> str | None:
             return await router_bot._hook_send_message(room_id, body, thread_id, source_hook, extra_content)
 
-        set_hook_message_sender(_send)
+        return _send
 
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""
@@ -782,7 +780,6 @@ class MultiAgentOrchestrator:
         if not self.agent_bots:
             await self.initialize()
 
-        self._refresh_hook_message_sender()
         router_bot = await self._start_router_bot()
         set_runtime_starting("Starting remaining Matrix bot accounts")
         start_results = await self._start_entities_once(
@@ -876,6 +873,7 @@ class MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             logger=logger.bind(event_name=EVENT_CONFIG_RELOADED),
             correlation_id=f"config-reload:{uuid4().hex}",
+            message_sender=self._hook_message_sender(),
             changed_entities=tuple(sorted(changed_entities)),
             added_entities=tuple(sorted(added_entities)),
             removed_entities=tuple(sorted(removed_entities)),
@@ -958,7 +956,6 @@ class MultiAgentOrchestrator:
 
         if plan.only_support_service_changes:
             await self._sync_runtime_support_services(new_config, start_watcher=self.running)
-            self._refresh_hook_message_sender()
             await self._emit_config_reloaded(
                 new_config=new_config,
                 changed_entities=set(),
@@ -969,7 +966,6 @@ class MultiAgentOrchestrator:
             return False
 
         changed_entities, retryable_entities, permanently_failed_entities = await self._restart_changed_entities(plan)
-        self._refresh_hook_message_sender()
         await self._reconcile_post_update_rooms(plan, changed_entities)
 
         for entity_name in retryable_entities:
@@ -1241,7 +1237,6 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
-        clear_hook_message_sender()
         await self._cancel_config_reload_task()
         await self._stop_memory_auto_flush_worker()
         await self._cancel_knowledge_refresh_task()
