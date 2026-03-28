@@ -202,6 +202,7 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
+_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"scheduled", "hook"})
 
 
 def _create_task_wrapper(
@@ -423,6 +424,21 @@ class _SyntheticTextEvent:
 type _TextDispatchEvent = nio.RoomMessageText | _SyntheticTextEvent
 
 type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
+
+
+def _is_coalescing_exempt_source_kind(event: _DispatchEvent) -> bool:
+    """Return True when coalescing should be skipped for this event.
+
+    Automation messages (scheduled tasks, hooks) are one-shot synthetic events
+    that must never be coalesced — coalescing targets rapid human typing only.
+    """
+    if not isinstance(event.source, dict):
+        return False
+    content = event.source.get("content")
+    if not isinstance(content, dict):
+        return False
+    source_kind = content.get("com.mindroom.source_kind")
+    return isinstance(source_kind, str) and source_kind in _COALESCING_EXEMPT_SOURCE_KINDS
 
 
 def _merge_response_extra_content(
@@ -1699,6 +1715,11 @@ class AgentBot:
             return False
         current_ts = event.server_timestamp
         if not isinstance(current_ts, int):
+            return False
+
+        # Automation messages (scheduled tasks, hooks) are one-shot synthetic events
+        # that must never be coalesced — coalescing targets rapid human typing only.
+        if _is_coalescing_exempt_source_kind(event):
             return False
 
         for msg in context.thread_history:
