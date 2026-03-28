@@ -980,6 +980,8 @@ class TestAgentBot:
             assert stream_kwargs["room_id"] == "!test:localhost"
             assert stream_kwargs["knowledge"] is None
             assert stream_kwargs["user_id"] == "@user:localhost"
+            assert isinstance(stream_kwargs["run_id"], str)
+            assert stream_kwargs["run_id"]
             assert stream_kwargs["media"] == MediaInputs()
             assert stream_kwargs["reply_to_event_id"] == "event123"
             assert stream_kwargs["show_tool_calls"] is True
@@ -1001,6 +1003,8 @@ class TestAgentBot:
             assert ai_kwargs["room_id"] == "!test:localhost"
             assert ai_kwargs["knowledge"] is None
             assert ai_kwargs["user_id"] == "@user:localhost"
+            assert isinstance(ai_kwargs["run_id"], str)
+            assert ai_kwargs["run_id"]
             assert ai_kwargs["media"] == MediaInputs()
             assert ai_kwargs["reply_to_event_id"] == "event123"
             assert ai_kwargs["show_tool_calls"] is True

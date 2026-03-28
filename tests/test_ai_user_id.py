@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,7 +10,13 @@ import pytest
 from agno.media import File
 from agno.models.metrics import Metrics
 from agno.models.vertexai.claude import Claude as VertexAIClaude
-from agno.run.agent import ModelRequestCompletedEvent, RunCompletedEvent, RunContentEvent, RunErrorEvent
+from agno.run.agent import (
+    ModelRequestCompletedEvent,
+    RunCancelledEvent,
+    RunCompletedEvent,
+    RunContentEvent,
+    RunErrorEvent,
+)
 from agno.run.base import RunStatus
 
 from mindroom.ai import (
@@ -107,6 +114,7 @@ class TestUserIdPassthrough:
 
             mock_ai.assert_called_once()
             assert mock_ai.call_args.kwargs["user_id"] == "@alice:localhost"
+            assert callable(mock_ai.call_args.kwargs["run_id_callback"])
 
     @pytest.mark.asyncio
     async def test_streaming_passes_user_id(self, tmp_path: Path) -> None:
@@ -174,6 +182,7 @@ class TestUserIdPassthrough:
 
                 mock_stream.assert_called_once()
                 assert mock_stream.call_args.kwargs["user_id"] == "@bob:localhost"
+                assert callable(mock_stream.call_args.kwargs["run_id_callback"])
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:
@@ -205,6 +214,37 @@ class TestUserIdPassthrough:
 
             mock_agent.arun.assert_called_once()
             assert mock_agent.arun.call_args.kwargs["user_id"] == "@user:localhost"
+
+    @pytest.mark.asyncio
+    async def test_ai_response_passes_run_id_to_agent_arun(self, tmp_path: Path) -> None:
+        """Non-streaming cancellation needs an explicit run_id threaded to Agno."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Response"
+        mock_run_output.tools = None
+        mock_agent.arun = AsyncMock(return_value=mock_run_output)
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+
+            await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                run_id="run-123",
+            )
+
+            mock_agent.arun.assert_called_once()
+            assert mock_agent.arun.call_args.kwargs["run_id"] == "run-123"
 
     @pytest.mark.asyncio
     async def test_prepare_agent_and_prompt_threads_config_path_to_create_agent(self, tmp_path: Path) -> None:
@@ -322,6 +362,97 @@ class TestUserIdPassthrough:
 
             mock_agent.arun.assert_called_once()
             assert mock_agent.arun.call_args.kwargs["user_id"] == "@user:localhost"
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_passes_run_id_to_agent_arun(self, tmp_path: Path) -> None:
+        """Streaming cancellation needs an explicit run_id threaded to Agno."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            yield "chunk"
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+
+            _chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    run_id="run-456",
+                )
+            ]
+
+            mock_agent.arun.assert_called_once()
+            assert mock_agent.arun.call_args.kwargs["run_id"] == "run-456"
+
+    @pytest.mark.asyncio
+    async def test_ai_response_raises_cancelled_error_for_cancelled_runs(self, tmp_path: Path) -> None:
+        """Gracefully cancelled Agno runs should surface as task cancellation to the bot."""
+        mock_agent = MagicMock()
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Run run-123 was cancelled"
+        mock_run_output.tools = None
+        mock_run_output.status = RunStatus.cancelled
+        mock_run_output.run_id = "run-123"
+        mock_run_output.session_id = "session1"
+        mock_run_output.model = "test-model"
+        mock_run_output.model_provider = "openai"
+        mock_run_output.metrics = None
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+
+            with pytest.raises(asyncio.CancelledError):
+                await ai_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                )
+
+    @pytest.mark.asyncio
+    async def test_ai_response_returns_friendly_error_for_error_status(self, tmp_path: Path) -> None:
+        """Errored Agno RunOutput values must not be surfaced as successful replies."""
+        mock_agent = MagicMock()
+        mock_run_output = MagicMock()
+        mock_run_output.content = "validation failed in agno"
+        mock_run_output.status = RunStatus.error
+        mock_run_output.tools = None
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+            patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly-error") as mock_friendly_error,
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+
+            response = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+            )
+
+        assert response == "friendly-error"
+        mock_friendly_error.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:
@@ -446,6 +577,53 @@ class TestUserIdPassthrough:
         assert "Inline media unavailable for this model" in second_call.args[0]
 
     @pytest.mark.asyncio
+    async def test_ai_response_retries_errored_run_output_with_fresh_run_id(self, tmp_path: Path) -> None:
+        """Inline-media retries must use a fresh Agno run_id after an errored run output."""
+        mock_agent = MagicMock()
+        error_output = MagicMock()
+        error_output.content = "Error code: 500 - audio input is not supported"
+        error_output.status = RunStatus.error
+        error_output.tools = None
+
+        success_output = MagicMock()
+        success_output.content = "Recovered response"
+        success_output.status = RunStatus.completed
+        success_output.tools = None
+
+        seen_run_ids: list[str | None] = []
+        callback_run_ids: list[str] = []
+        responses = [error_output, success_output]
+
+        async def fake_cached_run(*_args: object, **kwargs: object) -> MagicMock:
+            seen_run_ids.append(kwargs["run_id"])
+            run_id_callback = kwargs["run_id_callback"]
+            if run_id_callback is not None and kwargs["run_id"] is not None:
+                run_id_callback(kwargs["run_id"])
+            return responses.pop(0)
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._cached_agent_run", side_effect=fake_cached_run),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            response = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                run_id="run-123",
+                run_id_callback=callback_run_ids.append,
+                media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+            )
+
+        assert response == "Recovered response"
+        assert seen_run_ids[0] == "run-123"
+        assert seen_run_ids[1] is not None
+        assert seen_run_ids[1] != "run-123"
+        assert callback_run_ids == [run_id for run_id in seen_run_ids if run_id is not None]
+
+    @pytest.mark.asyncio
     async def test_stream_agent_response_retries_without_media_on_validation_error(self, tmp_path: Path) -> None:
         """When inline media is rejected, streaming should retry once without media."""
         mock_agent = MagicMock()
@@ -498,6 +676,52 @@ class TestUserIdPassthrough:
         assert list(second_call.kwargs["files"]) == []
         assert "Inline media unavailable for this model" in second_call.args[0]
         assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_retries_with_fresh_run_id(self, tmp_path: Path) -> None:
+        """Streaming inline-media retries must not reuse the cancelled attempt's run_id."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(content="Error code: 500 - audio input is not supported")
+
+        async def successful_stream() -> AsyncIterator[object]:
+            yield RunContentEvent(content="Recovered stream")
+
+        callback_run_ids: list[str] = []
+        mock_agent.arun = MagicMock(side_effect=[failing_stream(), successful_stream()])
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    run_id="run-456",
+                    run_id_callback=callback_run_ids.append,
+                    media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+                )
+            ]
+
+        assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
+        first_call = mock_agent.arun.call_args_list[0]
+        second_call = mock_agent.arun.call_args_list[1]
+        assert first_call.kwargs["run_id"] == "run-456"
+        assert second_call.kwargs["run_id"] is not None
+        assert second_call.kwargs["run_id"] != "run-456"
+        assert callback_run_ids == [first_call.kwargs["run_id"], second_call.kwargs["run_id"]]
 
     @pytest.mark.parametrize(
         ("error_text", "expected"),
@@ -845,6 +1069,62 @@ class TestUserIdPassthrough:
         assert payload["context"]["input_tokens"] == 500
         assert payload["context"]["window_tokens"] == 1000
         assert "utilization_pct" not in payload["context"]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_raises_cancelled_error_for_run_cancelled_event(self, tmp_path: Path) -> None:
+        """Graceful stream cancellation should preserve metadata and end as CancelledError."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="partial")
+            yield ModelRequestCompletedEvent(
+                model="test-model",
+                model_provider="openai",
+                input_tokens=100,
+                output_tokens=25,
+                total_tokens=125,
+            )
+            yield RunCancelledEvent(
+                run_id="run-3",
+                session_id="session1",
+                reason="Run run-3 was cancelled",
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        config = Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
+        )
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            run_metadata: dict[str, object] = {}
+            with pytest.raises(asyncio.CancelledError):
+                async for _chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=config,
+                    run_metadata_collector=run_metadata,
+                ):
+                    pass
+
+        payload = run_metadata["io.mindroom.ai_run"]
+        assert payload["run_id"] == "run-3"
+        assert payload["status"] == "cancelled"
+        assert payload["usage"]["input_tokens"] == 100
+        assert payload["usage"]["output_tokens"] == 25
+        assert payload["usage"]["total_tokens"] == 125
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_uses_request_metrics_fallback(self, tmp_path: Path) -> None:

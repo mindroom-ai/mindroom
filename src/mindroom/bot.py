@@ -198,6 +198,8 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 
 # Constants
 _SYNC_TIMEOUT_MS = 30000
+_STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
+_CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
 
 
 def _create_task_wrapper(
@@ -1190,14 +1192,14 @@ class AgentBot:
             # Only handle stop from users, not agents, and only if tracking this message
             if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
                 self.logger.info(
-                    "Stopped generation for message",
+                    "Stop requested for message",
                     message_id=event.reacts_to,
-                    stopped_by=event.sender,
+                    requested_by=event.sender,
                 )
                 # Remove the stop button immediately for user feedback
                 await self.stop_manager.remove_stop_button(self.client, event.reacts_to)
-                # Send a confirmation message
-                await self._send_response(room.room_id, event.reacts_to, "✅ Generation stopped", None)
+                # Acknowledge immediately without claiming the task has fully exited yet.
+                await self._send_response(room.room_id, event.reacts_to, _STOPPING_RESPONSE_TEXT, None)
                 return
             # Message is not being generated - let the reaction be handled for other purposes
             # (e.g., interactive questions). Don't return here so it can fall through!
@@ -2322,9 +2324,9 @@ class AgentBot:
         existing_event_id: str | None = None,
         *,
         payload: _DispatchPayload,
-        response_envelope: MessageEnvelope,
-        enrichment_digest: str | None,
-        correlation_id: str,
+        response_envelope: MessageEnvelope | None = None,
+        enrichment_digest: str | None = None,
+        correlation_id: str | None = None,
         reason_prefix: str = "Team request",
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot).
@@ -2369,6 +2371,20 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             include_context=include_matrix_prompt_context,
         )
+        resolved_response_envelope = response_envelope or MessageEnvelope(
+            source_event_id=reply_to_event_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id),
+            requester_id=requester_user_id,
+            sender_id=requester_user_id,
+            body=payload.prompt,
+            attachment_ids=tuple(payload.attachment_ids or ()),
+            mentioned_agents=(),
+            agent_name=self.agent_name,
+            source_kind="message",
+        )
+        resolved_correlation_id = correlation_id or reply_to_event_id
         session_id = create_session_id(room_id, thread_id)
         tool_context = self._build_tool_runtime_context(
             room_id=room_id,
@@ -2376,7 +2392,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
             attachment_ids=payload.attachment_ids,
-            correlation_id=correlation_id,
+            correlation_id=resolved_correlation_id,
         )
         execution_identity = self._build_tool_execution_identity(
             room_id=room_id,
@@ -2389,6 +2405,7 @@ class AgentBot:
         if orchestrator is None:
             msg = "Orchestrator is not set"
             raise RuntimeError(msg)
+        response_run_id = str(uuid4())
 
         # Create async function for team response generation that takes message_id as parameter
         client = self.client
@@ -2396,6 +2413,10 @@ class AgentBot:
 
         async def generate_team_response(message_id: str | None) -> None:
             nonlocal delivery_result
+
+            def _note_attempt_run_id(current_run_id: str) -> None:
+                self.stop_manager.update_run_id(message_id, current_run_id)
+
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(client, room_id):
@@ -2414,6 +2435,8 @@ class AgentBot:
                             media=payload.media,
                             show_tool_calls=self.show_tool_calls,
                             session_id=session_id,
+                            run_id=response_run_id,
+                            run_id_callback=_note_attempt_run_id,
                             user_id=requester_user_id,
                             reason_prefix=reason_prefix,
                         )
@@ -2444,8 +2467,8 @@ class AgentBot:
 
                 delivery_kind: Literal["sent", "edited"] = "edited" if message_id else "sent"
                 draft = await self._apply_before_response_hooks(
-                    correlation_id=correlation_id,
-                    envelope=response_envelope,
+                    correlation_id=resolved_correlation_id,
+                    envelope=resolved_response_envelope,
                     response_text=accumulated,
                     response_kind="team",
                     tool_trace=None,
@@ -2454,8 +2477,8 @@ class AgentBot:
                 if draft.suppress:
                     self.logger.warning(
                         "Team streaming response was already delivered before a suppressing hook ran",
-                        source_event_id=response_envelope.source_event_id,
-                        correlation_id=correlation_id,
+                        source_event_id=resolved_response_envelope.source_event_id,
+                        correlation_id=resolved_correlation_id,
                     )
                     delivery_result = _ResponseDispatchResult(
                         event_id=event_id,
@@ -2473,8 +2496,8 @@ class AgentBot:
                         existing_event_id=event_id,
                         response_text=draft.response_text,
                         response_kind="team",
-                        response_envelope=response_envelope,
-                        correlation_id=correlation_id,
+                        response_envelope=resolved_response_envelope,
+                        correlation_id=resolved_correlation_id,
                         tool_trace=None,
                         extra_content=None,
                         apply_before_hooks=False,
@@ -2482,8 +2505,8 @@ class AgentBot:
                 else:
                     interactive_response = interactive.parse_and_format_interactive(accumulated, extract_mapping=True)
                     await self._emit_after_response_hooks(
-                        correlation_id=correlation_id,
-                        envelope=response_envelope,
+                        correlation_id=resolved_correlation_id,
+                        envelope=resolved_response_envelope,
                         response_text=interactive_response.formatted_text,
                         response_event_id=event_id,
                         delivery_kind=delivery_kind,
@@ -2498,24 +2521,33 @@ class AgentBot:
                     )
             else:
                 # Show typing indicator while team generates non-streaming response
-                async with typing_indicator(client, room_id):
-                    with (
-                        tool_execution_identity(execution_identity),
-                        tool_runtime_context(tool_context),
-                    ):
-                        response_text = await team_response(
-                            agent_names=agent_names,
-                            mode=mode,
-                            message=model_message,
-                            orchestrator=orchestrator,
-                            execution_identity=execution_identity,
-                            thread_history=thread_history,
-                            model_name=model_name,
-                            media=payload.media,
-                            session_id=session_id,
-                            user_id=requester_user_id,
-                            reason_prefix=reason_prefix,
-                        )
+                try:
+                    async with typing_indicator(client, room_id):
+                        with (
+                            tool_execution_identity(execution_identity),
+                            tool_runtime_context(tool_context),
+                        ):
+                            response_text = await team_response(
+                                agent_names=agent_names,
+                                mode=mode,
+                                message=model_message,
+                                orchestrator=orchestrator,
+                                execution_identity=execution_identity,
+                                thread_history=thread_history,
+                                model_name=model_name,
+                                media=payload.media,
+                                session_id=session_id,
+                                run_id=response_run_id,
+                                run_id_callback=_note_attempt_run_id,
+                                user_id=requester_user_id,
+                                reason_prefix=reason_prefix,
+                            )
+                except asyncio.CancelledError:
+                    self.logger.info("Team non-streaming response cancelled by user", message_id=message_id)
+                    if message_id:
+                        await self._edit_message(room_id, message_id, _CANCELLED_RESPONSE_TEXT, thread_id)
+                    raise
+
                 delivery_result = await self._deliver_generated_response(
                     room_id=room_id,
                     reply_to_event_id=reply_to_event_id,
@@ -2523,8 +2555,8 @@ class AgentBot:
                     existing_event_id=message_id,
                     response_text=response_text,
                     response_kind="team",
-                    response_envelope=response_envelope,
-                    correlation_id=correlation_id,
+                    response_envelope=resolved_response_envelope,
+                    correlation_id=resolved_correlation_id,
                     tool_trace=None,
                     extra_content=None,
                 )
@@ -2543,6 +2575,7 @@ class AgentBot:
             thinking_message=thinking_msg,
             existing_event_id=existing_event_id,
             user_id=requester_user_id,
+            run_id=response_run_id,
         )
         try:
             if enrichment_digest is not None:
@@ -2599,6 +2632,7 @@ class AgentBot:
         thinking_message: str | None = None,  # None means don't send thinking message
         existing_event_id: str | None = None,
         user_id: str | None = None,  # User ID for presence check
+        run_id: str | None = None,
     ) -> str | None:
         """Run a response generation function with cancellation support.
 
@@ -2615,6 +2649,7 @@ class AgentBot:
             thinking_message: Thinking message to show (only used when existing_event_id is None)
             existing_event_id: ID of existing message to edit (for interactive questions)
             user_id: User ID for checking if they're online (for stop button decision)
+            run_id: Explicit Agno run identifier used for graceful stop/cancel handling.
 
         Returns:
             The initial message ID if created, None otherwise
@@ -2658,7 +2693,13 @@ class AgentBot:
             tracked_message_id = message_to_track or f"__pending_response__:{id(task)}"
             show_stop_button = False  # Default to not showing
 
-            self.stop_manager.set_current(tracked_message_id, room_id, task, None)
+            self.stop_manager.set_current(
+                tracked_message_id,
+                room_id,
+                task,
+                None,
+                run_id=run_id,
+            )
 
             if message_to_track:
                 # Add stop button if configured AND user is online
@@ -2709,6 +2750,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        run_id: str | None = None,
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
@@ -2753,6 +2795,10 @@ class AgentBot:
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(room_id)
+
+        def _note_attempt_run_id(current_run_id: str) -> None:
+            self.stop_manager.update_run_id(existing_event_id, current_run_id)
+
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
@@ -2774,6 +2820,8 @@ class AgentBot:
                         room_id=room_id,
                         knowledge=knowledge,
                         user_id=user_id,
+                        run_id=run_id,
+                        run_id_callback=_note_attempt_run_id,
                         media=media_inputs,
                         reply_to_event_id=reply_to_event_id,
                         active_event_ids=active_event_ids,
@@ -2787,8 +2835,7 @@ class AgentBot:
             # Handle cancellation - send a message showing it was stopped
             self.logger.info("Non-streaming response cancelled by user", message_id=existing_event_id)
             if existing_event_id:
-                cancelled_text = "**[Response cancelled by user]**"
-                await self._edit_message(room_id, existing_event_id, cancelled_text, thread_id)
+                await self._edit_message(room_id, existing_event_id, _CANCELLED_RESPONSE_TEXT, thread_id)
             raise
         except Exception as e:
             self.logger.exception("Error in non-streaming response", error=str(e))
@@ -3123,7 +3170,7 @@ class AgentBot:
             options_list=interactive_response.options_list,
         )
 
-    async def _process_and_respond_streaming(
+    async def _process_and_respond_streaming(  # noqa: C901
         self,
         room_id: str,
         prompt: str,
@@ -3134,6 +3181,7 @@ class AgentBot:
         *,
         adopt_existing_placeholder: bool = False,
         user_id: str | None = None,
+        run_id: str | None = None,
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
@@ -3179,6 +3227,10 @@ class AgentBot:
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(room_id)
         tool_trace: list[ToolTraceEntry] = []
+
+        def _note_attempt_run_id(current_run_id: str) -> None:
+            self.stop_manager.update_run_id(existing_event_id, current_run_id)
+
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
@@ -3200,6 +3252,8 @@ class AgentBot:
                         room_id=room_id,
                         knowledge=knowledge,
                         user_id=user_id,
+                        run_id=run_id,
+                        run_id_callback=_note_attempt_run_id,
                         media=media_inputs,
                         reply_to_event_id=reply_to_event_id,
                         active_event_ids=active_event_ids,
@@ -3424,6 +3478,7 @@ class AgentBot:
             enable_streaming=self.enable_streaming,
         )
         delivery_result: _ResponseDispatchResult | None = None
+        response_run_id = str(uuid4())
 
         # Create async function for generation that takes message_id as parameter
         async def generate(message_id: str | None) -> None:
@@ -3438,6 +3493,7 @@ class AgentBot:
                     message_id,  # Edit the thinking message or existing
                     adopt_existing_placeholder=existing_event_id is None and message_id is not None,
                     user_id=user_id,
+                    run_id=response_run_id,
                     media=media_inputs,
                     attachment_ids=attachment_ids,
                     model_prompt=model_prompt_text,
@@ -3454,6 +3510,7 @@ class AgentBot:
                     model_thread_history,
                     message_id,  # Edit the thinking message or existing
                     user_id=user_id,
+                    run_id=response_run_id,
                     media=media_inputs,
                     attachment_ids=attachment_ids,
                     model_prompt=model_prompt_text,
@@ -3476,6 +3533,7 @@ class AgentBot:
             thinking_message=thinking_msg,
             existing_event_id=existing_event_id,
             user_id=user_id,
+            run_id=response_run_id,
         )
 
         try:
