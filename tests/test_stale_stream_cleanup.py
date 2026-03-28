@@ -11,7 +11,7 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedThread,
@@ -19,6 +19,7 @@ from mindroom.matrix.stale_stream_cleanup import (
     cleanup_stale_streaming_messages,
 )
 from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.tool_system.events import _TOOL_TRACE_KEY
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -32,6 +33,7 @@ STALE_AGE_MS = stale_stream_cleanup_module._STALE_STREAM_RECENCY_GUARD_MS + 60_0
 AUTO_RESUME_MESSAGE = (
     "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
 )
+USER_ID = "@user:example.com"
 
 
 def _make_config(tmp_path: Path) -> Config:
@@ -137,14 +139,12 @@ async def _run_cleanup(
     *,
     joined_rooms: list[str],
     bot_user_ids: set[str] | None = None,
-    now_ms: int = NOW_MS,
 ) -> tuple[int, list[InterruptedThread]]:
     with (
         patch(
             "mindroom.matrix.stale_stream_cleanup.get_joined_rooms",
             new=AsyncMock(return_value=joined_rooms),
         ),
-        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000),
     ):
         return await cleanup_stale_streaming_messages(
             client,
@@ -314,11 +314,17 @@ async def test_cleanup_skips_completed_stream_status_even_with_trailing_marker(t
 
 
 @pytest.mark.asyncio
-async def test_cleanup_returns_interrupted_thread_per_cleaned_threaded_message(tmp_path: Path) -> None:
-    """Cleanup should return one interrupted-thread record per cleaned threaded message."""
+async def test_cleanup_keeps_latest_interrupted_thread_per_agent_and_thread(tmp_path: Path) -> None:
+    """Cleanup should keep only the newest interrupted record for each agent in a thread."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Please continue",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+        ),
         _make_message_event(
             event_id="$older",
             body="First partial ⋯",
@@ -345,14 +351,9 @@ async def test_cleanup_returns_interrupted_thread_per_cleaned_threaded_message(t
         InterruptedThread(
             room_id=ROOM_ID,
             thread_id="$thread-root",
-            target_event_id="$older",
-            partial_text="First partial",
-        ),
-        InterruptedThread(
-            room_id=ROOM_ID,
-            thread_id="$thread-root",
             target_event_id="$newer",
             partial_text="Second partial",
+            agent_name="test_agent",
         ),
     ]
 
@@ -360,7 +361,7 @@ async def test_cleanup_returns_interrupted_thread_per_cleaned_threaded_message(t
 @pytest.mark.asyncio
 async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> None:
     """Auto-resume should send the requested system message into each interrupted thread."""
-    _ = _make_config(tmp_path)
+    config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     interrupted = [
         InterruptedThread(
@@ -368,12 +369,14 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
             thread_id="$thread-one",
             target_event_id="$target-one",
             partial_text="One",
+            agent_name="test_agent",
         ),
         InterruptedThread(
             room_id=ROOM_ID,
             thread_id="$thread-two",
             target_event_id="$target-two",
             partial_text="Two",
+            agent_name="test_agent",
         ),
     ]
 
@@ -384,17 +387,25 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
         ) as mock_send,
         patch("mindroom.matrix.stale_stream_cleanup.asyncio.sleep", new=AsyncMock()) as mock_sleep,
     ):
-        resumed_count = await auto_resume_interrupted_threads(client, interrupted)
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
 
     assert resumed_count == 2
     assert mock_send.await_count == 2
     first_content = mock_send.await_args_list[0].args[2]
     second_content = mock_send.await_args_list[1].args[2]
-    assert first_content["body"] == AUTO_RESUME_MESSAGE
+    assert first_content["body"] == f"@Test Agent {AUTO_RESUME_MESSAGE}"
+    assert first_content["m.mentions"] == {
+        "user_ids": [config.get_ids(runtime_paths_for(config))["test_agent"].full_id],
+    }
     assert first_content["m.relates_to"]["rel_type"] == "m.thread"
     assert first_content["m.relates_to"]["event_id"] == "$thread-one"
     assert first_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$target-one"}
-    assert second_content["body"] == AUTO_RESUME_MESSAGE
+    assert second_content["body"] == f"@Test Agent {AUTO_RESUME_MESSAGE}"
     assert second_content["m.relates_to"]["event_id"] == "$thread-two"
     mock_sleep.assert_awaited_once_with(2.0)
 
@@ -402,7 +413,7 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_auto_resume_honors_max_resumes_cap(tmp_path: Path) -> None:
     """Auto-resume should stop after the configured resume cap."""
-    _ = _make_config(tmp_path)
+    config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     interrupted = [
         InterruptedThread(
@@ -410,6 +421,7 @@ async def test_auto_resume_honors_max_resumes_cap(tmp_path: Path) -> None:
             thread_id=f"$thread-{index}",
             target_event_id=f"$target-{index}",
             partial_text=f"Part {index}",
+            agent_name="test_agent",
         )
         for index in range(12)
     ]
@@ -421,7 +433,13 @@ async def test_auto_resume_honors_max_resumes_cap(tmp_path: Path) -> None:
         ) as mock_send,
         patch("mindroom.matrix.stale_stream_cleanup.asyncio.sleep", new=AsyncMock()) as mock_sleep,
     ):
-        resumed_count = await auto_resume_interrupted_threads(client, interrupted, max_resumes=10)
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            max_resumes=10,
+        )
 
     assert resumed_count == 10
     assert mock_send.await_count == 10
@@ -431,7 +449,7 @@ async def test_auto_resume_honors_max_resumes_cap(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_auto_resume_skips_thread_id_none(tmp_path: Path) -> None:
     """Auto-resume should skip interrupted records that do not have a thread ID."""
-    _ = _make_config(tmp_path)
+    config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     interrupted = [
         InterruptedThread(
@@ -439,12 +457,14 @@ async def test_auto_resume_skips_thread_id_none(tmp_path: Path) -> None:
             thread_id=None,
             target_event_id="$non-threaded",
             partial_text="Unthreaded",
+            agent_name="test_agent",
         ),
         InterruptedThread(
             room_id=ROOM_ID,
             thread_id="$threaded",
             target_event_id="$target",
             partial_text="Threaded",
+            agent_name="test_agent",
         ),
     ]
 
@@ -452,12 +472,142 @@ async def test_auto_resume_skips_thread_id_none(tmp_path: Path) -> None:
         "mindroom.matrix.stale_stream_cleanup.send_message",
         new=AsyncMock(return_value="$resume"),
     ) as mock_send:
-        resumed_count = await auto_resume_interrupted_threads(client, interrupted)
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
 
     assert resumed_count == 1
     mock_send.assert_awaited_once()
     assert mock_send.await_args.args[1] == ROOM_ID
     assert mock_send.await_args.args[2]["m.relates_to"]["event_id"] == "$threaded"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_cleans_recent_interrupted_message_on_startup(tmp_path: Path) -> None:
+    """Startup cleanup should not skip fresh interrupted messages after a restart."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Start here",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - 2_000,
+        ),
+        _make_message_event(
+            event_id="$message",
+            body="Needs cleanup ⋯",
+            timestamp_ms=NOW_MS - 1_000,
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message",
+        new=AsyncMock(return_value="$edit"),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert interrupted == [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-root",
+            target_event_id="$message",
+            partial_text="Needs cleanup",
+            agent_name="test_agent",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preserves_stream_status_and_tool_trace_metadata(tmp_path: Path) -> None:
+    """Cleanup edits should preserve structured metadata needed by clients and continuation."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$original",
+            body="Working ⋯",
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+        ),
+        _make_message_event(
+            event_id="$latest-edit",
+            body="* Working",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to={"rel_type": "m.replace", "event_id": "$original"},
+            new_content={
+                "body": "Working ⋯",
+                "msgtype": "m.text",
+                STREAM_STATUS_KEY: "streaming",
+                _TOOL_TRACE_KEY: {"version": 1, "events": [{"type": "tool_started", "tool_name": "shell"}]},
+            },
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message",
+        new=AsyncMock(return_value="$cleanup-edit"),
+    ) as mock_edit:
+        cleaned, _ = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    edit_content = mock_edit.await_args.args[3]
+    assert edit_content[STREAM_STATUS_KEY] == "streaming"
+    assert edit_content[_TOOL_TRACE_KEY] == {
+        "version": 1,
+        "events": [{"type": "tool_started", "tool_name": "shell"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_dedupes_same_agent_and_thread_using_newest_target(tmp_path: Path) -> None:
+    """Auto-resume should emit one relay per agent/thread pair, targeting the newest interruption."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-root",
+            target_event_id="$older",
+            partial_text="Older",
+            agent_name="test_agent",
+        ),
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-root",
+            target_event_id="$newer",
+            partial_text="Newer",
+            agent_name="test_agent",
+        ),
+    ]
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message",
+        new=AsyncMock(return_value="$resume"),
+    ) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+
+    assert resumed_count == 1
+    mock_send.assert_awaited_once()
+    assert mock_send.await_args.args[2]["m.relates_to"]["m.in_reply_to"] == {"event_id": "$newer"}
 
 
 @pytest.mark.asyncio
@@ -492,6 +642,7 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
                 thread_id="$thread-root",
                 target_event_id="$target",
                 partial_text="Half finished",
+                agent_name="test_agent",
             ),
         ]
 
@@ -513,6 +664,44 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
         await orchestrator.start()
 
     assert call_order == ["wait", "setup", "cleanup", "resume", "knowledge"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_auto_resume_uses_router_client(tmp_path: Path) -> None:
+    """Auto-resume should post visible relays from the router, not the internal user."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+
+    router_client = AsyncMock(spec=nio.AsyncClient)
+    router_bot = MagicMock()
+    router_bot.agent_name = ROUTER_AGENT_NAME
+    router_bot.client = router_client
+    router_bot.agent_user = MagicMock(user_id="@mindroom_router:example.com")
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-root",
+            target_event_id="$target",
+            partial_text="Half finished",
+            agent_name="test_agent",
+        ),
+    ]
+
+    with patch(
+        "mindroom.orchestrator.auto_resume_interrupted_threads",
+        new=AsyncMock(return_value=1),
+    ) as mock_auto_resume:
+        await orchestrator._auto_resume_after_restart(interrupted, config)
+
+    mock_auto_resume.assert_awaited_once()
+    assert mock_auto_resume.await_args.args[0] is router_client
+    assert mock_auto_resume.await_args.args[1] == interrupted
+    assert mock_auto_resume.await_args.kwargs["config"] == config
+    assert mock_auto_resume.await_args.kwargs["runtime_paths"] == runtime_paths_for(config)
 
 
 def test_bot_module_does_not_import_stale_stream_cleanup() -> None:

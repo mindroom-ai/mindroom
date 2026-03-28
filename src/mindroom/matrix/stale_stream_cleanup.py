@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import nio
 from nio.api import Api, RelationshipType
 
-from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING
+from mindroom.constants import (
+    ORIGINAL_SENDER_KEY,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     build_threaded_edit_content,
@@ -20,13 +25,14 @@ from mindroom.matrix.client import (
     send_message,
 )
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.identity import MatrixID, extract_agent_name
+from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
     is_in_progress_message,
 )
+from mindroom.tool_system.events import _TOOL_TRACE_KEY
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
@@ -59,6 +65,7 @@ class InterruptedThread:
     thread_id: str | None
     target_event_id: str
     partial_text: str
+    agent_name: str
 
 
 @dataclass
@@ -68,6 +75,7 @@ class _MessageState:
     latest_body: str | None = None
     latest_timestamp: int = 0
     latest_event_id: str = ""
+    latest_content: dict[str, object] | None = None
     thread_id: str | None = None
     stream_status: str | None = None
     stop_reaction_event_ids: set[str] = field(default_factory=set)
@@ -117,6 +125,9 @@ async def cleanup_stale_streaming_messages(
 async def auto_resume_interrupted_threads(
     client: nio.AsyncClient,
     interrupted: list[InterruptedThread],
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
     max_resumes: int = 10,
     delay: float = 2.0,
 ) -> int:
@@ -130,11 +141,10 @@ async def auto_resume_interrupted_threads(
 
     resumed_count = 0
     for index, interrupted_thread in enumerate(selected_threads):
-        content = build_message_content(
-            body=_AUTO_RESUME_MESSAGE,
-            thread_event_id=interrupted_thread.thread_id,
-            reply_to_event_id=interrupted_thread.target_event_id,
-            latest_thread_event_id=interrupted_thread.target_event_id,
+        content = _build_auto_resume_content(
+            interrupted_thread,
+            config=config,
+            runtime_paths=runtime_paths,
         )
         response_event_id = await send_message(client, interrupted_thread.room_id, content)
         if response_event_id:
@@ -180,7 +190,10 @@ async def _cleanup_room_stale_streaming_messages(
 
     cleaned_count = 0
     prior_edit_succeeded = False
-    interrupted_threads: list[InterruptedThread] = []
+    interrupted_threads_by_key: dict[tuple[str, str], InterruptedThread] = {}
+    agent_name = _agent_name_for_bot_user_id(bot_user_id, config, runtime_paths)
+    if agent_name is None:
+        return 0, []
     candidate_items = sorted(
         ((k, v) for k, v in message_states.items() if v.latest_body is not None),
         key=lambda item: (item[1].latest_timestamp, item[0]),
@@ -189,9 +202,6 @@ async def _cleanup_room_stale_streaming_messages(
     for target_event_id, state in candidate_items:
         assert state.latest_body is not None  # guaranteed by filter above
         if _is_cleanup_candidate(state):
-            if _is_recent_timestamp(state.latest_timestamp):
-                continue
-
             try:
                 if prior_edit_succeeded:
                     await asyncio.sleep(_RATE_LIMIT_DELAY_SECONDS)
@@ -205,6 +215,7 @@ async def _cleanup_room_stale_streaming_messages(
                     sender_domain=sender_domain,
                     config=config,
                     runtime_paths=runtime_paths,
+                    agent_name=agent_name,
                 )
                 if not edited:
                     continue
@@ -212,7 +223,7 @@ async def _cleanup_room_stale_streaming_messages(
                 cleaned_count += 1
                 prior_edit_succeeded = True
                 if interrupted is not None:
-                    interrupted_threads.append(interrupted)
+                    interrupted_threads_by_key[(interrupted.thread_id or "", interrupted.agent_name)] = interrupted
             except Exception as exc:
                 logger.warning(
                     "Failed stale message cleanup",
@@ -231,7 +242,7 @@ async def _cleanup_room_stale_streaming_messages(
                 bot_user_ids=bot_user_ids,
             )
 
-    return cleaned_count, interrupted_threads
+    return cleaned_count, list(interrupted_threads_by_key.values())
 
 
 async def _cleanup_one_stale_message(
@@ -244,6 +255,7 @@ async def _cleanup_one_stale_message(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    agent_name: str,
 ) -> tuple[bool, InterruptedThread | None]:
     """Edit one stale message, redact stop reactions, return interrupted thread info."""
     assert state.latest_body is not None
@@ -256,6 +268,7 @@ async def _cleanup_one_stale_message(
         sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
+        preserved_content=state.latest_content,
     )
     if not edit_succeeded:
         return False, None
@@ -267,6 +280,7 @@ async def _cleanup_one_stale_message(
             thread_id=state.thread_id,
             target_event_id=target_event_id,
             partial_text=_truncate_partial_text(_extract_partial_text(state.latest_body)),
+            agent_name=agent_name,
         )
     await _redact_stop_reactions(
         client,
@@ -358,11 +372,19 @@ def _merge_resolved_message_state(
     stream_status = message_data.get("stream_status")
     if stream_status is not None and not isinstance(stream_status, str):
         stream_status = None
+    latest_content = message_data.get("content")
+    normalized_latest_content: dict[str, object] | None = None
+    if isinstance(latest_content, dict):
+        normalized_latest_content = {}
+        for key, value in latest_content.items():
+            if isinstance(key, str):
+                normalized_latest_content[key] = value
 
     state = message_states.setdefault(target_event_id, _MessageState())
     state.latest_body = body
     state.latest_timestamp = timestamp
     state.latest_event_id = latest_event_id
+    state.latest_content = normalized_latest_content
     state.thread_id = thread_id
     state.stream_status = stream_status
 
@@ -404,6 +426,7 @@ async def _edit_stale_message(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    preserved_content: dict[str, object] | None,
 ) -> bool:
     """Edit a stale message while preserving thread context when present."""
     content = await build_threaded_edit_content(
@@ -415,6 +438,7 @@ async def _edit_stale_message(
         config=config,
         runtime_paths=runtime_paths,
         sender_domain=sender_domain,
+        extra_content=_preserved_cleanup_content(preserved_content),
     )
 
     response_event_id = await edit_message(client, room_id, target_event_id, content, new_text)
@@ -427,6 +451,20 @@ async def _edit_stale_message(
         event_id=target_event_id,
     )
     return False
+
+
+def _preserved_cleanup_content(content: dict[str, object] | None) -> dict[str, object] | None:
+    """Return the metadata fields that should survive a restart cleanup edit."""
+    if content is None:
+        return None
+
+    preserved: dict[str, object] = {}
+    for key in (STREAM_STATUS_KEY, _TOOL_TRACE_KEY, ORIGINAL_SENDER_KEY, "m.mentions"):
+        value = content.get(key)
+        if value is not None:
+            preserved[key] = value
+
+    return preserved or None
 
 
 async def _redact_stop_reactions(
@@ -615,17 +653,19 @@ def _select_threads_to_resume(
     *,
     max_resumes: int,
 ) -> list[InterruptedThread]:
-    """Return the first threaded interruptions up to the resume cap."""
-    selected: list[InterruptedThread] = []
+    """Return the first unique threaded interruptions up to the resume cap."""
+    selected_by_key: dict[tuple[str, str, str], InterruptedThread] = {}
 
     for interrupted_thread in interrupted:
         if interrupted_thread.thread_id is None:
             continue
-        selected.append(interrupted_thread)
-        if len(selected) >= max_resumes:
-            return selected
+        selected_by_key[(interrupted_thread.room_id, interrupted_thread.thread_id, interrupted_thread.agent_name)] = (
+            interrupted_thread
+        )
+        if len(selected_by_key) >= max_resumes:
+            return list(selected_by_key.values())
 
-    return selected
+    return list(selected_by_key.values())
 
 
 def _has_restart_interrupted_note(body: str) -> bool:
@@ -643,7 +683,58 @@ def _is_cleanup_candidate(state: _MessageState) -> bool:
     return is_in_progress_message(state.latest_body)
 
 
-def _is_recent_timestamp(timestamp_ms: int) -> bool:
-    """Return whether the timestamp is within the recency guard window."""
-    now_ms = int(time.time() * 1000)
-    return now_ms - timestamp_ms < _STALE_STREAM_RECENCY_GUARD_MS
+def _build_auto_resume_content(
+    interrupted_thread: InterruptedThread,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> dict[str, object]:
+    """Build the router-authored visible resume relay for one interrupted agent."""
+    matrix_id = config.get_ids(runtime_paths).get(interrupted_thread.agent_name)
+    target_user_id = matrix_id.full_id if matrix_id is not None else None
+    display_name = _entity_display_name(interrupted_thread.agent_name, config)
+
+    body = _AUTO_RESUME_MESSAGE
+    formatted_body: str | None = None
+    mentioned_user_ids: list[str] | None = None
+    if target_user_id is not None:
+        body = f"@{display_name} {_AUTO_RESUME_MESSAGE}"
+        formatted_body = markdown_to_html(
+            f"[@{display_name}](https://matrix.to/#/{target_user_id}) {_AUTO_RESUME_MESSAGE}",
+        )
+        mentioned_user_ids = [target_user_id]
+
+    return build_message_content(
+        body=body,
+        formatted_body=formatted_body,
+        mentioned_user_ids=mentioned_user_ids,
+        thread_event_id=interrupted_thread.thread_id,
+        reply_to_event_id=interrupted_thread.target_event_id,
+        latest_thread_event_id=interrupted_thread.target_event_id,
+    )
+
+
+def _entity_display_name(agent_name: str, config: Config) -> str:
+    """Return the configured display name for an agent or team."""
+    if agent_name in config.agents:
+        return config.agents[agent_name].display_name
+    if agent_name in config.teams:
+        return config.teams[agent_name].display_name
+    return agent_name
+
+
+def _agent_name_for_bot_user_id(
+    bot_user_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Resolve a bot user ID back to its configured agent or team name."""
+    direct_match = extract_agent_name(bot_user_id, config, runtime_paths)
+    if direct_match is not None:
+        return direct_match
+
+    bot_username = MatrixID.parse(bot_user_id).username
+    for agent_name, matrix_id in config.get_ids(runtime_paths).items():
+        if matrix_id.username == bot_username:
+            return agent_name
+    return None

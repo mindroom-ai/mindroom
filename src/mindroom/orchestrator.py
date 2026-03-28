@@ -47,9 +47,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
     INTERNAL_USER_ACCOUNT_KEY,
     INTERNAL_USER_AGENT_NAME,
-    AgentMatrixUser,
     create_agent_user,
-    login_agent_user,
 )
 from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import (
@@ -766,43 +764,25 @@ class MultiAgentOrchestrator:
         interrupted_threads: list[InterruptedThread],
         config: Config,
     ) -> None:
-        """Queue real Matrix resume messages from the internal system user."""
+        """Queue visible Matrix resume relays from the router."""
         if not config.defaults.auto_resume_after_restart or not interrupted_threads:
             return
-        if config.mindroom_user is None:
-            logger.warning("Auto-resume after restart is enabled but mindroom_user is not configured")
+        router_bot = self._router_bot()
+        if router_bot is None or router_bot.client is None:
+            logger.warning("Auto-resume after restart skipped because the router client is unavailable")
             return
 
-        user_account = MatrixState.load(runtime_paths=self.runtime_paths).get_account(INTERNAL_USER_ACCOUNT_KEY)
-        user_id = config.get_mindroom_user_id(self.runtime_paths)
-        if user_account is None or user_id is None:
-            logger.warning("Auto-resume after restart skipped because the internal user account is unavailable")
-            return
-
-        system_user = AgentMatrixUser(
-            agent_name=INTERNAL_USER_AGENT_NAME,
-            user_id=user_id,
-            display_name=config.mindroom_user.display_name,
-            password=user_account.password,
-        )
         try:
-            system_user_client = await login_agent_user(
-                constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
-                system_user,
-                self.runtime_paths,
+            resumed_count = await auto_resume_interrupted_threads(
+                router_bot.client,
+                interrupted_threads,
+                config=config,
+                runtime_paths=self.runtime_paths,
             )
-        except Exception as exc:
-            logger.warning("Could not login internal user for auto-resume (non-critical)", error=str(exc))
-            return
-
-        try:
-            resumed_count = await auto_resume_interrupted_threads(system_user_client, interrupted_threads)
             if resumed_count > 0:
                 logger.info("Queued auto-resume messages after restart", count=resumed_count)
         except Exception as exc:
             logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
-        finally:
-            await system_user_client.close()
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
