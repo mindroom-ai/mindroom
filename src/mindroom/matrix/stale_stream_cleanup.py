@@ -990,6 +990,7 @@ async def _iter_reaction_relation_events(
     ):
         yield related_event
 
+
 def _extract_partial_text(body: str) -> str:
     """Return partial text without the restart interruption note."""
     interrupted_body = build_restart_interrupted_body(body)
