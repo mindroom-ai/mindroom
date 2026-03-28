@@ -10,7 +10,7 @@ import nio
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom.ai import cached_agent_run, get_model_instance
+from mindroom.ai import _cached_agent_run, get_model_instance
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import fetch_thread_history
 
@@ -115,7 +115,7 @@ async def _generate_summary(
         "- If the conversation references a ticket, issue number, or any identifier "
         "(e.g. PROJ-123, #42, BUG-7), include it near the start after the emoji\n"
         "- Be consistent: similar threads should produce similar-style summaries\n"
-        "- No quotes, no prefixes like \'Summary:\', no trailing punctuation\n"
+        "- No quotes, no prefixes like 'Summary:', no trailing punctuation\n"
         "\n"
         "GOOD EXAMPLES:\n"
         "- \U0001f41b PROJ-42: fix login crash on expired tokens — merged\n"
@@ -128,17 +128,17 @@ async def _generate_summary(
         "- \U0001f4b0 Q2 budget review — approved with minor adjustments\n"
         "\n"
         "BAD EXAMPLES (do NOT produce these):\n"
-        "- \'Thread about fixing a bug\' (too vague, no emoji, quoted)\n"
-        "- \'Summary: The team discussed the login issue\' (has prefix, no emoji, no outcome)\n"
-        "- \'\U0001f4ac Discussion\' (way too vague, no topic)\n"
-        "- \'\U0001f41b\U0001f527\u2705\U0001f680\U0001f525 Fixed the thing\' (too many emojis, vague)\n"
-        "- \'The conversation was about updating the configuration files for nginx\' (too long, no emoji, no outcome)\n"
+        "- 'Thread about fixing a bug' (too vague, no emoji, quoted)\n"
+        "- 'Summary: The team discussed the login issue' (has prefix, no emoji, no outcome)\n"
+        "- '\U0001f4ac Discussion' (way too vague, no topic)\n"
+        "- '\U0001f41b\U0001f527\u2705\U0001f680\U0001f525 Fixed the thing' (too many emojis, vague)\n"
+        "- 'The conversation was about updating the configuration files for nginx' (too long, no emoji, no outcome)\n"
         "\n"
         "Now summarize this thread:\n\n"
         f"{conversation}"
     )
     session_hash = hashlib.sha256(conversation.encode()).hexdigest()[:8]
-    response = await cached_agent_run(
+    response = await _cached_agent_run(
         agent=agent,
         full_prompt=prompt,
         session_id=f"thread_summary_{session_hash}",
