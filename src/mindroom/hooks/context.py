@@ -263,6 +263,7 @@ class ToolBeforeCallContext:
     runtime_paths: RuntimePaths | None = None
     logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
     correlation_id: str = ""
+    message_sender: HookMessageSender | None = field(default=None, kw_only=True)
 
     def decline(self, reason: str) -> None:
         """Mark the tool call as declined with one model-facing reason."""
@@ -285,7 +286,7 @@ class ToolBeforeCallContext:
         """Send a Matrix message from a tool hook and return the event ID when available."""
         return await _send_bound_message(
             self.logger,
-            None,
+            self.message_sender,
             self.plugin_name,
             self.event_name,
             room_id,
@@ -318,6 +319,7 @@ class ToolAfterCallContext:
     runtime_paths: RuntimePaths | None = None
     logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
     correlation_id: str = ""
+    message_sender: HookMessageSender | None = field(default=None, kw_only=True)
 
     @property
     def state_root(self) -> Path:
@@ -335,7 +337,7 @@ class ToolAfterCallContext:
         """Send a Matrix message from a tool hook and return the event ID when available."""
         return await _send_bound_message(
             self.logger,
-            None,
+            self.message_sender,
             self.plugin_name,
             self.event_name,
             room_id,

@@ -117,6 +117,7 @@ def _build_context_kwargs(  # noqa: C901
         "config": runtime_context.config if runtime_context is not None else config,
         "runtime_paths": runtime_context.runtime_paths if runtime_context is not None else runtime_paths,
         "correlation_id": correlation_id,
+        "message_sender": runtime_context.hook_message_sender if runtime_context is not None else None,
     }
 
 

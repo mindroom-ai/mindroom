@@ -114,6 +114,23 @@ async def redact_secrets(ctx):
     ctx.draft.response_text = scrub_api_keys(ctx.draft.response_text)
 ```
 
+### Gate (`emit_gate`)
+
+Hooks run serially.
+Each hook receives a mutable `ToolBeforeCallContext`.
+Failures fail open, so a broken or timed-out gate hook does not block the real tool call.
+The first hook that calls `ctx.decline(reason)` stops the chain and replaces the real tool call with a declined result.
+
+```python
+from mindroom.hooks import hook
+
+
+@hook("tool:before_call", priority=10)
+async def block_secret_reads(ctx):
+    if ctx.tool_name == "read_file" and "secret" in str(ctx.arguments.get("path", "")):
+        ctx.decline("Sensitive files must stay unread.")
+```
+
 ## Built-in events
 
 | Event | Mode | Context type | When it fires | Key mutable fields |
@@ -127,6 +144,8 @@ async def redact_secrets(ctx):
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
 | `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
+| `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call runs | `decline()` |
+| `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None (observer result snapshot) |
 
 ### Default timeouts
 
@@ -141,6 +160,8 @@ async def redact_secrets(ctx):
 | `agent:started` | 5000 |
 | `agent:stopped` | 5000 |
 | `config:reloaded` | 5000 |
+| `tool:before_call` | 200 |
+| `tool:after_call` | 300 |
 | Custom events | 1000 |
 
 ## The `@hook` decorator
@@ -407,7 +428,8 @@ Every hook context includes these fields:
 | `state_root` | `Path` | Plugin state directory (property) |
 
 Every hook context also exposes `await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None)`.
-It sends a hook-originated Matrix message and returns the event ID when available.
+When a runtime sender is available, it sends a hook-originated Matrix message and returns the event ID when available.
+When no sender is bound for the current runtime, it returns `None`.
 For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
 
 ### Transport objects
@@ -442,6 +464,32 @@ ResponseResult(
     delivery_kind: str,  # "sent" or "edited"
     response_kind: str,
     envelope: MessageEnvelope,
+)
+
+ToolBeforeCallContext(
+    tool_name: str,
+    arguments: dict[str, Any],
+    agent_name: str,
+    room_id: str | None,
+    thread_id: str | None,
+    requester_id: str | None,
+    session_id: str | None,
+    declined: bool = False,
+    decline_reason: str = "",
+)
+
+ToolAfterCallContext(
+    tool_name: str,
+    arguments: dict[str, Any],
+    agent_name: str,
+    room_id: str | None,
+    thread_id: str | None,
+    requester_id: str | None,
+    session_id: str | None,
+    result: object | None,
+    error: BaseException | None,
+    blocked: bool,
+    duration_ms: float,
 )
 ```
 

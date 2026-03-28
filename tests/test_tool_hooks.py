@@ -107,6 +107,7 @@ def _tool_runtime_context(
     tmp_path: Path,
     *,
     agent_name: str = "code",
+    hook_message_sender: object | None = None,
 ) -> ToolRuntimeContext:
     config = _config(tmp_path)
     return ToolRuntimeContext(
@@ -119,6 +120,7 @@ def _tool_runtime_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         correlation_id="corr-runtime",
+        hook_message_sender=hook_message_sender,
     )
 
 
@@ -422,6 +424,109 @@ async def test_tool_hook_bridge_allows_call_and_populates_contexts(tmp_path: Pat
             "$resolved-thread",
             "@user:localhost",
             "session-1",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Path) -> None:
+    """After-call hooks should observe results without mutating the returned value."""
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def mutate(ctx: ToolAfterCallContext) -> None:
+        assert isinstance(ctx.result, dict)
+        ctx.result["mutated"] = True
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [mutate])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        execution_identity=_execution_identity(),
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> dict[str, object]:
+        return {"echo": kwargs["path"]}
+
+    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == {"echo": "notes.txt"}
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) -> None:
+    """Tool hook contexts should route send_message() through the active hook sender."""
+    sent: list[tuple[str, str, str | None, str, dict[str, object] | None]] = []
+
+    async def hook_message_sender(
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, object] | None,
+    ) -> str | None:
+        sent.append((room_id, body, thread_id, source_hook, extra_content))
+        return f"${body}-event"
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        event_id = await ctx.send_message(
+            "!room:localhost",
+            "before",
+            thread_id="$before-thread",
+            extra_content={"phase": "before"},
+        )
+        assert event_id == "$before-event"
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        event_id = await ctx.send_message(
+            "!room:localhost",
+            "after",
+            thread_id="$after-thread",
+            extra_content={"phase": "after"},
+        )
+        assert event_id == "$after-event"
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        execution_identity=_execution_identity(),
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> dict[str, object]:
+        return {"echo": kwargs["path"]}
+
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)),
+        tool_execution_identity(_execution_identity()),
+    ):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == {"echo": "notes.txt"}
+    assert sent == [
+        (
+            "!room:localhost",
+            "before",
+            "$before-thread",
+            "tool-policy:tool:before_call",
+            {
+                "phase": "before",
+                "com.mindroom.original_sender": "@user:localhost",
+            },
+        ),
+        (
+            "!room:localhost",
+            "after",
+            "$after-thread",
+            "tool-policy:tool:after_call",
+            {
+                "phase": "after",
+                "com.mindroom.original_sender": "@user:localhost",
+            },
         ),
     ]
 

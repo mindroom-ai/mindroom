@@ -117,6 +117,14 @@ def _context_logger(hook: RegisteredHook) -> object:
     )
 
 
+def _copy_tool_after_result(result: object | None) -> object | None:
+    """Isolate observer hooks from mutating the caller-visible tool result."""
+    try:
+        return deepcopy(result)
+    except Exception:
+        return result
+
+
 def _bind_hook_context(hook: RegisteredHook, context: HookExecutionContext) -> HookExecutionContext:
     replacement_kwargs: dict[str, object] = {
         "plugin_name": hook.plugin_name,
@@ -125,6 +133,8 @@ def _bind_hook_context(hook: RegisteredHook, context: HookExecutionContext) -> H
     }
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
         replacement_kwargs["arguments"] = deepcopy(context.arguments)
+    if isinstance(context, ToolAfterCallContext):
+        replacement_kwargs["result"] = _copy_tool_after_result(context.result)
     if isinstance(context, MessageEnrichContext):
         replacement_kwargs["_items"] = []
     return replace(context, **replacement_kwargs)
