@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
+from mindroom.bot import AgentBot, _MessageContext
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -119,6 +118,18 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
         storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
+    )
+
+
+def _dispatch_context(bot: AgentBot) -> _MessageContext:
+    """Return a typed message context for dispatch-path tests."""
+    return _MessageContext(
+        am_i_mentioned=True,
+        is_thread=False,
+        thread_id=None,
+        thread_history=[],
+        mentioned_agents=[bot.matrix_id],
+        has_non_agent_mentions=False,
     )
 
 
@@ -306,13 +317,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
         hook_calls.append("called")
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
-    bot._extract_message_context = AsyncMock(
-        return_value=SimpleNamespace(
-            thread_id=None,
-            mentioned_agents=[bot.matrix_id],
-            am_i_mentioned=True,
-        ),
-    )
+    bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
     bot.response_tracker.mark_responded = MagicMock()
 
     dispatch = await bot._prepare_dispatch(
@@ -355,13 +360,7 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
         hook_calls.append("called")
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
-    bot._extract_message_context = AsyncMock(
-        return_value=SimpleNamespace(
-            thread_id=None,
-            mentioned_agents=[bot.matrix_id],
-            am_i_mentioned=True,
-        ),
-    )
+    bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._resolve_dispatch_action = AsyncMock(return_value=None)
 
     await bot._dispatch_text_message(
