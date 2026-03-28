@@ -110,7 +110,7 @@ class TestMatrixID:
             room_models=self.config.room_models,
             models=self.config.models,
         )
-        config = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+        config = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
         domain = config.get_domain(runtime_paths)
 
         assert agent_username_localpart("calculator", runtime_paths=runtime_paths) == "mindroom_calculator_a1b2c3d4"

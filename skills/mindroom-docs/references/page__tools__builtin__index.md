@@ -272,7 +272,7 @@ If an agent with an isolating scope tries to use one of these integrations, the 
 
 ## Enabling Tools
 
-Add tools to agents in `config.yaml`:
+Add tools to agents in `config.yaml` — as plain strings or single-key dicts with inline config overrides:
 
 ```
 agents:
@@ -282,12 +282,13 @@ agents:
     model: sonnet
     tools:
       - file
-      - shell
+      - shell:                            # per-agent config override
+          extra_env_passthrough: "DAWARICH_*"
       - duckduckgo
       - github
 ```
 
-Or use the Dashboard's Agents tab to enable tools visually.
+Or use the Dashboard's Agents tab to enable tools visually. See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration) for the full override syntax.
 
 ## Environment Variables
 

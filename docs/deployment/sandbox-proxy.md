@@ -291,7 +291,10 @@ Credential leases are single-use: once consumed by an `/execute` call, the lease
 
 ## Per-agent configuration
 
-MindRoom owns the default local-versus-worker routing policy. You can override which tools are routed through the sandbox proxy per agent (or set a default for all agents) in `config.yaml`:
+MindRoom owns the default local-versus-worker routing policy. You can override which tools are routed through the sandbox proxy per agent (or set a default for all agents) in `config.yaml`.
+
+Per-agent tool config overrides (inline `shell: {extra_env_passthrough: "DAWARICH_*"}` syntax in agent `tools` lists) are threaded through the sandbox proxy so workers receive the merged overrides alongside credentials and runtime overrides.
+See [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration) for the full syntax.
 
 ```yaml
 defaults:

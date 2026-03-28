@@ -33,10 +33,38 @@ if TYPE_CHECKING:
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
+_TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "text", "url"})
+AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
 
 
 class ToolInitOverrideError(ValueError):
     """Raised when a caller supplies unsupported tool init overrides."""
+
+
+class ToolConfigOverrideError(ValueError):
+    """Raised when authored tool config overrides are invalid."""
+
+
+def is_authored_override_inherit(value: object) -> bool:
+    """Return whether an authored override value clears an inherited higher-level override."""
+    return value == AUTHORED_OVERRIDE_INHERIT
+
+
+def apply_authored_overrides(
+    base: dict[str, object],
+    overrides: dict[str, object] | None,
+) -> dict[str, object]:
+    """Apply one authored override layer onto an existing authored-override mapping."""
+    resolved = dict(base)
+    if not overrides:
+        return resolved
+
+    for field_name, value in overrides.items():
+        if is_authored_override_inherit(value):
+            resolved.pop(field_name, None)
+        else:
+            resolved[field_name] = value
+    return resolved
 
 
 def _sanitize_safe_tool_init_override_value(
@@ -63,6 +91,128 @@ def _sanitize_safe_tool_init_override_value(
         raise ToolInitOverrideError(msg)
 
     return value
+
+
+def _override_path(
+    tool_name: str,
+    field_name: str,
+    *,
+    config_path_prefix: str | None,
+) -> str:
+    if config_path_prefix:
+        return f"{config_path_prefix}.{tool_name}.{field_name}"
+    return f"{tool_name}.{field_name}"
+
+
+def _agent_override_field(tool_name: str, field_name: str) -> ConfigField | None:
+    """Return one tool's agent override field metadata when it exists."""
+    metadata = TOOL_METADATA.get(tool_name)
+    if metadata is None or not metadata.agent_override_fields:
+        return None
+    return next((candidate for candidate in metadata.agent_override_fields if candidate.name == field_name), None)
+
+
+def _validate_text_authored_override_value(
+    tool_name: str,
+    field: ConfigField,
+    value: object,
+    *,
+    full_path: str,
+) -> object:
+    """Validate one authored override for a text-like config field."""
+    agent_override_field = _agent_override_field(tool_name, field.name)
+    if agent_override_field is not None and agent_override_field.type == "string[]":
+        try:
+            normalized = _normalize_string_array_override(value)
+        except TypeError as exc:
+            msg = f"{full_path}: {exc}."
+            raise ToolConfigOverrideError(msg) from exc
+        if normalized is None:
+            return None
+        return ", ".join(normalized)
+
+    if not isinstance(value, str):
+        msg = f"{full_path}: expected a string or null."
+        raise ToolConfigOverrideError(msg)
+    return value
+
+
+def _validate_authored_override_value(
+    tool_name: str,
+    field: ConfigField,
+    value: object,
+    *,
+    full_path: str,
+) -> object:
+    """Validate one authored override value against its declared config field type."""
+    if is_authored_override_inherit(value):
+        return value
+
+    if value is None:
+        if field.required:
+            msg = f"{full_path}: null is not allowed for required fields."
+            raise ToolConfigOverrideError(msg)
+        return None
+
+    if field.type in _TEXT_CONFIG_FIELD_TYPES:
+        return _validate_text_authored_override_value(tool_name, field, value, full_path=full_path)
+
+    if field.type == "boolean":
+        if not isinstance(value, bool):
+            msg = f"{full_path}: expected a boolean or null."
+            raise ToolConfigOverrideError(msg)
+        return value
+
+    if field.type == "number":
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            msg = f"{full_path}: expected a number or null."
+            raise ToolConfigOverrideError(msg)
+        return value
+
+    return value
+
+
+def validate_authored_overrides(
+    tool_name: str,
+    overrides: dict[str, object] | None,
+    *,
+    config_path_prefix: str | None = None,
+) -> dict[str, object]:
+    """Validate authored YAML overrides against one tool's declared config fields."""
+    if not overrides:
+        return {}
+
+    metadata = TOOL_METADATA.get(tool_name)
+    if metadata is None:
+        msg = f"Unknown tool '{tool_name}'."
+        raise ToolConfigOverrideError(msg)
+
+    fields_by_name = {field.name: field for field in metadata.config_fields or []}
+    unexpected_fields = sorted(set(overrides) - set(fields_by_name))
+    if unexpected_fields:
+        unexpected = ", ".join(unexpected_fields)
+        allowed = ", ".join(sorted(fields_by_name)) or "none"
+        path = _override_path(tool_name, unexpected_fields[0], config_path_prefix=config_path_prefix)
+        msg = f"{path}: unknown authored override field(s): {unexpected}. Allowed fields: {allowed}."
+        raise ToolConfigOverrideError(msg)
+
+    validated: dict[str, object] = {}
+    for field_name, value in overrides.items():
+        field = fields_by_name[field_name]
+        full_path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)
+        if field.type == "password":
+            msg = f"{full_path}: authored overrides are not allowed for password fields."
+            raise ToolConfigOverrideError(msg)
+        if not field.authored_override:
+            msg = f"{full_path}: authored overrides are not allowed for this field."
+            raise ToolConfigOverrideError(msg)
+        validated[field_name] = _validate_authored_override_value(
+            tool_name,
+            field,
+            value,
+            full_path=full_path,
+        )
+    return validated
 
 
 def sanitize_tool_init_overrides(
@@ -94,6 +244,7 @@ def _build_tool_config_init_kwargs(
     metadata: ToolMetadata,
     *,
     credentials: dict[str, object],
+    tool_config_overrides: dict[str, object] | None,
     tool_init_overrides: dict[str, object] | None,
     runtime_overrides: dict[str, object] | None,
 ) -> dict[str, object]:
@@ -103,6 +254,14 @@ def _build_tool_config_init_kwargs(
 
     config_field_names = {field.name for field in metadata.config_fields}
     init_kwargs = {field.name: credentials[field.name] for field in metadata.config_fields if field.name in credentials}
+    if tool_config_overrides:
+        for field in metadata.config_fields:
+            if field.name not in tool_config_overrides:
+                continue
+            override_value = tool_config_overrides[field.name]
+            if is_authored_override_inherit(override_value):
+                continue
+            init_kwargs[field.name] = override_value
     if tool_init_overrides:
         init_kwargs.update(
             {
@@ -160,6 +319,7 @@ def _build_tool_instance(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
+    tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
@@ -196,10 +356,12 @@ def _build_tool_instance(
     ) or {}
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
+    validated_tool_config_overrides = validate_authored_overrides(tool_name, tool_config_overrides)
     safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
     init_kwargs = _build_tool_config_init_kwargs(
         metadata,
         credentials=credentials,
+        tool_config_overrides=validated_tool_config_overrides,
         tool_init_overrides=safe_tool_init_overrides,
         runtime_overrides=runtime_overrides,
     )
@@ -226,6 +388,7 @@ def _build_tool_instance(
         runtime_paths=runtime_paths,
         credentials_manager=resolved_credentials_manager,
         tool_init_overrides=proxy_tool_init_overrides or None,
+        tool_config_overrides=validated_tool_config_overrides,
         runtime_overrides=runtime_overrides,
         extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
         worker_tools_override=worker_tools_override,
@@ -241,6 +404,7 @@ def get_tool_by_name(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
+    tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
@@ -260,6 +424,7 @@ def get_tool_by_name(
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
         credentials_manager=credentials_manager,
+        tool_config_overrides=tool_config_overrides,
         tool_init_overrides=tool_init_overrides,
         worker_tools_override=worker_tools_override,
         runtime_overrides=runtime_overrides,
@@ -352,13 +517,14 @@ class ConfigField:
 
     name: str  # Environment variable name (e.g., "SMTP_HOST")
     label: str  # Display label (e.g., "SMTP Host")
-    type: Literal["boolean", "number", "password", "text", "url", "select"] = "text"
+    type: Literal["boolean", "number", "password", "text", "url", "select", "string[]"] = "text"
     required: bool = True
     default: Any = None
     placeholder: str | None = None
     description: str | None = None
     options: list[dict[str, str]] | None = None  # For select type
     validation: dict[str, Any] | None = None  # min, max, pattern, etc.
+    authored_override: bool = True
 
 
 @dataclass
@@ -375,6 +541,7 @@ class ToolMetadata:
     icon: str | None = None  # Icon identifier for frontend
     icon_color: str | None = None  # Tailwind color class like "text-blue-500"
     config_fields: list[ConfigField] | None = None  # Detailed field definitions
+    agent_override_fields: list[ConfigField] | None = None  # Safe per-agent override field definitions
     dependencies: list[str] | None = None  # Required pip packages
     auth_provider: str | None = None  # Name of integration that provides auth (e.g., "google")
     docs_url: str | None = None  # Documentation URL
@@ -399,6 +566,7 @@ def register_tool_with_metadata(
     icon: str | None = None,
     icon_color: str | None = None,
     config_fields: list[ConfigField] | None = None,
+    agent_override_fields: list[ConfigField] | None = None,
     dependencies: list[str] | None = None,
     auth_provider: str | None = None,
     docs_url: str | None = None,
@@ -421,6 +589,7 @@ def register_tool_with_metadata(
         icon: Icon identifier for frontend
         icon_color: CSS color class for the icon
         config_fields: List of configuration fields
+        agent_override_fields: Safe per-agent override fields serialized via config.yaml
         dependencies: Required Python packages
         auth_provider: Name of integration that provides authentication
         docs_url: Link to documentation
@@ -445,6 +614,7 @@ def register_tool_with_metadata(
             icon=icon,
             icon_color=icon_color,
             config_fields=config_fields,
+            agent_override_fields=agent_override_fields,
             dependencies=dependencies,
             auth_provider=auth_provider,
             docs_url=docs_url,
@@ -503,3 +673,102 @@ def export_tools_metadata() -> list[dict[str, Any]]:
 
     tools.sort(key=lambda tool: (tool["category"], tool["name"]))
     return tools
+
+
+def _normalize_string_array_override(value: object) -> list[str] | None:
+    """Normalize a string-array authored override from a list or legacy text value."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        values = [part.strip() for part in value.replace("\n", ",").split(",") if part.strip()]
+        return values or None
+    if not isinstance(value, list):
+        msg = "expected a list of strings or a comma/newline-separated string"
+        raise TypeError(msg)
+    normalized: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str):
+            msg = "expected a list of strings"
+            raise TypeError(msg)
+        stripped = entry.strip()
+        if stripped:
+            normalized.append(stripped)
+    return normalized or None
+
+
+def _normalize_agent_override_field_value(field: ConfigField, value: object) -> object | None:
+    """Normalize one authored agent override value according to its declared schema."""
+    if field.type == "string[]":
+        return _normalize_string_array_override(value)
+    if field.type == "boolean":
+        if value is None or isinstance(value, bool):
+            return value
+        msg = "expected a boolean or null"
+        raise ValueError(msg)
+    if field.type == "number":
+        if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)):
+            return value
+        msg = "expected a number or null"
+        raise ValueError(msg)
+    if field.type in {"password", "select", "text", "url"}:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        msg = "expected a string or null"
+        raise ValueError(msg)
+    return value
+
+
+def normalize_authored_tool_overrides(tool_name: str, overrides: dict[str, object] | None) -> dict[str, object]:
+    """Validate and normalize one tool's authored per-agent overrides."""
+    if not overrides:
+        return {}
+
+    metadata = TOOL_METADATA.get(tool_name)
+    if metadata is None:
+        msg = f"Unknown tool '{tool_name}' cannot declare per-agent overrides."
+        raise ValueError(msg)
+
+    field_map = {field.name: field for field in metadata.agent_override_fields or []}
+    if not field_map:
+        msg = f"Tool '{tool_name}' does not support per-agent overrides."
+        raise ValueError(msg)
+
+    unexpected_fields = sorted(set(overrides) - set(field_map))
+    if unexpected_fields:
+        allowed = ", ".join(sorted(field_map)) or "none"
+        unexpected = ", ".join(unexpected_fields)
+        msg = f"Unsupported per-agent override(s) for '{tool_name}': {unexpected}. Allowed overrides: {allowed}."
+        raise ValueError(msg)
+
+    normalized: dict[str, object] = {}
+    for field_name, raw_value in overrides.items():
+        field = field_map[field_name]
+        try:
+            normalized_value = _normalize_agent_override_field_value(field, raw_value)
+        except (TypeError, ValueError) as exc:
+            msg = f"Invalid per-agent override for '{tool_name}.{field_name}': {exc}"
+            raise ValueError(msg) from exc
+        if normalized_value is not None:
+            normalized[field_name] = normalized_value
+    return normalized
+
+
+def authored_tool_overrides_to_runtime(tool_name: str, overrides: dict[str, object] | None) -> dict[str, object] | None:
+    """Convert normalized authored per-agent overrides into runtime kwargs."""
+    normalized = normalize_authored_tool_overrides(tool_name, overrides)
+    if not normalized:
+        return None
+
+    metadata = TOOL_METADATA[tool_name]
+    field_map = {field.name: field for field in metadata.agent_override_fields or []}
+    runtime_overrides: dict[str, object] = {}
+    for field_name, value in normalized.items():
+        field = field_map[field_name]
+        if field.type == "string[]":
+            runtime_overrides[field_name] = ", ".join(cast("list[str]", value))
+        else:
+            runtime_overrides[field_name] = value
+    return runtime_overrides or None

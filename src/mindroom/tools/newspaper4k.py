@@ -17,8 +17,8 @@ if TYPE_CHECKING:
 
 
 @register_tool_with_metadata(
-    name="newspaper4k",
-    display_name="Newspaper4k",
+    name="newspaper",
+    display_name="Newspaper",
     description="Read and extract content from news articles using advanced web scraping",
     category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,

@@ -26,10 +26,12 @@ from mindroom.credentials import CredentialsManager, get_runtime_credentials_man
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
+    ToolConfigOverrideError,
     ToolInitOverrideError,
     ensure_tool_registry_loaded,
     get_tool_by_name,
     sanitize_tool_init_overrides,
+    validate_authored_overrides,
 )
 from mindroom.tool_system.sandbox_proxy import to_json_compatible
 from mindroom.tool_system.worker_routing import (
@@ -187,6 +189,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     execution_identity: dict[str, Any] = Field(default_factory=dict)
     private_agent_names: list[str] | None = None
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
+    tool_config_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
     execution_env: dict[str, str] = Field(default_factory=dict)
     extra_env_passthrough: str | None = None
@@ -314,6 +317,7 @@ def _resolve_entrypoint(
     function_name: str,
     execution_identity: ToolExecutionIdentity | None = None,
     credential_overrides: dict[str, object] | None = None,
+    tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     runtime_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
@@ -335,11 +339,12 @@ def _resolve_entrypoint(
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
             credentials_manager=_runner_credentials_manager(runtime_paths),
+            tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
             worker_target=worker_target,
         )
-    except ToolInitOverrideError as exc:
+    except (ToolConfigOverrideError, ToolInitOverrideError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -411,6 +416,7 @@ async def _execute_request_inprocess(
             function_name=request.function_name,
             execution_identity=execution_identity,
             credential_overrides=request.credential_overrides or None,
+            tool_config_overrides=request.tool_config_overrides or None,
             tool_init_overrides=request.tool_init_overrides or None,
             runtime_overrides=runtime_overrides,
             worker_scope=request.worker_scope,
@@ -630,16 +636,8 @@ async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse
     )
 
 
-@router.post("/execute", response_model=SandboxRunnerExecuteResponse)
-async def execute_tool_call(  # noqa: C901
-    request: Request,
-    payload: SandboxRunnerExecuteRequest,
-) -> SandboxRunnerExecuteResponse:
-    """Execute a tool function locally and return the serialized result."""
-    runtime_paths = sandbox_runner_runtime_paths(request)
-    config = _runtime_config_or_empty(runtime_paths)
-    runner_token = _app_runner_token(request.app)
-    payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
+def _validate_execute_request_payload(payload: SandboxRunnerExecuteRequest) -> None:
+    """Validate request override channels before execution dispatch."""
     if payload.credential_overrides:
         raise HTTPException(status_code=400, detail="credential_overrides must be supplied via lease_id.")
     if payload.tool_init_overrides and payload.tool_name in TOOL_METADATA:
@@ -649,6 +647,32 @@ async def execute_tool_call(  # noqa: C901
             )
         except ToolInitOverrideError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.tool_config_overrides:
+        try:
+            payload.tool_config_overrides = validate_authored_overrides(
+                payload.tool_name,
+                payload.tool_config_overrides,
+                config_path_prefix="request.tool_config_overrides",
+            )
+        except ToolConfigOverrideError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.execution_env and payload.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES:
+        raise HTTPException(status_code=400, detail="execution_env is only supported for execution tools.")
+    if payload.extra_env_passthrough is not None and payload.tool_name != "shell":
+        raise HTTPException(status_code=400, detail="extra_env_passthrough is only supported for shell.")
+
+
+@router.post("/execute", response_model=SandboxRunnerExecuteResponse)
+async def execute_tool_call(
+    request: Request,
+    payload: SandboxRunnerExecuteRequest,
+) -> SandboxRunnerExecuteResponse:
+    """Execute a tool function locally and return the serialized result."""
+    runtime_paths = sandbox_runner_runtime_paths(request)
+    config = _runtime_config_or_empty(runtime_paths)
+    runner_token = _app_runner_token(request.app)
+    payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
+    _validate_execute_request_payload(payload)
     credential_overrides: dict[str, object] = {}
     if payload.lease_id is not None:
         credential_overrides = sandbox_worker_prep.consume_credential_lease(
@@ -658,10 +682,6 @@ async def execute_tool_call(  # noqa: C901
         )
 
     payload.credential_overrides = credential_overrides
-    if payload.execution_env and payload.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES:
-        raise HTTPException(status_code=400, detail="execution_env is only supported for execution tools.")
-    if payload.extra_env_passthrough is not None and payload.tool_name != "shell":
-        raise HTTPException(status_code=400, detail="extra_env_passthrough is only supported for shell.")
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None
     if payload.worker_key is not None:
         try:

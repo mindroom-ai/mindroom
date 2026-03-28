@@ -93,6 +93,7 @@ def _append_config_only_presets(tools: list[dict[str, Any]]) -> None:
                 "icon": "Workflow",
                 "icon_color": "text-orange-500",
                 "config_fields": None,
+                "agent_override_fields": None,
                 "dependencies": None,
                 "auth_provider": None,
                 "docs_url": None,

@@ -13,6 +13,15 @@ import {
 } from '@/types/config';
 import * as configService from '@/services/configService';
 import type { ConfigDiagnostic } from '@/lib/configValidation';
+import {
+  cloneToolEntries,
+  getToolOverrides as getToolOverridesFromEntries,
+  normalizeToolEntries,
+  rebuildToolEntries,
+  setToolOverridesInEntries,
+  type ToolEntry,
+  type ToolOverrides,
+} from '@/lib/toolEntry';
 
 const AGENT_POLICIES_ERROR_MESSAGE = 'Failed to derive agent policies';
 
@@ -83,6 +92,113 @@ function isMemoryEmbedderUpdate(update: object): update is MemoryEmbedderUpdate 
   return 'provider' in update && 'model' in update;
 }
 
+const rawToolEntriesByConfig = new WeakMap<Config, Map<string, ToolEntry[]>>();
+const rawDefaultToolEntriesByConfig = new WeakMap<Config, ToolEntry[] | undefined>();
+
+function cloneRawToolEntriesByAgent(
+  rawEntriesByAgent: Map<string, ToolEntry[]>
+): Map<string, ToolEntry[]> {
+  return new Map(
+    Array.from(rawEntriesByAgent.entries(), ([agentId, rawEntries]) => [
+      agentId,
+      cloneToolEntries(rawEntries),
+    ])
+  );
+}
+
+function rememberRawToolEntries(
+  config: Config,
+  rawEntriesByAgent: Map<string, ToolEntry[]>,
+  rawDefaultToolEntries: ToolEntry[] | undefined
+): void {
+  rawToolEntriesByConfig.set(config, cloneRawToolEntriesByAgent(rawEntriesByAgent));
+  rawDefaultToolEntriesByConfig.set(
+    config,
+    rawDefaultToolEntries === undefined ? undefined : cloneToolEntries(rawDefaultToolEntries)
+  );
+}
+
+function preserveRawToolEntries(previousConfig: Config | null, nextConfig: Config): void {
+  if (previousConfig == null) {
+    return;
+  }
+  rememberRawToolEntries(
+    nextConfig,
+    rawToolEntriesByConfig.get(previousConfig) ?? new Map<string, ToolEntry[]>(),
+    rawDefaultToolEntriesByConfig.get(previousConfig)
+  );
+}
+
+function getRememberedRawToolEntries(config: Config | null, agentId: string): ToolEntry[] {
+  if (config == null) {
+    return [];
+  }
+  return cloneToolEntries(rawToolEntriesByConfig.get(config)?.get(agentId));
+}
+
+function getRememberedRawDefaultToolEntries(config: Config | null): ToolEntry[] | undefined {
+  if (config == null) {
+    return undefined;
+  }
+  const rawDefaultToolEntries = rawDefaultToolEntriesByConfig.get(config);
+  return rawDefaultToolEntries === undefined ? undefined : cloneToolEntries(rawDefaultToolEntries);
+}
+
+function setRememberedRawToolEntries(
+  config: Config,
+  agentId: string,
+  rawEntries: ToolEntry[]
+): void {
+  const rememberedEntries = rawToolEntriesByConfig.get(config);
+  const nextEntriesByAgent =
+    rememberedEntries == null
+      ? new Map<string, ToolEntry[]>()
+      : cloneRawToolEntriesByAgent(rememberedEntries);
+  nextEntriesByAgent.set(agentId, cloneToolEntries(rawEntries));
+  rawToolEntriesByConfig.set(config, nextEntriesByAgent);
+}
+
+function normalizeConfigToolEntries(rawConfig: configService.RawConfig): {
+  normalizedConfig: Config;
+  rawEntriesByAgent: Map<string, ToolEntry[]>;
+  rawDefaultToolEntries: ToolEntry[] | undefined;
+} {
+  const { agents: _rawAgents, defaults: rawDefaults, ...restConfig } = rawConfig;
+  const rawEntriesByAgent = new Map<string, ToolEntry[]>();
+  const rawDefaultToolEntries =
+    rawDefaults?.tools === undefined ? undefined : cloneToolEntries(rawDefaults.tools);
+  const normalizedAgents = Object.fromEntries(
+    Object.entries(rawConfig.agents).map(([agentId, agentConfig]) => {
+      const rawEntries = cloneToolEntries(agentConfig.tools);
+      rawEntriesByAgent.set(agentId, rawEntries);
+      return [
+        agentId,
+        {
+          ...agentConfig,
+          tools: normalizeToolEntries(rawEntries),
+        },
+      ];
+    })
+  );
+  const normalizedDefaults = rawDefaults
+    ? {
+        ...rawDefaults,
+        tools:
+          rawDefaults.tools === undefined ? undefined : normalizeToolEntries(rawDefaultToolEntries),
+      }
+    : undefined;
+
+  return {
+    normalizedConfig: {
+      ...restConfig,
+      agents: normalizedAgents,
+      ...(normalizedDefaults ? { defaults: normalizedDefaults } : {}),
+    } as Config,
+    rawEntriesByAgent,
+    rawDefaultToolEntries,
+  };
+}
+
 interface ConfigState {
   // State
   config: Config | null;
@@ -135,6 +251,12 @@ interface ConfigState {
   updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
   deleteModel: (modelId: string) => void;
   updateToolConfig: (toolId: string, config: unknown) => void;
+  getAgentToolOverrides: (agentId: string, toolName: string) => ToolOverrides | null;
+  updateAgentToolOverrides: (
+    agentId: string,
+    toolName: string,
+    overrides: ToolOverrides | null
+  ) => void;
   markDirty: () => void;
 }
 
@@ -162,14 +284,20 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   loadConfig: async () => {
     set({ isLoading: true, diagnostics: [] });
     try {
-      const config = await configService.loadConfig();
+      const rawConfig = await configService.loadConfig();
+      const {
+        normalizedConfig: loadedConfig,
+        rawEntriesByAgent,
+        rawDefaultToolEntries,
+      } = normalizeConfigToolEntries(rawConfig);
       const normalizedConfig: Config = {
-        ...config,
-        knowledge_bases: config.knowledge_bases || {},
-        cultures: config.cultures || {},
+        ...loadedConfig,
+        knowledge_bases: loadedConfig.knowledge_bases || {},
+        cultures: loadedConfig.cultures || {},
       };
-      const defaultLearning = config.defaults?.learning ?? true;
-      const defaultLearningMode = config.defaults?.learning_mode ?? 'always';
+      rememberRawToolEntries(normalizedConfig, rawEntriesByAgent, rawDefaultToolEntries);
+      const defaultLearning = normalizedConfig.defaults?.learning ?? true;
+      const defaultLearningMode = normalizedConfig.defaults?.learning_mode ?? 'always';
       const agents = Object.entries(normalizedConfig.agents).map(([id, agent]) => ({
         id,
         ...agent,
@@ -204,7 +332,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       const rooms: Room[] = Array.from(roomIds).map(roomId => {
         const agentsInRoom = agents.filter(agent => agent.rooms.includes(roomId)).map(a => a.id);
-        const roomModel = config.room_models?.[roomId];
+        const roomModel = normalizedConfig.room_models?.[roomId];
         return {
           id: roomId,
           display_name: roomId.charAt(0).toUpperCase() + roomId.slice(1),
@@ -300,14 +428,34 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       syncStatus: 'syncing',
     });
     try {
+      const rawEntriesByAgent = new Map(
+        agents.map(agent => [
+          agent.id,
+          rebuildToolEntries(agent.tools, getRememberedRawToolEntries(config, agent.id)),
+        ])
+      );
+      const rawDefaultToolEntries = getRememberedRawDefaultToolEntries(config);
+
       // Convert agents array back to object format
-      const agentsObject = agents.reduce(
+      const normalizedAgentsObject = agents.reduce(
         (acc, agent) => {
           const { id, ...rest } = agent;
           acc[id] = rest;
           return acc;
         },
         {} as Record<string, Omit<Agent, 'id'>>
+      );
+      const payloadAgentsObject = agents.reduce(
+        (acc, agent) => {
+          const { id, ...rest } = agent;
+          const rawToolEntries = rawEntriesByAgent.get(id);
+          acc[id] = {
+            ...rest,
+            tools: rawToolEntries ?? rest.tools,
+          };
+          return acc;
+        },
+        {} as configService.ConfigSavePayload['agents']
       );
 
       const culturesObject = cultures.reduce(
@@ -329,7 +477,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       const updatedConfig: Config = {
         ...config,
-        agents: agentsObject,
+        agents: normalizedAgentsObject,
         teams: teams.reduce(
           (acc, team) => {
             const { id, ...rest } = team;
@@ -341,8 +489,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         cultures: culturesObject,
         room_models: Object.keys(roomModels).length > 0 ? roomModels : undefined,
       };
+      const payload: configService.ConfigSavePayload = {
+        ...updatedConfig,
+        agents: payloadAgentsObject,
+        defaults: {
+          ...updatedConfig.defaults,
+          tools: rawDefaultToolEntries ?? updatedConfig.defaults.tools,
+        },
+      };
 
-      await configService.saveConfig(updatedConfig);
+      await configService.saveConfig(payload);
+      rememberRawToolEntries(updatedConfig, rawEntriesByAgent, rawDefaultToolEntries);
       set({
         config: updatedConfig,
         isLoading: false,
@@ -675,6 +832,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         };
       }
 
+      const previousConfig = state.config;
+      if (previousConfig && updatedConfig && updatedConfig !== previousConfig) {
+        preserveRawToolEntries(previousConfig, updatedConfig);
+      }
+
       // If agents changed, update the agents' rooms arrays
       if (updates.agents) {
         const oldRoom = state.rooms.find(r => r.id === roomId);
@@ -764,6 +926,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           ...state.config,
           room_models: remainingModels,
         };
+        preserveRawToolEntries(state.config, updatedConfig);
       }
 
       return {
@@ -834,11 +997,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateRoomModels: roomModels => {
     set(state => {
       if (!state.config) return state;
+      const nextConfig = {
+        ...state.config,
+        room_models: roomModels,
+      };
+      preserveRawToolEntries(state.config, nextConfig);
       return {
-        config: {
-          ...state.config,
-          room_models: roomModels,
-        },
+        config: nextConfig,
         isDirty: true,
         diagnostics: [],
       };
@@ -850,30 +1015,34 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set(state => {
       if (!state.config) return state;
       if (isMemoryEmbedderUpdate(memoryConfig)) {
-        return {
-          config: {
-            ...state.config,
-            memory: {
-              ...state.config.memory,
-              embedder: {
-                provider: memoryConfig.provider,
-                config: {
-                  model: memoryConfig.model,
-                  ...(memoryConfig.host ? { host: memoryConfig.host } : {}),
-                },
+        const nextConfig = {
+          ...state.config,
+          memory: {
+            ...state.config.memory,
+            embedder: {
+              provider: memoryConfig.provider,
+              config: {
+                model: memoryConfig.model,
+                ...(memoryConfig.host ? { host: memoryConfig.host } : {}),
               },
             },
           },
+        };
+        preserveRawToolEntries(state.config, nextConfig);
+        return {
+          config: nextConfig,
           isDirty: true,
           diagnostics: [],
         };
       }
 
+      const nextConfig = {
+        ...state.config,
+        memory: memoryConfig,
+      };
+      preserveRawToolEntries(state.config, nextConfig);
       return {
-        config: {
-          ...state.config,
-          memory: memoryConfig,
-        },
+        config: nextConfig,
         isDirty: true,
         diagnostics: [],
       };
@@ -885,17 +1054,19 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set(state => {
       if (!state.config) return state;
       const existingBaseConfig = state.config.knowledge_bases?.[baseName] || {};
-      return {
-        config: {
-          ...state.config,
-          knowledge_bases: {
-            ...(state.config.knowledge_bases || {}),
-            [baseName]: {
-              ...existingBaseConfig,
-              ...baseConfig,
-            },
+      const nextConfig = {
+        ...state.config,
+        knowledge_bases: {
+          ...(state.config.knowledge_bases || {}),
+          [baseName]: {
+            ...existingBaseConfig,
+            ...baseConfig,
           },
         },
+      };
+      preserveRawToolEntries(state.config, nextConfig);
+      return {
+        config: nextConfig,
         isDirty: true,
         diagnostics: [],
       };
@@ -923,13 +1094,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         ])
       );
+      const nextConfig = {
+        ...state.config,
+        knowledge_bases: knowledgeBases,
+        agents: configAgents,
+      };
+      preserveRawToolEntries(state.config, nextConfig);
 
       return {
-        config: {
-          ...state.config,
-          knowledge_bases: knowledgeBases,
-          agents: configAgents,
-        },
+        config: nextConfig,
         agents,
         isDirty: true,
         diagnostics: [],
@@ -941,17 +1114,19 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateModel: (modelId, updates) => {
     set(state => {
       if (!state.config) return state;
-      return {
-        config: {
-          ...state.config,
-          models: {
-            ...state.config.models,
-            [modelId]: {
-              ...state.config.models[modelId],
-              ...updates,
-            },
+      const nextConfig = {
+        ...state.config,
+        models: {
+          ...state.config.models,
+          [modelId]: {
+            ...state.config.models[modelId],
+            ...updates,
           },
         },
+      };
+      preserveRawToolEntries(state.config, nextConfig);
+      return {
+        config: nextConfig,
         isDirty: true,
         diagnostics: [],
       };
@@ -963,11 +1138,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set(state => {
       if (!state.config) return state;
       const { [modelId]: _, ...remainingModels } = state.config.models;
+      const nextConfig = {
+        ...state.config,
+        models: remainingModels,
+      };
+      preserveRawToolEntries(state.config, nextConfig);
       return {
-        config: {
-          ...state.config,
-          models: remainingModels,
-        },
+        config: nextConfig,
         isDirty: true,
         diagnostics: [],
       };
@@ -978,17 +1155,41 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateToolConfig: (toolId, config) => {
     set(state => {
       if (!state.config) return state;
-      return {
-        config: {
-          ...state.config,
-          tools: {
-            ...state.config.tools,
-            [toolId]: config,
-          },
+      const nextConfig = {
+        ...state.config,
+        tools: {
+          ...state.config.tools,
+          [toolId]: config,
         },
+      };
+      preserveRawToolEntries(state.config, nextConfig);
+      return {
+        config: nextConfig,
         isDirty: true,
         diagnostics: [],
       };
+    });
+  },
+
+  getAgentToolOverrides: (agentId, toolName) => {
+    const config = get().config;
+    return getToolOverridesFromEntries(toolName, getRememberedRawToolEntries(config, agentId));
+  },
+
+  updateAgentToolOverrides: (agentId, toolName, overrides) => {
+    const config = get().config;
+    if (!config) {
+      return;
+    }
+    const nextRawEntries = setToolOverridesInEntries(
+      toolName,
+      overrides,
+      getRememberedRawToolEntries(config, agentId)
+    );
+    setRememberedRawToolEntries(config, agentId, nextRawEntries);
+    set({
+      isDirty: true,
+      diagnostics: [],
     });
   },
 

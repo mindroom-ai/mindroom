@@ -331,9 +331,11 @@ def _build_registered_agent_tool(
     worker_tools: list[str],
     worker_scope: WorkerScope | None,
     agent_name: str,
+    tool_config_overrides: dict[str, object] | None,
     workspace_path: Path | None,
     routing_agent_is_private: bool,
     execution_identity: ToolExecutionIdentity | None,
+    runtime_overrides: dict[str, object] | None,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
     worker_target = build_worker_target_from_runtime_env(
@@ -352,10 +354,12 @@ def _build_registered_agent_tool(
         tool_name,
         runtime_paths,
         credentials_manager=credentials_manager,
+        tool_config_overrides=tool_config_overrides,
         tool_init_overrides=_tool_base_dir_override(
             tool_name,
             workspace_path=workspace_path,
         ),
+        runtime_overrides=runtime_overrides,
         shared_storage_root_path=shared_storage_path,
         worker_tools_override=worker_tools,
         worker_target=worker_target,
@@ -396,6 +400,7 @@ def build_agent_toolkit(
     config: Config,
     runtime_paths: constants.RuntimePaths,
     worker_tools: list[str],
+    tool_config_overrides: dict[str, object] | None = None,
     tool_init_context: AgentToolInitContext,
     execution_identity: ToolExecutionIdentity | None,
     delegation_depth: int = 0,
@@ -460,9 +465,11 @@ def build_agent_toolkit(
         worker_tools,
         tool_init_context.execution_scope,
         agent_name,
+        tool_config_overrides,
         tool_init_context.workspace_path,
         tool_init_context.routing_agent_is_private,
         execution_identity,
+        config.get_agent_tool_runtime_overrides(agent_name, tool_name, runtime_paths=runtime_paths),
     )
 
 
@@ -766,6 +773,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         config,
         delegation_depth=delegation_depth,
     )
+    resolved_tool_configs = {
+        entry.name: entry.tool_config_overrides for entry in config.get_agent_tool_configs(agent_name)
+    }
     worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
     tool_init_context = _tool_init_context_from_runtime(agent_runtime)
     workspace = agent_runtime.workspace
@@ -778,6 +788,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 config=config,
                 runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
+                tool_config_overrides=resolved_tool_configs.get(tool_name),
                 tool_init_context=tool_init_context,
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,

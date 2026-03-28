@@ -484,6 +484,7 @@ def _call_proxy_sync(  # noqa: C901
     kwargs: dict[str, object],
     credentials_manager: CredentialsManager | None,
     shared_storage_root_path: Path | None = None,
+    tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
@@ -507,6 +508,8 @@ def _call_proxy_sync(  # noqa: C901
         payload["execution_env"] = execution_env
     if extra_env_passthrough is not None:
         payload["extra_env_passthrough"] = extra_env_passthrough
+    if tool_config_overrides:
+        payload["tool_config_overrides"] = to_json_compatible(tool_config_overrides)
     if worker_handle is None and proxy_config.proxy_url is None:
         msg = "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)
@@ -575,6 +578,7 @@ def _wrap_sync_function(
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
     shared_storage_root_path: Path | None = None,
+    tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
@@ -593,6 +597,7 @@ def _wrap_sync_function(
             kwargs=dict(kwargs),
             credentials_manager=credentials_manager,
             shared_storage_root_path=shared_storage_root_path,
+            tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
@@ -611,6 +616,7 @@ def _wrap_async_function(
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
     shared_storage_root_path: Path | None = None,
+    tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
@@ -630,6 +636,7 @@ def _wrap_async_function(
             kwargs=dict(kwargs),
             credentials_manager=credentials_manager,
             shared_storage_root_path=shared_storage_root_path,
+            tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
@@ -647,6 +654,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
     shared_storage_root_path: Path | None = None,
+    tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     runtime_overrides: dict[str, object] | None = None,
     extra_env_passthrough: str | None = None,
@@ -681,6 +689,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             runtime_paths=runtime_paths,
             credentials_manager=credentials_manager,
             shared_storage_root_path=shared_storage_root_path,
+            tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
@@ -696,6 +705,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             runtime_paths=runtime_paths,
             credentials_manager=credentials_manager,
             shared_storage_root_path=shared_storage_root_path,
+            tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,

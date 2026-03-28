@@ -13,7 +13,7 @@ from agno.tools import Toolkit
 from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config, load_config
-from mindroom.config.models import AgentLearningMode  # noqa: TC001
+from mindroom.config.models import AgentLearningMode, ToolConfigEntry
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import TOOL_METADATA, ToolCategory, ToolStatus
 
@@ -26,6 +26,15 @@ logger = get_logger(__name__)
 def _is_known_tool_entry(tool_name: str) -> bool:
     """Return whether a tool entry is a known registered tool."""
     return tool_name in TOOL_METADATA
+
+
+def _preserve_tool_overrides(
+    existing_entries: list[ToolConfigEntry],
+    updated_tool_names: list[str],
+) -> list[ToolConfigEntry]:
+    """Keep inline overrides for retained tools during string-only tool-list edits."""
+    existing_by_name = {entry.name: entry for entry in existing_entries}
+    return [existing_by_name.get(tool_name, ToolConfigEntry(name=tool_name)) for tool_name in updated_tool_names]
 
 
 def validate_knowledge_bases(
@@ -60,7 +69,7 @@ def validate_knowledge_bases(
 
 def _save_runtime_validated_config(config: Config, runtime_paths: RuntimePaths, config_path: Path) -> None:
     """Revalidate the full config against the active runtime before writing it."""
-    validated = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    validated = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     validated.save_to_yaml(config_path)
 
 
@@ -395,7 +404,7 @@ class ConfigManagerTools(Toolkit):
             agents_info = []
 
             for name, agent in config.agents.items():
-                tools_str = ", ".join(agent.tools) if agent.tools else "No tools"
+                tools_str = ", ".join(agent.tool_names) if agent.tools else "No tools"
                 role_line = f"  - Role: {agent.role[:100]}..." if len(agent.role) > 100 else f"  - Role: {agent.role}"
                 agents_info.append(
                     f"**{name}** ({agent.display_name})\n"
@@ -526,7 +535,7 @@ class ConfigManagerTools(Toolkit):
             new_agent = AgentConfig(
                 display_name=display_name,
                 role=role,
-                tools=tools,
+                tools=tools,  # ty: ignore[invalid-argument-type]
                 instructions=instructions,
                 model=model,
                 rooms=rooms,
@@ -605,8 +614,8 @@ class ConfigManagerTools(Toolkit):
                 agent.role = role
                 changes.append(f"Role -> {role}")
 
-            if tools is not None and tools != agent.tools:
-                agent.tools = tools
+            if tools is not None and tools != agent.tool_names:
+                agent.tools = _preserve_tool_overrides(agent.tools, tools)
                 changes.append(f"Tools -> {', '.join(tools) if tools else '(empty)'}")
 
             if instructions is not None and instructions != agent.instructions:
@@ -733,7 +742,7 @@ class ConfigManagerTools(Toolkit):
             if not agent.tools:
                 warnings.append("No tools configured")
             else:
-                invalid_tools = [t for t in agent.tools if not _is_known_tool_entry(t)]
+                invalid_tools = [t for t in agent.tool_names if not _is_known_tool_entry(t)]
                 if invalid_tools:
                     issues.append(f"Invalid tools: {', '.join(invalid_tools)}")
 
@@ -760,7 +769,7 @@ class ConfigManagerTools(Toolkit):
             output.append("\n### Configuration Summary:")
             output.append(f"- Display Name: {agent.display_name}")
             output.append(f"- Role: {agent.role[:100]}..." if len(agent.role) > 100 else f"- Role: {agent.role}")
-            output.append(f"- Tools: {', '.join(agent.tools) if agent.tools else 'None'}")
+            output.append(f"- Tools: {', '.join(agent.tool_names) if agent.tools else 'None'}")
             output.append(f"- Model: {agent.model}")
 
             return "\n".join(output)
@@ -776,7 +785,7 @@ class ConfigManagerTools(Toolkit):
                 return f"Error: Agent '{agent_name}' not found."
 
             agent = config.agents[agent_name]
-            agent_dict = agent.model_dump(exclude_none=True)
+            agent_dict = agent.authored_model_dump()
 
             yaml_str = yaml.dump(agent_dict, default_flow_style=False, sort_keys=False)
         except Exception as e:

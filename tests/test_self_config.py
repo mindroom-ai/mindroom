@@ -36,7 +36,7 @@ def _make_config(
         config_path = Path(tmp.name)
     runtime_paths = resolve_runtime_paths(config_path=config_path)
     config.save_to_yaml(config_path)
-    bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound, config_path
 
@@ -137,7 +137,7 @@ class TestUpdateOwnConfig:
             assert "Successfully" in result
 
             reloaded = Config.from_yaml(config_path)
-            assert reloaded.agents["coder"].tools == ["googlesearch", "calculator"]
+            assert reloaded.agents["coder"].tool_names == ["googlesearch", "calculator"]
         finally:
             config_path.unlink(missing_ok=True)
 
@@ -152,7 +152,7 @@ class TestUpdateOwnConfig:
             assert "Successfully" in result
 
             reloaded = Config.from_yaml(config_path)
-            assert reloaded.agents["coder"].tools == ["openclaw_compat", "python"]
+            assert reloaded.agents["coder"].tool_names == ["openclaw_compat", "python"]
             effective = reloaded.get_agent_tools("coder")
             assert effective[0] == "openclaw_compat"
             assert "shell" in effective
@@ -186,7 +186,7 @@ class TestUpdateOwnConfig:
             assert "config_manager" in result
 
             reloaded = Config.from_yaml(config_path)
-            assert reloaded.agents["coder"].tools == ["self_config"]
+            assert reloaded.agents["coder"].tool_names == ["self_config"]
         finally:
             config_path.unlink(missing_ok=True)
 
@@ -221,6 +221,52 @@ class TestUpdateOwnConfig:
 
             reloaded = Config.from_yaml(config_path)
             assert reloaded.agents["coder"].include_default_tools is True
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_include_default_tools_blocks_when_defaults_mapping_contains_privileged(self) -> None:
+        """Blocked-tool checks should inspect normalized names from mapping entries too."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", include_default_tools=False)},
+            defaults=DefaultsConfig(tools=[{"config_manager": None}]),
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(include_default_tools=True)
+
+            assert "Error" in result
+            assert "config_manager" in result
+
+            reloaded = Config.from_yaml(config_path)
+            assert reloaded.agents["coder"].include_default_tools is False
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_tools_preserves_retained_inline_overrides(self) -> None:
+        """String-only self-config updates should keep existing overrides for retained tools."""
+        _, config_path = _make_config(
+            agents={
+                "coder": AgentConfig(
+                    display_name="Coder",
+                    role="Code",
+                    tools=[
+                        {"shell": {"enable_run_shell_command": False}},
+                        {"file": {"enable_delete_file": True}},
+                    ],
+                ),
+            },
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(tools=["shell", "calculator"])
+
+            assert "Successfully" in result
+
+            reloaded = Config.from_yaml(config_path)
+            assert reloaded.agents["coder"].model_dump(exclude_none=True)["tools"] == [
+                {"shell": {"enable_run_shell_command": False}},
+                "calculator",
+            ]
         finally:
             config_path.unlink(missing_ok=True)
 

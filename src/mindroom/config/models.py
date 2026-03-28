@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, cast
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
@@ -28,12 +28,121 @@ class StreamingConfig(BaseModel):
     )
 
 
+def _normalize_tool_entry_overrides(
+    overrides: object,
+    *,
+    error_message: str,
+) -> dict[str, object]:
+    """Normalize one inline tool override mapping."""
+    if overrides is None:
+        return {}
+    if not isinstance(overrides, dict):
+        raise ValueError(error_message)  # noqa: TRY004 - keep Pydantic validation errors structured
+    return cast("dict[str, object]", dict(overrides))
+
+
+def _coerce_named_tool_entry(data: dict[object, object]) -> dict[str, object]:
+    """Normalize the explicit ``{name: ..., overrides: ...}`` form."""
+    normalized = cast("dict[str, object]", dict(data))
+    normalized["overrides"] = _normalize_tool_entry_overrides(
+        normalized.get("overrides"),
+        error_message="Tool entry overrides must be a mapping",
+    )
+    return normalized
+
+
+def _coerce_single_key_tool_entry(data: dict[object, object]) -> dict[str, object]:
+    """Normalize the compact single-key YAML form."""
+    if len(data) != 1:
+        msg = (
+            "Tool entries must be either a string name or a single-key mapping like "
+            "{shell: {extra_env_passthrough: 'DAWARICH_*'}}"
+        )
+        raise ValueError(msg)
+
+    name, overrides = next(iter(data.items()))
+    if not isinstance(name, str):
+        msg = "Tool entry names must be strings"
+        raise ValueError(msg)  # noqa: TRY004 - keep Pydantic validation errors structured
+
+    return {
+        "name": name,
+        "overrides": _normalize_tool_entry_overrides(
+            overrides,
+            error_message=f"Tool '{name}' overrides must be a mapping",
+        ),
+    }
+
+
+class ToolConfigEntry(BaseModel):
+    """One authored tool entry with optional inline overrides."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    overrides: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_entry(cls, data: object) -> object:
+        """Normalize string and single-key YAML forms into the model shape."""
+        if isinstance(data, cls):
+            return data
+        if isinstance(data, str):
+            return {"name": data}
+        if isinstance(data, dict):
+            entry_dict = cast("dict[object, object]", data)
+            return (
+                _coerce_named_tool_entry(entry_dict)
+                if "name" in entry_dict or "overrides" in entry_dict
+                else _coerce_single_key_tool_entry(entry_dict)
+            )
+        msg = "Tool entries must be strings or single-key mappings"
+        raise ValueError(msg)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        """Strip surrounding whitespace and reject empty tool names."""
+        stripped = value.strip()
+        if not stripped:
+            msg = "Tool name must not be empty"
+            raise ValueError(msg)
+        return stripped
+
+    @model_serializer(mode="plain")
+    def serialize(self) -> object:
+        """Preserve the compact YAML form when no overrides are set."""
+        return self.name if not self.overrides else {self.name: self.overrides}
+
+
+def validate_unique_tool_entries(
+    tools: list[ToolConfigEntry],
+    *,
+    scope_name: str,
+) -> list[ToolConfigEntry]:
+    """Ensure each normalized tool name appears at most once within one scope."""
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for entry in tools:
+        if entry.name in seen and entry.name not in duplicates:
+            duplicates.append(entry.name)
+        seen.add(entry.name)
+
+    if duplicates:
+        msg = f"Duplicate {scope_name} tools are not allowed: {', '.join(duplicates)}"
+        raise ValueError(msg)
+    return tools
+
+
 class DefaultsConfig(BaseModel):
     """Default configuration values for agents."""
 
-    tools: list[str] = Field(
-        default_factory=lambda: list(_DEFAULT_DEFAULT_TOOLS),
-        description="Tool names automatically added to every agent",
+    model_config = ConfigDict(validate_assignment=True)
+
+    tools: list[ToolConfigEntry] = Field(
+        default_factory=lambda: [ToolConfigEntry(name=name) for name in _DEFAULT_DEFAULT_TOOLS],
+        description="Tool entries automatically added to every agent, with optional inline overrides",
     )
     markdown: bool = Field(default=True, description="Default markdown setting")
     enable_streaming: bool = Field(
@@ -114,21 +223,16 @@ class DefaultsConfig(BaseModel):
             raise ValueError(msg)
         return self
 
+    @property
+    def tool_names(self) -> list[str]:
+        """Return default tool names without inline override details."""
+        return [entry.name for entry in self.tools]
+
     @field_validator("tools")
     @classmethod
-    def validate_unique_tools(cls, tools: list[str]) -> list[str]:
+    def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
         """Ensure each default tool appears at most once."""
-        seen: set[str] = set()
-        duplicates: list[str] = []
-        for tool_name in tools:
-            if tool_name in seen and tool_name not in duplicates:
-                duplicates.append(tool_name)
-            seen.add(tool_name)
-
-        if duplicates:
-            msg = f"Duplicate default tools are not allowed: {', '.join(duplicates)}"
-            raise ValueError(msg)
-        return tools
+        return validate_unique_tool_entries(tools, scope_name="default")
 
 
 class EmbedderConfig(BaseModel):

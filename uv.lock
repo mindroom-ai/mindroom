@@ -3431,7 +3431,7 @@ moviepy-video-tools = [
 neo4j = [
     { name = "neo4j" },
 ]
-newspaper4k = [
+newspaper = [
     { name = "lxml-html-clean" },
     { name = "newspaper4k" },
 ]
@@ -3652,7 +3652,7 @@ requires-dist = [
     { name = "linkup-sdk", marker = "extra == 'linkup'", specifier = ">=0.2.8" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "lumaai", marker = "extra == 'lumalabs'" },
-    { name = "lxml-html-clean", marker = "extra == 'newspaper4k'" },
+    { name = "lxml-html-clean", marker = "extra == 'newspaper'" },
     { name = "markdown", specifier = ">=3.7" },
     { name = "matplotlib", marker = "extra == 'visualization'" },
     { name = "matrix-nio", specifier = ">=0.24" },
@@ -3661,7 +3661,7 @@ requires-dist = [
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
-    { name = "newspaper4k", marker = "extra == 'newspaper4k'" },
+    { name = "newspaper4k", marker = "extra == 'newspaper'" },
     { name = "notion-client", marker = "extra == 'notion'" },
     { name = "openai" },
     { name = "openai", marker = "extra == 'dalle'" },
@@ -3730,7 +3730,7 @@ requires-dist = [
     { name = "youtube-transcript-api", marker = "extra == 'youtube'" },
     { name = "zep-cloud", marker = "extra == 'zep'", specifier = ">=3.3" },
 ]
-provides-extras = ["agentql", "airflow", "apify", "arxiv", "attachments", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browserbase", "cal-com", "calculator", "cartesia", "claude-agent", "clickup", "coding", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "dalle", "daytona", "delegate", "desi-vocal", "discord", "docker", "duckdb", "duckduckgo", "e2b", "eleven-labs", "email", "exa", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-maps", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-message", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper4k", "notion", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "resend", "scheduler", "scrapegraph", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "subagents", "supabase", "tavily", "telegram", "thread-resolution", "todoist", "trafilatura", "trello", "twilio", "unsplash", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
+provides-extras = ["agentql", "airflow", "apify", "arxiv", "attachments", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browserbase", "cal-com", "calculator", "cartesia", "claude-agent", "clickup", "coding", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "dalle", "daytona", "delegate", "desi-vocal", "discord", "docker", "duckdb", "duckduckgo", "e2b", "eleven-labs", "email", "exa", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-maps", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-message", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "resend", "scheduler", "scrapegraph", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "subagents", "supabase", "tavily", "telegram", "thread-resolution", "todoist", "trafilatura", "trello", "twilio", "unsplash", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
 
 [package.metadata.requires-dev]
 dev = [

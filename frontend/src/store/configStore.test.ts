@@ -106,6 +106,47 @@ describe('configStore', () => {
       expect(state.syncStatus).toBe('synced');
     });
 
+    it('normalizes mixed tool entries when loading configuration', async () => {
+      const mockConfig = {
+        agents: {
+          test: {
+            display_name: 'Test Agent',
+            role: 'Test role',
+            tools: ['calculator', { shell: { sandbox: 'tight' } }],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        defaults: {
+          markdown: true,
+          tools: [{ gmail: { label: 'support' } }, 'file'],
+        },
+        models: {
+          default: {
+            provider: 'ollama',
+            id: 'test-model',
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: { test: makeAgentPolicy('test') } }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+
+      const state = useConfigStore.getState();
+      expect(state.agents[0].tools).toEqual(['calculator', 'shell']);
+      expect(state.config?.agents.test.tools).toEqual(['calculator', 'shell']);
+      expect(state.config?.defaults.tools).toEqual(['gmail', 'file']);
+    });
+
     it('should apply global learning defaults when agent settings are omitted', async () => {
       const mockConfig = {
         agents: {
@@ -680,6 +721,74 @@ describe('configStore', () => {
       expect(state.isDirty).toBe(false);
       expect(state.syncStatus).toBe('synced');
       expect(state.config?.agents).toEqual({ test: agentWithoutId });
+    });
+
+    it('rebuilds mixed tool entries on save after config clones', async () => {
+      const mockConfig = {
+        agents: {
+          test: {
+            display_name: 'Test Agent',
+            role: 'Test role',
+            tools: ['calculator', { shell: { sandbox: 'tight' } }],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        defaults: {
+          markdown: true,
+          tools: [{ gmail: { label: 'support' } }, 'file'],
+        },
+        models: {
+          default: {
+            provider: 'ollama',
+            id: 'test-model',
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: { test: makeAgentPolicy('test') } }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+      useConfigStore.getState().updateToolConfig('gmail', { enabled: true });
+      useConfigStore.getState().updateAgent('test', { tools: ['shell', 'browser'] });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const saveCall = (global.fetch as any).mock.calls[2];
+      expect(saveCall[0]).toBe('/api/config/save');
+      expect(saveCall[1]).toMatchObject({
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      expect(JSON.parse(saveCall[1].body)).toMatchObject({
+        defaults: {
+          markdown: true,
+          tools: [{ gmail: { label: 'support' } }, 'file'],
+        },
+        agents: {
+          test: {
+            tools: [{ shell: { sandbox: 'tight' } }, 'browser'],
+          },
+        },
+        tools: {
+          gmail: { enabled: true },
+        },
+      });
+      expect(useConfigStore.getState().config?.agents.test.tools).toEqual(['shell', 'browser']);
+      expect(useConfigStore.getState().config?.defaults.tools).toEqual(['gmail', 'file']);
     });
 
     it('stores backend validation issues without poisoning the global load error', async () => {
@@ -2441,6 +2550,336 @@ describe('configStore', () => {
       const state = useConfigStore.getState();
       expect(state.syncStatus).toBe('synced');
       expect(state.isDirty).toBe(false);
+    });
+  });
+
+  describe('tool overrides', () => {
+    it('normalizes structured tool entries on load and exposes remembered overrides', async () => {
+      const mockConfig = {
+        agents: {
+          openclaw: {
+            display_name: 'OpenClaw',
+            role: 'Coding agent',
+            tools: ['browser', { shell: { extra_env_passthrough: ['GITEA_TOKEN'] } }],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        models: {
+          default: {
+            provider: 'ollama',
+            id: 'test-model',
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-3-small',
+            },
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: { openclaw: makeAgentPolicy('openclaw') } }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+
+      const state = useConfigStore.getState();
+      expect(state.agents[0].tools).toEqual(['browser', 'shell']);
+      expect(state.getAgentToolOverrides('openclaw', 'shell')).toEqual({
+        extra_env_passthrough: ['GITEA_TOKEN'],
+      });
+    });
+
+    it('updates overrides, marks the draft dirty, and rebuilds structured tool entries on save', async () => {
+      const mockConfig = {
+        agents: {
+          openclaw: {
+            display_name: 'OpenClaw',
+            role: 'Coding agent',
+            tools: ['browser', { shell: { extra_env_passthrough: ['GITEA_TOKEN'] } }],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        models: {
+          default: {
+            provider: 'ollama',
+            id: 'test-model',
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-3-small',
+            },
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: { openclaw: makeAgentPolicy('openclaw') } }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+      useConfigStore.getState().updateAgentToolOverrides('openclaw', 'shell', {
+        shell_path_prepend: ['/run/wrappers/bin'],
+      });
+
+      expect(useConfigStore.getState().isDirty).toBe(true);
+      expect(useConfigStore.getState().getAgentToolOverrides('openclaw', 'shell')).toEqual({
+        extra_env_passthrough: ['GITEA_TOKEN'],
+        shell_path_prepend: ['/run/wrappers/bin'],
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const saveCall = (global.fetch as any).mock.calls[2];
+      expect(saveCall[0]).toBe('/api/config/save');
+      expect(saveCall[1]).toMatchObject({
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      expect(JSON.parse(saveCall[1].body)).toEqual({
+        ...mockConfig,
+        cultures: {},
+        knowledge_bases: {},
+        teams: {},
+        agents: {
+          openclaw: {
+            ...mockConfig.agents.openclaw,
+            learning: true,
+            learning_mode: 'always',
+            knowledge_bases: [],
+            delegate_to: [],
+            context_files: [],
+            tools: [
+              'browser',
+              {
+                shell: {
+                  extra_env_passthrough: ['GITEA_TOKEN'],
+                  shell_path_prepend: ['/run/wrappers/bin'],
+                },
+              },
+            ],
+          },
+        },
+      });
+    });
+
+    it('preserves remembered overrides when updateRoom replaces the config object', async () => {
+      const mockConfig = {
+        agents: {
+          openclaw: {
+            display_name: 'OpenClaw',
+            role: 'Coding agent',
+            tools: [
+              'browser',
+              {
+                shell: {
+                  extra_env_passthrough: ['GITEA_TOKEN'],
+                  shell_path_prepend: ['/run/wrappers/bin'],
+                },
+              },
+            ],
+            skills: [],
+            instructions: [],
+            rooms: ['lobby'],
+          },
+        },
+        models: {
+          default: {
+            provider: 'ollama',
+            id: 'test-model',
+          },
+          claude: {
+            provider: 'anthropic',
+            id: 'claude-sonnet-4-6',
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-3-small',
+            },
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: { openclaw: makeAgentPolicy('openclaw') } }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+      useConfigStore.getState().updateRoom('lobby', { model: 'claude' });
+
+      expect(useConfigStore.getState().getAgentToolOverrides('openclaw', 'shell')).toEqual({
+        extra_env_passthrough: ['GITEA_TOKEN'],
+        shell_path_prepend: ['/run/wrappers/bin'],
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const saveCall = (global.fetch as any).mock.calls[2];
+      expect(saveCall[0]).toBe('/api/config/save');
+      expect(JSON.parse(saveCall[1].body)).toEqual({
+        ...mockConfig,
+        room_models: {
+          lobby: 'claude',
+        },
+        cultures: {},
+        knowledge_bases: {},
+        teams: {},
+        agents: {
+          openclaw: {
+            ...mockConfig.agents.openclaw,
+            learning: true,
+            learning_mode: 'always',
+            knowledge_bases: [],
+            delegate_to: [],
+            context_files: [],
+            tools: [
+              'browser',
+              {
+                shell: {
+                  extra_env_passthrough: ['GITEA_TOKEN'],
+                  shell_path_prepend: ['/run/wrappers/bin'],
+                },
+              },
+            ],
+          },
+        },
+      });
+    });
+
+    it('collapses an empty override object back to a plain string entry on save', async () => {
+      const mockConfig = {
+        agents: {
+          openclaw: {
+            display_name: 'OpenClaw',
+            role: 'Coding agent',
+            tools: [{ shell: { extra_env_passthrough: ['GITEA_TOKEN'] } }],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        models: {
+          default: {
+            provider: 'ollama',
+            id: 'test-model',
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-3-small',
+            },
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: { openclaw: makeAgentPolicy('openclaw') } }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+      useConfigStore.getState().updateAgentToolOverrides('openclaw', 'shell', {
+        extra_env_passthrough: null,
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const saveCall = (global.fetch as any).mock.calls[2];
+      expect(saveCall[0]).toBe('/api/config/save');
+      expect(saveCall[1]).toMatchObject({
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      expect(JSON.parse(saveCall[1].body)).toEqual({
+        ...mockConfig,
+        cultures: {},
+        knowledge_bases: {},
+        teams: {},
+        agents: {
+          openclaw: {
+            ...mockConfig.agents.openclaw,
+            learning: true,
+            learning_mode: 'always',
+            knowledge_bases: [],
+            delegate_to: [],
+            context_files: [],
+            tools: ['shell'],
+          },
+        },
+      });
     });
   });
 });

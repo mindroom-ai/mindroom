@@ -1,5 +1,21 @@
 import { Agent, AgentPoliciesByAgent, Config } from '@/types/config';
 import { ConfigValidationIssue } from '@/lib/configValidation';
+import type { ToolEntry } from '@/lib/toolEntry';
+
+export type RawAgentConfig = Omit<Agent, 'id' | 'tools'> & {
+  tools: ToolEntry[];
+};
+
+export type RawDefaultsConfig = Omit<Config['defaults'], 'tools'> & {
+  tools?: ToolEntry[];
+};
+
+export type RawConfig = Omit<Config, 'agents' | 'defaults'> & {
+  agents: Record<string, RawAgentConfig>;
+  defaults: RawDefaultsConfig;
+};
+
+export type ConfigSavePayload = RawConfig;
 
 const API_BASE = '/api';
 
@@ -36,7 +52,7 @@ async function responseDetail(response: Response): Promise<unknown> {
   }
 }
 
-export async function loadConfig(): Promise<Config> {
+export async function loadConfig(): Promise<RawConfig> {
   const response = await fetch(`${API_BASE}/config/load`, {
     method: 'POST',
   });
@@ -89,7 +105,7 @@ export async function getAgentPolicies(
   return payload.agent_policies;
 }
 
-export async function saveConfig(config: Config): Promise<void> {
+export async function saveConfig(config: ConfigSavePayload): Promise<void> {
   const response = await fetch(`${API_BASE}/config/save`, {
     method: 'PUT',
     headers: {
