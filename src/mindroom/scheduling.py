@@ -391,6 +391,27 @@ async def _get_pending_task_record(
     return task_record
 
 
+async def _save_one_time_task_status(
+    client: nio.AsyncClient,
+    task: ScheduledTaskRecord,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    status: str,
+) -> None:
+    """Persist the terminal status for a one-time task without restarting it."""
+    await _save_scheduled_task(
+        client=client,
+        room_id=task.room_id,
+        task_id=task.task_id,
+        workflow=task.workflow,
+        config=config,
+        runtime_paths=runtime_paths,
+        status=status,
+        created_at=task.created_at,
+        restart_task=False,
+    )
+
+
 async def _save_scheduled_task(
     client: nio.AsyncClient,
     room_id: str,
@@ -560,17 +581,50 @@ Examples of event/condition phrasing to include in the message (do not include t
         )
 
 
+async def _build_workflow_message_content(
+    client: nio.AsyncClient,
+    workflow: ScheduledWorkflow,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    message_text: str,
+) -> dict[str, typing.Any]:
+    """Build Matrix message content for a scheduled workflow."""
+    if workflow.new_thread:
+        return format_message_with_mentions(
+            config,
+            runtime_paths,
+            message_text,
+            sender_domain=config.get_domain(runtime_paths),
+            thread_event_id=None,
+        )
+    automated_message = f"⏰ [Automated Task]\n{message_text}\n\n_Note: Automated task - no follow-up expected._"
+    assert workflow.room_id is not None  # Caller checks this
+    latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+        client,
+        workflow.room_id,
+        workflow.thread_id,
+    )
+    return format_message_with_mentions(
+        config,
+        runtime_paths,
+        automated_message,
+        sender_domain=config.get_domain(runtime_paths),
+        thread_event_id=workflow.thread_id,
+        latest_thread_event_id=latest_thread_event_id,
+    )
+
+
 async def _execute_scheduled_workflow(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
     task_id: str = "scheduled-task",
-) -> None:
+) -> bool:
     """Execute a scheduled workflow by posting its message to the thread."""
     if not workflow.room_id:
         logger.error("Cannot execute workflow without room_id")
-        return
+        return False
 
     try:
         message_text = workflow.message
@@ -593,33 +647,16 @@ async def _execute_scheduled_workflow(
             await emit(_ACTIVE_HOOK_REGISTRY, EVENT_SCHEDULE_FIRED, context)
             if context.suppress:
                 logger.info("Scheduled workflow suppressed by hook", task_id=task_id, room_id=workflow.room_id)
-                return
+                return False
             message_text = context.message_text
-        if workflow.new_thread:
-            content = format_message_with_mentions(
-                config,
-                runtime_paths,
-                message_text,
-                sender_domain=config.get_domain(runtime_paths),
-                thread_event_id=None,
-            )
-        else:
-            automated_message = (
-                f"⏰ [Automated Task]\n{message_text}\n\n_Note: Automated task - no follow-up expected._"
-            )
-            latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-                client,
-                workflow.room_id,
-                workflow.thread_id,
-            )
-            content = format_message_with_mentions(
-                config,
-                runtime_paths,
-                automated_message,
-                sender_domain=config.get_domain(runtime_paths),
-                thread_event_id=workflow.thread_id,
-                latest_thread_event_id=latest_thread_event_id,
-            )
+
+        content = await _build_workflow_message_content(
+            client,
+            workflow,
+            config,
+            runtime_paths,
+            message_text,
+        )
         if workflow.created_by:
             content[ORIGINAL_SENDER_KEY] = workflow.created_by
         content["com.mindroom.source_kind"] = "scheduled"
@@ -642,7 +679,13 @@ async def _execute_scheduled_workflow(
                 thread_event_id=workflow.thread_id,
                 latest_thread_event_id=workflow.thread_id,
             )
-            await send_message(client, workflow.room_id, error_content)
+            try:
+                await send_message(client, workflow.room_id, error_content)
+            except Exception:
+                logger.exception("Failed to send scheduled workflow failure message")
+        return False
+    else:
+        return True
 
 
 async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
@@ -743,7 +786,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         _cleanup_task_if_current(task_id, running_tasks)
 
 
-async def _run_once_task(  # noqa: C901
+async def _run_once_task(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     task_id: str,
     workflow: ScheduledWorkflow,
@@ -755,6 +798,7 @@ async def _run_once_task(  # noqa: C901
         logger.error("No room_id provided for one-time task", task_id=task_id)
         return
 
+    latest_pending_task: ScheduledTaskRecord | None = None
     try:
         while True:
             latest_task = await _get_pending_task_record(client=client, room_id=workflow.room_id, task_id=task_id)
@@ -785,11 +829,34 @@ async def _run_once_task(  # noqa: C901
             return
 
         latest_workflow = latest_before_execute.workflow
+        latest_pending_task = latest_before_execute
         if not latest_workflow.execute_at:
             logger.error("No execution time provided for one-time task", task_id=task_id)
             return
 
-        await _execute_scheduled_workflow(client, latest_workflow, config, runtime_paths, task_id=task_id)
+        execution_succeeded = await _execute_scheduled_workflow(
+            client,
+            latest_workflow,
+            config,
+            runtime_paths,
+            task_id=task_id,
+        )
+        final_status = "completed" if execution_succeeded else "failed"
+
+        try:
+            await _save_one_time_task_status(
+                client=client,
+                task=latest_pending_task,
+                config=config,
+                runtime_paths=runtime_paths,
+                status=final_status,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist one-time task final state",
+                task_id=task_id,
+                status=final_status,
+            )
     except asyncio.CancelledError:
         logger.info(f"One-time task {task_id} was cancelled")
         raise
@@ -803,6 +870,17 @@ async def _run_once_task(  # noqa: C901
                 latest_thread_event_id=workflow.thread_id,
             )
             await send_message(client, workflow.room_id, error_content)
+        if latest_pending_task is not None:
+            try:
+                await _save_one_time_task_status(
+                    client=client,
+                    task=latest_pending_task,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    status="failed",
+                )
+            except Exception:
+                logger.exception("Failed to mark one-time task as failed", task_id=task_id)
     finally:
         _cleanup_task_if_current(task_id, _running_tasks)
 

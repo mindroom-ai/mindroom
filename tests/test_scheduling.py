@@ -419,6 +419,75 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_once_task_marks_completed_after_success() -> None:
+    """One-time tasks should overwrite pending state with completed after firing."""
+    client = AsyncMock()
+    client.room_put_state = AsyncMock()
+    config = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="Run once",
+        description="One-time success",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    pending_record = _record("task_once_completed", workflow, status="pending")
+
+    with (
+        patch(
+            "mindroom.scheduling.get_scheduled_task",
+            new=AsyncMock(side_effect=[pending_record, pending_record]),
+        ),
+        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(return_value=True)) as execute_mock,
+    ):
+        await _run_once_task(client, "task_once_completed", workflow, config, _runtime_paths())
+
+    execute_mock.assert_awaited_once()
+    client.room_put_state.assert_awaited_once()
+    put_kwargs = client.room_put_state.await_args.kwargs
+    assert put_kwargs["room_id"] == "!test:server"
+    assert put_kwargs["event_type"] == _SCHEDULED_TASK_EVENT_TYPE
+    assert put_kwargs["state_key"] == "task_once_completed"
+    assert put_kwargs["content"]["status"] == "completed"
+    assert put_kwargs["content"]["workflow"] == workflow.model_dump_json()
+    assert put_kwargs["content"]["created_at"] == pending_record.created_at.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_run_once_task_marks_failed_after_execution_failure() -> None:
+    """One-time tasks should overwrite pending state with failed when firing fails."""
+    client = AsyncMock()
+    client.room_put_state = AsyncMock()
+    config = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="Run once",
+        description="One-time failure",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    pending_record = _record("task_once_failed", workflow, status="pending")
+
+    with (
+        patch(
+            "mindroom.scheduling.get_scheduled_task",
+            new=AsyncMock(side_effect=[pending_record, pending_record]),
+        ),
+        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(return_value=False)) as execute_mock,
+    ):
+        await _run_once_task(client, "task_once_failed", workflow, config, _runtime_paths())
+
+    execute_mock.assert_awaited_once()
+    client.room_put_state.assert_awaited_once()
+    put_kwargs = client.room_put_state.await_args.kwargs
+    assert put_kwargs["state_key"] == "task_once_failed"
+    assert put_kwargs["content"]["status"] == "failed"
+    assert put_kwargs["content"]["workflow"] == workflow.model_dump_json()
+
+
+@pytest.mark.asyncio
 async def test_run_cron_task_executes_latest_state_workflow() -> None:
     """Recurring tasks should execute using the latest persisted workflow data."""
     client = AsyncMock()
@@ -458,6 +527,40 @@ async def test_run_cron_task_executes_latest_state_workflow() -> None:
     executed_workflow = execute_mock.await_args.args[1]
     assert executed_workflow.message == "Updated recurring message"
     assert executed_workflow.description == "Updated recurring description"
+
+
+@pytest.mark.asyncio
+async def test_run_cron_task_keeps_pending_state_after_success() -> None:
+    """Recurring tasks should keep their pending state after firing."""
+    client = AsyncMock()
+    client.room_put_state = AsyncMock()
+    config = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+        message="Recurring message",
+        description="Recurring description",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    pending_record = _record("task_cron_pending", workflow, status="pending")
+
+    class _ImmediateCron:
+        def get_next(self, _type: object) -> datetime:
+            return datetime.now(UTC) - timedelta(seconds=1)
+
+    with (
+        patch(
+            "mindroom.scheduling.get_scheduled_task",
+            new=AsyncMock(side_effect=[pending_record, pending_record]),
+        ),
+        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(return_value=True)) as execute_mock,
+        patch("mindroom.scheduling.croniter", return_value=_ImmediateCron()),
+    ):
+        await _run_cron_task(client, "task_cron_pending", workflow, {}, config, _runtime_paths())
+
+    execute_mock.assert_awaited_once()
+    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
