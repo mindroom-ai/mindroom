@@ -50,6 +50,33 @@ type SyncBridgeEvent = (
 )
 
 
+class NonDeepcopyableResult:
+    """Mutable result object that deliberately breaks deepcopy()."""
+
+    def __init__(self, payload: dict[str, str]) -> None:
+        self.payload = payload
+
+    def __deepcopy__(self, memo: dict[int, object]) -> object:
+        """Force the snapshot path away from deepcopy()."""
+        del memo
+        msg = "result deepcopy disabled"
+        raise TypeError(msg)
+
+
+class NonDeepcopyableToolError(ValueError):
+    """Mutable exception object that deliberately breaks deepcopy()."""
+
+    def __init__(self, message: str, details: dict[str, str]) -> None:
+        super().__init__(message)
+        self.details = details
+
+    def __deepcopy__(self, memo: dict[int, object]) -> object:
+        """Force the snapshot path away from deepcopy()."""
+        del memo
+        msg = "error deepcopy disabled"
+        raise TypeError(msg)
+
+
 def _config(
     tmp_path: Path,
     *,
@@ -512,6 +539,33 @@ async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_tool_after_call_hooks_cannot_mutate_non_deepcopyable_result(tmp_path: Path) -> None:
+    """After-call hooks should still get an isolated snapshot when deepcopy() fails."""
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def mutate(ctx: ToolAfterCallContext) -> None:
+        assert isinstance(ctx.result, NonDeepcopyableResult)
+        ctx.result.payload["echo"] = "rewritten by hook"
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [mutate])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        execution_identity=_execution_identity(),
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> NonDeepcopyableResult:
+        return NonDeepcopyableResult({"echo": str(kwargs["path"])})
+
+    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert isinstance(result, NonDeepcopyableResult)
+    assert result.payload == {"echo": "notes.txt"}
+
+
+@pytest.mark.asyncio
 async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) -> None:
     """Tool hook contexts should route send_message() through the active hook sender."""
     sent: list[tuple[str, str, str | None, str, dict[str, object] | None]] = []
@@ -779,6 +833,40 @@ async def test_tool_hook_bridge_reraises_tool_errors_after_after_call(tmp_path: 
     assert after_seen[0][0] is None
     assert isinstance(after_seen[0][1], ValueError)
     assert after_seen[0][2] is False
+
+
+@pytest.mark.asyncio
+async def test_tool_after_call_hooks_cannot_mutate_reraised_non_deepcopyable_error(tmp_path: Path) -> None:
+    """After-call hooks should not be able to rewrite the original raised error."""
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def rewrite(ctx: ToolAfterCallContext) -> None:
+        assert isinstance(ctx.error, NonDeepcopyableToolError)
+        ctx.error.args = ("rewritten by hook",)
+        ctx.error.details["status"] = "rewritten"
+
+    registry = HookRegistry.from_plugins([_plugin("tool-audit", [rewrite])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        execution_identity=_execution_identity(),
+    )
+    assert bridge is not None
+
+    async def explode(**kwargs: object) -> object:
+        del kwargs
+        message = "original boom"
+        raise NonDeepcopyableToolError(message, {"status": "original"})
+
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path)),
+        tool_execution_identity(_execution_identity()),
+        pytest.raises(NonDeepcopyableToolError, match="original boom") as exc_info,
+    ):
+        await bridge("explode", explode, {})
+
+    assert exc_info.value.args == ("original boom",)
+    assert exc_info.value.details == {"status": "original"}
 
 
 @pytest.mark.asyncio
