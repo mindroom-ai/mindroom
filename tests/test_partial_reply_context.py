@@ -30,7 +30,6 @@ from mindroom.matrix.client import _stream_status_from_content, fetch_thread_his
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
-    _RESTART_INTERRUPTED_RESPONSE_NOTE,
     StreamingResponse,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -174,14 +173,13 @@ class TestClassifyPartialReply:
         "body",
         [
             f"Legacy partial\n\n{_CANCELLED_RESPONSE_NOTE}",
-            f"Legacy partial\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}",
             "Legacy partial\n\n**[Response interrupted by an error: boom]**",
             "Legacy partial [cancelled]",
             "Legacy partial [error]",
         ],
     )
-    def test_interrupted_markers_without_metadata_are_interrupted(self, body: str) -> None:
-        """Fallback to interrupted classification for marker-only bodies without metadata."""
+    def test_legacy_interrupted_markers_without_metadata_are_interrupted(self, body: str) -> None:
+        """Fallback to interrupted classification for legacy cancelled/error bodies."""
         assert (
             _classify_partial_reply(
                 {"body": body},
@@ -220,7 +218,6 @@ class TestCleanPartialReplyBody:
             ("Hello world ⋯", "Hello world"),
             ("Hello world ⋯..", "Hello world"),
             (f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}", "Partial answer"),
-            (f"Partial answer\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}", "Partial answer"),
             ("Partial answer [cancelled]", "Partial answer"),
             ("Partial answer [error]", "Partial answer"),
             ("Partial answer\n\n**[Response interrupted by an error: boom]**", "Partial answer"),

@@ -43,10 +43,6 @@ from mindroom.matrix.client import get_latest_thread_event_id_if_needed
 logger = get_logger(__name__)
 
 # Global constant for the in-progress marker
-# STREAM_STATUS_KEY is the durable source of truth for newly written messages.
-# We still keep the visible marker heuristic for older history that predates
-# stream-status persistence and for live filtering while our own in-flight
-# edits are arriving.
 IN_PROGRESS_MARKER = " ⋯"
 _PROGRESS_PLACEHOLDER = "Thinking..."
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
@@ -81,26 +77,16 @@ def is_interrupted_partial_reply(text: object) -> bool:
     if not isinstance(text, str):
         return False
     trimmed_text = text.rstrip()
-    return trimmed_text.endswith(
-        (
-            _CANCELLED_RESPONSE_NOTE,
-            _RESTART_INTERRUPTED_RESPONSE_NOTE,
-            " [cancelled]",
-            " [error]",
-        ),
-    ) or (_STREAM_ERROR_RESPONSE_NOTE in trimmed_text)
+    return trimmed_text.endswith((_CANCELLED_RESPONSE_NOTE, " [cancelled]", " [error]")) or (
+        _STREAM_ERROR_RESPONSE_NOTE in trimmed_text
+    )
 
 
 def clean_partial_reply_text(text: str) -> str:
     """Strip partial-reply markers and status notes from persisted text."""
     cleaned = _IN_PROGRESS_MESSAGE_PATTERN.sub("", text).rstrip()
 
-    for marker in (
-        " [cancelled]",
-        " [error]",
-        _CANCELLED_RESPONSE_NOTE,
-        _RESTART_INTERRUPTED_RESPONSE_NOTE,
-    ):
+    for marker in (" [cancelled]", " [error]", _CANCELLED_RESPONSE_NOTE):
         if cleaned.endswith(marker):
             cleaned = cleaned[: -len(marker)].rstrip()
 
