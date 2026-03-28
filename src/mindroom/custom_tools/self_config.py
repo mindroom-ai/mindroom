@@ -13,6 +13,7 @@ from mindroom.config.main import load_config
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.custom_tools.config_manager import (
     _is_known_tool_entry,
+    _preserve_tool_overrides,
     _save_runtime_validated_config,
     validate_knowledge_bases,
 )
@@ -53,7 +54,7 @@ class SelfConfigTools(Toolkit):
         if self.agent_name not in config.agents:
             return f"Error: Agent '{self.agent_name}' not found in configuration."
 
-        agent_dict = config.agents[self.agent_name].model_dump(exclude_none=True)
+        agent_dict = config.agents[self.agent_name].authored_model_dump()
         yaml_str = yaml.dump(agent_dict, default_flow_style=False, sort_keys=False)
         return f"## Configuration for '{self.agent_name}':\n\n```yaml\n{yaml_str}```"
 
@@ -127,7 +128,7 @@ class SelfConfigTools(Toolkit):
 
         # Block include_default_tools if defaults.tools contains privileged tools
         if include_default_tools is True:
-            inherited_blocked = sorted({t for t in config.defaults.tools if t in _SELF_CONFIG_BLOCKED_TOOLS})
+            inherited_blocked = sorted({t for t in config.defaults.tool_names if t in _SELF_CONFIG_BLOCKED_TOOLS})
             if inherited_blocked:
                 return (
                     f"Error: Cannot enable include_default_tools because defaults.tools "
@@ -145,7 +146,7 @@ class SelfConfigTools(Toolkit):
             ("display_name", display_name),
             ("role", role),
             ("instructions", instructions),
-            ("tools", tools),
+            ("tools", _preserve_tool_overrides(agent.tools, tools) if tools is not None else None),
             ("model", model),
             ("rooms", rooms),
             ("markdown", markdown),
@@ -184,7 +185,9 @@ class SelfConfigTools(Toolkit):
             if validated_value == current_value:
                 continue
             display = field_name.replace("_", " ").title()
-            if isinstance(validated_value, list):
+            if field_name == "tools":
+                formatted = ", ".join(validated_agent.tool_names) if validated_agent.tool_names else "(empty)"
+            elif isinstance(validated_value, list):
                 formatted = ", ".join(str(v) for v in validated_value) if validated_value else "(empty)"
             else:
                 formatted = str(validated_value)

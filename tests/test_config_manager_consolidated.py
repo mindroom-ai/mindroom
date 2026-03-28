@@ -5,6 +5,9 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -12,6 +15,7 @@ from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
+from mindroom.tool_system.metadata import AUTHORED_OVERRIDE_INHERIT
 
 
 def _minimal_config_path(tmp_path: Path) -> Path:
@@ -194,7 +198,7 @@ class TestConsolidatedConfigManager:
             assert "Successfully created" in result
 
             config = Config.from_yaml(config_path)
-            assert config.agents["test_agent"].tools == ["openclaw_compat"]
+            assert config.agents["test_agent"].tool_names == ["openclaw_compat"]
             effective = config.get_agent_tools("test_agent")
             assert effective[0] == "openclaw_compat"
             assert "shell" in effective
@@ -335,6 +339,217 @@ class TestConsolidatedConfigManager:
             assert config.agents["test_agent"].role == "Old role"  # Unchanged
         finally:
             config_path.unlink(missing_ok=True)
+
+    def test_tool_config_entries_parse_and_merge(self) -> None:
+        """Mixed string and mapping syntax should normalize and merge defaults with agent overrides."""
+        config = Config.validate_with_runtime(
+            {
+                "defaults": {
+                    "tools": [
+                        "scheduler",
+                        {"shell": {"extra_env_passthrough": "DAWARICH_*", "enable_run_shell_command": False}},
+                    ],
+                },
+                "agents": {
+                    "code": {
+                        "display_name": "Code",
+                        "tools": [
+                            "file",
+                            {"shell": {"enable_run_shell_command": True, "extra_env_passthrough": None}},
+                        ],
+                    },
+                },
+            },
+            _runtime_paths(),
+        )
+
+        assert config.defaults.tool_names == ["scheduler", "shell"]
+        assert config.agents["code"].tool_names == ["file", "shell"]
+
+        resolved = config.get_agent_tool_configs("code")
+        assert [entry.name for entry in resolved[:3]] == ["file", "shell", "scheduler"]
+        resolved_shell = next(entry for entry in resolved if entry.name == "shell")
+        assert resolved_shell.tool_config_overrides == {
+            "enable_run_shell_command": True,
+            "extra_env_passthrough": None,
+        }
+
+    def test_tool_config_inherit_sentinel_clears_required_default_override(self) -> None:
+        """A per-agent sentinel should remove an inherited required override and fall back to lower layers."""
+        config = Config.validate_with_runtime(
+            {
+                "defaults": {
+                    "tools": [
+                        {"clickup": {"master_space_id": "space-default"}},
+                    ],
+                },
+                "agents": {
+                    "code": {
+                        "display_name": "Code",
+                        "tools": [
+                            {"clickup": {"master_space_id": AUTHORED_OVERRIDE_INHERIT}},
+                        ],
+                    },
+                },
+            },
+            _runtime_paths(),
+        )
+
+        resolved = next(entry for entry in config.get_agent_tool_configs("code") if entry.name == "clickup")
+        assert resolved.tool_config_overrides == {}
+
+    def test_duplicate_tool_entries_are_rejected_for_agents_and_defaults(self) -> None:
+        """Duplicate tool names should be rejected even across mixed string and mapping syntax."""
+        with pytest.raises(ValueError, match="Duplicate default tools are not allowed: shell"):
+            DefaultsConfig(tools=["shell", {"shell": {"enable_run_shell_command": True}}])
+
+        with pytest.raises(ValueError, match="Duplicate agent tools are not allowed: shell"):
+            AgentConfig(
+                display_name="Code",
+                tools=["shell", {"shell": {"enable_run_shell_command": True}}],
+            )
+
+    def test_tool_config_roundtrip_preserves_mapping_entries(self, tmp_path: Path) -> None:
+        """Saving and reloading should preserve inline override entries for defaults and agents."""
+        config_path = tmp_path / "config.yaml"
+        config = Config(
+            defaults=DefaultsConfig(
+                tools=[
+                    "scheduler",
+                    {"shell": {"extra_env_passthrough": "DAWARICH_*"}},
+                ],
+            ),
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    tools=[
+                        "file",
+                        {"shell": {"enable_run_shell_command": True}},
+                    ],
+                ),
+            },
+        )
+        config.save_to_yaml(config_path)
+
+        reloaded = Config.from_yaml(config_path)
+        assert reloaded.model_dump(exclude_none=True)["defaults"]["tools"] == [
+            "scheduler",
+            {"shell": {"extra_env_passthrough": "DAWARICH_*"}},
+        ]
+        assert reloaded.model_dump(exclude_none=True)["agents"]["code"]["tools"] == [
+            "file",
+            {"shell": {"enable_run_shell_command": True}},
+        ]
+
+    def test_defaults_tool_assignment_normalizes_strings(self) -> None:
+        """DefaultsConfig assignment validation should still coerce plain strings."""
+        config = Config()
+
+        config.defaults.tools = ["shell"]
+
+        assert config.defaults.tool_names == ["shell"]
+        assert config.defaults.tools[0].overrides == {}
+
+    def test_implied_tools_do_not_receive_preset_overrides(self) -> None:
+        """Only explicit tool entries should carry overrides after preset expansion."""
+        config = Config.validate_with_runtime(
+            {
+                "agents": {
+                    "code": {
+                        "display_name": "Code",
+                        "include_default_tools": False,
+                        "tools": [
+                            {"openclaw_compat": None},
+                            {"shell": {"enable_run_shell_command": False}},
+                        ],
+                    },
+                },
+            },
+            _runtime_paths(),
+        )
+
+        resolved = {entry.name: entry.tool_config_overrides for entry in config.get_agent_tool_configs("code")}
+        assert resolved["openclaw_compat"] == {}
+        assert resolved["shell"] == {"enable_run_shell_command": False}
+        assert resolved["coding"] == {}
+        assert resolved["browser"] == {}
+
+    def test_manage_agent_update_preserves_inline_tool_overrides(self, tmp_path: Path) -> None:
+        """String-only tool updates should keep overrides for retained tools."""
+        config_path = tmp_path / "config.yaml"
+        config = Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    tools=[
+                        {"shell": {"enable_run_shell_command": False}},
+                        {"file": {"enable_delete_file": True}},
+                    ],
+                ),
+            },
+        )
+        config.save_to_yaml(config_path)
+
+        cm = _config_manager(config_path)
+        result = cm.manage_agent(
+            operation="update",
+            agent_name="code",
+            tools=["shell", "calculator"],
+        )
+
+        assert "Successfully updated" in result
+        reloaded = Config.from_yaml(config_path)
+        assert reloaded.agents["code"].model_dump(exclude_none=True)["tools"] == [
+            {"shell": {"enable_run_shell_command": False}},
+            "calculator",
+        ]
+
+    @pytest.mark.parametrize(
+        ("tool_entry", "expected_path"),
+        [
+            pytest.param("does_not_exist", "agents.code.tools[0].does_not_exist", id="string"),
+            pytest.param({"does_not_exist": None}, "agents.code.tools[0].does_not_exist", id="null-mapping"),
+            pytest.param({"does_not_exist": {}}, "agents.code.tools[0].does_not_exist", id="empty-mapping"),
+        ],
+    )
+    def test_validate_with_runtime_rejects_unknown_tool_names(
+        self,
+        tool_entry: object,
+        expected_path: str,
+    ) -> None:
+        """Runtime config validation should reject unknown tool names before agent construction."""
+        with pytest.raises(ValueError, match=r"Unknown tool 'does_not_exist'") as exc_info:
+            Config.validate_with_runtime(
+                {
+                    "agents": {
+                        "code": {
+                            "display_name": "Code",
+                            "tools": [tool_entry],
+                        },
+                    },
+                },
+                _runtime_paths(),
+            )
+
+        assert expected_path in str(exc_info.value)
+
+    def test_tool_config_entry_invalid_scalar_raises_validation_error(self) -> None:
+        """Non-string, non-mapping tool entries should surface as structured Pydantic errors."""
+        with pytest.raises(ValidationError) as exc_info:
+            Config.model_validate(
+                {
+                    "agents": {
+                        "code": {
+                            "display_name": "Code",
+                            "tools": [123],
+                        },
+                    },
+                },
+            )
+
+        errors = exc_info.value.errors()
+        assert any(error["loc"] == ("agents", "code", "tools", 0) for error in errors)
+        assert "Tool entries must be strings or single-key mappings" in str(exc_info.value)
 
     def test_manage_agent_update_rejects_unknown_knowledge_bases(self) -> None:
         """Update must fail when setting unknown knowledge base IDs."""

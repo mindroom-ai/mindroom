@@ -72,6 +72,7 @@ def _python_tools_runtime() -> tuple[Any, Any, Any, Any]:
             type="text",
             required=False,
             default=None,
+            authored_override=False,
         ),
         ConfigField(
             name="safe_globals",

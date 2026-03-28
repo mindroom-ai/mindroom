@@ -178,7 +178,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
 
     # Load current config
     config = load_config(runtime_paths)
-    config_dict = config.model_dump(exclude_none=True)
+    config_dict = config.authored_model_dump()
 
     if operation == "show":
         # Show entire config

@@ -410,7 +410,7 @@ class TestConfigCommandHandling:
                     "test_agent": {
                         "display_name": "Test Agent",
                         "role": "Testing",
-                        "tools": ["tool1"],
+                        "tools": ["shell"],
                     },
                 },
                 "models": {"default": {"provider": "openai", "id": "gpt-4"}},
@@ -504,13 +504,13 @@ class TestConfigCommandHandling:
             # This simulates what happens when user types: !config set path ["item1", "item2"]
             # shlex turns it into: [item1, item2] (quotes consumed)
             response, change_info = await handle_config_command(
-                "set agents.test_agent.tools [communication, lobby]",
+                "set agents.test_agent.tools [matrix_message, scheduler]",
                 _runtime_paths_for_config(config_path),
             )
             assert change_info is not None  # set command should return change info
             assert "Configuration Change Preview" in response
             # Check that the change_info contains the correct new value
-            assert change_info["new_value"] == ["communication", "lobby"]
+            assert change_info["new_value"] == ["matrix_message", "scheduler"]
         finally:
             config_path.unlink()
 
@@ -533,12 +533,12 @@ class TestConfigCommandHandling:
         try:
             # User properly quotes the entire JSON array
             response, change_info = await handle_config_command(
-                'set agents.test_agent.tools ["tool1", "tool2"]',
+                'set agents.test_agent.tools ["shell", "coding"]',
                 _runtime_paths_for_config(config_path),
             )
             assert change_info is not None  # set command should return change info
             assert "Configuration Change Preview" in response
             # Check that the change_info contains the correct new value
-            assert change_info["new_value"] == ["tool1", "tool2"]
+            assert change_info["new_value"] == ["shell", "coding"]
         finally:
             config_path.unlink()
