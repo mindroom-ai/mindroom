@@ -62,9 +62,10 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        lfs: true
+        lfs: ${{ github.event_name != 'pull_request' }}
 
     - name: Pull Git LFS objects
+      if: github.event_name != 'pull_request'
       run: git lfs pull
 
     - name: Set up Docker Buildx
