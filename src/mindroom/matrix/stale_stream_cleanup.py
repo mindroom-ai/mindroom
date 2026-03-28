@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import nio
-from nio.api import Api, RelationshipType
+from nio.api import RelationshipType
 
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
@@ -292,14 +292,14 @@ async def _collect_room_history_events(
             try:
                 if isinstance(event, nio.RoomMessageText):
                     message_events.append(event)
-                else:
+                elif isinstance(event, nio.Event):
                     _record_stop_reaction(
                         message_states,
                         event=event,
                         bot_user_id=bot_user_id,
                     )
             except Exception as exc:
-                event_id = getattr(event, "event_id", None)
+                event_id = event.event_id if isinstance(event, nio.Event) else None
                 logger.warning(
                     "Failed to inspect room event during stale stream cleanup",
                     room_id=room_id,
@@ -372,15 +372,15 @@ def _merge_resolved_message_state(
 def _record_stop_reaction(
     message_states: dict[str, _MessageState],
     *,
-    event: object,
+    event: nio.Event,
     bot_user_id: str,
 ) -> None:
     """Track self-authored stop reactions by their target message ID."""
-    event_sender = getattr(event, "sender", None)
+    event_sender = event.sender
     if event_sender != bot_user_id:
         return
 
-    event_source = getattr(event, "source", None)
+    event_source = event.source
     if not isinstance(event_source, dict):
         return
 
@@ -389,7 +389,7 @@ def _record_stop_reaction(
         return
 
     target_event_id = event_info.reaction_target_event_id
-    reaction_event_id = getattr(event, "event_id", None)
+    reaction_event_id = event.event_id
     if not isinstance(target_event_id, str) or not isinstance(reaction_event_id, str):
         return
 
@@ -513,12 +513,14 @@ async def _get_stop_reaction_event_ids_from_relations(
         room_id=room_id,
         target_event_id=target_event_id,
     ):
-        related_event_id = getattr(related_event, "event_id", None)
-        related_sender = getattr(related_event, "sender", None)
-        if not isinstance(related_event_id, str) or related_sender not in bot_user_ids:
+        if not isinstance(related_event, nio.ReactionEvent):
             continue
 
-        event_source = getattr(related_event, "source", None)
+        related_event_id = related_event.event_id
+        if related_event.sender not in bot_user_ids or not isinstance(related_event_id, str):
+            continue
+
+        event_source = related_event.source
         if not isinstance(event_source, dict):
             continue
 
@@ -538,78 +540,15 @@ async def _iter_reaction_relation_events(
     *,
     room_id: str,
     target_event_id: str,
-) -> AsyncIterator[object]:
-    """Yield reaction relation events from nio or direct Matrix HTTP."""
-    relation_iterator = getattr(client, "room_get_event_relations", None)
-    if callable(relation_iterator):
-        async for related_event in relation_iterator(
-            room_id,
-            target_event_id,
-            RelationshipType.annotation,
-            "m.reaction",
-        ):
-            yield related_event
-        return
-
-    async for related_event in _iter_reaction_relation_events_via_http(
-        client,
-        room_id=room_id,
-        target_event_id=target_event_id,
+) -> AsyncIterator[nio.Event]:
+    """Yield reaction relation events from nio's relations iterator."""
+    async for related_event in client.room_get_event_relations(
+        room_id,
+        target_event_id,
+        RelationshipType.annotation,
+        "m.reaction",
     ):
         yield related_event
-
-
-async def _iter_reaction_relation_events_via_http(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    target_event_id: str,
-) -> AsyncIterator[object]:
-    """Yield reaction relation events via the raw Matrix relations endpoint."""
-    next_batch: str | None = None
-
-    while True:
-        query_parameters: dict[str, str] = {"dir": nio.MessageDirection.back.value}
-        if next_batch is not None:
-            query_parameters["from"] = next_batch
-        path = Api._build_path(
-            [
-                "rooms",
-                room_id,
-                "relations",
-                target_event_id,
-                RelationshipType.annotation.value,
-                "m.reaction",
-            ],
-            query_parameters,
-            "/_matrix/client/v1",
-        )
-        headers = {"Content-Type": "application/json"}
-        if client.access_token:
-            headers["Authorization"] = f"Bearer {client.access_token}"
-
-        response = await client.send("GET", path, headers=headers)
-        try:
-            if response.status >= 400:
-                body_text = await response.text()
-                msg = f"HTTP {response.status} from relations API: {body_text}"
-                raise ValueError(msg)
-            response_body = await response.json()
-        finally:
-            response.release()
-
-        chunk = response_body.get("chunk")
-        if not isinstance(chunk, list):
-            msg = "Invalid relations API response: missing chunk list"
-            raise TypeError(msg)
-
-        for raw_event in chunk:
-            if isinstance(raw_event, dict):
-                yield nio.Event.parse_event(raw_event)
-
-        next_batch = response_body.get("next_batch")
-        if not isinstance(next_batch, str) or not next_batch:
-            return
 
 
 def _has_restart_interrupted_note(body: str) -> bool:
