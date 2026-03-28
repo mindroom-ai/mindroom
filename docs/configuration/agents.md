@@ -31,11 +31,15 @@ agents:
     # Model to use (defined in models section)
     model: sonnet
 
-    # Tools the agent can use
+    # Tools the agent can use (plain names or inline config overrides)
     tools:
       - file
       - shell
       - github
+      # Per-agent tool config override (single-key dict syntax):
+      # - shell:
+      #     extra_env_passthrough: "DAWARICH_*"
+      #     enable_run_shell_command: true
 
     # Skills the agent can use (defined in skills section or plugins)
     skills:
@@ -119,7 +123,7 @@ agents:
 | `display_name` | string | *required* | Human-readable name shown in Matrix as the bot's display name |
 | `role` | string | `""` | System prompt describing the agent's purpose — guides its behavior and expertise |
 | `model` | string | `"default"` | Model name (must match a key in the `models` section) |
-| `tools` | list | `[]` | Agent-specific tool names (see [Tools](../tools/index.md)); effective tools are `tools + defaults.tools` with duplicates removed |
+| `tools` | list | `[]` | Agent-specific tool entries — plain strings or single-key dicts with config overrides (see [Tools](../tools/index.md) and [Per-Agent Tool Configuration](#per-agent-tool-configuration)); effective tools are `tools + defaults.tools` with duplicates removed |
 | `include_default_tools` | bool | `true` | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out |
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
@@ -156,6 +160,124 @@ Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it surv
 `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`).
 When the effective memory backend is `file`, the agent's canonical file memory root is that same workspace directory.
 Absolute paths and `..` traversal are rejected.
+
+## Per-Agent Tool Configuration
+
+Tools can be plain strings or single-key dicts with inline config overrides.
+This lets you customize tool behavior per agent without affecting other agents that use the same tool.
+
+```yaml
+agents:
+  code:
+    tools:
+      - file                              # no override, uses defaults
+      - shell:                            # per-agent override
+          extra_env_passthrough: "DAWARICH_*"
+          enable_run_shell_command: true
+  research:
+    tools:
+      - shell                             # uses global defaults (no overrides)
+      - duckduckgo
+```
+
+### Merge Order
+
+MindRoom resolves tool configuration in layers:
+
+1. Tool constructor defaults (hardcoded in tool code)
+2. Credentials (dashboard or credential store)
+3. `defaults.tools` overrides (global inline config)
+4. `agents.<name>.tools` overrides (per-agent inline config)
+5. Runtime overrides (sandbox proxy, init overrides)
+
+Within the authored layers (`defaults.tools` and `agents.<name>.tools`), each field has three possible states:
+
+- Key omitted: keep the value from the next lower layer unchanged.
+- Concrete value: override the next lower layer with that value.
+- `__MINDROOM_INHERIT__`: clear an inherited authored override and fall back to the next lower layer.
+
+When the same tool appears in both `defaults.tools` and `agents.<name>.tools`, MindRoom merges them field-by-field.
+Per-agent values win for overlapping keys, non-overlapping keys are kept from both, and `__MINDROOM_INHERIT__` removes the inherited authored value instead of passing the literal string to the tool.
+
+### Defaults with Overrides
+
+`defaults.tools` also accepts the single-key dict syntax for global overrides that apply to all agents:
+
+```yaml
+defaults:
+  tools:
+    - scheduler
+    - shell:
+        enable_run_shell_command: true     # global default for all agents
+```
+
+### Clearing An Inherited Override
+
+Use `__MINDROOM_INHERIT__` when an agent should keep the tool but stop inheriting one authored field from `defaults.tools`.
+
+Optional-field example:
+
+```yaml
+defaults:
+  tools:
+    - shell:
+        extra_env_passthrough: "DAWARICH_*"
+        enable_run_shell_command: true
+
+agents:
+  research:
+    tools:
+      - shell:
+          extra_env_passthrough: __MINDROOM_INHERIT__
+```
+
+`research` still inherits `enable_run_shell_command: true`, but `extra_env_passthrough` falls back to the lower layer (persisted tool config if set, otherwise the tool's normal default).
+
+Required non-secret field example:
+
+```yaml
+defaults:
+  tools:
+    - clickup:
+        master_space_id: "space-default"
+
+agents:
+  ops:
+    tools:
+      - clickup:
+          master_space_id: __MINDROOM_INHERIT__
+```
+
+`ops` still uses the `clickup` tool, but `master_space_id` no longer inherits `"space-default"`.
+MindRoom falls back to the next lower layer, which is usually the stored tool config from the dashboard or credential store.
+
+### `include_default_tools` vs `__MINDROOM_INHERIT__`
+
+- `include_default_tools: false` is coarse-grained: it removes every tool and every override inherited from `defaults.tools` for that agent.
+- `__MINDROOM_INHERIT__` is fine-grained: it keeps the tool and the rest of the inherited fields, but clears one specific authored override.
+
+### Security Restrictions
+
+Not all config fields can be overridden inline:
+
+- `type="password"` fields are blocked (credentials must go through the dashboard or credential store)
+- `base_dir` is blocked (runtime-only, set by the workspace system)
+- Fields with `authored_override: false` in the tool metadata are blocked
+
+MindRoom validates overrides at config load time and rejects unknown field names, wrong value types, and blocked fields with a clear error message.
+
+### Backward Compatibility
+
+Existing configs with plain string tool lists work unchanged:
+
+```yaml
+tools: [shell, file, duckduckgo]   # still valid
+```
+
+### Config Manager
+
+The `!config` chat command and the `config_manager` tool preserve inline overrides when updating tool lists.
+Adding or removing tools via chat does not discard existing per-agent overrides on other tools.
 
 ## Worker Routing
 
@@ -407,7 +529,11 @@ The `defaults` section sets fallback values for all agents. Any agent that omits
 
 ```yaml
 defaults:
-  tools: [scheduler]                   # Tools added to every agent by default (set [] to disable)
+  tools:                                # Tools added to every agent by default (set [] to disable)
+    - scheduler
+    # Per-agent tool config overrides also work in defaults:
+    # - shell:
+    #     enable_run_shell_command: true
   markdown: true                        # Format responses as Markdown
   learning: true                        # Enable Agno Learning
   learning_mode: always                 # "always" or "agentic"

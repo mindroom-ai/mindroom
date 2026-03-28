@@ -129,6 +129,58 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
     )
 
 
+def test_config_round_trips_structured_agent_tool_entries() -> None:
+    """Structured tool entries should stay authored while runtime access stays name-based."""
+    runtime_paths = _runtime_paths(Path(tempfile.mkdtemp()))
+    config = Config.validate_with_runtime(
+        {
+            "agents": {
+                "openclaw": {
+                    "display_name": "OpenClaw",
+                    "role": "Coding agent",
+                    "tools": [
+                        {
+                            "shell": {
+                                "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
+                                "shell_path_prepend": "/run/wrappers/bin",
+                            },
+                        },
+                        "browser",
+                    ],
+                    "rooms": ["lobby"],
+                },
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-4o-mini",
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+    agent_config = config.agents["openclaw"]
+    assert agent_config.tool_names == ["shell", "browser"]
+    assert agent_config.get_tool_overrides("shell") == {
+        "extra_env_passthrough": ["GITEA_TOKEN", "WHISPER_URL"],
+        "shell_path_prepend": ["/run/wrappers/bin"],
+    }
+    assert config.authored_model_dump()["agents"]["openclaw"]["tools"] == [
+        {
+            "shell": {
+                "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
+                "shell_path_prepend": "/run/wrappers/bin",
+            },
+        },
+        "browser",
+    ]
+    assert config.get_agent_tool_runtime_overrides("openclaw", "shell") == {
+        "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
+        "shell_path_prepend": "/run/wrappers/bin",
+    }
+
+
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the calculator agent is created correctly."""
@@ -245,7 +297,6 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
         "openclaw_compat",
         "shell",
         "coding",
-        "browser",
     ]
     config.defaults.tools = ["openclaw_compat", "python", "scheduler"]
 
@@ -284,6 +335,55 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")
+def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+) -> None:
+    """Agent construction should merge defaults and agent overrides before tool lookup."""
+    mock_get_tool_by_name.return_value = MagicMock()
+    config = _test_config()
+    config.defaults.tools = [
+        {"shell": {"extra_env_passthrough": "DAWARICH_*", "enable_run_shell_command": False}},
+    ]
+    config.agents["general"].tools = [{"shell": {"enable_run_shell_command": True}}]
+
+    _create_agent_for_test("general", config=config)
+
+    shell_call = next(call for call in mock_get_tool_by_name.call_args_list if call.args[0] == "shell")
+    assert shell_call.kwargs["tool_config_overrides"] == {
+        "extra_env_passthrough": "DAWARICH_*",
+        "enable_run_shell_command": True,
+    }
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_keeps_runtime_base_dir_separate_from_authored_tool_config(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Workspace base_dir should stay runtime-only while authored config uses its own override channel."""
+    mock_get_tool_by_name.return_value = MagicMock()
+
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    config = _test_config()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].tools = [{"shell": {"enable_run_shell_command": False}}]
+    config.agents["general"].include_default_tools = False
+
+    _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+
+    assert mock_get_tool_by_name.call_args is not None
+    assert mock_get_tool_by_name.call_args.kwargs["tool_config_overrides"] == {
+        "enable_run_shell_command": False,
+    }
+    assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(workspace)}
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
 def test_create_agent_continues_when_implied_tool_import_fails(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -295,6 +395,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         _runtime_paths: object = None,
         *,
         credentials_manager: object | None = None,
+        tool_config_overrides: dict[str, object] | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
@@ -304,6 +405,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         del (
             _runtime_paths,
             credentials_manager,
+            tool_config_overrides,
             tool_init_overrides,
             runtime_overrides,
             shared_storage_root_path,
@@ -345,6 +447,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         _runtime_paths: object = None,
         *,
         credentials_manager: object | None = None,
+        tool_config_overrides: dict[str, object] | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
@@ -354,6 +457,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         del (
             _runtime_paths,
             credentials_manager,
+            tool_config_overrides,
             tool_init_overrides,
             runtime_overrides,
             shared_storage_root_path,
@@ -839,6 +943,37 @@ def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")
+def test_create_agent_passes_authored_shell_runtime_overrides(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+) -> None:
+    """Authored per-agent shell overrides should be converted into runtime kwargs."""
+    mock_get_tool_by_name.return_value = MagicMock()
+
+    config = _test_config()
+    config.agents["general"].tools = [
+        {
+            "shell": {
+                "extra_env_passthrough": ["GITEA_TOKEN", "WHISPER_URL"],
+                "shell_path_prepend": ["/run/wrappers/bin"],
+            },
+        },
+    ]
+    config.agents["general"].include_default_tools = False
+
+    _create_agent_for_test("general", config=config)
+
+    runtime_overrides_by_tool = {
+        call.args[0]: call.kwargs.get("runtime_overrides") for call in mock_get_tool_by_name.call_args_list
+    }
+    assert runtime_overrides_by_tool["shell"] == {
+        "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
+        "shell_path_prepend": "/run/wrappers/bin",
+    }
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
 def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -1218,13 +1353,21 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         _runtime_paths: object = None,
         *,
         credentials_manager: object | None = None,
+        tool_config_overrides: dict[str, object] | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
         worker_target: object | None = None,
     ) -> MagicMock:
-        del _runtime_paths, tool_init_overrides, runtime_overrides, shared_storage_root_path, worker_tools_override
+        del (
+            _runtime_paths,
+            tool_config_overrides,
+            tool_init_overrides,
+            runtime_overrides,
+            shared_storage_root_path,
+            worker_tools_override,
+        )
         credentials = load_scoped_credentials(
             tool_name,
             credentials_manager=cast("CredentialsManager", credentials_manager),

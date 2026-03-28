@@ -79,7 +79,7 @@ def _validated_config_payload(
 ) -> dict[str, Any]:
     """Normalize and validate one config payload against the active runtime."""
     validated_config = Config.validate_with_runtime(raw_config, runtime_paths)
-    return validated_config.model_dump(exclude_none=True)
+    return validated_config.authored_model_dump()
 
 
 def run_config_write[T](
@@ -117,7 +117,7 @@ def load_config_from_file(
 ) -> bool:
     """Load config from the runtime config file into the shared cache."""
     try:
-        validated_payload = load_runtime_config_model(runtime_paths).model_dump(exclude_none=True)
+        validated_payload = load_runtime_config_model(runtime_paths).authored_model_dump()
         with config_lock:
             config_data.clear()
             config_data.update(validated_payload)

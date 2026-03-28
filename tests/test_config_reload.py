@@ -401,6 +401,33 @@ def test_get_changed_agents_detects_culture_config_updates() -> None:
     assert changed == {"agent1"}
 
 
+def test_get_changed_agents_detects_tool_override_updates() -> None:
+    """Agent restarts should trigger when authored tool overrides change."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    tools=[{"shell": {"enable_run_shell_command": False}}],
+                ),
+            },
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    tools=[{"shell": {"enable_run_shell_command": True}}],
+                ),
+            },
+        ),
+    )
+
+    changed = _get_changed_agents(old_config, new_config, agent_bots={"agent1": AsyncMock()})
+    assert changed == {"agent1"}
+
+
 @pytest.fixture
 def initial_config() -> Config:
     """Initial configuration with some agents and rooms."""

@@ -25,7 +25,7 @@ def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
             "MINDROOM_NAMESPACE": "",
         },
     )
-    bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound
 
@@ -874,6 +874,6 @@ def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
     config_path = tmp_path / "config.yaml"
     storage_path = tmp_path / "mindroom_data"
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env={})
-    bound = Config.validate_with_runtime(_config(**config_data).model_dump(exclude_none=True), runtime_paths)
+    bound = Config.validate_with_runtime(_config(**config_data).authored_model_dump(), runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound

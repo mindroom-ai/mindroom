@@ -17,6 +17,12 @@ agents:
     rooms:
       - lobby
     tools: []
+    # Tools can be plain strings or single-key dicts with per-agent config overrides:
+    # tools:
+    #   - file
+    #   - shell:
+    #       extra_env_passthrough: "DAWARICH_*"
+    #       enable_run_shell_command: true
     instructions:
       - Be helpful and conversational
 

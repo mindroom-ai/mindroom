@@ -243,7 +243,7 @@ optional-dependencies.moviepy_video_tools = [
 optional-dependencies.neo4j = [
   "neo4j",
 ]
-optional-dependencies.newspaper4k = [
+optional-dependencies.newspaper = [
   "lxml-html-clean",
   "newspaper4k",
 ]
