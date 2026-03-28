@@ -47,14 +47,14 @@ repos:
 
       - id: generate-skill-references
         name: Regenerate mindroom-docs skill references
-        entry: python .github/scripts/generate_skill_references.py
+        entry: .venv/bin/python .github/scripts/generate_skill_references.py
         language: system
         pass_filenames: false
         files: ^(docs/.*\.md|zensical\.toml)$
 
       - id: check-tool-extras-sync
         name: Check tool extras stay in sync with pyproject.toml
-        entry: python .github/scripts/check_tool_extras_sync.py
+        entry: .venv/bin/python .github/scripts/check_tool_extras_sync.py
         language: system
         pass_filenames: false
         files: ^(pyproject\.toml|src/mindroom/tools/.*\.py)$
