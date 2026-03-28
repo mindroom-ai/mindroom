@@ -135,6 +135,8 @@ describe('AgentEditor', () => {
     agentPoliciesByAgent: makeAgentPolicies(),
     isDirty: false,
     diagnostics: [],
+    selectAgent: vi.fn(),
+    getAgentToolOverrides: vi.fn(() => null),
   };
 
   beforeEach(() => {
@@ -279,6 +281,52 @@ describe('AgentEditor', () => {
 
     expect(screen.getByText('Setup Required')).toBeInTheDocument();
     expect(screen.getByLabelText('Weather')).toBeInTheDocument();
+  });
+
+  it('shows customized indicators and opens the inline tool settings panel for checked tools', () => {
+    const shellAgent = { ...mockAgent, tools: ['shell'] };
+    const getAgentToolOverrides = vi.fn((agentId: string, toolName: string) =>
+      agentId === 'test_agent' && toolName === 'shell'
+        ? { extra_env_passthrough: ['GITEA_TOKEN'] }
+        : null
+    );
+
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [shellAgent],
+      config: {
+        ...mockConfig,
+        agents: { test_agent: shellAgent },
+      },
+      getAgentToolOverrides,
+    });
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: 'shell',
+          display_name: 'Shell Commands',
+          setup_type: 'none',
+          status: 'available',
+          agent_override_fields: [
+            {
+              name: 'extra_env_passthrough',
+              label: 'Env Passthrough',
+              type: 'string[]',
+            },
+          ],
+        },
+      ],
+      loading: false,
+      statusAuthoritative: true,
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByText('Customized')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Shell Commands' }));
+
+    expect(screen.getByText('Shell Commands settings')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('GITEA_TOKEN')).toBeInTheDocument();
   });
 
   it('keeps selected unsupported tools visible so they can be removed', async () => {

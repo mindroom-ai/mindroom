@@ -3,6 +3,18 @@ import { API_ENDPOINTS, fetchJSON, withAgentExecutionScope } from '@/lib/api';
 import type { WorkerScope } from '@/types/config';
 import { useFetchData } from './useFetchData';
 
+export interface ToolFieldSchema {
+  name: string;
+  label: string;
+  type: 'boolean' | 'number' | 'password' | 'select' | 'string[]' | 'text' | 'url';
+  required?: boolean;
+  default?: unknown;
+  placeholder?: string | null;
+  description?: string | null;
+  options?: Array<{ label: string; value: string }> | null;
+  validation?: Record<string, unknown> | null;
+}
+
 export interface ToolInfo {
   name: string;
   display_name: string;
@@ -12,7 +24,8 @@ export interface ToolInfo {
   setup_type: string;
   icon: string | null;
   icon_color: string | null;
-  config_fields: any[] | null;
+  config_fields: ToolFieldSchema[] | null;
+  agent_override_fields?: ToolFieldSchema[] | null;
   dependencies: string[] | null;
   auth_provider?: string | null;
   docs_url?: string | null;

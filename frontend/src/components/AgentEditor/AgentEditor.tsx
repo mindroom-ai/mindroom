@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useState, useMemo } from 'react';
+import { useEffect, useCallback, useState, useMemo, useRef } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { useSwipeBack } from '@/hooks/useSwipeBack';
 import { Button } from '@/components/ui/button';
@@ -28,13 +28,12 @@ import {
   getDefaultPrivateConfig,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
 } from '@/types/config';
-import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
-import { TOOL_SCHEMAS } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useTools } from '@/hooks/useTools';
 import { useSkills } from '@/hooks/useSkills';
 import { useScopedConfigValidation } from '@/hooks/useScopedConfigValidation';
+import { ToolConfigPanel } from './ToolConfigPanel';
 
 const TOOL_VALIDATION_UNAVAILABLE_MESSAGE =
   'Tool availability preview is unavailable while agent policy preview is unavailable. Save or refresh to validate tool assignments.';
@@ -52,9 +51,11 @@ export function AgentEditor() {
     agentPoliciesByAgent,
     isDirty,
     selectAgent,
+    getAgentToolOverrides,
   } = useConfigStore();
 
-  const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
+  const [activeToolName, setActiveToolName] = useState<string | null>(null);
+  const toolConfigRef = useRef<HTMLDivElement>(null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
   const defaultLearning = config?.defaults.learning ?? true;
   const defaultLearningMode = config?.defaults.learning_mode ?? 'always';
@@ -118,6 +119,10 @@ export function AgentEditor() {
   const privateConfig = useWatch({ name: 'private', control });
   const privateKnowledge = privateConfig?.knowledge;
   const policyAwareBackendTools = policyPreviewAvailable ? backendTools : [];
+  const toolInfoByName = useMemo(
+    () => new Map(policyAwareBackendTools.map(tool => [tool.name, tool])),
+    [policyAwareBackendTools]
+  );
   const validationPrefix = useMemo<Array<string | number> | null>(
     () => (selectedAgentId == null ? null : ['agents', selectedAgentId]),
     [selectedAgentId]
@@ -266,6 +271,21 @@ export function AgentEditor() {
       });
     }
   }, [defaultLearning, defaultLearningMode, selectedAgent, reset]);
+
+  useEffect(() => {
+    const selectedToolNames = agentTools ?? [];
+    if (selectedToolNames.length === 0) {
+      setActiveToolName(null);
+      return;
+    }
+    setActiveToolName(currentActiveToolName => {
+      if (currentActiveToolName != null && selectedToolNames.includes(currentActiveToolName)) {
+        return currentActiveToolName;
+      }
+      return null;
+    });
+  }, [agentTools, selectedAgentId, toolInfoByName]);
+
   // Let the store normalize against current state so sequential UI updates do not
   // reuse stale render-time agent data.
   const handleFieldChange = useCallback(
@@ -283,9 +303,18 @@ export function AgentEditor() {
         ? [...new Set([...currentTools, toolName])]
         : currentTools.filter(tool => tool !== toolName);
       handleFieldChange('tools', nextTools);
+      setActiveToolName(currentActiveToolName => {
+        if (checked) {
+          return toolName;
+        }
+        if (currentActiveToolName != null && nextTools.includes(currentActiveToolName)) {
+          return currentActiveToolName;
+        }
+        return null;
+      });
       return nextTools;
     },
-    [handleFieldChange]
+    [handleFieldChange, toolInfoByName]
   );
 
   const handleDelete = () => {
@@ -442,6 +471,21 @@ export function AgentEditor() {
     if (raw.trim() === '') return null;
     const n = parseInt(raw, 10);
     return Number.isNaN(n) || n < 0 ? null : n;
+  };
+  const activeTool = activeToolName != null ? toolInfoByName.get(activeToolName) ?? null : null;
+  const activeToolNameSelected = activeToolName != null && effectiveTools.includes(activeToolName);
+  useEffect(() => {
+    if (activeToolNameSelected && toolConfigRef.current) {
+      toolConfigRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [activeToolName, activeToolNameSelected]);
+
+  const toolHasOverrides = (toolName: string): boolean => {
+    if (selectedAgentId == null) {
+      return false;
+    }
+    const overrides = getAgentToolOverrides(selectedAgentId, toolName);
+    return overrides != null && Object.keys(overrides).length > 0;
   };
 
   if (!selectedAgent) {
@@ -1027,18 +1071,22 @@ export function AgentEditor() {
                         control={control}
                         render={({ field }) => {
                           const isChecked = field.value.includes(tool.name);
-                          const hasSchema = !!TOOL_SCHEMAS[tool.name];
-                          const needsConfig =
-                            tool.setup_type !== 'none' &&
-                            tool.config_fields &&
-                            tool.config_fields.length > 0;
+                          const hasOverrides = toolHasOverrides(tool.name);
+                          const isActive = activeToolName === tool.name;
 
                           return (
-                            <div className="flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
+                            <div
+                              className={`flex items-center justify-between rounded-lg p-2 transition-colors ${
+                                isActive
+                                  ? 'bg-blue-50 dark:bg-blue-500/10'
+                                  : 'hover:bg-gray-50 dark:hover:bg-white/5'
+                              }`}
+                            >
                               <div className="flex items-center space-x-3 sm:space-x-2">
                                 <Checkbox
                                   id={`configured-${tool.name}`}
                                   checked={isChecked}
+                                  aria-label={isChecked ? tool.display_name : undefined}
                                   onCheckedChange={checked => {
                                     field.onChange(
                                       updateSelectedTools(field.value, tool.name, checked === true)
@@ -1046,22 +1094,43 @@ export function AgentEditor() {
                                   }}
                                   className="h-5 w-5 sm:h-4 sm:w-4"
                                 />
-                                <label
-                                  htmlFor={`configured-${tool.name}`}
-                                  className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
-                                >
-                                  {tool.display_name}
-                                </label>
+                                {isChecked ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setActiveToolName(tool.name)}
+                                    className="text-sm font-medium leading-none text-left"
+                                  >
+                                    {tool.display_name}
+                                  </button>
+                                ) : (
+                                  <label
+                                    htmlFor={`configured-${tool.name}`}
+                                    className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
+                                  >
+                                    {tool.display_name}
+                                  </label>
+                                )}
+                                {hasOverrides && (
+                                  <Badge
+                                    variant="secondary"
+                                    className="text-[10px] uppercase tracking-wide"
+                                  >
+                                    Customized
+                                  </Badge>
+                                )}
                               </div>
-                              {isChecked && hasSchema && needsConfig && (
+                              {isChecked && (
                                 <Button
-                                  variant="ghost"
+                                  type="button"
+                                  variant={isActive ? 'secondary' : 'ghost'}
                                   size="sm"
-                                  onClick={() => setConfigDialogTool(tool.name)}
+                                  onClick={() => setActiveToolName(tool.name)}
                                   className="h-8 px-2"
                                 >
                                   <Settings className="h-4 w-4 sm:mr-1" />
-                                  <span className="hidden sm:inline">Settings</span>
+                                  <span className="hidden sm:inline">
+                                    {hasOverrides ? 'Edit' : 'Settings'}
+                                  </span>
                                 </Button>
                               )}
                             </div>
@@ -1101,13 +1170,22 @@ export function AgentEditor() {
                         control={control}
                         render={({ field }) => {
                           const isChecked = field.value.includes(tool.name);
+                          const hasOverrides = toolHasOverrides(tool.name);
+                          const isActive = activeToolName === tool.name;
 
                           return (
-                            <div className="flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
+                            <div
+                              className={`flex items-center justify-between rounded-lg p-2 transition-colors ${
+                                isActive
+                                  ? 'bg-blue-50 dark:bg-blue-500/10'
+                                  : 'hover:bg-gray-50 dark:hover:bg-white/5'
+                              }`}
+                            >
                               <div className="flex items-center space-x-3 sm:space-x-2">
                                 <Checkbox
                                   id={`default-${tool.name}`}
                                   checked={isChecked}
+                                  aria-label={isChecked ? tool.display_name : undefined}
                                   onCheckedChange={checked => {
                                     field.onChange(
                                       updateSelectedTools(field.value, tool.name, checked === true)
@@ -1115,13 +1193,45 @@ export function AgentEditor() {
                                   }}
                                   className="h-5 w-5 sm:h-4 sm:w-4"
                                 />
-                                <label
-                                  htmlFor={`default-${tool.name}`}
-                                  className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
-                                >
-                                  {tool.display_name}
-                                </label>
+                                {isChecked ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setActiveToolName(tool.name)}
+                                    className="text-sm font-medium leading-none text-left"
+                                  >
+                                    {tool.display_name}
+                                  </button>
+                                ) : (
+                                  <label
+                                    htmlFor={`default-${tool.name}`}
+                                    className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
+                                  >
+                                    {tool.display_name}
+                                  </label>
+                                )}
+                                {hasOverrides && (
+                                  <Badge
+                                    variant="secondary"
+                                    className="text-[10px] uppercase tracking-wide"
+                                  >
+                                    Customized
+                                  </Badge>
+                                )}
                               </div>
+                              {isChecked && (
+                                <Button
+                                  type="button"
+                                  variant={isActive ? 'secondary' : 'ghost'}
+                                  size="sm"
+                                  onClick={() => setActiveToolName(tool.name)}
+                                  className="h-8 px-2"
+                                >
+                                  <Settings className="h-4 w-4 sm:mr-1" />
+                                  <span className="hidden sm:inline">
+                                    {hasOverrides ? 'Edit' : 'Settings'}
+                                  </span>
+                                </Button>
+                              )}
                             </div>
                           );
                         }}
@@ -1160,14 +1270,23 @@ export function AgentEditor() {
                         render={({ field }) => {
                           const isChecked = field.value.includes(tool.name);
                           const setupBlocked = tool.dashboard_configuration_supported === false;
+                          const hasOverrides = toolHasOverrides(tool.name);
+                          const isActive = activeToolName === tool.name;
 
                           return (
-                            <div className="rounded-lg p-2 transition-colors hover:bg-gray-50 dark:hover:bg-white/5">
+                            <div
+                              className={`rounded-lg p-2 transition-colors ${
+                                isActive
+                                  ? 'bg-blue-50 dark:bg-blue-500/10'
+                                  : 'hover:bg-gray-50 dark:hover:bg-white/5'
+                              }`}
+                            >
                               <div className="flex items-center justify-between">
                                 <div className="flex items-center space-x-3 sm:space-x-2">
                                   <Checkbox
                                     id={`setup-${tool.name}`}
                                     checked={isChecked}
+                                    aria-label={isChecked ? tool.display_name : undefined}
                                     onCheckedChange={checked => {
                                       field.onChange(
                                         updateSelectedTools(
@@ -1179,16 +1298,50 @@ export function AgentEditor() {
                                     }}
                                     className="h-5 w-5 sm:h-4 sm:w-4"
                                   />
-                                  <label
-                                    htmlFor={`setup-${tool.name}`}
-                                    className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
-                                  >
-                                    {tool.display_name}
-                                  </label>
+                                  {isChecked ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => setActiveToolName(tool.name)}
+                                      className="text-sm font-medium leading-none text-left"
+                                    >
+                                      {tool.display_name}
+                                    </button>
+                                  ) : (
+                                    <label
+                                      htmlFor={`setup-${tool.name}`}
+                                      className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
+                                    >
+                                      {tool.display_name}
+                                    </label>
+                                  )}
+                                  {hasOverrides && (
+                                    <Badge
+                                      variant="secondary"
+                                      className="text-[10px] uppercase tracking-wide"
+                                    >
+                                      Customized
+                                    </Badge>
+                                  )}
                                 </div>
-                                <Badge variant="secondary" className="text-xs">
-                                  Setup required
-                                </Badge>
+                                <div className="flex items-center gap-2">
+                                  <Badge variant="secondary" className="text-xs">
+                                    Setup required
+                                  </Badge>
+                                  {isChecked && (
+                                    <Button
+                                      type="button"
+                                      variant={isActive ? 'secondary' : 'ghost'}
+                                      size="sm"
+                                      onClick={() => setActiveToolName(tool.name)}
+                                      className="h-8 px-2"
+                                    >
+                                      <Settings className="h-4 w-4 sm:mr-1" />
+                                      <span className="hidden sm:inline">
+                                        {hasOverrides ? 'Edit' : 'Settings'}
+                                      </span>
+                                    </Button>
+                                  )}
+                                </div>
                               </div>
                               {setupBlocked && (
                                 <p className="pl-8 pt-1 text-xs text-muted-foreground">
@@ -1205,6 +1358,15 @@ export function AgentEditor() {
                   </div>
                 </div>
               )}
+
+              <div ref={toolConfigRef} className="pt-3">
+                <ToolConfigPanel
+                  agentId={selectedAgent.id}
+                  toolName={activeToolNameSelected ? activeToolName : null}
+                  toolDisplayName={activeTool?.display_name ?? activeToolName ?? undefined}
+                  fields={activeTool?.agent_override_fields ?? null}
+                />
+              </div>
             </>
           )}
         </div>
@@ -1690,17 +1852,6 @@ export function AgentEditor() {
           </FieldGroup>
         </div>
       </div>
-
-      {/* Tool Configuration Dialog */}
-      {configDialogTool && (
-        <ToolConfigDialog
-          toolId={configDialogTool}
-          open={!!configDialogTool}
-          onOpenChange={open => {
-            if (!open) setConfigDialogTool(null);
-          }}
-        />
-      )}
     </EditorPanel>
   );
 }
