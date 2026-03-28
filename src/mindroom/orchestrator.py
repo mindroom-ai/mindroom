@@ -16,7 +16,12 @@ from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entity
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.hooks import ConfigReloadedContext, HookRegistry, emit
+from mindroom.hooks import (
+    ConfigReloadedContext,
+    HookMessageSender,
+    HookRegistry,
+    emit,
+)
 from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.types import EVENT_CONFIG_RELOADED
 from mindroom.knowledge.manager import (
@@ -708,6 +713,23 @@ class MultiAgentOrchestrator:
         )
         return router_bot
 
+    def _hook_message_sender(self) -> HookMessageSender | None:
+        """Return a router-backed sender for hook contexts when available."""
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if router_bot is None:
+            return None
+
+        async def _send(
+            room_id: str,
+            body: str,
+            thread_id: str | None,
+            source_hook: str,
+            extra_content: dict[str, object] | None,
+        ) -> str | None:
+            return await router_bot._hook_send_message(room_id, body, thread_id, source_hook, extra_content)
+
+        return _send
+
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""
         if failed_agents:
@@ -851,6 +873,7 @@ class MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             logger=logger.bind(event_name=EVENT_CONFIG_RELOADED),
             correlation_id=f"config-reload:{uuid4().hex}",
+            message_sender=self._hook_message_sender(),
             changed_entities=tuple(sorted(changed_entities)),
             added_entities=tuple(sorted(added_entities)),
             removed_entities=tuple(sorted(removed_entities)),

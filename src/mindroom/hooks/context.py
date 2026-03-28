@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from mindroom.constants import ORIGINAL_SENDER_KEY
+
 from .types import EnrichmentCachePolicy, EnrichmentItem
 
 if TYPE_CHECKING:
@@ -16,6 +18,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
+
+    from .sender import HookMessageSender
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +73,7 @@ class HookContext:
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
     correlation_id: str
+    message_sender: HookMessageSender | None = field(default=None, kw_only=True)
 
     @property
     def state_root(self) -> Path:
@@ -76,6 +81,26 @@ class HookContext:
         plugin_root = self.runtime_paths.storage_root / "plugins" / self.plugin_name
         plugin_root.mkdir(parents=True, exist_ok=True)
         return plugin_root
+
+    async def send_message(
+        self,
+        room_id: str,
+        text: str,
+        *,
+        thread_id: str | None = None,
+        extra_content: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Send a Matrix message from a hook and return the event ID when available."""
+        sender = self.message_sender
+        if sender is None:
+            self.logger.warning("send_message called but no sender registered")
+            return None
+        source_hook = f"{self.plugin_name}:{self.event_name}"
+        resolved_extra_content = dict(extra_content or {})
+        requester_id = _requester_id_for_hook_send(self)
+        if requester_id:
+            resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
+        return await sender(room_id, text, thread_id, source_hook, resolved_extra_content or None)
 
 
 @dataclass(slots=True)
@@ -175,3 +200,18 @@ class CustomEventContext(HookContext):
     room_id: str | None
     thread_id: str | None
     sender_id: str | None
+
+
+def _requester_id_for_hook_send(context: HookContext) -> str | None:
+    """Return the requester identity to preserve on hook-originated sends."""
+    if isinstance(context, MessageReceivedContext | MessageEnrichContext):
+        return context.envelope.requester_id
+    if isinstance(context, BeforeResponseContext):
+        return context.draft.envelope.requester_id
+    if isinstance(context, AfterResponseContext):
+        return context.result.envelope.requester_id
+    if isinstance(context, ScheduleFiredContext):
+        return context.created_by
+    if isinstance(context, ReactionReceivedContext | CustomEventContext):
+        return context.sender_id
+    return None

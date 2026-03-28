@@ -18,6 +18,7 @@ from mindroom.hooks import (
     AfterResponseContext,
     AgentLifecycleContext,
     BeforeResponseContext,
+    HookMessageSender,
     HookRegistry,
     MessageEnrichContext,
     MessageEnvelope,
@@ -32,6 +33,7 @@ from mindroom.hooks import (
     render_enrichment_block,
     strip_enrichment_from_session_storage,
 )
+from mindroom.hooks.sender import send_hook_message
 from mindroom.hooks.types import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -492,7 +494,18 @@ class AgentBot:
             "runtime_paths": self.runtime_paths,
             "logger": self.logger.bind(event_name=event_name),
             "correlation_id": correlation_id,
+            "message_sender": self._hook_message_sender(),
         }
+
+    def _hook_message_sender(self) -> HookMessageSender | None:
+        """Return the sender bound into hook contexts for this bot."""
+        if self.orchestrator is not None:
+            sender = self.orchestrator._hook_message_sender()
+            if sender is not None:
+                return sender
+        if self.agent_name == ROUTER_AGENT_NAME and self.client is not None:
+            return self._hook_send_message
+        return None
 
     def _build_message_envelope(
         self,
@@ -511,7 +524,10 @@ class AgentBot:
         resolved_source_kind = source_kind
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = content.get("com.mindroom.source_kind")
-            if isinstance(source_kind_override, str) and source_kind_override:
+            source_kind_sender_is_trusted = isinstance(event, _SyntheticTextEvent) or (
+                extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
+            )
+            if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
                 resolved_source_kind = source_kind_override
         if resolved_source_kind is None:
             if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
@@ -550,6 +566,14 @@ class AgentBot:
         correlation_id: str,
     ) -> bool:
         """Emit message:received and return whether hooks suppressed processing."""
+        if envelope.source_kind == "hook":
+            self.logger.debug(
+                "Skipping message:received hooks for hook-originated automation message",
+                event_id=envelope.source_event_id,
+                room_id=envelope.room_id,
+            )
+            return False
+
         if not self.hook_registry.has_hooks(EVENT_MESSAGE_RECEIVED):
             return False
 
@@ -2159,6 +2183,7 @@ class AgentBot:
             attachment_ids=tuple(attachment_ids or []),
             hook_registry=self.hook_registry,
             correlation_id=correlation_id,
+            hook_message_sender=self._hook_message_sender(),
         )
 
     def _build_tool_execution_identity(
@@ -3767,6 +3792,36 @@ class AgentBot:
             self.logger.info("Sent response", event_id=event_id, room_id=room_id)
             return event_id
         self.logger.error("Failed to send response to room", room_id=room_id)
+        return None
+
+    async def _hook_send_message(
+        self,
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Send a hook-originated Matrix message with stable metadata tags."""
+        if self.client is None:
+            self.logger.warning("Hook send requested before Matrix client is ready", room_id=room_id)
+            return None
+
+        event_id = await send_hook_message(
+            self.client,
+            self.config,
+            self.runtime_paths,
+            room_id,
+            body,
+            thread_id,
+            source_hook,
+            extra_content,
+            sender_domain=self.matrix_id.domain,
+        )
+        if event_id:
+            self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)
+            return event_id
+        self.logger.error("Failed to send hook message", room_id=room_id, source_hook=source_hook)
         return None
 
     async def _edit_message(
