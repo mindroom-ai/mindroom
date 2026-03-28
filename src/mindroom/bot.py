@@ -3405,6 +3405,18 @@ class AgentBot:
 
         return delivery
 
+    def _resolve_response_event_id(
+        self,
+        delivery_result: _ResponseDispatchResult | None,
+        tracked_event_id: str | None,
+        existing_event_id: str | None,
+    ) -> str | None:
+        if delivery_result is not None and delivery_result.event_id is not None:
+            return delivery_result.event_id
+        if delivery_result is not None and existing_event_id is not None:
+            return existing_event_id
+        return tracked_event_id or existing_event_id
+
     async def _generate_response(
         self,
         room_id: str,
@@ -3587,12 +3599,11 @@ class AgentBot:
                 thread_id=thread_id,
             )
 
-        if delivery_result is not None and delivery_result.event_id is not None:
-            resolved_event_id = delivery_result.event_id
-        elif delivery_result is not None and existing_event_id is not None:
-            resolved_event_id = existing_event_id
-        else:
-            resolved_event_id = tracked_event_id or existing_event_id
+        resolved_event_id = self._resolve_response_event_id(
+            delivery_result=delivery_result,
+            tracked_event_id=tracked_event_id,
+            existing_event_id=existing_event_id,
+        )
 
         if (
             thread_id is not None
