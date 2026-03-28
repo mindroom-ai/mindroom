@@ -65,6 +65,13 @@ REQUIRES_LINUX_LOCAL_WORKER = pytest.mark.skipif(
 )
 
 
+def _fake_local_worker_venv_create(_self: object, venv_dir: Path) -> None:
+    """Create the minimal worker venv layout needed for path-validation tests."""
+    bin_dir = venv_dir / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "python").symlink_to(Path(sys.executable))
+
+
 @pytest.fixture(autouse=True)
 def _load_tools() -> None:
     ensure_tool_registry_loaded(resolve_runtime_paths(config_path=Path("config.yaml")))
@@ -1169,18 +1176,19 @@ def test_sandbox_runner_rejects_worker_base_dir_outside_worker_root(
     """Worker requests should reject base_dir overrides that escape the worker root."""
     _set_sandbox_token(monkeypatch)
 
-    response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "coding",
-            "function_name": "ls",
-            "args": [],
-            "kwargs": {"path": "."},
-            "worker_key": "worker-a",
-            "tool_init_overrides": {"base_dir": str(tmp_path / "outside-worker-root")},
-        },
-    )
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "coding",
+                "function_name": "ls",
+                "args": [],
+                "kwargs": {"path": "."},
+                "worker_key": "worker-a",
+                "tool_init_overrides": {"base_dir": str(tmp_path / "outside-worker-root")},
+            },
+        )
 
     assert response.status_code == 400
     assert "worker root" in response.json()["detail"]
@@ -1195,18 +1203,19 @@ def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_state_roo
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
 
-    response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "coding",
-            "function_name": "ls",
-            "args": [],
-            "kwargs": {"path": "."},
-            "worker_key": "v1:tenant-123:shared:general",
-            "tool_init_overrides": {"base_dir": "agents/other/workspace"},
-        },
-    )
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "coding",
+                "function_name": "ls",
+                "args": [],
+                "kwargs": {"path": "."},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/other/workspace"},
+            },
+        )
 
     assert response.status_code == 400
     assert "allowed state roots" in response.json()["detail"]
@@ -1227,18 +1236,19 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
     monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
 
-    response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "file",
-            "function_name": "save_file",
-            "args": ["hello", "note.txt"],
-            "kwargs": {},
-            "worker_key": worker_key,
-            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
-        },
-    )
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["hello", "note.txt"],
+                "kwargs": {},
+                "worker_key": worker_key,
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
@@ -1288,18 +1298,19 @@ def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
 
-    response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "coding",
-            "function_name": "ls",
-            "args": [],
-            "kwargs": {"path": "."},
-            "worker_key": "legacy-worker",
-            "tool_init_overrides": {"base_dir": "agents/other/workspace"},
-        },
-    )
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "coding",
+                "function_name": "ls",
+                "args": [],
+                "kwargs": {"path": "."},
+                "worker_key": "legacy-worker",
+                "tool_init_overrides": {"base_dir": "agents/other/workspace"},
+            },
+        )
 
     assert response.status_code == 400
     assert "visible state roots" in response.json()["detail"]
@@ -1339,18 +1350,19 @@ def test_sandbox_runner_worker_request_rejects_invalid_base_dir_type_for_unknown
     """Worker base_dir validation should run before unknown-tool resolution."""
     _set_sandbox_token(monkeypatch)
 
-    response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "does_not_exist",
-            "function_name": "add",
-            "args": [],
-            "kwargs": {},
-            "worker_key": "worker-a",
-            "tool_init_overrides": {"base_dir": {"bad": "value"}},
-        },
-    )
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "does_not_exist",
+                "function_name": "add",
+                "args": [],
+                "kwargs": {},
+                "worker_key": "worker-a",
+                "tool_init_overrides": {"base_dir": {"bad": "value"}},
+            },
+        )
 
     assert response.status_code == 400
     assert "base_dir" in response.json()["detail"]
@@ -2298,7 +2310,8 @@ def test_prepare_worker_uses_explicit_runtime_storage_root_for_local_workers(
         process_env=dict(os.environ),
     )
 
-    worker = sandbox_worker_prep_module.prepare_worker("worker-a", runtime_paths)
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        worker = sandbox_worker_prep_module.prepare_worker("worker-a", runtime_paths)
 
     assert worker.debug_metadata["state_root"] == str(
         tmp_path / "explicit-storage" / "workers" / worker_dir_name("worker-a"),

@@ -330,7 +330,7 @@ def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatc
     fake_google_credentials = object()
 
     def fake_load_credentials_from_file(path: str, *, scopes: list[str]) -> tuple[object, str]:
-        assert path == str(credentials_path)
+        assert Path(path).resolve() == credentials_path.resolve()
         assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
         return fake_google_credentials, "ignored-project"
 
