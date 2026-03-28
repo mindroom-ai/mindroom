@@ -38,8 +38,13 @@ from mindroom.matrix.rooms import (
     load_rooms,
     resolve_room_aliases,
 )
+from mindroom.matrix.stale_stream_cleanup import cleanup_stale_streaming_messages
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, create_agent_user
+from mindroom.matrix.users import (
+    INTERNAL_USER_ACCOUNT_KEY,
+    INTERNAL_USER_AGENT_NAME,
+    create_agent_user,
+)
 from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import (
     reset_runtime_state,
@@ -714,6 +719,39 @@ class MultiAgentOrchestrator:
             return
         logger.info("All agent bots started successfully")
 
+    async def _cleanup_stale_streams_after_restart(
+        self,
+        bots: list[AgentBot | TeamBot],
+        config: Config,
+    ) -> None:
+        """Cleanup stale streams for started bots before sync loops begin."""
+        bot_user_ids = {bot.agent_user.user_id for bot in bots if bot.client is not None and bot.agent_user.user_id}
+        if not bot_user_ids:
+            return
+
+        cleaned_count = 0
+        for bot in bots:
+            if bot.client is None or not bot.agent_user.user_id:
+                continue
+            try:
+                bot_cleaned_count = await cleanup_stale_streaming_messages(
+                    bot.client,
+                    bot_user_id=bot.agent_user.user_id,
+                    bot_user_ids=bot_user_ids,
+                    config=config,
+                    runtime_paths=self.runtime_paths,
+                )
+                cleaned_count += bot_cleaned_count
+            except Exception as exc:
+                logger.warning(
+                    "Could not cleanup stale streaming messages (non-critical)",
+                    agent_name=bot.agent_name,
+                    error=str(exc),
+                )
+
+        if cleaned_count > 0:
+            logger.info("Cleaned stale streaming messages", count=cleaned_count)
+
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         await wait_for_matrix_homeserver(runtime_paths=self.runtime_paths)
@@ -739,6 +777,7 @@ class MultiAgentOrchestrator:
             "Setting up Matrix rooms and memberships",
             lambda: self._setup_rooms_and_memberships(started_bots),
         )
+        await self._cleanup_stale_streams_after_restart(started_bots, config)
 
         self.running = True
 
