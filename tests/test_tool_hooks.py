@@ -62,6 +62,10 @@ class NonDeepcopyableResult:
         msg = "result deepcopy disabled"
         raise TypeError(msg)
 
+    def __repr__(self) -> str:
+        """Keep the lossy fallback stable for assertions."""
+        return f"NonDeepcopyableResult(payload={self.payload!r})"
+
 
 class NonDeepcopyableToolError(ValueError):
     """Mutable exception object that deliberately breaks deepcopy()."""
@@ -541,11 +545,12 @@ async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_tool_after_call_hooks_cannot_mutate_non_deepcopyable_result(tmp_path: Path) -> None:
     """After-call hooks should still get an isolated snapshot when deepcopy() fails."""
+    seen: list[object | None] = []
 
     @hook(EVENT_TOOL_AFTER_CALL)
     async def mutate(ctx: ToolAfterCallContext) -> None:
-        assert isinstance(ctx.result, NonDeepcopyableResult)
-        ctx.result.payload["echo"] = "rewritten by hook"
+        seen.append(ctx.result)
+        assert ctx.result == "NonDeepcopyableResult(payload={'echo': 'notes.txt'})"
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [mutate])])
     bridge = build_tool_hook_bridge(
@@ -563,6 +568,7 @@ async def test_tool_after_call_hooks_cannot_mutate_non_deepcopyable_result(tmp_p
 
     assert isinstance(result, NonDeepcopyableResult)
     assert result.payload == {"echo": "notes.txt"}
+    assert seen == ["NonDeepcopyableResult(payload={'echo': 'notes.txt'})"]
 
 
 @pytest.mark.asyncio
@@ -838,12 +844,13 @@ async def test_tool_hook_bridge_reraises_tool_errors_after_after_call(tmp_path: 
 @pytest.mark.asyncio
 async def test_tool_after_call_hooks_cannot_mutate_reraised_non_deepcopyable_error(tmp_path: Path) -> None:
     """After-call hooks should not be able to rewrite the original raised error."""
+    seen_error_types: list[type[BaseException]] = []
 
     @hook(EVENT_TOOL_AFTER_CALL)
     async def rewrite(ctx: ToolAfterCallContext) -> None:
-        assert isinstance(ctx.error, NonDeepcopyableToolError)
+        assert ctx.error is not None
+        seen_error_types.append(type(ctx.error))
         ctx.error.args = ("rewritten by hook",)
-        ctx.error.details["status"] = "rewritten"
 
     registry = HookRegistry.from_plugins([_plugin("tool-audit", [rewrite])])
     bridge = build_tool_hook_bridge(
@@ -867,6 +874,7 @@ async def test_tool_after_call_hooks_cannot_mutate_reraised_non_deepcopyable_err
 
     assert exc_info.value.args == ("original boom",)
     assert exc_info.value.details == {"status": "original"}
+    assert seen_error_types == [Exception]
 
 
 @pytest.mark.asyncio

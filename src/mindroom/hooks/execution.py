@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Hashable
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -47,8 +46,6 @@ class _HookFailureState:
 
 
 _HOOK_FAILURES: dict[tuple[str, str], _HookFailureState] = {}
-_IMMUTABLE_SNAPSHOT_TYPES = (type(None), str, bytes, int, float, bool, complex)
-_MISSING_SNAPSHOT = object()
 
 type HookExecutionContext = HookContext | ToolBeforeCallContext | ToolAfterCallContext
 
@@ -120,144 +117,25 @@ def _context_logger(hook: RegisteredHook) -> object:
     )
 
 
-def _snapshot_tool_observer_key(key: object, memo: dict[int, object]) -> object:
-    snapshot_key = _snapshot_tool_observer_value(key, memo)
-    if isinstance(snapshot_key, Hashable):
-        return snapshot_key
-    return repr(snapshot_key)
-
-
-def _snapshot_exception(value: BaseException, memo: dict[int, object]) -> BaseException:
-    snapshot_args = tuple(_snapshot_tool_observer_value(arg, memo) for arg in value.args)
-    try:
-        clone = type(value)(*snapshot_args)
-    except Exception:
-        clone = Exception(*snapshot_args) if snapshot_args else Exception(str(value))
-    memo[id(value)] = clone
-    clone.args = snapshot_args
-
-    notes = getattr(value, "__notes__", None)
-    if notes is not None:
-        for note in notes:
-            clone.add_note(str(note))
-
-    for attr_name, attr_value in vars(value).items():
-        setattr(clone, attr_name, _snapshot_tool_observer_value(attr_value, memo))
-    return clone
-
-
-def _snapshot_object_instance(value: object, memo: dict[int, object]) -> object:
-    try:
-        clone = object.__new__(type(value))
-    except TypeError:
-        return repr(value)
-
-    memo[id(value)] = clone
-    try:
-        for attr_name, attr_value in vars(value).items():
-            setattr(clone, attr_name, _snapshot_tool_observer_value(attr_value, memo))
-    except Exception:
-        return repr(value)
-
-    slots = getattr(type(value), "__slots__", ())
-    if isinstance(slots, str):
-        slots = (slots,)
-    for slot_name in slots:
-        if slot_name in {"__dict__", "__weakref__"} or not hasattr(value, slot_name):
-            continue
-        try:
-            setattr(clone, slot_name, _snapshot_tool_observer_value(getattr(value, slot_name), memo))
-        except Exception:
-            return repr(value)
-    return clone
-
-
-def _try_deepcopy_snapshot(value: object, memo: dict[int, object]) -> object:
-    try:
-        snapshot = deepcopy(value)
-    except Exception:
-        return _MISSING_SNAPSHOT
-    memo[id(value)] = snapshot
-    return snapshot
-
-
-def _snapshot_mapping(value: dict[object, object], memo: dict[int, object]) -> dict[object, object | None]:
-    snapshot_dict: dict[object, object | None] = {}
-    memo[id(value)] = snapshot_dict
-    for key, item in value.items():
-        snapshot_dict[_snapshot_tool_observer_key(key, memo)] = _snapshot_tool_observer_value(item, memo)
-    return snapshot_dict
-
-
-def _snapshot_list(value: list[object], memo: dict[int, object]) -> list[object | None]:
-    snapshot_list: list[object | None] = []
-    memo[id(value)] = snapshot_list
-    snapshot_list.extend(_snapshot_tool_observer_value(item, memo) for item in value)
-    return snapshot_list
-
-
-def _snapshot_tuple(value: tuple[object, ...], memo: dict[int, object]) -> tuple[object | None, ...]:
-    snapshot_tuple = tuple(_snapshot_tool_observer_value(item, memo) for item in value)
-    memo[id(value)] = snapshot_tuple
-    return snapshot_tuple
-
-
-def _snapshot_set(value: set[object], memo: dict[int, object]) -> set[object]:
-    snapshot_set = {_snapshot_tool_observer_key(item, memo) for item in value}
-    memo[id(value)] = snapshot_set
-    return snapshot_set
-
-
-def _snapshot_frozenset(value: frozenset[object], memo: dict[int, object]) -> frozenset[object]:
-    snapshot_frozenset = frozenset(_snapshot_tool_observer_key(item, memo) for item in value)
-    memo[id(value)] = snapshot_frozenset
-    return snapshot_frozenset
-
-
-def _snapshot_tool_observer_fallback(value: object, memo: dict[int, object]) -> object:
-    snapshot: object
-    if isinstance(value, BaseException):
-        snapshot = _snapshot_exception(value, memo)
-    elif isinstance(value, dict):
-        snapshot = _snapshot_mapping(cast("dict[object, object]", value), memo)
-    elif isinstance(value, list):
-        snapshot = _snapshot_list(cast("list[object]", value), memo)
-    elif isinstance(value, tuple):
-        snapshot = _snapshot_tuple(value, memo)
-    elif isinstance(value, set):
-        snapshot = _snapshot_set(cast("set[object]", value), memo)
-    elif isinstance(value, frozenset):
-        snapshot = _snapshot_frozenset(value, memo)
-    elif isinstance(value, bytearray):
-        snapshot_bytes = bytes(value)
-        memo[id(value)] = snapshot_bytes
-        snapshot = snapshot_bytes
-    elif hasattr(value, "__dict__") or getattr(type(value), "__slots__", ()):
-        snapshot = _snapshot_object_instance(value, memo)
-    else:
-        snapshot = repr(value)
-    return snapshot
-
-
-def _snapshot_tool_observer_value(
-    value: object | None,
-    memo: dict[int, object] | None = None,
-) -> object | None:
+def _snapshot_tool_observer_value(value: object | None) -> object | None:
     """Return an observer-safe snapshot that cannot mutate caller-visible state."""
-    if isinstance(value, _IMMUTABLE_SNAPSHOT_TYPES):
-        return value
+    if value is None:
+        return None
+    try:
+        return deepcopy(value)
+    except Exception:
+        return repr(value)
 
-    if memo is None:
-        memo = {}
-    value_id = id(value)
-    cached = memo.get(value_id)
-    if cached is not None:
-        return cached
 
-    snapshot = _try_deepcopy_snapshot(value, memo)
-    if snapshot is not _MISSING_SNAPSHOT:
-        return snapshot
-    return _snapshot_tool_observer_fallback(value, memo)
+def _snapshot_tool_observer_error(error: BaseException | None) -> BaseException | None:
+    """Return an isolated exception snapshot for after-call observer hooks."""
+    if error is None:
+        return None
+    try:
+        copied = deepcopy(error)
+    except Exception:
+        return Exception(str(error))
+    return copied if isinstance(copied, BaseException) else Exception(str(error))
 
 
 def _bind_hook_context(hook: RegisteredHook, context: HookExecutionContext) -> HookExecutionContext:
@@ -270,7 +148,7 @@ def _bind_hook_context(hook: RegisteredHook, context: HookExecutionContext) -> H
         replacement_kwargs["arguments"] = deepcopy(context.arguments)
     if isinstance(context, ToolAfterCallContext):
         replacement_kwargs["result"] = _snapshot_tool_observer_value(context.result)
-        replacement_kwargs["error"] = cast("BaseException | None", _snapshot_tool_observer_value(context.error))
+        replacement_kwargs["error"] = _snapshot_tool_observer_error(context.error)
     if isinstance(context, MessageEnrichContext):
         replacement_kwargs["_items"] = []
     return replace(context, **replacement_kwargs)
