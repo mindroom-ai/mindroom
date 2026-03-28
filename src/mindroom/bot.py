@@ -33,6 +33,7 @@ from mindroom.hooks import (
     render_enrichment_block,
     strip_enrichment_from_session_storage,
 )
+from mindroom.hooks.sender import send_hook_message
 from mindroom.hooks.types import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -523,7 +524,10 @@ class AgentBot:
         resolved_source_kind = source_kind
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = content.get("com.mindroom.source_kind")
-            if isinstance(source_kind_override, str) and source_kind_override:
+            source_kind_sender_is_trusted = isinstance(event, _SyntheticTextEvent) or (
+                extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
+            )
+            if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
                 resolved_source_kind = source_kind_override
         if resolved_source_kind is None:
             if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
@@ -3744,22 +3748,17 @@ class AgentBot:
             self.logger.warning("Hook send requested before Matrix client is ready", room_id=room_id)
             return None
 
-        content_extra = dict(extra_content or {})
-        content_extra["com.mindroom.source_kind"] = "hook"
-        content_extra["com.mindroom.hook_source"] = source_hook
-
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(self.client, room_id, thread_id)
-        content = format_message_with_mentions(
+        event_id = await send_hook_message(
+            self.client,
             self.config,
             self.runtime_paths,
+            room_id,
             body,
+            thread_id,
+            source_hook,
+            extra_content,
             sender_domain=self.matrix_id.domain,
-            thread_event_id=thread_id,
-            latest_thread_event_id=latest_thread_event_id,
-            extra_content=content_extra,
         )
-
-        event_id = await send_message(self.client, room_id, content)
         if event_id:
             self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)
             return event_id
