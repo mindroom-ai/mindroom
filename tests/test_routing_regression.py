@@ -150,6 +150,7 @@ class TestRoutingRegression:
         message_event.sender = "@user:localhost"
         message_event.body = "@mindroom_research:localhost what can you do?"
         message_event.event_id = "$user_msg_123"
+        message_event.server_timestamp = 1000
         message_event.source = {
             "content": {
                 "body": "@mindroom_research:localhost what can you do?",
@@ -246,6 +247,7 @@ class TestRoutingRegression:
         message_event.sender = "@user:localhost"
         message_event.body = "What's the latest news?"
         message_event.event_id = "$user_msg_456"
+        message_event.server_timestamp = 1000
         message_event.source = {
             "content": {
                 "body": "What's the latest news?",
@@ -329,6 +331,7 @@ class TestRoutingRegression:
         message_event.sender = "@bob:localhost"
         message_event.body = "What's new today?"
         message_event.event_id = "$user_msg_789"
+        message_event.server_timestamp = 1000
         message_event.source = {
             "content": {
                 "body": "What's new today?",
@@ -416,6 +419,7 @@ class TestRoutingRegression:
         message_event.sender = "@bob:localhost"
         message_event.body = "What's new today?"
         message_event.event_id = "$user_msg_789_multi"
+        message_event.server_timestamp = 1000
         message_event.source = {
             "content": {
                 "body": "What's new today?",
@@ -494,6 +498,7 @@ class TestRoutingRegression:
         message_event.sender = "@bob:localhost"
         message_event.body = "What's new today?"
         message_event.event_id = "$user_msg_791"
+        message_event.server_timestamp = 1000
         message_event.source = {
             "content": {
                 "body": "What's new today?",
@@ -575,6 +580,7 @@ class TestRoutingRegression:
         message_event.sender = "@alice:localhost"
         message_event.body = "Can someone continue this thread?"
         message_event.event_id = "$user_msg_790"
+        message_event.server_timestamp = 1000
         message_event.source = {
             "content": {
                 "body": "Can someone continue this thread?",
@@ -703,6 +709,7 @@ class TestRoutingRegression:
         message_event.sender = f"@user:{domain}"
         message_event.body = f"@mindroom_research:{domain} and @mindroom_news:{domain}, what do you think?"
         message_event.event_id = "$user_msg_789"
+        message_event.server_timestamp = 1000
         message_event.source = {
             "content": {
                 "body": f"@mindroom_research:{domain} and @mindroom_news:{domain}, what do you think?",
@@ -776,6 +783,7 @@ class TestRoutingRegression:
         router_message.sender = "@mindroom_router:localhost"
         router_message.body = "@research could you help with this?"
         router_message.event_id = "$router_msg"
+        router_message.server_timestamp = 1000
         router_message.source = {
             "content": {
                 "body": "@research could you help with this?",
