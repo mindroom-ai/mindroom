@@ -601,7 +601,9 @@ async def _build_workflow_message_content(
             sender_domain=config.get_domain(runtime_paths),
             thread_event_id=None,
         )
-    automated_message = f"⏰ [Automated Task]\n{message_text}\n\n_Note: Automated task - no follow-up expected._"
+    automated_message = (
+        f"⏰ [Automated Task]\n{message_text}\n\n_Note: Automated task - follow-up expected when complete._"
+    )
     assert workflow.room_id is not None  # Caller checks this
     latest_thread_event_id = await get_latest_thread_event_id_if_needed(
         client,

@@ -255,7 +255,7 @@ How it works:
 - **Event-based**: Automatically converts to smart polling (e.g., "if email" → check every 1-2 min)
 - Agents receive clear instructions about conditions to check
 - Multiple agents collaborate when mentioned together
-- Automated tasks are clearly marked so agents don't wait for follow-up"""
+- Automated tasks are clearly marked and agents follow up when they fire"""
 
     if topic == "skill":
         return """**Skill Command**
