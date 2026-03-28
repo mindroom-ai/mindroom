@@ -47,7 +47,7 @@ The enrichment is stripped from session history after the response completes.
 
 ## Hook types
 
-The hook system has three execution modes, determined by the event, not by individual hooks.
+The hook system has four execution modes, determined by the event, not by individual hooks.
 
 ### Observer (`emit`)
 
@@ -319,7 +319,7 @@ A bounded semaphore (default 10) prevents one plugin from flooding the event loo
 ## Custom events
 
 Plugins can define and emit namespaced custom events.
-Built-in namespaces (`message:*`, `agent:*`, `schedule:*`, `reaction:*`, `config:*`) are reserved.
+Built-in namespaces (`message:*`, `agent:*`, `schedule:*`, `reaction:*`, `config:*`, `tool:*`) are reserved.
 
 ### Defining a custom event hook
 
@@ -359,7 +359,7 @@ await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
 
 - Pattern: `^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$`
 - Must contain at least one colon separator
-- Reserved namespaces: `message`, `agent`, `schedule`, `reaction`, `config`
+- Reserved namespaces: `message`, `agent`, `schedule`, `reaction`, `config`, `tool`
 - Custom events run in observer mode (`emit()`)
 - Recursion guard: nested emissions stop at depth 3
 

@@ -262,11 +262,11 @@ List skill directories in the manifest `skills` array. Those directories are add
 
 ## Hooks
 
-Plugins can ship typed event hooks for message enrichment, response transformation, lifecycle observation, reactions, schedules, and custom events.
+Plugins can ship typed event hooks for message enrichment, response transformation, lifecycle observation, tool call gating and observation, reactions, schedules, and custom events.
 See the [Hooks](hooks.md) page for full documentation including:
 
 - The `@hook` decorator and all parameters
-- All 9 built-in events and their execution modes
+- The built-in events and their execution modes
 - The enrichment pipeline (`message:enrich`)
 - Custom events
 - Error handling and circuit breaker behavior
