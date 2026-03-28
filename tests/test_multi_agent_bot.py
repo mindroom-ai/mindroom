@@ -29,6 +29,7 @@ from mindroom.authorization import is_authorized_sender as is_authorized_sender_
 from mindroom.bot import (
     AgentBot,
     MultiKnowledgeVectorDb,
+    TeamBot,
     _DispatchPayload,
     _MessageContext,
     _PreparedDispatch,
@@ -76,7 +77,7 @@ from mindroom.orchestrator import (
     main,
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
-from mindroom.teams import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
+from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import (
@@ -2085,6 +2086,151 @@ class TestAgentBot:
         process_kwargs = bot._process_and_respond_streaming.await_args.kwargs
         assert process_args[5] == "$thinking"
         assert process_kwargs["adopt_existing_placeholder"] is True
+
+    @pytest.mark.asyncio
+    async def test_generate_response_queues_thread_summary_for_threaded_reply(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Threaded agent replies should queue summary generation."""
+
+        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function(None)
+            return "$response"
+
+        scheduled_tasks: list[asyncio.Task[None]] = []
+        scheduled_names: list[str] = []
+
+        def schedule_background_task(
+            coro: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            error_handler: object | None = None,  # noqa: ARG001
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+            scheduled_tasks.append(task)
+            scheduled_names.append(name)
+            return task
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._process_and_respond = AsyncMock(
+            return_value=_ResponseDispatchResult(event_id="$response", response_text="ok", delivery_kind="sent"),
+        )
+        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
+
+        with (
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
+            patch("mindroom.bot.maybe_generate_thread_summary", new_callable=AsyncMock) as mock_thread_summary,
+        ):
+            await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Summarize this thread",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=[],
+                user_id="@alice:localhost",
+            )
+
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+        mock_thread_summary.assert_awaited_once_with(
+            client=bot.client,
+            room_id="!test:localhost",
+            thread_id="$thread",
+            config=config,
+            runtime_paths=bot.runtime_paths,
+        )
+        assert "thread_summary_!test:localhost_$thread" in scheduled_names
+
+    @pytest.mark.asyncio
+    async def test_team_generate_response_queues_thread_summary_for_threaded_reply(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Threaded team replies should queue summary generation."""
+        scheduled_tasks: list[asyncio.Task[None]] = []
+        scheduled_names: list[str] = []
+
+        def schedule_background_task(
+            coro: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            error_handler: object | None = None,  # noqa: ARG001
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+            scheduled_tasks.append(task)
+            scheduled_names.append(name)
+            return task
+
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        team_member = config.get_ids(runtime_paths)["general"]
+        bot = TeamBot(
+            mock_agent_user,
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_agents=[team_member],
+            team_mode="coordinate",
+        )
+        bot.client = AsyncMock()
+        bot._generate_team_response_helper = AsyncMock(return_value="$team-response")
+
+        resolution = TeamResolution(
+            intent=TeamIntent.EXPLICIT_MEMBERS,
+            requested_members=[team_member],
+            member_statuses=[
+                TeamResolutionMember(
+                    agent=team_member,
+                    name="general",
+                    status=TeamMemberStatus.ELIGIBLE,
+                ),
+            ],
+            eligible_members=[team_member],
+            outcome=TeamOutcome.TEAM,
+            mode=TeamMode.COORDINATE,
+        )
+
+        with (
+            patch.object(bot, "_materializable_agent_names", return_value={"general"}),
+            patch("mindroom.bot.resolve_configured_team", return_value=resolution),
+            patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.bot.store_conversation_memory", new_callable=AsyncMock),
+            patch("mindroom.bot.maybe_generate_thread_summary", new_callable=AsyncMock) as mock_thread_summary,
+        ):
+            event_id = await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Team, summarize this thread",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=[],
+                user_id="@alice:localhost",
+            )
+
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+        assert event_id == "$team-response"
+        mock_thread_summary.assert_awaited_once_with(
+            client=bot.client,
+            room_id="!test:localhost",
+            thread_id="$thread",
+            config=config,
+            runtime_paths=bot.runtime_paths,
+        )
+        assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
