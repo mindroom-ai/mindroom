@@ -1145,6 +1145,10 @@ class AgentBot:
         if dispatch is None:
             return
 
+        if self._has_newer_unresponded_in_scope(event, dispatch.context):
+            self.response_tracker.mark_responded(event.event_id)
+            return
+
         content = event.source.get("content") if isinstance(event.source, dict) else None
         message_attachment_ids = parse_attachment_ids_from_event_source(event.source)
         message_extra_content: dict[str, Any] = {}
@@ -1665,6 +1669,62 @@ class AgentBot:
             return None
 
         return requester_user_id
+
+    def _has_newer_unresponded_in_scope(
+        self,
+        event: _DispatchEvent,
+        context: _MessageContext,
+    ) -> bool:
+        """Return True if a newer unresponded message from the same sender exists.
+
+        Compares raw ``event.sender`` against thread_history ``sender`` fields.
+        When True the caller should ``mark_responded`` and skip AI generation;
+        the latest message will pick up earlier ones via unseen-message context.
+
+        Only considers newer messages that look like normal text (not ``!``
+        commands), because commands exit early in dispatch without generating
+        an AI response — coalescing against them would permanently drop the
+        older message.
+
+        Limitations (graceful degradation to current behaviour):
+        - Room-mode (no thread_history): returns False.
+        - Media / voice messages: not coalesced (text-only).
+        - Race condition: if the newer task completes before the older task
+          reaches this check, the older task proceeds normally (duplicate
+          reply, same as pre-coalescing behaviour).
+        """
+        if not context.thread_history:
+            return False
+
+        if isinstance(event, _SyntheticTextEvent):
+            return False
+        current_ts = event.server_timestamp
+        if not isinstance(current_ts, int):
+            return False
+
+        for msg in context.thread_history:
+            if msg.get("event_id") == event.event_id:
+                continue
+            if msg.get("sender") != event.sender:
+                continue
+            msg_ts = msg.get("timestamp")
+            if not isinstance(msg_ts, int) or msg_ts <= current_ts:
+                continue
+            # Skip commands — they exit early without generating an AI response,
+            # so coalescing against them would permanently lose the older message.
+            msg_body = msg.get("body", "")
+            if isinstance(msg_body, str) and msg_body.lstrip().startswith("!"):
+                continue
+            # Found a newer normal message from the same sender — skip if unresponded.
+            if not self.response_tracker.has_responded(msg["event_id"]):
+                self.logger.info(
+                    "Coalescing older message; newer unresponded message exists",
+                    event_id=event.event_id,
+                    coalesced_event_id=msg["event_id"],
+                )
+                return True
+
+        return False
 
     async def _prepare_dispatch(
         self,
