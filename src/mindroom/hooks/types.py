@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Protocol
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable
-
+from typing import Any, Literal, Protocol
 
 EVENT_MESSAGE_RECEIVED = "message:received"
 EVENT_MESSAGE_ENRICH = "message:enrich"
@@ -55,6 +52,10 @@ DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
 DEFAULT_CUSTOM_EVENT_TIMEOUT_MS = 1000
 
 EnrichmentCachePolicy = Literal["stable", "volatile"]
+type HookMessageSender = Callable[
+    [str, str, str | None, str, dict[str, Any] | None],
+    Awaitable[str | None],
+]
 
 
 class HookCallback(Protocol):

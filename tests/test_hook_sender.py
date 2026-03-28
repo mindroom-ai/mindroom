@@ -19,12 +19,14 @@ from mindroom.hooks import (
     EVENT_MESSAGE_RECEIVED,
     AgentLifecycleContext,
     HookContext,
+    HookMessageSender,
     HookRegistry,
     MessageEnvelope,
     MessageReceivedContext,
     hook,
 )
 from mindroom.hooks.execution import emit
+from mindroom.hooks.sender import HookMessageSender as SenderAlias
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
@@ -39,8 +41,6 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.hooks.sender import HookMessageSender
-
 
 def _config(tmp_path: Path) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
@@ -51,6 +51,11 @@ def _config(tmp_path: Path) -> Config:
         ),
         runtime_paths,
     )
+
+
+def test_hooks_package_reexports_hook_message_sender() -> None:
+    """The public hooks package should keep exporting HookMessageSender."""
+    assert HookMessageSender is SenderAlias
 
 
 def _plugin(name: str, callbacks: list[object]) -> object:

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from mindroom.hooks.types import HookMessageSender as _HookMessageSender
 from mindroom.matrix.client import get_latest_thread_event_id_if_needed, send_message
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -15,10 +15,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-type HookMessageSender = Callable[
-    [str, str, str | None, str, dict[str, Any] | None],
-    Awaitable[str | None],
-]
+
+HookMessageSender = _HookMessageSender
 
 
 def resolve_hook_sender_domain(

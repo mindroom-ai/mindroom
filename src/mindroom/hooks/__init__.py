@@ -40,6 +40,7 @@ from .types import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EnrichmentItem,
+    HookMessageSender,
     RegisteredHook,
 )
 
@@ -63,6 +64,7 @@ __all__ = [
     "CustomEventContext",
     "EnrichmentItem",
     "HookContext",
+    "HookMessageSender",
     "HookRegistry",
     "MessageEnrichContext",
     "MessageEnvelope",
