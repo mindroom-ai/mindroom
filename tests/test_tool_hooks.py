@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -41,6 +41,12 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_p
 if TYPE_CHECKING:
     from collections.abc import Generator
     from pathlib import Path
+
+type SyncBridgeEvent = (
+    tuple[Literal["before"], str, dict[str, str], str]
+    | tuple[Literal["tool"], str]
+    | tuple[Literal["after"], str, bool, str]
+)
 
 
 def _config(
@@ -311,7 +317,7 @@ def test_build_tool_hook_bridge_returns_none_without_tool_hooks() -> None:
 
 def test_sync_function_call_execute_runs_tool_hooks(tmp_path: Path) -> None:
     """Sync FunctionCall.execute() should still fire the bridge hooks."""
-    seen: list[object] = []
+    seen: list[SyncBridgeEvent] = []
 
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def before(ctx: ToolBeforeCallContext) -> None:
@@ -361,7 +367,7 @@ def test_sync_function_call_execute_runs_tool_hooks(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_sync_tool_function_call_aexecute_runs_tool_hooks(tmp_path: Path) -> None:
     """Async execution should still run the bridge for sync tool entrypoints."""
-    seen: list[object] = []
+    seen: list[SyncBridgeEvent] = []
 
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def before(ctx: ToolBeforeCallContext) -> None:

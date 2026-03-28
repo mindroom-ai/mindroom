@@ -36,6 +36,7 @@ _DECLINED_RESULT_TEMPLATE = (
     "Adjust your approach — try a different tool or different arguments."
 )
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
+ToolHookResult = Any
 
 
 def _resolved_thread_id(
@@ -125,21 +126,21 @@ def _format_declined_result(tool_name: str, reason: str) -> str:
     return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
 
 
-async def _await_result(awaitable: Awaitable[object]) -> object:
+async def _await_result(awaitable: Awaitable[ToolHookResult]) -> ToolHookResult:
     return await awaitable
 
 
-def _run_coroutine_from_sync(coroutine: object) -> object:
+def _run_coroutine_from_sync(coroutine: ToolHookResult) -> ToolHookResult:
     if not inspect.isawaitable(coroutine):
         return coroutine
-    runner_coroutine = cast("Coroutine[Any, Any, object]", _await_result(coroutine))
+    runner_coroutine = cast("Coroutine[Any, Any, ToolHookResult]", _await_result(coroutine))
 
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(runner_coroutine)
 
-    result: object | None = None
+    result: ToolHookResult = None
     error: BaseException | None = None
     context = copy_context()
 
@@ -158,7 +159,7 @@ def _run_coroutine_from_sync(coroutine: object) -> object:
     return result
 
 
-async def _call_tool(func: Callable[..., Any], args: dict[str, Any]) -> object:
+async def _call_tool(func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
     result = func(**args)
     if inspect.isawaitable(result):
         return await result
@@ -181,7 +182,7 @@ async def _execute_bridge(
     runtime_paths: RuntimePaths | None,
     has_before_hooks: bool,
     has_after_hooks: bool,
-) -> object:
+) -> ToolHookResult:
     started_at = time.perf_counter()
     context_kwargs = _build_context_kwargs(
         tool_name=tool_name,
@@ -212,7 +213,7 @@ async def _execute_bridge(
                 await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
             return result
 
-    result: object | None = None
+    result: ToolHookResult = None
     error: BaseException | None = None
     try:
         result = await _call_tool(func, args)
@@ -258,7 +259,7 @@ def build_tool_hook_bridge(
     if not has_before_hooks and not has_after_hooks:
         return None
 
-    async def bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> object:
+    async def bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
         return await _execute_bridge(
             hook_registry=hook_registry,
             tool_name=name,
@@ -276,7 +277,7 @@ def build_tool_hook_bridge(
             has_after_hooks=has_after_hooks,
         )
 
-    def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> object:
+    def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
         return _run_coroutine_from_sync(
             _execute_bridge(
                 hook_registry=hook_registry,
