@@ -341,8 +341,58 @@ def test_sync_function_call_execute_runs_tool_hooks(tmp_path: Path) -> None:
     function = _first_function(toolkit)
     prepend_tool_hook_bridge(toolkit, bridge)
 
-    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+    with (
+        patch("agno.tools.function.log_warning") as mock_log_warning,
+        tool_runtime_context(_tool_runtime_context(tmp_path)),
+        tool_execution_identity(_execution_identity()),
+    ):
         result = FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute()
+
+    assert result.status == "success"
+    assert result.result == "HI"
+    mock_log_warning.assert_not_called()
+    assert seen == [
+        ("before", "echo", {"text": "hi"}, "$resolved-thread"),
+        ("tool", "hi"),
+        ("after", "HI", False, "$resolved-thread"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_function_call_aexecute_runs_tool_hooks(tmp_path: Path) -> None:
+    """Async execution should still run the bridge for sync tool entrypoints."""
+    seen: list[object] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append(("before", ctx.tool_name, dict(ctx.arguments), ctx.thread_id))
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        seen.append(("after", ctx.result, ctx.blocked, ctx.thread_id))
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        execution_identity=_execution_identity(),
+    )
+    assert bridge is not None
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        def echo(self, text: str) -> str:
+            seen.append(("tool", text))
+            return text.upper()
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    prepend_tool_hook_bridge(toolkit, bridge)
+
+    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+        result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute()
 
     assert result.status == "success"
     assert result.result == "HI"

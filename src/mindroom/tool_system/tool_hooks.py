@@ -277,9 +277,6 @@ def build_tool_hook_bridge(
         )
 
     def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> object:
-        if inspect.iscoroutinefunction(func):
-            return _run_coroutine_from_sync(_call_tool(func, args))
-
         return _run_coroutine_from_sync(
             _execute_bridge(
                 hook_registry=hook_registry,
@@ -325,9 +322,7 @@ def _prepend_function_tool_hook(function: Function, bridge: Callable[..., Any]) 
     is_async_entrypoint = inspect.iscoroutinefunction(function.entrypoint) or inspect.isasyncgenfunction(
         function.entrypoint,
     )
-    bridge_hooks = [bridge]
-    if not is_async_entrypoint and sync_bridge is not None:
-        bridge_hooks.append(sync_bridge)
+    bridge_hooks = [bridge] if is_async_entrypoint or sync_bridge is None else [sync_bridge]
 
     existing_hooks = [hook for hook in list(function.tool_hooks or []) if hook not in bridge_hooks]
     function.tool_hooks = [*bridge_hooks, *existing_hooks]
