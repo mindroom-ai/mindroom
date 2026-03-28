@@ -461,8 +461,13 @@ Common `just` recipes for development:
 just local-matrix-up              # Boot Synapse + Postgres dev stack
 just local-platform-compose-up    # Full SaaS sandbox
 
-# Testing
-just test-backend                 # Run pytest for core
+# Testing (IMPORTANT: use nix-shell on NixOS hosts)
+# If `uv run pytest` fails with 'module mindroom has no attribute bot',
+# you need nix-shell for libstdc++.so.6. Use:
+export NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos
+nix-shell --run 'uv run pytest tests/<file>.py -x -n 0 --no-cov -v'
+# Or if the above works, you can also use:
+just test-backend                 # Run pytest for core (may need nix-shell wrapper)
 just test-saas-backend            # Run pytest for SaaS backend
 
 # Deployment

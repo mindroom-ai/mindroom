@@ -38,8 +38,19 @@ from mindroom.matrix.rooms import (
     load_rooms,
     resolve_room_aliases,
 )
+from mindroom.matrix.stale_stream_cleanup import (
+    InterruptedThread,
+    auto_resume_interrupted_threads,
+    cleanup_stale_streaming_messages,
+)
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, create_agent_user
+from mindroom.matrix.users import (
+    INTERNAL_USER_ACCOUNT_KEY,
+    INTERNAL_USER_AGENT_NAME,
+    AgentMatrixUser,
+    create_agent_user,
+    login_agent_user,
+)
 from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import (
     reset_runtime_state,
@@ -714,6 +725,85 @@ class MultiAgentOrchestrator:
             return
         logger.info("All agent bots started successfully")
 
+    async def _cleanup_stale_streams_after_restart(
+        self,
+        bots: list[AgentBot | TeamBot],
+        config: Config,
+    ) -> list[InterruptedThread]:
+        """Cleanup stale streams for started bots before sync loops begin."""
+        bot_user_ids = {bot.agent_user.user_id for bot in bots if bot.client is not None and bot.agent_user.user_id}
+        if not bot_user_ids:
+            return []
+
+        cleaned_count = 0
+        interrupted_threads: list[InterruptedThread] = []
+        for bot in bots:
+            if bot.client is None or not bot.agent_user.user_id:
+                continue
+            try:
+                bot_cleaned_count, bot_interrupted_threads = await cleanup_stale_streaming_messages(
+                    bot.client,
+                    bot_user_id=bot.agent_user.user_id,
+                    bot_user_ids=bot_user_ids,
+                    config=config,
+                    runtime_paths=self.runtime_paths,
+                )
+                cleaned_count += bot_cleaned_count
+                interrupted_threads.extend(bot_interrupted_threads)
+            except Exception as exc:
+                logger.warning(
+                    "Could not cleanup stale streaming messages (non-critical)",
+                    agent_name=bot.agent_name,
+                    error=str(exc),
+                )
+
+        if cleaned_count > 0:
+            logger.info("Cleaned stale streaming messages", count=cleaned_count)
+        return interrupted_threads
+
+    async def _auto_resume_after_restart(
+        self,
+        interrupted_threads: list[InterruptedThread],
+        config: Config,
+    ) -> None:
+        """Queue real Matrix resume messages from the internal system user."""
+        if not config.defaults.auto_resume_after_restart or not interrupted_threads:
+            return
+        if config.mindroom_user is None:
+            logger.warning("Auto-resume after restart is enabled but mindroom_user is not configured")
+            return
+
+        user_account = MatrixState.load(runtime_paths=self.runtime_paths).get_account(INTERNAL_USER_ACCOUNT_KEY)
+        user_id = config.get_mindroom_user_id(self.runtime_paths)
+        if user_account is None or user_id is None:
+            logger.warning("Auto-resume after restart skipped because the internal user account is unavailable")
+            return
+
+        system_user = AgentMatrixUser(
+            agent_name=INTERNAL_USER_AGENT_NAME,
+            user_id=user_id,
+            display_name=config.mindroom_user.display_name,
+            password=user_account.password,
+        )
+        try:
+            system_user_client = await login_agent_user(
+                constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+                system_user,
+                self.runtime_paths,
+            )
+        except Exception as exc:
+            logger.warning("Could not login internal user for auto-resume (non-critical)", error=str(exc))
+            return
+
+        try:
+            resumed_count = await auto_resume_interrupted_threads(system_user_client, interrupted_threads)
+            if resumed_count > 0:
+                logger.info("Queued auto-resume messages after restart", count=resumed_count)
+        except Exception as exc:
+            logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
+        finally:
+            await system_user_client.close()
+
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         await wait_for_matrix_homeserver(runtime_paths=self.runtime_paths)
@@ -739,6 +829,8 @@ class MultiAgentOrchestrator:
             "Setting up Matrix rooms and memberships",
             lambda: self._setup_rooms_and_memberships(started_bots),
         )
+        interrupted_threads = await self._cleanup_stale_streams_after_restart(started_bots, config)
+        await self._auto_resume_after_restart(interrupted_threads, config)
 
         self.running = True
 

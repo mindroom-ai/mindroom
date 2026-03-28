@@ -48,6 +48,7 @@ _PROGRESS_PLACEHOLDER = "Thinking..."
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
 _CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
+_RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _IN_PROGRESS_MESSAGE_PATTERN = re.compile(rf"{re.escape(IN_PROGRESS_MARKER)}\.*$")
@@ -95,6 +96,14 @@ def clean_partial_reply_text(text: str) -> str:
     if cleaned == _PROGRESS_PLACEHOLDER or not cleaned or not any(char.isalnum() for char in cleaned):
         return ""
     return cleaned
+
+
+def build_restart_interrupted_body(text: str) -> str:
+    """Return restart-note text for a stale in-progress message body."""
+    stripped_text = _IN_PROGRESS_MESSAGE_PATTERN.sub("", text).rstrip()
+    if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
+        return _RESTART_INTERRUPTED_RESPONSE_NOTE
+    return f"{stripped_text}\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}"
 
 
 def _longest_common_prefix_len(first: list[ToolTraceEntry], second: list[ToolTraceEntry]) -> int:
