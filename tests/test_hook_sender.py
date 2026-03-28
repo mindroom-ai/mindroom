@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.hooks import (
     EVENT_MESSAGE_RECEIVED,
     HookContext,
@@ -37,7 +39,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Awaitable, Callable, Generator
     from pathlib import Path
 
 
@@ -221,8 +223,20 @@ async def test_hook_context_send_message_supports_multiple_hook_sends(tmp_path: 
     await emit(registry, EVENT_MESSAGE_RECEIVED, _message_received_context(tmp_path))
 
     assert sent_messages == [
-        ("!room:localhost", "first", "$thread", "hook-plugin:message:received", {"custom": 1}),
-        ("!room:localhost", "second", None, "hook-plugin:message:received", None),
+        (
+            "!room:localhost",
+            "first",
+            "$thread",
+            "hook-plugin:message:received",
+            {"custom": 1, ORIGINAL_SENDER_KEY: "@user:localhost"},
+        ),
+        (
+            "!room:localhost",
+            "second",
+            None,
+            "hook-plugin:message:received",
+            {ORIGINAL_SENDER_KEY: "@user:localhost"},
+        ),
     ]
 
 
@@ -290,6 +304,34 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
     assert isinstance(captured_content["m.relates_to"], dict)
     assert captured_content["m.relates_to"]["rel_type"] == "m.thread"
     assert captured_content["m.relates_to"]["event_id"] == "$thread"
+
+
+@pytest.mark.asyncio
+async def test_hook_send_message_preserves_original_sender_for_downstream_dispatch(tmp_path: Path) -> None:
+    """Hook sends should preserve the requester identity for downstream permission checks."""
+    bot = _hook_bot(tmp_path)
+    bot.client = AsyncMock()
+
+    captured_content: dict[str, object] = {}
+
+    async def mock_send(_client: object, _room_id: str, content: dict[str, object]) -> str:
+        captured_content.update(content)
+        return "$hook-event"
+
+    with (
+        patch("mindroom.bot.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
+        patch("mindroom.bot.send_message", side_effect=mock_send),
+    ):
+        event_id = await bot._hook_send_message(
+            "!room:localhost",
+            "hello",
+            None,
+            "plugin:event",
+            {ORIGINAL_SENDER_KEY: "@user:localhost"},
+        )
+
+    assert event_id == "$hook-event"
+    assert captured_content[ORIGINAL_SENDER_KEY] == "@user:localhost"
 
 
 @pytest.mark.asyncio
@@ -381,7 +423,7 @@ async def test_orchestrator_refreshes_and_clears_hook_message_sender(tmp_path: P
     """The orchestrator should register the router sender and clear it on stop."""
     orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     router_bot = MagicMock()
-    router_bot.client = AsyncMock()
+    router_bot.client = None
     router_bot.stop = AsyncMock()
     router_bot._hook_send_message = AsyncMock(return_value="$router-event")
     orchestrator.agent_bots = {"router": router_bot}
@@ -390,6 +432,7 @@ async def test_orchestrator_refreshes_and_clears_hook_message_sender(tmp_path: P
 
     sender = get_hook_message_sender()
     assert sender is not None
+    router_bot.client = AsyncMock()
     assert await sender("!room:localhost", "body", "$thread", "plugin:event", {"custom": True}) == "$router-event"
     router_bot._hook_send_message.assert_awaited_once_with(
         "!room:localhost",
@@ -403,3 +446,50 @@ async def test_orchestrator_refreshes_and_clears_hook_message_sender(tmp_path: P
         await orchestrator.stop()
 
     assert get_hook_message_sender() is None
+
+
+@pytest.mark.asyncio
+async def test_start_runtime_registers_hook_sender_before_router_start(tmp_path: Path) -> None:
+    """Router lifecycle hooks should see a registered sender during startup."""
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.config = _config(tmp_path)
+    router_bot = MagicMock()
+    router_bot.client = None
+    router_bot.running = False
+    router_bot._hook_send_message = AsyncMock(return_value="$router-event")
+    orchestrator.agent_bots = {"router": router_bot}
+
+    async def mock_start_router_bot() -> object:
+        assert get_hook_message_sender() is not None
+        router_bot.client = AsyncMock()
+        return router_bot
+
+    async def passthrough_run_with_retry(
+        _label: str,
+        fn: Callable[[], Awaitable[object]],
+        **_kwargs: object,
+    ) -> object:
+        return await fn()
+
+    orchestrator._start_router_bot = AsyncMock(side_effect=mock_start_router_bot)
+    orchestrator._start_entities_once = AsyncMock(
+        return_value=SimpleNamespace(
+            started_bots=[],
+            retryable_entities=[],
+            permanently_failed_entities=[],
+        ),
+    )
+    orchestrator._log_degraded_startup = MagicMock()
+    orchestrator._setup_rooms_and_memberships = AsyncMock()
+    orchestrator._cleanup_stale_streams_after_restart = AsyncMock()
+    orchestrator._schedule_knowledge_refresh = AsyncMock()
+    orchestrator._sync_memory_auto_flush_worker = AsyncMock()
+    orchestrator._start_sync_task = MagicMock()
+
+    with (
+        patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
+        patch("mindroom.orchestrator.run_with_retry", side_effect=passthrough_run_with_retry),
+    ):
+        await orchestrator._start_runtime()
+
+    assert get_hook_message_sender() is not None

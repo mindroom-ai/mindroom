@@ -717,7 +717,7 @@ class MultiAgentOrchestrator:
     def _refresh_hook_message_sender(self) -> None:
         """Register the active router-backed sender for hook contexts."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or router_bot.client is None:
+        if router_bot is None:
             clear_hook_message_sender()
             return
 
@@ -782,8 +782,8 @@ class MultiAgentOrchestrator:
         if not self.agent_bots:
             await self.initialize()
 
-        router_bot = await self._start_router_bot()
         self._refresh_hook_message_sender()
+        router_bot = await self._start_router_bot()
         set_runtime_starting("Starting remaining Matrix bot accounts")
         start_results = await self._start_entities_once(
             [entity_name for entity_name in self.agent_bots if entity_name != ROUTER_AGENT_NAME],

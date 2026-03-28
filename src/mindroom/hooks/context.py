@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from mindroom.constants import ORIGINAL_SENDER_KEY
+
 from .sender import get_hook_message_sender
 from .types import EnrichmentCachePolicy, EnrichmentItem
 
@@ -92,7 +94,11 @@ class HookContext:
             self.logger.warning("send_message called but no sender registered")
             return None
         source_hook = f"{self.plugin_name}:{self.event_name}"
-        return await sender(room_id, text, thread_id, source_hook, extra_content)
+        resolved_extra_content = dict(extra_content or {})
+        requester_id = _requester_id_for_hook_send(self)
+        if requester_id:
+            resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
+        return await sender(room_id, text, thread_id, source_hook, resolved_extra_content or None)
 
 
 @dataclass(slots=True)
@@ -192,3 +198,18 @@ class CustomEventContext(HookContext):
     room_id: str | None
     thread_id: str | None
     sender_id: str | None
+
+
+def _requester_id_for_hook_send(context: HookContext) -> str | None:
+    """Return the requester identity to preserve on hook-originated sends."""
+    if isinstance(context, MessageReceivedContext | MessageEnrichContext):
+        return context.envelope.requester_id
+    if isinstance(context, BeforeResponseContext):
+        return context.draft.envelope.requester_id
+    if isinstance(context, AfterResponseContext):
+        return context.result.envelope.requester_id
+    if isinstance(context, ScheduleFiredContext):
+        return context.created_by
+    if isinstance(context, ReactionReceivedContext | CustomEventContext):
+        return context.sender_id
+    return None
