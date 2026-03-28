@@ -34,9 +34,32 @@ from agno.run.agent import (
 )
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
-from agno.utils.message import filter_tool_calls
 
 from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
+from mindroom.compaction import (
+    CompactionOutcome,
+    apply_pending_compaction,
+    clear_pending_compaction,
+    compact_session_now,
+)
+from mindroom.compaction import (
+    estimate_history_tokens as _shared_estimate_history_tokens,
+)
+from mindroom.compaction import (
+    estimate_message_media_chars as _shared_estimate_message_media_chars,
+)
+from mindroom.compaction import (
+    estimate_messages_tokens as _shared_estimate_messages_tokens,
+)
+from mindroom.compaction import (
+    estimate_static_tokens as _shared_estimate_static_tokens,
+)
+from mindroom.compaction import (
+    find_fitting_run_limit as _shared_find_fitting_run_limit,
+)
+from mindroom.compaction import (
+    get_replayable_runs as _shared_get_replayable_runs,
+)
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ROUTER_AGENT_NAME,
@@ -57,6 +80,7 @@ from mindroom.media_fallback import append_inline_media_fallback_prompt, should_
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_enhanced_prompt
 from mindroom.streaming import clean_partial_reply_text, is_in_progress_message, is_interrupted_partial_reply
+from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.events import (
     complete_pending_tool_block,
     extract_tool_completed_info,
@@ -160,122 +184,27 @@ def _canonical_provider(provider: str) -> str:
 
 
 def _estimate_message_media_chars(message: Message) -> int:
-    media_values = (
-        message.images,
-        message.audio,
-        message.videos,
-        message.files,
-        message.audio_output,
-        message.image_output,
-        message.video_output,
-        message.file_output,
-    )
-    media_chars = 0
-    for media_value in media_values:
-        if media_value:
-            media_chars += len(str(media_value))
-    return media_chars
+    return _shared_estimate_message_media_chars(message)
 
 
 def _estimate_messages_tokens(messages: Sequence[Message] | None) -> int:
-    """Estimate token count for messages using chars / 4 approximation."""
-    if not messages:
-        return 0
-    total_chars = 0
-    for msg in messages:
-        content = msg.compressed_content or msg.content
-        if isinstance(content, str):
-            total_chars += len(content)
-        elif isinstance(content, list):
-            for part in content:
-                total_chars += len(str(part))
-        elif content is not None:
-            total_chars += len(str(content))
-        tool_calls = msg.tool_calls
-        if tool_calls:
-            total_chars += len(str(tool_calls))
-        total_chars += _estimate_message_media_chars(msg)
-    return total_chars // 4
+    return _shared_estimate_messages_tokens(messages)
 
 
 def _estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
-    """Estimate tokens for the system prompt and current user message (chars / 4)."""
-    static_chars = len(agent.role or "")
-    instructions = agent.instructions
-    if isinstance(instructions, str):
-        static_chars += len(instructions)
-    elif isinstance(instructions, list):
-        for instruction in instructions:
-            static_chars += len(str(instruction))
-    static_chars += len(full_prompt)
-    return static_chars // 4
-
-
-def _get_history_skip_roles(agent: Agent) -> list[str] | None:
-    """Return history skip_roles matching Agno's run-message construction."""
-    system_role = agent.system_message_role
-    if isinstance(system_role, str) and system_role not in {"user", "assistant", "tool"}:
-        return [system_role]
-    return None
-
-
-def _get_team_scope(agent: Agent) -> tuple[str | None, str | None]:
-    """Return (team_id, agent_id) only when agent is actually in a team scope."""
-    team_id = agent.team_id
-    if not isinstance(team_id, str) or not team_id:
-        return None, None
-    agent_id = agent.id
-    return team_id, agent_id if isinstance(agent_id, str) and agent_id else None
+    return _shared_estimate_static_tokens(agent, full_prompt)
 
 
 def _get_replayable_runs(session: AgentSession, agent: Agent) -> list[RunOutput | TeamRunOutput]:
-    """Get runs eligible for history replay, matching Agno session filtering."""
-    runs = [run for run in session.runs or [] if isinstance(run, (RunOutput, TeamRunOutput))]
-
-    team_id, agent_id = _get_team_scope(agent)
-    if team_id is not None:
-        runs = [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == team_id]
-    elif agent_id:
-        runs = [run for run in runs if isinstance(run, RunOutput) and run.agent_id == agent_id]
-
-    skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
-    return [run for run in runs if run.parent_run_id is None and run.status not in skip_statuses]
+    return _shared_get_replayable_runs(session, agent)
 
 
 def _estimate_history_tokens(session: AgentSession, agent: Agent, run_limit: int | None) -> int:
-    """Estimate tokens for replayed history messages using Agno's get_messages path."""
-    team_id, agent_id = _get_team_scope(agent)
-    messages = session.get_messages(
-        agent_id=agent_id,
-        team_id=team_id,
-        last_n_runs=run_limit,
-        limit=None,
-        skip_roles=_get_history_skip_roles(agent),
-    )
-    max_tool_calls_from_history = agent.max_tool_calls_from_history
-    if max_tool_calls_from_history is None:
-        return _estimate_messages_tokens(messages)
-    history_copy = [deepcopy(msg) for msg in messages]
-    filter_tool_calls(history_copy, max_tool_calls_from_history)
-    return _estimate_messages_tokens(history_copy)
+    return _shared_estimate_history_tokens(session, agent, run_limit)
 
 
 def _find_fitting_run_limit(session: AgentSession, agent: Agent, max_runs: int, budget: int) -> int:
-    """Find the largest run limit whose replayed history stays within budget."""
-    low = 0
-    high = max_runs
-    best = 0
-
-    while low <= high:
-        mid = (low + high) // 2
-        tokens = 0 if mid == 0 else _estimate_history_tokens(session, agent, mid)
-        if tokens <= budget:
-            best = mid
-            low = mid + 1
-        else:
-            high = mid - 1
-
-    return best
+    return _shared_find_fitting_run_limit(session, agent, max_runs, budget)
 
 
 def _disable_history_for_run(
@@ -355,14 +284,28 @@ def _apply_context_window_limit(
     )
     initial_run_limit = max_considered_runs if current_limit is not None and current_limit > 0 else None
     history_tokens = _estimate_history_tokens(session, agent, initial_run_limit)
-    total_tokens = static_tokens + history_tokens
+    summary_tokens = 0
+    if agent.add_session_summary_to_context and session.summary is not None:
+        summary_tokens = estimate_text_tokens(session.summary.summary)
+    total_tokens = static_tokens + history_tokens + summary_tokens
     if total_tokens <= threshold:
         return
 
     original = current_limit if current_limit is not None else len(replayable_runs)
-    budget = threshold - static_tokens
+    budget = threshold - static_tokens - summary_tokens
     if budget <= 0:
         new_limit = 0
+        if static_tokens + summary_tokens > threshold and summary_tokens > 0:
+            # Summary alone exceeds the remaining budget — suppress it for this run
+            agent.add_session_summary_to_context = False
+            logger.warning(
+                "Session summary exceeds context budget, disabling for this run",
+                agent=agent_name,
+                summary_tokens=summary_tokens,
+                static_tokens=static_tokens,
+                context_window=context_window,
+                threshold=threshold,
+            )
         reason = "no_history_budget"
     else:
         new_limit = _find_fitting_run_limit(session, agent, max_considered_runs, budget)
@@ -803,13 +746,20 @@ def _get_unseen_messages(
     unseen: list[dict[str, Any]] = []
     partial_reply_kinds: set[PartialReplyKind] = set()
     for msg in thread_history:
+        # Skip compaction notice events
+        content_dict = msg.get("content")
+        if isinstance(content_dict, dict) and content_dict.get("io.mindroom.compaction") is not None:
+            continue
         event_id = msg.get("event_id")
         sender = msg.get("sender")
+        content = msg.get("content")
         # Skip already-seen messages
         if event_id and event_id in seen_event_ids:
             continue
         # Skip the current triggering message
         if current_event_id and event_id == current_event_id:
+            continue
+        if isinstance(content, dict) and "io.mindroom.compaction" in content:
             continue
         if agent_sender_id and sender == agent_sender_id:
             partial_kind = _classify_partial_reply(
@@ -999,21 +949,23 @@ async def _cached_agent_run(
     run_id_callback: Callable[[str], None] | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     enrichment_digest: str | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
     media_inputs = media or MediaInputs()
     storage_path = runtime_paths.storage_root
-    # Skip cache when media is present (large bytes, unlikely to repeat)
-    # or when Agno history is enabled (prompt can be identical but replayed history differs)
+    # Skip cache when media is present (large bytes, unlikely to repeat),
+    # when Agno history is enabled (prompt can be identical but replayed history differs),
+    # or when session summary replay is active (summary state is not in the cache key)
     cache = (
         None
-        if (media_inputs.has_any() or agent.add_history_to_context)
+        if (media_inputs.has_any() or agent.add_history_to_context or agent.add_session_summary_to_context)
         else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
     )
     if cache is None:
         _note_attempt_run_id(run_id_callback, run_id)
-        return await agent.arun(
+        response = await agent.arun(
             full_prompt,
             session_id=session_id,
             user_id=user_id,
@@ -1024,6 +976,10 @@ async def _cached_agent_run(
             videos=media_inputs.videos,
             metadata=metadata,
         )
+        manual_outcome = await apply_pending_compaction()
+        if manual_outcome is not None and compaction_outcomes_collector is not None:
+            compaction_outcomes_collector.append(manual_outcome)
+        return response
 
     model = agent.model
     assert model is not None
@@ -1041,6 +997,9 @@ async def _cached_agent_run(
         run_id=run_id,
         metadata=metadata,
     )
+    manual_outcome = await apply_pending_compaction()
+    if manual_outcome is not None and compaction_outcomes_collector is not None:
+        compaction_outcomes_collector.append(manual_outcome)
 
     if response.status not in {RunStatus.cancelled, RunStatus.error}:
         cache.set(cache_key, response)
@@ -1061,6 +1020,7 @@ async def _prepare_agent_and_prompt(
     reply_to_event_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
     execution_identity: ToolExecutionIdentity | None = None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
 ) -> tuple[Agent, str, list[str]]:
     """Prepare agent and full prompt for AI processing.
 
@@ -1082,10 +1042,10 @@ async def _prepare_agent_and_prompt(
 
     unseen_event_ids: list[str] = []
 
-    # Check whether Agno already has prior runs for this session.
+    storage = None
     session = None
     has_prior_runs = False
-    if session_id and thread_history:
+    if session_id:
         storage = create_session_storage(
             agent_name,
             config,
@@ -1093,7 +1053,7 @@ async def _prepare_agent_and_prompt(
             execution_identity=execution_identity,
         )
         session = _get_agent_session(storage, session_id)
-        has_prior_runs = session is not None and bool(session.runs)
+        has_prior_runs = session is not None and (bool(session.runs) or session.summary is not None)
 
     if reply_to_event_id and thread_history:
         # Matrix bot path: reuse unseen-message extraction even on first turn or
@@ -1131,6 +1091,75 @@ async def _prepare_agent_and_prompt(
         include_interactive_questions=include_interactive_questions,
         execution_identity=execution_identity,
     )
+    if session_id and storage is not None and session is not None and has_prior_runs and agent_name in config.agents:
+        compaction_config = config.get_agent_compaction_config(agent_name)
+        model_name, model_config = _get_model_config(config, agent_name)
+        context_window = model_config.context_window if model_config is not None else None
+        if compaction_config.enabled and context_window is not None:
+            static_tokens = _estimate_static_tokens(agent, full_prompt)
+            history_run_limit = (
+                agent.num_history_runs if agent.num_history_runs and agent.num_history_runs > 0 else None
+            )
+            history_message_limit = (
+                agent.num_history_messages
+                if agent.num_history_messages is not None and agent.num_history_messages > 0
+                else None
+            )
+            history_tokens = _shared_estimate_history_tokens(
+                session,
+                agent,
+                history_run_limit,
+                message_limit=history_message_limit,
+            )
+            summary_tokens = 0
+            if agent.add_session_summary_to_context and session.summary is not None:
+                summary_tokens = estimate_text_tokens(session.summary.summary)
+            if compaction_config.threshold_tokens is not None:
+                effective_threshold = compaction_config.threshold_tokens
+            elif compaction_config.threshold_percent is not None:
+                effective_threshold = int(context_window * compaction_config.threshold_percent)
+            else:
+                effective_threshold = int(context_window * 0.8)
+            # Clamp reserve/keep against context window so small models don't collapse to 0
+            effective_reserve = min(compaction_config.reserve_tokens, context_window // 2)
+            effective_keep_recent = min(compaction_config.keep_recent_tokens, context_window // 2)
+            target_ceiling = min(
+                effective_threshold,
+                max(0, context_window - effective_reserve),
+            )
+            if static_tokens + history_tokens + summary_tokens > target_ceiling >= 0:
+                try:
+                    summary_model_name = (
+                        compaction_config.model or model_name or config.get_entity_model_name(agent_name)
+                    )
+                    summary_model = get_model_instance(config, runtime_paths, summary_model_name)
+                    summary_model_config = config.models.get(summary_model_name)
+                    compaction_model_context_window = (
+                        summary_model_config.context_window
+                        if summary_model_config and summary_model_config.context_window
+                        else None
+                    )
+
+                    compaction_result = await compact_session_now(
+                        storage=storage,
+                        session_id=session_id,
+                        agent=agent,
+                        model=summary_model,
+                        mode="auto",
+                        window_tokens=context_window,
+                        threshold_tokens=effective_threshold,
+                        reserve_tokens=effective_reserve,
+                        keep_recent_tokens=effective_keep_recent,
+                        notify=compaction_config.notify,
+                        compaction_model_context_window=compaction_model_context_window,
+                    )
+                except Exception:
+                    logger.exception("Auto-compaction failed, falling back to context window limit")
+                    compaction_result = None
+                if compaction_result is not None:
+                    session, outcome = compaction_result
+                    if compaction_outcomes_collector is not None:
+                        compaction_outcomes_collector.append(outcome)
     _apply_context_window_limit(
         agent,
         agent_name,
@@ -1164,6 +1193,7 @@ async def ai_response(  # noqa: C901
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     enrichment_digest: str | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
@@ -1219,6 +1249,7 @@ async def ai_response(  # noqa: C901
             reply_to_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
             execution_identity=execution_identity,
+            compaction_outcomes_collector=compaction_outcomes_collector,
         )
     except Exception as e:
         logger.exception("Error preparing agent", agent=agent_name)
@@ -1260,6 +1291,7 @@ async def ai_response(  # noqa: C901
                 continue
 
             logger.exception("Error generating AI response", agent=agent_name)
+            clear_pending_compaction()
             return get_user_friendly_error_message(e, agent_name)
 
         if response.status == RunStatus.error:
@@ -1405,6 +1437,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     show_tool_calls: bool = True,
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     enrichment_digest: str | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
@@ -1462,6 +1495,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             reply_to_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
             execution_identity=execution_identity,
+            compaction_outcomes_collector=compaction_outcomes_collector,
         )
     except Exception as e:
         logger.exception("Error preparing agent for streaming", agent=agent_name)
@@ -1470,10 +1504,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
     metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
-    # Check cache (skip when media is present or history is enabled)
+    # Check cache (skip when media is present, history is enabled, or summary replay is active)
     cache = (
         None
-        if (media_inputs.has_any() or agent.add_history_to_context)
+        if (media_inputs.has_any() or agent.add_history_to_context or agent.add_session_summary_to_context)
         else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
     )
     if cache is not None:
@@ -1546,6 +1580,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 attempt_run_id = _next_retry_run_id(run_id)
                 continue
             logger.exception("Error starting streaming AI response")
+            clear_pending_compaction()
             yield get_user_friendly_error_message(e, agent_name)
             return
 
@@ -1558,6 +1593,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             retried_without_inline_media=retried_without_inline_media,
         ):
             yield stream_chunk
+
+        manual_outcome = await apply_pending_compaction()
+        if manual_outcome is not None and compaction_outcomes_collector is not None:
+            compaction_outcomes_collector.append(manual_outcome)
 
         if state.retry_requested:
             attempt_prompt = append_inline_media_fallback_prompt(full_prompt)

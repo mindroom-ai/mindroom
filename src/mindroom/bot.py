@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
+from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -56,6 +57,7 @@ from mindroom.matrix.identity import (
 )
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.presence import (
     build_agent_status_message,
     is_user_online,
@@ -188,6 +190,7 @@ if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
     from agno.media import Image
 
+    from mindroom.compaction import CompactionOutcome
     from mindroom.config.main import Config
     from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.orchestrator import MultiAgentOrchestrator
@@ -2924,6 +2927,7 @@ class AgentBot:
             execution_identity,
         )
         tool_trace: list[ToolTraceEntry] = []
+        compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(room_id)
 
@@ -2960,6 +2964,7 @@ class AgentBot:
                         tool_trace_collector=tool_trace,
                         run_metadata_collector=run_metadata_content,
                         execution_identity=execution_identity,
+                        compaction_outcomes_collector=compaction_outcomes,
                         enrichment_digest=enrichment_digest,
                     )
         except asyncio.CancelledError:
@@ -3019,6 +3024,17 @@ class AgentBot:
                 self.agent_name,
             )
             await interactive.add_reaction_buttons(self.client, room_id, delivery.event_id, delivery.options_list)
+
+        if delivery.event_id is not None:
+            for outcome in compaction_outcomes:
+                if outcome.notify:
+                    await self._send_compaction_notice(
+                        room_id=room_id,
+                        reply_to_event_id=reply_to_event_id,
+                        main_response_event_id=delivery.event_id,
+                        thread_id=thread_id,
+                        outcome=outcome,
+                    )
 
         return delivery
 
@@ -3355,6 +3371,7 @@ class AgentBot:
             [self.agent_name],
             execution_identity,
         )
+        compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(room_id)
         tool_trace: list[ToolTraceEntry] = []
@@ -3391,6 +3408,7 @@ class AgentBot:
                         show_tool_calls=self.show_tool_calls,
                         run_metadata_collector=run_metadata_content,
                         execution_identity=execution_identity,
+                        compaction_outcomes_collector=compaction_outcomes,
                         enrichment_digest=enrichment_digest,
                     )
                     response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
@@ -3532,6 +3550,17 @@ class AgentBot:
                 delivery.event_id,
                 delivery.options_list,
             )
+
+        if delivery.event_id is not None:
+            for outcome in compaction_outcomes:
+                if outcome.notify:
+                    await self._send_compaction_notice(
+                        room_id=room_id,
+                        reply_to_event_id=reply_to_event_id,
+                        main_response_event_id=delivery.event_id,
+                        thread_id=thread_id,
+                        outcome=outcome,
+                    )
 
         return delivery
 
@@ -3837,6 +3866,53 @@ class AgentBot:
             self.logger.info("Sent response", event_id=event_id, room_id=room_id)
             return event_id
         self.logger.error("Failed to send response to room", room_id=room_id)
+        return None
+
+    async def _send_compaction_notice(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        main_response_event_id: str,
+        thread_id: str | None,
+        outcome: CompactionOutcome,
+    ) -> str | None:
+        """Send a compaction notice without mention parsing side effects."""
+        if self.client is None:
+            return None
+
+        summary_line = (
+            "Conversation compacted "
+            f"(~{outcome.before_tokens:,} -> ~{outcome.after_tokens:,} / {outcome.window_tokens:,} tokens, "
+            f"{outcome.compacted_run_count} runs summarized)."
+        )
+        formatted_body = f"<em>{html_escape(summary_line)}</em>"
+        effective_thread_id = self._resolve_reply_thread_id(
+            thread_id,
+            reply_to_event_id,
+            room_id=room_id,
+        )
+        content = build_message_content(
+            summary_line,
+            formatted_body=formatted_body,
+            thread_event_id=effective_thread_id,
+            reply_to_event_id=main_response_event_id,
+            extra_content={
+                "msgtype": "m.notice",
+                "io.mindroom.compaction": outcome.to_notice_metadata(),
+                "com.mindroom.skip_mentions": True,
+            },
+        )
+        event_id = await send_message(self.client, room_id, content)
+        if event_id:
+            self.logger.info(
+                "Sent compaction notice",
+                event_id=event_id,
+                room_id=room_id,
+                summary_model=outcome.summary_model,
+            )
+            return event_id
+        self.logger.error("Failed to send compaction notice", room_id=room_id)
         return None
 
     async def _hook_send_message(

@@ -101,6 +101,16 @@ export type CultureMode = 'automatic' | 'agentic' | 'manual';
 
 export type ThreadMode = 'thread' | 'room';
 
+export interface CompactionConfig {
+  enabled?: boolean;
+  threshold_tokens?: number | null;
+  threshold_percent?: number | null;
+  reserve_tokens?: number;
+  keep_recent_tokens?: number;
+  model?: string | null;
+  notify?: boolean;
+}
+
 export interface Agent {
   id: string; // The key in the agents object
   display_name: string;
@@ -116,6 +126,7 @@ export interface Agent {
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
   memory_backend?: MemoryBackend; // Per-agent memory backend override (inherits memory.backend when omitted)
+  compaction?: CompactionConfig | null; // Per-agent auto-compaction overrides
   model?: string; // Reference to a model in the models section
   show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
   worker_tools?: string[]; // Tool names to route through scoped workers (overrides defaults)
@@ -185,6 +196,7 @@ export interface Config {
     markdown: boolean;
     learning?: boolean;
     learning_mode?: LearningMode;
+    compaction?: CompactionConfig;
     show_tool_calls?: boolean;
     worker_scope?: WorkerScope | null;
     worker_tools?: string[]; // Tool names to route through scoped workers by default for all agents

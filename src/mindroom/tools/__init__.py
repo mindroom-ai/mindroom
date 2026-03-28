@@ -16,6 +16,7 @@ from mindroom.tool_system.metadata import (
     ToolStatus,
     register_tool_with_metadata,
 )
+from mindroom.tools import compact_context as _compact_context_registration  # noqa: F401
 from mindroom.tools import delegate as _delegate_registration  # noqa: F401
 from mindroom.tools import memory as _memory_registration  # noqa: F401
 from mindroom.tools import self_config as _self_config_registration  # noqa: F401

@@ -19,6 +19,7 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
+from agno.session.summary import SessionSummary
 from pydantic import ValidationError
 
 import mindroom
@@ -36,9 +37,10 @@ from mindroom.ai import (
     ai_response,
 )
 from mindroom.bot import AgentBot
+from mindroom.compaction import CompactionOutcome
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig, ToolConfigEntry
 from mindroom.constants import STREAM_STATUS_STREAMING, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
@@ -243,29 +245,89 @@ class TestHistoryConfig:
         assert agent.enable_session_summaries is False
 
     def test_enable_session_summaries_defaults_override(self) -> None:
-        """Defaults-level enable_session_summaries=True flows to agent."""
+        """MindRoom keeps Agno auto summaries disabled even if the legacy default is true."""
         config = _load_default_config()
         config.defaults.enable_session_summaries = True
         with patch("mindroom.agents.SqliteDb"):
             agent = _create_agent_for_test("calculator", config)
-        assert agent.enable_session_summaries is True
+        assert agent.enable_session_summaries is False
 
     def test_enable_session_summaries_per_agent_true(self) -> None:
-        """Per-agent enable_session_summaries=True overrides defaults False."""
+        """MindRoom ignores the legacy per-agent auto-summary flag."""
         config = _load_default_config()
         config.agents["calculator"].enable_session_summaries = True
         with patch("mindroom.agents.SqliteDb"):
             agent = _create_agent_for_test("calculator", config)
-        assert agent.enable_session_summaries is True
+        assert agent.enable_session_summaries is False
 
     def test_enable_session_summaries_per_agent_false_overrides_defaults_true(self) -> None:
-        """Per-agent enable_session_summaries=False overrides defaults True."""
+        """Legacy auto-summary flags stay disabled regardless of authored value."""
         config = _load_default_config()
         config.defaults.enable_session_summaries = True
         config.agents["calculator"].enable_session_summaries = False
         with patch("mindroom.agents.SqliteDb"):
             agent = _create_agent_for_test("calculator", config)
         assert agent.enable_session_summaries is False
+
+    def test_compaction_defaults_are_absent_until_authored(self) -> None:
+        """DefaultsConfig.compaction is None when not explicitly set."""
+        defaults = DefaultsConfig()
+        assert defaults.compaction is None
+
+    def test_compaction_config_allows_both_thresholds_none(self) -> None:
+        """CompactionConfig allows both thresholds None (runtime fallback to 80% of context window)."""
+        cfg = CompactionConfig(threshold_tokens=None, threshold_percent=None)
+        assert cfg.threshold_tokens is None
+        assert cfg.threshold_percent is None
+
+    def test_config_merges_agent_compaction_overrides(self) -> None:
+        """Per-agent compaction overrides merge over defaults field-by-field."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="Calculator",
+                        compaction={"threshold_tokens": 32000, "notify": False},
+                    ),
+                },
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+                defaults=DefaultsConfig(
+                    compaction=CompactionConfig(
+                        enabled=True,
+                        threshold_tokens=64000,
+                        reserve_tokens=2048,
+                        keep_recent_tokens=12000,
+                        model="default",
+                        notify=True,
+                    ),
+                ),
+            ),
+        )
+
+        effective = config.get_agent_compaction_config("calculator")
+
+        assert effective.enabled is True
+        assert effective.threshold_tokens == 32000
+        assert effective.reserve_tokens == 2048
+        assert effective.keep_recent_tokens == 12000
+        assert effective.model == "default"
+        assert effective.notify is False
+
+    def test_auto_compaction_enables_session_summary_context(self) -> None:
+        """Auto-compaction should replay session summaries into the next prompt."""
+        config = _load_default_config()
+        with patch("mindroom.agents.SqliteDb"):
+            agent = _create_agent_for_test("calculator", config)
+        assert agent.add_session_summary_to_context is True
+
+    def test_manual_compaction_tool_enables_session_summary_context(self) -> None:
+        """The manual compaction tool should also enable summary replay."""
+        config = _load_default_config()
+        config.defaults.compaction = CompactionConfig(enabled=False)
+        config.agents["calculator"].tools.append(ToolConfigEntry(name="compact_context"))
+        with patch("mindroom.agents.SqliteDb"):
+            agent = _create_agent_for_test("calculator", config)
+        assert agent.add_session_summary_to_context is True
 
     # -- max_tool_calls_from_history --
 
@@ -386,6 +448,16 @@ class TestGetSeenEventIds:
         run2 = _make_run_output("r2", metadata={"matrix_seen_event_ids": ["$e1"]})
         session = AgentSession(session_id="sid", runs=[run1, run2])
         assert get_seen_event_ids(session) == {"$e1"}
+
+    def test_compaction_metadata_seen_ids_are_unioned_with_remaining_runs(self) -> None:
+        """Persisted compaction metadata should remain part of the seen-id source of truth."""
+        run = _make_run_output("r2", metadata={"matrix_seen_event_ids": ["$e3"]})
+        session = AgentSession(
+            session_id="sid",
+            runs=[run],
+            metadata={"mindroom_compaction": {"seen_event_ids": ["$e1", "$e2"]}},
+        )
+        assert get_seen_event_ids(session) == {"$e1", "$e2", "$e3"}
 
 
 class TestRemoveRunByEventId:
@@ -535,6 +607,32 @@ class TestGetUnseenMessages:
         assert unseen[0]["event_id"] == "$b1"
         assert partial_reply_kinds == set()
 
+    def test_skips_compaction_notice_events(self) -> None:
+        """Compaction notices must not be reclassified as unseen user input."""
+        config = self._make_config()
+        thread_history = [
+            {
+                "sender": "@user:example.com",
+                "body": "Compacted",
+                "event_id": "$notice",
+                "msgtype": "m.notice",
+                "content": {"io.mindroom.compaction": {"version": 1}},
+            },
+            {"sender": "@user:example.com", "body": "Real message", "event_id": "$real"},
+        ]
+
+        unseen, _ = _get_unseen_messages(
+            thread_history,
+            "test_agent",
+            config,
+            runtime_paths_for(config),
+            set(),
+            None,
+            active_event_ids=set(),
+        )
+
+        assert [message["event_id"] for message in unseen] == ["$real"]
+
 
 class TestBuildPromptWithUnseen:
     """Test _build_prompt_with_unseen helper."""
@@ -647,6 +745,37 @@ class TestPrepareAgentAndPrompt:
             mock_stuff.assert_not_called()
             # $u1 is seen, $u2 is current → no unseen messages, but the function still ran the Agno path
             assert unseen_ids == []
+
+    @pytest.mark.asyncio
+    async def test_summary_only_session_uses_agno_history_path(self, config: Config, tmp_path: object) -> None:
+        """Session with summary but no runs (fully compacted) should use Agno history, not thread stuffing."""
+        thread_history = [
+            {"sender": "@user:example.com", "body": "Hi", "event_id": "$u1"},
+            {"sender": "@user:example.com", "body": "Follow up", "event_id": "$u2"},
+        ]
+        session = AgentSession(
+            session_id="sid",
+            runs=[],
+            summary=SessionSummary(summary="## Goal\nPrevious work."),
+        )
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.create_agent") as mock_create,
+            patch("mindroom.ai._get_agent_session", return_value=session),
+            patch("mindroom.ai.build_prompt_with_thread_history") as mock_stuff,
+            patch("mindroom.ai.create_session_storage"),
+        ):
+            mock_create.return_value = MagicMock(spec=Agent)
+            _agent, _prompt, _unseen_ids = await _prepare_agent_and_prompt(
+                "calculator",
+                "test",
+                _runtime_paths(tmp_path),
+                config,
+                thread_history=thread_history,
+                session_id="sid",
+                reply_to_event_id="$u2",
+            )
+            mock_stuff.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_session_has_runs_but_no_metadata_uses_agno_path(self, config: Config, tmp_path: object) -> None:
@@ -835,6 +964,173 @@ class TestPrepareAgentAndPrompt:
             mock_stuff.assert_called_once()
             assert prompt == "stuffed"
             assert unseen_ids == []
+
+    @pytest.mark.asyncio
+    async def test_auto_compaction_runs_before_history_limiting(self, config: Config, tmp_path: object) -> None:
+        """When the estimated prompt exceeds the threshold, auto-compaction runs first."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"calculator": AgentConfig(display_name="Calculator")},
+                models={"default": ModelConfig(provider="openai", id="test-model", context_window=100)},
+                defaults=DefaultsConfig(
+                    compaction=CompactionConfig(
+                        enabled=True,
+                        threshold_tokens=20,
+                        reserve_tokens=10,
+                        keep_recent_tokens=5,
+                    ),
+                ),
+            ),
+            tmp_path,
+        )
+        session = AgentSession(
+            session_id="sid",
+            runs=[
+                RunOutput(
+                    run_id="r1",
+                    messages=[Message(role="user", content="x" * 60)],
+                    status=RunStatus.running,
+                ),
+            ],
+        )
+        agent = MagicMock(spec=Agent)
+        agent.role = "r" * 20
+        agent.instructions = []
+        agent.num_history_runs = None
+        agent.num_history_messages = None
+        agent.add_session_summary_to_context = True
+        agent.max_tool_calls_from_history = None
+        compacted_session = AgentSession(session_id="sid", runs=[])
+        outcome = CompactionOutcome(
+            mode="auto",
+            summary="## Goal\nCompacted",
+            topics=["compaction"],
+            summary_model="compact-model",
+            before_tokens=50,
+            after_tokens=10,
+            window_tokens=100,
+            threshold_tokens=20,
+            reserve_tokens=10,
+            keep_recent_tokens=5,
+            runs_before=1,
+            runs_after=1,
+            compacted_run_count=1,
+            compacted_at="2026-03-22T20:15:00Z",
+            notify=True,
+        )
+        collector: list[CompactionOutcome] = []
+
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.create_agent", return_value=agent),
+            patch("mindroom.ai.create_session_storage", return_value=MagicMock(spec=SqliteDb)),
+            patch("mindroom.ai._get_agent_session", return_value=session),
+            patch("mindroom.ai.get_model_instance", return_value=MagicMock(id="compact-model")),
+            patch(
+                "mindroom.ai.compact_session_now",
+                new_callable=AsyncMock,
+                return_value=(compacted_session, outcome),
+            ) as mock_compact,
+            patch("mindroom.ai._apply_context_window_limit") as mock_apply_limit,
+        ):
+            await _prepare_agent_and_prompt(
+                "calculator",
+                "test",
+                _runtime_paths(tmp_path),
+                config,
+                thread_history=[],
+                session_id="sid",
+                compaction_outcomes_collector=collector,
+            )
+
+        mock_compact.assert_awaited_once()
+        assert collector == [outcome]
+        assert mock_apply_limit.call_args.kwargs["session"] is compacted_session
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("context_window", "enabled", "session", "prompt"),
+        [
+            (
+                100,
+                False,
+                AgentSession(session_id="sid", runs=[RunOutput(run_id="r1", status=RunStatus.running)]),
+                "test",
+            ),
+            (
+                None,
+                True,
+                AgentSession(session_id="sid", runs=[RunOutput(run_id="r1", status=RunStatus.running)]),
+                "test",
+            ),
+            (100, True, None, "test"),
+            (
+                100,
+                True,
+                AgentSession(
+                    session_id="sid",
+                    runs=[
+                        RunOutput(
+                            run_id="r1",
+                            messages=[Message(role="user", content="tiny")],
+                            status=RunStatus.running,
+                        ),
+                    ],
+                ),
+                "ok",
+            ),
+        ],
+    )
+    async def test_auto_compaction_skips_noop_cases(
+        self,
+        context_window: int | None,
+        enabled: bool,
+        session: AgentSession | None,
+        prompt: str,
+        tmp_path: object,
+    ) -> None:
+        """Disabled, no-session, no-window, and below-threshold cases should not compact."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"calculator": AgentConfig(display_name="Calculator")},
+                models={"default": ModelConfig(provider="openai", id="test-model", context_window=context_window)},
+                defaults=DefaultsConfig(
+                    compaction=CompactionConfig(
+                        enabled=enabled,
+                        threshold_tokens=20,
+                        reserve_tokens=10,
+                        keep_recent_tokens=5,
+                    ),
+                ),
+            ),
+            tmp_path,
+        )
+        agent = MagicMock(spec=Agent)
+        agent.role = ""
+        agent.instructions = []
+        agent.num_history_runs = None
+        agent.num_history_messages = None
+        agent.add_session_summary_to_context = True
+        agent.max_tool_calls_from_history = None
+
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value=prompt),
+            patch("mindroom.ai.create_agent", return_value=agent),
+            patch("mindroom.ai.create_session_storage", return_value=MagicMock(spec=SqliteDb)),
+            patch("mindroom.ai._get_agent_session", return_value=session),
+            patch("mindroom.ai.compact_session_now", new_callable=AsyncMock) as mock_compact,
+            patch("mindroom.ai._apply_context_window_limit"),
+        ):
+            await _prepare_agent_and_prompt(
+                "calculator",
+                prompt,
+                _runtime_paths(tmp_path),
+                config,
+                thread_history=[],
+                session_id="sid",
+            )
+
+        mock_compact.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -1446,6 +1742,27 @@ class TestApplyContextWindowLimit:
             runs=[RunOutput(run_id="r1", messages=[media_msg], status=RunStatus.running)],
         )
         _apply_context_window_limit(agent, "test_agent", config, "y" * 20, "sid", tmp_path, session=session)
+        assert agent.add_history_to_context is False
+
+    def test_counts_session_summary_tokens_when_budgeting(self, tmp_path: object) -> None:
+        """Injected session summaries should count against the fallback history budget."""
+        config = self._make_config(context_window=100)  # threshold=80
+        agent = self._make_agent(role="x" * 20, num_history_runs=1)
+        agent.add_session_summary_to_context = True
+        session = AgentSession(
+            session_id="sid",
+            runs=[
+                RunOutput(
+                    run_id="r1",
+                    messages=[Message(role="user", content="a" * 100)],
+                    status=RunStatus.running,
+                ),
+            ],
+            summary=SessionSummary(summary="s" * 240),
+        )
+
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
+
         assert agent.add_history_to_context is False
 
     def test_respects_max_tool_calls_from_history_when_budgeting(self, tmp_path: object) -> None:

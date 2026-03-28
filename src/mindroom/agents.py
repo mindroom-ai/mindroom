@@ -19,7 +19,7 @@ from agno.session.agent import AgentSession
 
 import mindroom.tools  # noqa: F401
 from mindroom import agent_prompts, constants
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
@@ -395,7 +395,7 @@ def _tool_init_context_from_runtime(agent_runtime: ResolvedAgentRuntime) -> Agen
     )
 
 
-def build_agent_toolkit(
+def build_agent_toolkit(  # noqa: PLR0911
     tool_name: str,
     *,
     agent_name: str,
@@ -458,6 +458,16 @@ def build_agent_toolkit(
         from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
 
         return SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths)
+
+    if tool_name == "compact_context":
+        from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
+
+        return CompactContextTools(
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
 
     return _build_registered_agent_tool(
         tool_name,
@@ -616,9 +626,16 @@ def _get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | Non
 
 def get_seen_event_ids(session: AgentSession) -> set[str]:
     """Return union of all matrix_seen_event_ids from run metadata."""
-    if not session.runs:
-        return set()
     seen: set[str] = set()
+    metadata = session.metadata
+    if isinstance(metadata, dict):
+        compaction_metadata = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
+        if isinstance(compaction_metadata, dict):
+            preserved_seen_ids = compaction_metadata.get("seen_event_ids")
+            if isinstance(preserved_seen_ids, list):
+                seen.update(event_id for event_id in preserved_seen_ids if isinstance(event_id, str))
+    if not session.runs:
+        return seen
     for run in session.runs:
         if isinstance(run, RunOutput) and run.metadata:
             seen_ids = run.metadata.get("matrix_seen_event_ids")
@@ -953,17 +970,20 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         else defaults.compress_tool_results
     )
 
-    enable_session_summaries = (
-        agent_config.enable_session_summaries
-        if agent_config.enable_session_summaries is not None
-        else defaults.enable_session_summaries
-    )
-
     max_tool_calls_from_history = (
         agent_config.max_tool_calls_from_history
         if agent_config.max_tool_calls_from_history is not None
         else defaults.max_tool_calls_from_history
     )
+    compaction_config = config.get_agent_compaction_config(agent_name)
+    add_session_summary_to_context = compaction_config.enabled or "compact_context" in tool_names
+
+    # Warn when the deprecated enable_session_summaries field is explicitly set
+    if agent_config.enable_session_summaries is not None or defaults.enable_session_summaries:
+        logger.warning(
+            "enable_session_summaries is deprecated and ignored; use compaction config instead",
+            agent=agent_name,
+        )
 
     agent = Agent(
         name=agent_config.display_name,
@@ -981,12 +1001,14 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         add_history_to_context=True,
         num_history_runs=num_history_runs,
         num_history_messages=num_history_messages,
+        store_history_messages=False,
         culture_manager=culture_manager,
         add_culture_to_context=add_culture_to_context,
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
         compress_tool_results=compress_tool_results,
-        enable_session_summaries=enable_session_summaries,
+        enable_session_summaries=False,
+        add_session_summary_to_context=add_session_summary_to_context,
         max_tool_calls_from_history=max_tool_calls_from_history,
     )
     # Agno hardcodes num_history_runs=3 when both are None. Override after

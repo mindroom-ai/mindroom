@@ -15,7 +15,12 @@ from pydantic import (
 
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.memory import MemoryBackend  # noqa: TC001
-from mindroom.config.models import AgentLearningMode, ToolConfigEntry, validate_unique_tool_entries
+from mindroom.config.models import (
+    AgentLearningMode,
+    CompactionOverrideConfig,
+    ToolConfigEntry,
+    validate_unique_tool_entries,
+)
 from mindroom.tool_system.metadata import TOOL_METADATA, normalize_authored_tool_overrides
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
@@ -187,6 +192,10 @@ class AgentConfig(BaseModel):
     memory_backend: MemoryBackend | None = Field(
         default=None,
         description="Memory backend override for this agent ('mem0' or 'file'); inherits memory.backend when omitted",
+    )
+    compaction: CompactionOverrideConfig | None = Field(
+        default=None,
+        description="Per-agent auto-compaction overrides",
     )
     private: AgentPrivateConfig | None = Field(
         default=None,

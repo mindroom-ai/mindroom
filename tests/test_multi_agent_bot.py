@@ -36,6 +36,7 @@ from mindroom.bot import (
     _ResponseAction,
     _ResponseDispatchResult,
 )
+from mindroom.compaction import CompactionOutcome
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -244,6 +245,26 @@ class _FailingStubVectorDb:
     ) -> list[Document]:
         _ = (query, limit, filters)
         raise RuntimeError(self.error_message)
+
+
+def _make_compaction_outcome(*, mode: str = "auto", notify: bool = True) -> CompactionOutcome:
+    return CompactionOutcome(
+        mode=mode,
+        summary="## Goal\nPreserve <summary> & keep context.",
+        topics=["compaction", "context"],
+        summary_model="compact-model",
+        before_tokens=30000,
+        after_tokens=12000,
+        window_tokens=200000,
+        threshold_tokens=100000,
+        reserve_tokens=16384,
+        keep_recent_tokens=20000,
+        runs_before=18,
+        runs_after=7,
+        compacted_run_count=12,
+        compacted_at="2026-03-22T20:15:00Z",
+        notify=notify,
+    )
 
 
 class TestAgentBot:
@@ -987,6 +1008,7 @@ class TestAgentBot:
             assert stream_kwargs["reply_to_event_id"] == "event123"
             assert stream_kwargs["show_tool_calls"] is True
             assert stream_kwargs["run_metadata_collector"] == {}
+            assert stream_kwargs["compaction_outcomes_collector"] == []
             mock_ai_response.assert_not_called()
             # With streaming and stop button: initial message + reaction + edits
             # Note: The exact count may vary based on implementation
@@ -1011,6 +1033,7 @@ class TestAgentBot:
             assert ai_kwargs["show_tool_calls"] is True
             assert ai_kwargs["tool_trace_collector"] == []
             assert ai_kwargs["run_metadata_collector"] == {}
+            assert ai_kwargs["compaction_outcomes_collector"] == []
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final
             assert bot.client.room_send.call_count >= 2
