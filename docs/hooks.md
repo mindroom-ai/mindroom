@@ -406,6 +406,10 @@ Every hook context includes these fields:
 | `correlation_id` | `str` | Unique ID per inbound event |
 | `state_root` | `Path` | Plugin state directory (property) |
 
+Every hook context also exposes `await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None)`.
+It sends a hook-originated Matrix message and returns the event ID when available.
+For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
+
 ### Transport objects
 
 ```python
@@ -420,7 +424,7 @@ MessageEnvelope(
     attachment_ids: tuple[str, ...],
     mentioned_agents: tuple[str, ...],
     agent_name: str,
-    source_kind: str,  # "message", "edit", "voice", "image", "scheduled"
+    source_kind: str,  # "message", "edit", "voice", "image", "scheduled", "hook"
 )
 
 ResponseDraft(

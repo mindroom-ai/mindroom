@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.logging_config import get_logger
 
 from .sender import get_hook_message_sender
@@ -48,6 +49,7 @@ async def _send_hook_message(
     *,
     thread_id: str | None = None,
     extra_content: dict[str, Any] | None = None,
+    requester_id: str | None = None,
 ) -> str | None:
     """Send a Matrix message from a hook and return the event ID when available."""
     sender = get_hook_message_sender()
@@ -55,7 +57,10 @@ async def _send_hook_message(
         logger.warning("send_message called but no sender registered")
         return None
     source_hook = f"{plugin_name}:{event_name}"
-    return await sender(room_id, text, thread_id, source_hook, extra_content)
+    resolved_extra_content = dict(extra_content or {})
+    if requester_id:
+        resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
+    return await sender(room_id, text, thread_id, source_hook, resolved_extra_content or None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +137,7 @@ class HookContext:
             text,
             thread_id=thread_id,
             extra_content=extra_content,
+            requester_id=_requester_id_for_hook_send(self),
         )
 
 
@@ -282,6 +288,7 @@ class ToolBeforeCallContext:
             text,
             thread_id=thread_id,
             extra_content=extra_content,
+            requester_id=self.requester_id,
         )
 
 
@@ -330,4 +337,20 @@ class ToolAfterCallContext:
             text,
             thread_id=thread_id,
             extra_content=extra_content,
+            requester_id=self.requester_id,
         )
+
+
+def _requester_id_for_hook_send(context: HookContext) -> str | None:
+    """Return the requester identity to preserve on hook-originated sends."""
+    if isinstance(context, MessageReceivedContext | MessageEnrichContext):
+        return context.envelope.requester_id
+    if isinstance(context, BeforeResponseContext):
+        return context.draft.envelope.requester_id
+    if isinstance(context, AfterResponseContext):
+        return context.result.envelope.requester_id
+    if isinstance(context, ScheduleFiredContext):
+        return context.created_by
+    if isinstance(context, ReactionReceivedContext | CustomEventContext):
+        return context.sender_id
+    return None
