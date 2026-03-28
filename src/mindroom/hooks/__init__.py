@@ -26,7 +26,6 @@ from .enrichment import (
 )
 from .execution import emit, emit_collect, emit_gate, emit_transform
 from .registry import HookRegistry
-from .sender import HookMessageSender
 from .types import (
     BUILTIN_EVENT_NAMES,
     EVENT_AGENT_STARTED,
@@ -64,7 +63,6 @@ __all__ = [
     "CustomEventContext",
     "EnrichmentItem",
     "HookContext",
-    "HookMessageSender",
     "HookRegistry",
     "MessageEnrichContext",
     "MessageEnvelope",

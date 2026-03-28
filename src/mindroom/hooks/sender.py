@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from mindroom.matrix.client import get_latest_thread_event_id_if_needed, send_message
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.mentions import format_message_with_mentions
 
 if TYPE_CHECKING:
     import nio
@@ -52,12 +54,6 @@ async def send_hook_message(
     resolved_sender_domain = resolve_hook_sender_domain(client, sender_domain=sender_domain)
     if resolved_sender_domain is None:
         return None
-
-    # These stay local to avoid an import cycle during config bootstrap:
-    # config.main -> tool_system.plugins -> hooks -> sender ->
-    # matrix.(client|mentions) -> config.main
-    from mindroom.matrix.client import get_latest_thread_event_id_if_needed, send_message  # noqa: PLC0415
-    from mindroom.matrix.mentions import format_message_with_mentions  # noqa: PLC0415
 
     content_extra = dict(extra_content or {})
     content_extra["com.mindroom.source_kind"] = "hook"

@@ -18,7 +18,6 @@ from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import (
     ConfigReloadedContext,
-    HookMessageSender,
     HookRegistry,
     emit,
 )
@@ -95,6 +94,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
     from pathlib import Path
     from types import FrameType
+
+    from mindroom.hooks.sender import HookMessageSender
 
     from .constants import RuntimePaths
     from .knowledge.manager import KnowledgeManager
