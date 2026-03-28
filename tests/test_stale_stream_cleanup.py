@@ -11,7 +11,7 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, STREAM_STATUS_KEY
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedThread,
@@ -354,6 +354,7 @@ async def test_cleanup_keeps_latest_interrupted_thread_per_agent_and_thread(tmp_
             target_event_id="$newer",
             partial_text="Second partial",
             agent_name="test_agent",
+            original_sender_id=USER_ID,
         ),
     ]
 
@@ -370,6 +371,7 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
             target_event_id="$target-one",
             partial_text="One",
             agent_name="test_agent",
+            original_sender_id=USER_ID,
         ),
         InterruptedThread(
             room_id=ROOM_ID,
@@ -377,6 +379,7 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
             target_event_id="$target-two",
             partial_text="Two",
             agent_name="test_agent",
+            original_sender_id=USER_ID,
         ),
     ]
 
@@ -405,8 +408,10 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
     assert first_content["m.relates_to"]["rel_type"] == "m.thread"
     assert first_content["m.relates_to"]["event_id"] == "$thread-one"
     assert first_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$target-one"}
+    assert first_content[ORIGINAL_SENDER_KEY] == USER_ID
     assert second_content["body"] == f"@Test Agent {AUTO_RESUME_MESSAGE}"
     assert second_content["m.relates_to"]["event_id"] == "$thread-two"
+    assert second_content[ORIGINAL_SENDER_KEY] == USER_ID
     mock_sleep.assert_awaited_once_with(2.0)
 
 
@@ -486,8 +491,8 @@ async def test_auto_resume_skips_thread_id_none(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cleanup_cleans_recent_interrupted_message_on_startup(tmp_path: Path) -> None:
-    """Startup cleanup should not skip fresh interrupted messages after a restart."""
+async def test_cleanup_skips_recent_in_progress_message_on_startup(tmp_path: Path) -> None:
+    """Startup cleanup should skip fresh in-progress messages to avoid cross-instance clobbering."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     client.room_messages.return_value = _room_messages_response(
@@ -501,6 +506,41 @@ async def test_cleanup_cleans_recent_interrupted_message_on_startup(tmp_path: Pa
             event_id="$message",
             body="Needs cleanup ⋯",
             timestamp_ms=NOW_MS - 1_000,
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.edit_message",
+            new=AsyncMock(return_value="$edit"),
+        ) as mock_edit,
+        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=NOW_MS / 1000),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_returns_thread_requester_for_auto_resume(tmp_path: Path) -> None:
+    """Cleanup should carry the interrupted thread requester into the auto-resume record."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Start here",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$message",
+            body="Needs cleanup ⋯",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
             relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
         ),
     )
@@ -520,6 +560,7 @@ async def test_cleanup_cleans_recent_interrupted_message_on_startup(tmp_path: Pa
             target_event_id="$message",
             partial_text="Needs cleanup",
             agent_name="test_agent",
+            original_sender_id=USER_ID,
         ),
     ]
 
@@ -570,6 +611,49 @@ async def test_cleanup_preserves_stream_status_and_tool_trace_metadata(tmp_path:
         "version": 1,
         "events": [{"type": "tool_started", "tool_name": "shell"}],
     }
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_restart_marked_streaming_message(tmp_path: Path) -> None:
+    """Cleanup should not re-edit a message that already carries the restart interruption note."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$original",
+            body="Working ⋯",
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+        ),
+        _make_message_event(
+            event_id="$latest-edit",
+            body="* Working",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to={"rel_type": "m.replace", "event_id": "$original"},
+            new_content={
+                "body": stale_stream_cleanup_module.build_restart_interrupted_body("Working ⋯"),
+                "msgtype": "m.text",
+                STREAM_STATUS_KEY: "streaming",
+            },
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message",
+        new=AsyncMock(return_value="$cleanup-edit"),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    mock_edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
