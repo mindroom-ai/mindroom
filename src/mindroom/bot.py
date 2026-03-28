@@ -18,6 +18,7 @@ from mindroom.hooks import (
     AfterResponseContext,
     AgentLifecycleContext,
     BeforeResponseContext,
+    HookMessageSender,
     HookRegistry,
     MessageEnrichContext,
     MessageEnvelope,
@@ -492,7 +493,18 @@ class AgentBot:
             "runtime_paths": self.runtime_paths,
             "logger": self.logger.bind(event_name=event_name),
             "correlation_id": correlation_id,
+            "message_sender": self._hook_message_sender(),
         }
+
+    def _hook_message_sender(self) -> HookMessageSender | None:
+        """Return the sender bound into hook contexts for this bot."""
+        if self.orchestrator is not None:
+            sender = self.orchestrator._hook_message_sender()
+            if sender is not None:
+                return sender
+        if self.agent_name == ROUTER_AGENT_NAME and self.client is not None:
+            return self._hook_send_message
+        return None
 
     def _build_message_envelope(
         self,
@@ -2167,6 +2179,7 @@ class AgentBot:
             attachment_ids=tuple(attachment_ids or []),
             hook_registry=self.hook_registry,
             correlation_id=correlation_id,
+            hook_message_sender=self._hook_message_sender(),
         )
 
     def _build_tool_execution_identity(

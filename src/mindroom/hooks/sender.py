@@ -1,30 +1,65 @@
-"""Hook-to-Matrix message sender registration."""
+"""Hook-to-Matrix message sender helpers."""
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import nio
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 type HookMessageSender = Callable[
     [str, str, str | None, str, dict[str, Any] | None],
     Awaitable[str | None],
 ]
 
-_active_sender: HookMessageSender | None = None
 
+def build_hook_message_sender(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    sender_domain: str | None = None,
+) -> HookMessageSender | None:
+    """Return a sender bound to one Matrix client, if enough identity is available."""
+    from mindroom.matrix.identity import MatrixID  # noqa: PLC0415
 
-def set_hook_message_sender(fn: HookMessageSender) -> None:
-    """Register the active hook message sender."""
-    global _active_sender
-    _active_sender = fn
+    resolved_sender_domain = sender_domain
+    if resolved_sender_domain is None:
+        user_id = client.user_id
+        if not isinstance(user_id, str):
+            return None
+        if not user_id.startswith("@") or ":" not in user_id:
+            return None
+        resolved_sender_domain = MatrixID.parse(user_id).domain
 
+    async def _send(
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, Any] | None,
+    ) -> str | None:
+        from mindroom.matrix.client import get_latest_thread_event_id_if_needed, send_message  # noqa: PLC0415
+        from mindroom.matrix.mentions import format_message_with_mentions  # noqa: PLC0415
 
-def get_hook_message_sender() -> HookMessageSender | None:
-    """Return the active hook message sender, if any."""
-    return _active_sender
+        content_extra = dict(extra_content or {})
+        content_extra["com.mindroom.source_kind"] = "hook"
+        content_extra["com.mindroom.hook_source"] = source_hook
 
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(client, room_id, thread_id)
+        content = format_message_with_mentions(
+            config,
+            runtime_paths,
+            body,
+            sender_domain=resolved_sender_domain,
+            thread_event_id=thread_id,
+            latest_thread_event_id=latest_thread_event_id,
+            extra_content=content_extra,
+        )
+        return await send_message(client, room_id, content)
 
-def clear_hook_message_sender() -> None:
-    """Clear the active hook message sender."""
-    global _active_sender
-    _active_sender = None
+    return _send

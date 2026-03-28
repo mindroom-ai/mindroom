@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
 
-from .sender import get_hook_message_sender
 from .types import EnrichmentCachePolicy, EnrichmentItem
 
 if TYPE_CHECKING:
@@ -19,6 +18,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
+
+    from .sender import HookMessageSender
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +73,7 @@ class HookContext:
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
     correlation_id: str
+    message_sender: HookMessageSender | None = field(default=None, kw_only=True)
 
     @property
     def state_root(self) -> Path:
@@ -89,7 +91,7 @@ class HookContext:
         extra_content: dict[str, Any] | None = None,
     ) -> str | None:
         """Send a Matrix message from a hook and return the event ID when available."""
-        sender = get_hook_message_sender()
+        sender = self.message_sender
         if sender is None:
             self.logger.warning("send_message called but no sender registered")
             return None
