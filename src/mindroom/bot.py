@@ -18,6 +18,7 @@ from mindroom.hooks import (
     AfterResponseContext,
     AgentLifecycleContext,
     BeforeResponseContext,
+    HookMessageSender,
     HookRegistry,
     MessageEnrichContext,
     MessageEnvelope,
@@ -32,6 +33,7 @@ from mindroom.hooks import (
     render_enrichment_block,
     strip_enrichment_from_session_storage,
 )
+from mindroom.hooks.sender import send_hook_message
 from mindroom.hooks.types import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -492,7 +494,18 @@ class AgentBot:
             "runtime_paths": self.runtime_paths,
             "logger": self.logger.bind(event_name=event_name),
             "correlation_id": correlation_id,
+            "message_sender": self._hook_message_sender(),
         }
+
+    def _hook_message_sender(self) -> HookMessageSender | None:
+        """Return the sender bound into hook contexts for this bot."""
+        if self.orchestrator is not None:
+            sender = self.orchestrator._hook_message_sender()
+            if sender is not None:
+                return sender
+        if self.agent_name == ROUTER_AGENT_NAME and self.client is not None:
+            return self._hook_send_message
+        return None
 
     def _build_message_envelope(
         self,
@@ -511,7 +524,10 @@ class AgentBot:
         resolved_source_kind = source_kind
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = content.get("com.mindroom.source_kind")
-            if isinstance(source_kind_override, str) and source_kind_override:
+            source_kind_sender_is_trusted = isinstance(event, _SyntheticTextEvent) or (
+                extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
+            )
+            if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
                 resolved_source_kind = source_kind_override
         if resolved_source_kind is None:
             if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
@@ -550,6 +566,14 @@ class AgentBot:
         correlation_id: str,
     ) -> bool:
         """Emit message:received and return whether hooks suppressed processing."""
+        if envelope.source_kind == "hook":
+            self.logger.debug(
+                "Skipping message:received hooks for hook-originated automation message",
+                event_id=envelope.source_event_id,
+                room_id=envelope.room_id,
+            )
+            return False
+
         if not self.hook_registry.has_hooks(EVENT_MESSAGE_RECEIVED):
             return False
 
@@ -1120,6 +1144,10 @@ class AgentBot:
         if dispatch is None:
             return
 
+        if self._has_newer_unresponded_in_scope(event, dispatch.context):
+            self.response_tracker.mark_responded(event.event_id)
+            return
+
         content = event.source.get("content") if isinstance(event.source, dict) else None
         message_attachment_ids = parse_attachment_ids_from_event_source(event.source)
         message_extra_content: dict[str, Any] = {}
@@ -1641,6 +1669,62 @@ class AgentBot:
 
         return requester_user_id
 
+    def _has_newer_unresponded_in_scope(
+        self,
+        event: _DispatchEvent,
+        context: _MessageContext,
+    ) -> bool:
+        """Return True if a newer unresponded message from the same sender exists.
+
+        Compares raw ``event.sender`` against thread_history ``sender`` fields.
+        When True the caller should ``mark_responded`` and skip AI generation;
+        the latest message will pick up earlier ones via unseen-message context.
+
+        Only considers newer messages that look like normal text (not ``!``
+        commands), because commands exit early in dispatch without generating
+        an AI response — coalescing against them would permanently drop the
+        older message.
+
+        Limitations (graceful degradation to current behaviour):
+        - Room-mode (no thread_history): returns False.
+        - Media / voice messages: not coalesced (text-only).
+        - Race condition: if the newer task completes before the older task
+          reaches this check, the older task proceeds normally (duplicate
+          reply, same as pre-coalescing behaviour).
+        """
+        if not context.thread_history:
+            return False
+
+        if isinstance(event, _SyntheticTextEvent):
+            return False
+        current_ts = event.server_timestamp
+        if not isinstance(current_ts, int):
+            return False
+
+        for msg in context.thread_history:
+            if msg.get("event_id") == event.event_id:
+                continue
+            if msg.get("sender") != event.sender:
+                continue
+            msg_ts = msg.get("timestamp")
+            if not isinstance(msg_ts, int) or msg_ts <= current_ts:
+                continue
+            # Skip commands — they exit early without generating an AI response,
+            # so coalescing against them would permanently lose the older message.
+            msg_body = msg.get("body", "")
+            if isinstance(msg_body, str) and msg_body.lstrip().startswith("!"):
+                continue
+            # Found a newer normal message from the same sender — skip if unresponded.
+            if not self.response_tracker.has_responded(msg["event_id"]):
+                self.logger.info(
+                    "Coalescing older message; newer unresponded message exists",
+                    event_id=event.event_id,
+                    coalesced_event_id=msg["event_id"],
+                )
+                return True
+
+        return False
+
     async def _prepare_dispatch(
         self,
         room: nio.MatrixRoom,
@@ -2099,6 +2183,7 @@ class AgentBot:
             attachment_ids=tuple(attachment_ids or []),
             hook_registry=self.hook_registry,
             correlation_id=correlation_id,
+            hook_message_sender=self._hook_message_sender(),
         )
 
     def _build_tool_execution_identity(
@@ -3707,6 +3792,36 @@ class AgentBot:
             self.logger.info("Sent response", event_id=event_id, room_id=room_id)
             return event_id
         self.logger.error("Failed to send response to room", room_id=room_id)
+        return None
+
+    async def _hook_send_message(
+        self,
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Send a hook-originated Matrix message with stable metadata tags."""
+        if self.client is None:
+            self.logger.warning("Hook send requested before Matrix client is ready", room_id=room_id)
+            return None
+
+        event_id = await send_hook_message(
+            self.client,
+            self.config,
+            self.runtime_paths,
+            room_id,
+            body,
+            thread_id,
+            source_hook,
+            extra_content,
+            sender_domain=self.matrix_id.domain,
+        )
+        if event_id:
+            self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)
+            return event_id
+        self.logger.error("Failed to send hook message", room_id=room_id, source_hook=source_hook)
         return None
 
     async def _edit_message(

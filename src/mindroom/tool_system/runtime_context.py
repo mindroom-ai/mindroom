@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.hooks.sender import HookMessageSender
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class ToolRuntimeContext:
     runtime_attachment_ids: list[str] = field(default_factory=list)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty)
     correlation_id: str | None = None
+    hook_message_sender: HookMessageSender | None = None
 
 
 _TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(
@@ -137,6 +139,7 @@ async def emit_custom_event(
         runtime_paths=context.runtime_paths,
         logger=get_logger("mindroom.hooks.tools").bind(event_name=event_name),
         correlation_id=correlation_id,
+        message_sender=context.hook_message_sender,
         payload=payload,
         source_plugin=plugin_name,
         room_id=context.room_id,
