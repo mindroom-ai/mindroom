@@ -7,10 +7,14 @@ import inspect
 import time
 from contextvars import copy_context
 from copy import deepcopy
+from dataclasses import dataclass
+from functools import wraps
 from threading import Thread
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
+
+from agno.tools.function import FunctionCall
 
 from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, emit, emit_gate
 from mindroom.hooks.types import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL
@@ -37,6 +41,15 @@ _DECLINED_RESULT_TEMPLATE = (
 )
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
 ToolHookResult = Any
+_ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC = FunctionCall._build_nested_execution_chain_async
+_AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False
+
+
+@dataclass(slots=True)
+class _DeferredAsyncToolHookResult:
+    """Sentinel used when a sync hook needs async completion on the current loop."""
+
+    awaitable: Awaitable[ToolHookResult]
 
 
 def _resolved_thread_id(
@@ -159,6 +172,35 @@ def _run_coroutine_from_sync(coroutine: ToolHookResult) -> ToolHookResult:
     return result
 
 
+def _patch_agno_async_tool_hook_chain() -> None:
+    """Teach Agno's async tool hook chain to unwrap deferred sync-hook awaitables."""
+    global _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED
+
+    if _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED:
+        return
+
+    @wraps(_ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC)
+    async def _patched_build_nested_execution_chain_async(
+        self: FunctionCall,
+        entrypoint_args: dict[str, Any],
+    ) -> Callable[..., Awaitable[ToolHookResult]]:
+        execution_chain = await _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC(self, entrypoint_args)
+
+        async def _wrapped_execution_chain(name: str, func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
+            result = await execution_chain(name, func, args)
+            while isinstance(result, _DeferredAsyncToolHookResult):
+                result = await result.awaitable
+            return result
+
+        return _wrapped_execution_chain
+
+    type.__setattr__(FunctionCall, "_build_nested_execution_chain_async", _patched_build_nested_execution_chain_async)
+    _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = True
+
+
+_patch_agno_async_tool_hook_chain()
+
+
 async def _call_tool(func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
     result = func(**args)
     if inspect.isawaitable(result):
@@ -278,6 +320,25 @@ def build_tool_hook_bridge(
         )
 
     def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
+        if inspect.iscoroutinefunction(func):
+            return _DeferredAsyncToolHookResult(
+                _execute_bridge(
+                    hook_registry=hook_registry,
+                    tool_name=name,
+                    func=func,
+                    args=args,
+                    agent_name=agent_name,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    requester_id=requester_id,
+                    session_id=session_id,
+                    execution_identity=execution_identity,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    has_before_hooks=has_before_hooks,
+                    has_after_hooks=has_after_hooks,
+                ),
+            )
         return _run_coroutine_from_sync(
             _execute_bridge(
                 hook_registry=hook_registry,

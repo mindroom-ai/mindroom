@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -584,6 +585,78 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
                 "com.mindroom.original_sender": "@user:localhost",
             },
         ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path) -> None:
+    """Sync-tool hooks should keep send_message() on the active request loop under aexecute()."""
+    request_thread = threading.get_ident()
+    request_loop = asyncio.get_running_loop()
+    seen: list[tuple[str, int, int] | tuple[str, str]] = []
+
+    async def hook_message_sender(
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, object] | None,
+    ) -> str | None:
+        del room_id, body, thread_id, source_hook, extra_content
+        current_loop = asyncio.get_running_loop()
+        current_thread = threading.get_ident()
+        seen.append(("sender", current_thread, id(current_loop)))
+        assert current_thread == request_thread
+        assert current_loop is request_loop
+        return "$ok"
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        current_loop = asyncio.get_running_loop()
+        current_thread = threading.get_ident()
+        seen.append(("hook", current_thread, id(current_loop)))
+        assert current_thread == request_thread
+        assert current_loop is request_loop
+        event_id = await ctx.send_message("!room:localhost", "before")
+        seen.append(("event_id", event_id or ""))
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        execution_identity=_execution_identity(),
+    )
+    assert bridge is not None
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        def echo(self, text: str) -> str:
+            current_loop = asyncio.get_running_loop()
+            current_thread = threading.get_ident()
+            seen.append(("tool", current_thread, id(current_loop)))
+            assert current_thread == request_thread
+            assert current_loop is request_loop
+            return text.upper()
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    prepend_tool_hook_bridge(toolkit, bridge)
+
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)),
+        tool_execution_identity(_execution_identity()),
+    ):
+        result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute()
+
+    assert result.status == "success"
+    assert result.result == "HI"
+    assert seen == [
+        ("hook", request_thread, id(request_loop)),
+        ("sender", request_thread, id(request_loop)),
+        ("event_id", "$ok"),
+        ("tool", request_thread, id(request_loop)),
     ]
 
 
