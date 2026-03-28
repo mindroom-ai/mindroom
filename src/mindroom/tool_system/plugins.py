@@ -8,9 +8,13 @@ import sys
 from dataclasses import dataclass
 from importlib import util
 from pathlib import Path
-from typing import TYPE_CHECKING
+from types import ModuleType  # noqa: TC003
+from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.hooks.decorators import iter_module_hooks
+from mindroom.hooks.types import HookCallback  # noqa: TC001
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.skills import set_plugin_skill_roots
 
@@ -29,28 +33,56 @@ class _PluginManifest:
 
     name: str
     tools_module: str | None
+    hooks_module: str | None
     skills: list[str]
 
 
 @dataclass(frozen=True)
-class _Plugin:
-    """Loaded plugin details."""
+class _PluginBase:
+    """Loaded plugin details that depend only on the manifest."""
 
     name: str
     root: Path
     manifest_path: Path
     tools_module_path: Path | None
+    hooks_module_path: Path | None
     skill_dirs: list[Path]
 
 
 @dataclass
 class _PluginCacheEntry:
     manifest_mtime: float
-    plugin: _Plugin
+    plugin: _PluginBase
+
+
+@dataclass(frozen=True)
+class _Plugin:
+    """Loaded plugin details for the active config snapshot."""
+
+    name: str
+    root: Path
+    manifest_path: Path
+    entry_config: PluginEntryConfig
+    plugin_order: int
+    tools_module_path: Path | None
+    hooks_module_path: Path | None
+    skill_dirs: list[Path]
+    discovered_hooks: tuple[HookCallback, ...]
+
+
+@dataclass
+class _ModuleCacheEntry:
+    mtime: float
+    module: ModuleType
 
 
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
 _TOOL_MODULE_CACHE: dict[Path, float] = {}
+_MODULE_IMPORT_CACHE: dict[Path, _ModuleCacheEntry] = {}
+
+
+def _hook_display_name(callback: HookCallback) -> str:
+    return cast("Any", callback).__name__
 
 
 def load_plugins(
@@ -58,16 +90,19 @@ def load_plugins(
     runtime_paths: RuntimePaths,
 ) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
-    plugin_paths = config.plugins
-    if not plugin_paths:
+    plugin_entries = config.plugins
+    if not plugin_entries:
         set_plugin_skill_roots([])
         return []
     plugins: list[_Plugin] = []
     skill_roots: list[Path] = []
 
-    for plugin_path in plugin_paths:
-        root = _resolve_plugin_root(plugin_path, runtime_paths)
-        plugin = _load_plugin(root)
+    for plugin_order, plugin_entry in enumerate(plugin_entries):
+        if not plugin_entry.enabled:
+            continue
+
+        root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
+        plugin = _load_plugin(root, plugin_entry, plugin_order)
         if plugin is None:
             continue
         plugins.append(plugin)
@@ -145,7 +180,11 @@ def _parse_python_plugin_spec(plugin_path: str) -> tuple[str, str | None, bool] 
     return module_name, subpath, explicit
 
 
-def _load_plugin(root: Path) -> _Plugin | None:
+def _load_plugin(
+    root: Path,
+    entry_config: PluginEntryConfig,
+    plugin_order: int,
+) -> _Plugin | None:
     if not root.exists() or not root.is_dir():
         logger.warning("Plugin path does not exist", path=str(root))
         return None
@@ -166,31 +205,60 @@ def _load_plugin(root: Path) -> _Plugin | None:
 
     cached = _PLUGIN_CACHE.get(manifest_path)
     if cached and cached.manifest_mtime == manifest_mtime:
-        _load_tools_module(cached.plugin)
-        return cached.plugin
+        return _materialize_plugin(cached.plugin, entry_config, plugin_order)
 
     manifest = _parse_manifest(manifest_path)
     if manifest is None:
         return None
 
     tools_module_path = _resolve_tools_module(root, manifest.tools_module)
+    hooks_module_path = _resolve_tools_module(root, manifest.hooks_module)
     skill_dirs = _resolve_skill_dirs(root, manifest.skills)
 
-    plugin = _Plugin(
+    plugin = _PluginBase(
         name=manifest.name,
         root=root,
         manifest_path=manifest_path,
         tools_module_path=tools_module_path,
+        hooks_module_path=hooks_module_path,
         skill_dirs=skill_dirs,
     )
 
     _PLUGIN_CACHE[manifest_path] = _PluginCacheEntry(manifest_mtime=manifest_mtime, plugin=plugin)
-
-    _load_tools_module(plugin)
-    return plugin
+    return _materialize_plugin(plugin, entry_config, plugin_order)
 
 
-def _parse_manifest(path: Path) -> _PluginManifest | None:
+def _materialize_plugin(
+    plugin: _PluginBase,
+    entry_config: PluginEntryConfig,
+    plugin_order: int,
+) -> _Plugin:
+    tools_module = _load_plugin_module(plugin.name, plugin.tools_module_path, kind="tools")
+    hooks_module_path = plugin.hooks_module_path or plugin.tools_module_path
+    hooks_module = _load_plugin_module(plugin.name, hooks_module_path, kind="hooks") if hooks_module_path else None
+    if hooks_module is None and plugin.hooks_module_path is None:
+        hooks_module = tools_module
+    discovered_hooks = tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else ()
+    if discovered_hooks:
+        logger.info(
+            "Discovered plugin hooks",
+            plugin_name=plugin.name,
+            hook_names=[_hook_display_name(hook) for hook in discovered_hooks],
+        )
+    return _Plugin(
+        name=plugin.name,
+        root=plugin.root,
+        manifest_path=plugin.manifest_path,
+        entry_config=entry_config,
+        plugin_order=plugin_order,
+        tools_module_path=plugin.tools_module_path,
+        hooks_module_path=plugin.hooks_module_path,
+        skill_dirs=plugin.skill_dirs,
+        discovered_hooks=discovered_hooks,
+    )
+
+
+def _parse_manifest(path: Path) -> _PluginManifest | None:  # noqa: PLR0911
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -211,6 +279,11 @@ def _parse_manifest(path: Path) -> _PluginManifest | None:
         logger.warning("Plugin tools_module must be a string", path=str(path))
         return None
 
+    hooks_module = data.get("hooks_module")
+    if hooks_module is not None and not isinstance(hooks_module, str):
+        logger.warning("Plugin hooks_module must be a string", path=str(path))
+        return None
+
     raw_skills = data.get("skills", [])
     if raw_skills is None:
         raw_skills = []
@@ -218,7 +291,12 @@ def _parse_manifest(path: Path) -> _PluginManifest | None:
         logger.warning("Plugin skills must be a list of strings", path=str(path))
         return None
 
-    return _PluginManifest(name=name.strip(), tools_module=tools_module, skills=raw_skills)
+    return _PluginManifest(
+        name=name.strip(),
+        tools_module=tools_module,
+        hooks_module=hooks_module,
+        skills=raw_skills,
+    )
 
 
 def _resolve_tools_module(root: Path, tools_module: str | None) -> Path | None:
@@ -242,36 +320,44 @@ def _resolve_skill_dirs(root: Path, skills: list[str]) -> list[Path]:
     return skill_dirs
 
 
-def _load_tools_module(plugin: _Plugin) -> None:
-    if plugin.tools_module_path is None:
-        return
-
-    module_path = plugin.tools_module_path
+def _load_plugin_module(
+    plugin_name: str,
+    module_path: Path | None,
+    *,
+    kind: str,
+) -> ModuleType | None:
+    if module_path is None:
+        return None
     try:
         mtime = module_path.stat().st_mtime
     except OSError as exc:
-        logger.warning("Failed to stat plugin tools module", path=str(module_path), error=str(exc))
-        return
+        logger.warning("Failed to stat plugin module", path=str(module_path), kind=kind, error=str(exc))
+        return None
 
-    cached_mtime = _TOOL_MODULE_CACHE.get(module_path)
-    if cached_mtime == mtime:
-        return
+    cached = _MODULE_IMPORT_CACHE.get(module_path)
+    if cached is not None and cached.mtime == mtime:
+        if kind == "tools":
+            _TOOL_MODULE_CACHE[module_path] = mtime
+        return cached.module
 
-    module_name = _module_name(plugin.name, module_path)
+    module_name = _module_name(plugin_name, module_path)
     spec = util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
-        logger.warning("Failed to load plugin tools module", path=str(module_path))
-        return
+        logger.warning("Failed to load plugin module", path=str(module_path), kind=kind)
+        return None
 
     module = util.module_from_spec(spec)
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
-        logger.warning("Plugin tools module execution failed", path=str(module_path), error=str(exc))
-        return
+        logger.warning("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
+        return None
 
-    _TOOL_MODULE_CACHE[module_path] = mtime
+    _MODULE_IMPORT_CACHE[module_path] = _ModuleCacheEntry(mtime=mtime, module=module)
+    if kind == "tools":
+        _TOOL_MODULE_CACHE[module_path] = mtime
+    return module
 
 
 def _module_name(plugin_name: str, module_path: Path) -> str:

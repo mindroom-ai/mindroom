@@ -13,6 +13,7 @@ from mindroom.bot import AgentBot, _DispatchPayload
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -26,6 +27,22 @@ if TYPE_CHECKING:
 @asynccontextmanager
 async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
     yield
+
+
+def _response_envelope() -> MessageEnvelope:
+    return MessageEnvelope(
+        source_event_id="$user_event",
+        room_id="!team:localhost",
+        thread_id="$thread_root",
+        resolved_thread_id="$thread_root",
+        requester_id="@user:localhost",
+        sender_id="@user:localhost",
+        body="Please coordinate and schedule a reminder",
+        attachment_ids=(),
+        mentioned_agents=(),
+        agent_name="general",
+        source_kind="message",
+    )
 
 
 def _make_bot(tmp_path: Path) -> AgentBot:
@@ -112,6 +129,9 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
             team_mode="coordinate",
             thread_history=[],
             requester_user_id="@user:localhost",
+            response_envelope=_response_envelope(),
+            enrichment_digest=None,
+            correlation_id="corr-team-non-streaming",
         )
 
 
@@ -222,4 +242,7 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
             team_mode="collaborate",
             thread_history=[],
             requester_user_id="@user:localhost",
+            response_envelope=_response_envelope(),
+            enrichment_digest=None,
+            correlation_id="corr-team-streaming",
         )

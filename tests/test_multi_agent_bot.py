@@ -33,18 +33,31 @@ from mindroom.bot import (
     _MessageContext,
     _PreparedDispatch,
     _ResponseAction,
+    _ResponseDispatchResult,
 )
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     RuntimePaths,
     resolve_runtime_paths,
+)
+from mindroom.hooks import (
+    EVENT_MESSAGE_AFTER_RESPONSE,
+    EVENT_MESSAGE_BEFORE_RESPONSE,
+    EVENT_REACTION_RECEIVED,
+    AfterResponseContext,
+    BeforeResponseContext,
+    HookRegistry,
+    MessageEnvelope,
+    ReactionReceivedContext,
+    hook,
 )
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.matrix.client import PermanentMatrixStartupError
@@ -64,6 +77,7 @@ from mindroom.orchestrator import (
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
+from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import (
     TEST_PASSWORD,
@@ -99,6 +113,38 @@ def _mock_shared_knowledge_manager(
     manager.matches.return_value = True
     manager.get_knowledge.return_value = knowledge
     return manager
+
+
+def _hook_plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
+    """Create a minimal plugin stub for hook registry tests."""
+    return SimpleNamespace(
+        name=name,
+        discovered_hooks=tuple(callbacks),
+        entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
+        plugin_order=0,
+    )
+
+
+def _hook_envelope(*, body: str = "hello", source_event_id: str = "$event") -> MessageEnvelope:
+    """Create a minimal response envelope for hook-aware bot tests."""
+    return MessageEnvelope(
+        source_event_id=source_event_id,
+        room_id="!test:localhost",
+        thread_id=None,
+        resolved_thread_id=source_event_id,
+        requester_id="@user:localhost",
+        sender_id="@user:localhost",
+        body=body,
+        attachment_ids=(),
+        mentioned_agents=(),
+        agent_name="calculator",
+        source_kind="message",
+    )
+
+
+@asynccontextmanager
+async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+    yield
 
 
 @dataclass
@@ -975,11 +1021,6 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Agents with matrix_message should receive room/thread/event ids in the model prompt."""
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -998,11 +1039,11 @@ class TestAgentBot:
         bot._send_response = AsyncMock(return_value="$response")
 
         with (
-            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
             patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai,
         ):
             mock_ai.return_value = "Handled"
-            event_id = await bot._process_and_respond(
+            delivery = await bot._process_and_respond(
                 room_id="!test:localhost",
                 prompt="Please send an update",
                 reply_to_event_id="$event123",
@@ -1011,7 +1052,7 @@ class TestAgentBot:
                 user_id="@user:localhost",
             )
 
-        assert event_id == "$response"
+        assert delivery.event_id == "$response"
         model_prompt = mock_ai.call_args.kwargs["prompt"]
         assert "[Matrix metadata for tool calls]" in model_prompt
         assert "room_id: !test:localhost" in model_prompt
@@ -1025,11 +1066,6 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """openclaw_compat agents should receive room/thread/event ids in the model prompt."""
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -1049,11 +1085,11 @@ class TestAgentBot:
         bot._send_response = AsyncMock(return_value="$response")
 
         with (
-            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
             patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai,
         ):
             mock_ai.return_value = "Handled"
-            event_id = await bot._process_and_respond(
+            delivery = await bot._process_and_respond(
                 room_id="!test:localhost",
                 prompt="Please send an update",
                 reply_to_event_id="$event123",
@@ -1062,7 +1098,7 @@ class TestAgentBot:
                 user_id="@user:localhost",
             )
 
-        assert event_id == "$response"
+        assert delivery.event_id == "$response"
         model_prompt = mock_ai.call_args.kwargs["prompt"]
         assert "[Matrix metadata for tool calls]" in model_prompt
         assert "room_id: !test:localhost" in model_prompt
@@ -1076,10 +1112,6 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Streaming path should inject Matrix ids for agents with matrix messaging tools."""
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
 
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "chunk"
@@ -1102,13 +1134,13 @@ class TestAgentBot:
         bot._handle_interactive_question = AsyncMock()
 
         with (
-            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
             patch("mindroom.bot.stream_agent_response", new_callable=AsyncMock) as mock_stream_agent_response,
             patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
         ):
             mock_stream_agent_response.return_value = mock_streaming_response()
             mock_send_streaming_response.return_value = ("$response", "chunk")
-            event_id = await bot._process_and_respond_streaming(
+            delivery = await bot._process_and_respond_streaming(
                 room_id="!test:localhost",
                 prompt="Please reply in thread",
                 reply_to_event_id="$event456",
@@ -1117,7 +1149,7 @@ class TestAgentBot:
                 user_id="@user:localhost",
             )
 
-        assert event_id == "$response"
+        assert delivery.event_id == "$response"
         model_prompt = mock_stream_agent_response.call_args.kwargs["prompt"]
         assert "[Matrix metadata for tool calls]" in model_prompt
         assert "room_id: !test:localhost" in model_prompt
@@ -1131,10 +1163,6 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Streaming should resolve knowledge only inside the request-scoped context."""
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
 
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "chunk"
@@ -1156,13 +1184,13 @@ class TestAgentBot:
         bot._handle_interactive_question = AsyncMock()
 
         with (
-            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
             patch("mindroom.bot.stream_agent_response", new_callable=AsyncMock) as mock_stream_agent_response,
             patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
         ):
             mock_stream_agent_response.return_value = mock_streaming_response()
             mock_send_streaming_response.return_value = ("$response", "chunk")
-            event_id = await bot._process_and_respond_streaming(
+            delivery = await bot._process_and_respond_streaming(
                 room_id="!test:localhost",
                 prompt="Hello",
                 reply_to_event_id="$event456",
@@ -1171,7 +1199,7 @@ class TestAgentBot:
                 user_id="@user:localhost",
             )
 
-        assert event_id == "$response"
+        assert delivery.event_id == "$response"
         bot._knowledge_for_agent.assert_called_once()
         args, kwargs = bot._knowledge_for_agent.call_args
         assert args == ("calculator",)
@@ -1185,11 +1213,6 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Non-streaming responses should persist attachment IDs in message metadata."""
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
@@ -1202,7 +1225,7 @@ class TestAgentBot:
 
         attachment_ids = ["att_image", "att_zip"]
         with (
-            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
             patch("mindroom.bot.ai_response", new_callable=AsyncMock, side_effect=fake_ai_response),
         ):
             await bot._process_and_respond(
@@ -1227,10 +1250,6 @@ class TestAgentBot:
     ) -> None:
         """Streaming responses should persist attachment IDs in message metadata."""
 
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "chunk"
 
@@ -1246,7 +1265,7 @@ class TestAgentBot:
 
         attachment_ids = ["att_image", "att_zip"]
         with (
-            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
             patch("mindroom.bot.stream_agent_response", side_effect=fake_stream_agent_response),
             patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
         ):
@@ -1264,6 +1283,62 @@ class TestAgentBot:
         sent_extra_content = mock_send_streaming_response.await_args.kwargs["extra_content"]
         assert sent_extra_content[ATTACHMENT_IDS_KEY] == attachment_ids
         assert sent_extra_content["io.mindroom.ai_run"]["version"] == 1
+
+    @pytest.mark.asyncio
+    async def test_process_and_respond_applies_before_and_after_hooks_non_streaming(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Non-streaming responses should pass through before/after hooks."""
+        after_results: list[tuple[str, str, str, str]] = []
+        before_calls = 0
+
+        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+        async def before_hook(ctx: BeforeResponseContext) -> None:
+            nonlocal before_calls
+            before_calls += 1
+            ctx.draft.response_text = f"{ctx.draft.response_text} [hooked]"
+
+        @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+        async def after_hook(ctx: AfterResponseContext) -> None:
+            after_results.append(
+                (
+                    ctx.result.response_event_id,
+                    ctx.result.response_text,
+                    ctx.result.delivery_kind,
+                    ctx.result.response_kind,
+                ),
+            )
+
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response")
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
+
+        with (
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai,
+        ):
+            mock_ai.return_value = "Handled"
+            delivery = await bot._process_and_respond(
+                room_id="!test:localhost",
+                prompt="Please send an update",
+                reply_to_event_id="$event123",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+                response_envelope=_hook_envelope(body="Please send an update", source_event_id="$event123"),
+                correlation_id="corr-hook",
+            )
+
+        assert delivery.event_id == "$response"
+        assert before_calls == 1
+        assert bot._send_response.await_args.args[2] == "Handled [hooked]"
+        assert after_results == [("$response", "Handled [hooked]", "sent", "ai")]
 
     @pytest.mark.asyncio
     async def test_process_and_respond_passes_active_response_event_ids(
@@ -1310,6 +1385,67 @@ class TestAgentBot:
             running_task.cancel()
             other_room_task.cancel()
             await asyncio.gather(running_task, other_room_task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_process_and_respond_streaming_applies_before_and_after_hooks_once(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming responses should fire hooks once after the stream settles."""
+        after_results: list[tuple[str, str, str, str]] = []
+        before_calls = 0
+
+        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+        async def before_hook(ctx: BeforeResponseContext) -> None:
+            nonlocal before_calls
+            before_calls += 1
+            ctx.draft.response_text = f"{ctx.draft.response_text} [hooked]"
+
+        @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+        async def after_hook(ctx: AfterResponseContext) -> None:
+            after_results.append(
+                (
+                    ctx.result.response_event_id,
+                    ctx.result.response_text,
+                    ctx.result.delivery_kind,
+                    ctx.result.response_kind,
+                ),
+            )
+
+        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+            yield "chunk"
+
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._edit_message = AsyncMock(return_value=True)
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
+
+        with (
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.stream_agent_response", new_callable=AsyncMock) as mock_stream_agent_response,
+            patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
+        ):
+            mock_stream_agent_response.return_value = mock_streaming_response()
+            mock_send_streaming_response.return_value = ("$response", "chunk")
+            delivery = await bot._process_and_respond_streaming(
+                room_id="!test:localhost",
+                prompt="Please reply in thread",
+                reply_to_event_id="$event456",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+                response_envelope=_hook_envelope(body="Please reply in thread", source_event_id="$event456"),
+                correlation_id="corr-stream",
+            )
+
+        assert delivery.event_id == "$response"
+        assert before_calls == 1
+        assert bot._edit_message.await_args.args[2] == "chunk [hooked]"
+        assert after_results == [("$response", "chunk [hooked]", "edited", "ai")]
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_passes_active_response_event_ids(
@@ -1361,6 +1497,207 @@ class TestAgentBot:
             running_task.cancel()
             other_room_task.cancel()
             await asyncio.gather(running_task, other_room_task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_generate_team_response_helper_applies_hooks_to_final_team_message(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Team final output should use the same before/after hook flow."""
+        after_results: list[tuple[str, str, str, str]] = []
+
+        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+        async def before_hook(ctx: BeforeResponseContext) -> None:
+            ctx.draft.response_text = f"{ctx.draft.response_text} [hooked]"
+
+        @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+        async def after_hook(ctx: AfterResponseContext) -> None:
+            after_results.append(
+                (
+                    ctx.result.response_event_id,
+                    ctx.result.response_text,
+                    ctx.result.delivery_kind,
+                    ctx.result.response_kind,
+                ),
+            )
+
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot._send_response = AsyncMock(return_value="$team")
+        bot._edit_message = AsyncMock(return_value=True)
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        matrix_ids = config.get_ids(runtime_paths_for(config))
+
+        with (
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.team_response", new_callable=AsyncMock, return_value="Team reply"),
+        ):
+            event_id = await bot._generate_team_response_helper(
+                room_id="!test:localhost",
+                reply_to_event_id="$team-root",
+                thread_id=None,
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+                thread_history=[],
+                requester_user_id="@user:localhost",
+                payload=_DispatchPayload(prompt="team prompt"),
+                response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                enrichment_digest="digest",
+                correlation_id="corr-team",
+            )
+
+        assert event_id == "$team"
+        assert bot._edit_message.await_args.args[2] == "Team reply [hooked]"
+        assert after_results == [("$team", "Team reply [hooked]", "edited", "team")]
+
+    @pytest.mark.asyncio
+    async def test_generate_team_response_helper_strips_enrichment_from_shared_team_session(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Shared team responses should strip transient enrichment from persisted session history."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot._send_response = AsyncMock(return_value="$team")
+        bot._edit_message = AsyncMock(return_value=True)
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        matrix_ids = config.get_ids(runtime_paths_for(config))
+        storage = MagicMock()
+
+        with (
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.team_response", new_callable=AsyncMock, return_value="Team reply"),
+            patch("mindroom.bot.create_session_storage", return_value=storage),
+            patch("mindroom.bot.strip_enrichment_from_session_storage") as mock_strip_enrichment,
+        ):
+            event_id = await bot._generate_team_response_helper(
+                room_id="!test:localhost",
+                reply_to_event_id="$team-root",
+                thread_id=None,
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+                thread_history=[],
+                requester_user_id="@user:localhost",
+                payload=_DispatchPayload(prompt="team prompt"),
+                response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                enrichment_digest="digest",
+                correlation_id="corr-team",
+            )
+
+        assert event_id == "$team"
+        mock_strip_enrichment.assert_called_once_with(storage, create_session_id("!test:localhost", None))
+
+    @pytest.mark.asyncio
+    async def test_reaction_hooks_run_after_built_in_handlers_decline(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """reaction:received hooks should run only after built-in handlers decline the event."""
+        seen: list[tuple[str, str, str | None]] = []
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def record_reaction(ctx: ReactionReceivedContext) -> None:
+            seen.append((ctx.reaction_key, ctx.target_event_id, ctx.thread_id))
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot.client.room_get_event = AsyncMock(
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Reply in thread",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
+                        },
+                        "event_id": "$question",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {"body": "Thread root", "msgtype": "m.text"},
+                        "event_id": "$thread-root",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
+        )
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.source = {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$question",
+                    "key": "👍",
+                },
+            },
+        }
+
+        with (
+            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=False)),
+        ):
+            await bot._on_reaction(room, event)
+
+        assert seen == [("👍", "$question", "$thread-root")]
+
+    @pytest.mark.asyncio
+    async def test_reaction_hooks_do_not_run_when_interactive_handler_claims_event(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """reaction:received hooks should not run when a built-in handler already consumes the reaction."""
+        seen: list[str] = []
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def record_reaction(ctx: ReactionReceivedContext) -> None:
+            seen.append(ctx.reaction_key)
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot._send_response = AsyncMock(return_value="$ack")
+        bot._generate_response = AsyncMock(return_value="$reply")
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+
+        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=("Selected", None))):
+            await bot._on_reaction(room, event)
+
+        assert seen == []
 
     def test_agent_has_matrix_messaging_tool_when_openclaw_compat_enabled(
         self,
@@ -1429,7 +1766,7 @@ class TestAgentBot:
             patch("mindroom.bot.typing_indicator", noop_typing_indicator),
             patch("mindroom.bot.ai_response", side_effect=fake_ai_response) as mock_ai,
         ):
-            event_id = await bot._process_and_respond(
+            delivery = await bot._process_and_respond(
                 room_id="!test:localhost",
                 prompt="Summarize README",
                 reply_to_event_id="$event",
@@ -1438,7 +1775,7 @@ class TestAgentBot:
                 user_id="@user:localhost",
             )
 
-        assert event_id == "$response"
+        assert delivery.event_id == "$response"
         assert mock_ai.call_args.kwargs["show_tool_calls"] is False
         tool_trace = bot._send_response.call_args.kwargs["tool_trace"]
         assert tool_trace is None
@@ -1537,7 +1874,9 @@ class TestAgentBot:
         config.timezone = "America/Los_Angeles"
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        bot._process_and_respond = AsyncMock(return_value="$response")
+        bot._process_and_respond = AsyncMock(
+            return_value=_ResponseDispatchResult(event_id="$response", response_text="ok", delivery_kind="sent"),
+        )
         bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
 
         prior_user_time = datetime(2026, 3, 10, 8, 10, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -1579,7 +1918,9 @@ class TestAgentBot:
             await asyncio.gather(*scheduled_tasks)
 
         process_args = bot._process_and_respond.await_args.args
-        assert process_args[1] == "[2026-03-20 08:15 PDT] What time is it?"
+        process_kwargs = bot._process_and_respond.await_args.kwargs
+        assert process_args[1] == "What time is it?"
+        assert process_kwargs["model_prompt"] == "[2026-03-20 08:15 PDT] What time is it?"
         assert process_args[4][0]["body"] == "[2026-03-10 08:10 PDT] Earlier user question"
         assert process_args[4][1]["body"] == "Existing agent reply"
 
@@ -1618,7 +1959,9 @@ class TestAgentBot:
         config.timezone = "America/Los_Angeles"
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        bot._process_and_respond = AsyncMock(return_value="$response")
+        bot._process_and_respond = AsyncMock(
+            return_value=_ResponseDispatchResult(event_id="$response", response_text="ok", delivery_kind="sent"),
+        )
         bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
 
         bob_time = datetime(2026, 3, 10, 8, 10, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -1667,7 +2010,9 @@ class TestAgentBot:
             await asyncio.gather(*scheduled_tasks)
 
         process_args = bot._process_and_respond.await_args.args
-        assert process_args[1] == "[2026-03-20 08:15 PDT] What time is it?"
+        process_kwargs = bot._process_and_respond.await_args.kwargs
+        assert process_args[1] == "What time is it?"
+        assert process_kwargs["model_prompt"] == "[2026-03-20 08:15 PDT] What time is it?"
         assert process_args[4][0]["body"] == "[2026-03-10 08:10 PDT] Bob question"
         assert process_args[4][1]["body"] == "[2026-03-10 08:12 PDT] Alice earlier"
         assert process_args[4][2]["body"] == "Existing agent reply"
@@ -1710,7 +2055,13 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        bot._process_and_respond_streaming = AsyncMock(return_value="$thinking")
+        bot._process_and_respond_streaming = AsyncMock(
+            return_value=_ResponseDispatchResult(
+                event_id="$thinking",
+                response_text="",
+                delivery_kind="edited",
+            ),
+        )
         bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
 
         with (
@@ -3681,6 +4032,8 @@ class TestAgentBot:
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
             ),
+            correlation_id="$event",
+            envelope=_hook_envelope(body="help me", source_event_id="$event"),
         )
         action = _ResponseAction(
             kind="reject",
@@ -4322,6 +4675,41 @@ class TestMultiAgentOrchestrator:
         assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
 
     @pytest.mark.asyncio
+    async def test_initialize_does_not_activate_hook_runtime_before_user_account_succeeds(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Startup must not swap the live hook runtime before user-account prep succeeds."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        config = MagicMock()
+        config.agents = {}
+        config.teams = {}
+        initial_hook_registry = orchestrator.hook_registry
+        new_hook_registry = HookRegistry.empty()
+
+        with (
+            patch("mindroom.orchestrator.load_config", return_value=config),
+            patch("mindroom.orchestrator.load_plugins", return_value=[]),
+            patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
+            patch("mindroom.orchestrator.reset_hook_execution_state") as mock_reset_hook_execution_state,
+            patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
+            patch.object(
+                orchestrator,
+                "_prepare_user_account",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+            patch.object(MultiAgentOrchestrator, "_create_managed_bot") as mock_create_managed_bot,
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await orchestrator.initialize()
+
+        assert orchestrator.config is None
+        assert orchestrator.hook_registry is initial_hook_registry
+        mock_reset_hook_execution_state.assert_not_called()
+        mock_set_scheduling_hook_registry.assert_not_called()
+        mock_create_managed_bot.assert_not_called()
+
+    @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.main.Config.from_yaml")
@@ -4938,6 +5326,7 @@ class TestMultiAgentOrchestrator:
             new_config=new_config,
             entities_to_restart=set(),
             new_entities=set(),
+            removed_entities=set(),
             only_support_service_changes=True,
         )
 
@@ -4952,6 +5341,50 @@ class TestMultiAgentOrchestrator:
         assert updated is False
         mock_load_config.assert_called_once()
         assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
+
+    @pytest.mark.asyncio
+    async def test_update_config_does_not_swap_hook_runtime_on_failed_reload(self, tmp_path: Path) -> None:
+        """Failed reloads must leave the active hook snapshot and scheduling registry untouched."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+
+        current_config = MagicMock()
+        current_config.authorization.global_users = []
+        new_config = MagicMock()
+        new_config.authorization.global_users = []
+        old_hook_registry = HookRegistry.empty()
+        new_hook_registry = HookRegistry.empty()
+
+        orchestrator.config = current_config
+        orchestrator.hook_registry = old_hook_registry
+        plan = SimpleNamespace(
+            mindroom_user_changed=True,
+            new_config=new_config,
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            only_support_service_changes=True,
+        )
+
+        with (
+            patch("mindroom.orchestrator.load_config", return_value=new_config),
+            patch("mindroom.orchestrator.load_plugins", return_value=[]),
+            patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
+            patch("mindroom.orchestrator.reset_hook_execution_state") as mock_reset_hook_execution_state,
+            patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
+            patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+            patch.object(
+                orchestrator,
+                "_prepare_user_account",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await orchestrator.update_config()
+
+        assert orchestrator.config is current_config
+        assert orchestrator.hook_registry is old_hook_registry
+        mock_reset_hook_execution_state.assert_not_called()
+        mock_set_scheduling_hook_registry.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_update_config_keeps_failed_new_bot_and_schedules_retry(self, tmp_path: Path) -> None:

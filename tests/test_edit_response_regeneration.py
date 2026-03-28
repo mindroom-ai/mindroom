@@ -14,6 +14,7 @@ from mindroom.bot import AgentBot
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -169,7 +170,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
             is_thread=False,
             thread_id=None,
             thread_history=[],
-            mentioned_agents=["test_agent"],
+            mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
         )
         mock_should_respond.return_value = True
         mock_streaming.return_value = False  # Use non-streaming for simpler test

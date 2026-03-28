@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 import yaml
-from pydantic import BaseModel, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from mindroom.agent_policy import (
     build_agent_policy_seeds,
@@ -25,6 +25,7 @@ from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
 from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
+from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
@@ -194,7 +195,7 @@ class Config(BaseModel):
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     cultures: dict[str, CultureConfig] = Field(default_factory=dict, description="Culture configurations")
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
-    plugins: list[str] = Field(default_factory=list, description="Plugin paths")
+    plugins: list[PluginEntryConfig] = Field(default_factory=list, description="Plugin entries")
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
     knowledge_bases: dict[str, KnowledgeBaseConfig] = Field(
@@ -228,6 +229,23 @@ class Config(BaseModel):
         default_factory=list,
         description="Matrix user IDs of non-MindRoom bots (e.g., bridge bots) that should be treated like agents for response logic — their messages won't trigger the multi-human-thread mention requirement",
     )
+
+    @field_validator("plugins", mode="before")
+    @classmethod
+    def normalize_plugins(cls, value: object) -> object:
+        """Normalize legacy string plugin entries into structured config objects."""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return value
+
+        normalized_plugins: list[object] = []
+        for plugin_entry in value:
+            if isinstance(plugin_entry, str):
+                normalized_plugins.append({"path": plugin_entry})
+                continue
+            normalized_plugins.append(plugin_entry)
+        return normalized_plugins
 
     @model_validator(mode="after")
     def validate_entity_names(self) -> Config:

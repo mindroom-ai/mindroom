@@ -21,6 +21,8 @@ from pydantic import BaseModel, Field
 from mindroom.ai import get_model_instance
 from mindroom.authorization import get_available_agents_for_sender
 from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.hooks import HookRegistry, ScheduleFiredContext, emit
+from mindroom.hooks.types import EVENT_SCHEDULE_FIRED
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     fetch_thread_history,
@@ -52,6 +54,7 @@ _TASK_STATE_POLL_INTERVAL_SECONDS = 30
 
 # Global task storage for running asyncio tasks
 _running_tasks: dict[str, asyncio.Task] = {}
+_ACTIVE_HOOK_REGISTRY: HookRegistry = HookRegistry.empty()
 
 
 class _AgentValidationResult(NamedTuple):
@@ -66,6 +69,12 @@ def _raise_scheduled_workflow_send_error() -> typing.NoReturn:
     """Raise when a scheduled workflow message cannot be sent."""
     msg = "Failed to send scheduled workflow message to Matrix"
     raise RuntimeError(msg)
+
+
+def set_scheduling_hook_registry(hook_registry: HookRegistry) -> None:
+    """Update the immutable hook snapshot used by scheduled task runners."""
+    global _ACTIVE_HOOK_REGISTRY
+    _ACTIVE_HOOK_REGISTRY = hook_registry
 
 
 # ---- Workflow scheduling primitives ----
@@ -556,6 +565,7 @@ async def _execute_scheduled_workflow(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
+    task_id: str = "scheduled-task",
 ) -> None:
     """Execute a scheduled workflow by posting its message to the thread."""
     if not workflow.room_id:
@@ -563,17 +573,39 @@ async def _execute_scheduled_workflow(
         return
 
     try:
+        message_text = workflow.message
+        if _ACTIVE_HOOK_REGISTRY.has_hooks(EVENT_SCHEDULE_FIRED):
+            context = ScheduleFiredContext(
+                event_name=EVENT_SCHEDULE_FIRED,
+                plugin_name="",
+                settings={},
+                config=config,
+                runtime_paths=runtime_paths,
+                logger=logger.bind(event_name=EVENT_SCHEDULE_FIRED),
+                correlation_id=f"{EVENT_SCHEDULE_FIRED}:{task_id}",
+                task_id=task_id,
+                workflow=workflow,
+                room_id=workflow.room_id,
+                thread_id=workflow.thread_id,
+                created_by=workflow.created_by,
+                message_text=message_text,
+            )
+            await emit(_ACTIVE_HOOK_REGISTRY, EVENT_SCHEDULE_FIRED, context)
+            if context.suppress:
+                logger.info("Scheduled workflow suppressed by hook", task_id=task_id, room_id=workflow.room_id)
+                return
+            message_text = context.message_text
         if workflow.new_thread:
             content = format_message_with_mentions(
                 config,
                 runtime_paths,
-                workflow.message,
+                message_text,
                 sender_domain=config.get_domain(runtime_paths),
                 thread_event_id=None,
             )
         else:
             automated_message = (
-                f"⏰ [Automated Task]\n{workflow.message}\n\n_Note: Automated task - no follow-up expected._"
+                f"⏰ [Automated Task]\n{message_text}\n\n_Note: Automated task - no follow-up expected._"
             )
             latest_thread_event_id = await get_latest_thread_event_id_if_needed(
                 client,
@@ -590,6 +622,7 @@ async def _execute_scheduled_workflow(
             )
         if workflow.created_by:
             content[ORIGINAL_SENDER_KEY] = workflow.created_by
+        content["com.mindroom.source_kind"] = "scheduled"
         event_id = await send_message(client, workflow.room_id, content)
         if event_id is None:
             _raise_scheduled_workflow_send_error()
@@ -689,7 +722,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 workflow = latest_workflow
                 continue
 
-            await _execute_scheduled_workflow(client, workflow, config, runtime_paths)
+            await _execute_scheduled_workflow(client, workflow, config, runtime_paths, task_id=task_id)
             if task_id not in running_tasks:
                 logger.info(f"Task {task_id} no longer in running tasks, stopping")
                 return
@@ -756,7 +789,7 @@ async def _run_once_task(  # noqa: C901
             logger.error("No execution time provided for one-time task", task_id=task_id)
             return
 
-        await _execute_scheduled_workflow(client, latest_workflow, config, runtime_paths)
+        await _execute_scheduled_workflow(client, latest_workflow, config, runtime_paths, task_id=task_id)
     except asyncio.CancelledError:
         logger.info(f"One-time task {task_id} was cancelled")
         raise

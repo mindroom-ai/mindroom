@@ -70,3 +70,14 @@ defaults:
   tools:
     - scheduler
   markdown: true
+
+# Advanced plugin example (optional)
+# plugins:
+#   - path: ./plugins/personal-context
+#     settings:
+#       dawarich_url: http://dawarich.local
+#     hooks:
+#       enrich_with_location:
+#         priority: 20
+#       audit_messages:
+#         enabled: false

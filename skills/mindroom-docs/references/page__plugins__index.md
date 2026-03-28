@@ -1,6 +1,6 @@
 # Plugins
 
-MindRoom plugins add tools and can optionally ship skills. Plugins are loaded from paths listed in `config.yaml`.
+MindRoom plugins add tools and can optionally ship skills and [hooks](https://docs.mindroom.chat/hooks/index.md). Plugins are loaded from paths listed in `config.yaml`.
 
 ## Plugin structure
 
@@ -10,6 +10,7 @@ A plugin is a directory containing `mindroom.plugin.json`:
 my-plugin/
 ├── mindroom.plugin.json
 ├── tools.py
+├── hooks.py
 └── skills/
     └── my-skill/
         └── SKILL.md
@@ -21,17 +22,19 @@ my-plugin/
 {
   "name": "my-plugin",
   "tools_module": "tools.py",
+  "hooks_module": "hooks.py",
   "skills": ["skills"]
 }
 ```
 
-| Field          | Type            | Description                                       |
-| -------------- | --------------- | ------------------------------------------------- |
-| `name`         | string          | Plugin identifier (required)                      |
-| `tools_module` | string          | Path to the tools module (optional)               |
-| `skills`       | list of strings | Relative directories containing skills (optional) |
+| Field          | Type            | Description                                                     |
+| -------------- | --------------- | --------------------------------------------------------------- |
+| `name`         | string          | Plugin identifier (required)                                    |
+| `tools_module` | string          | Path to the tools module (optional)                             |
+| `hooks_module` | string          | Path to the hooks module relative to the plugin root (optional) |
+| `skills`       | list of strings | Relative directories containing skills (optional)               |
 
-Unknown fields are ignored.
+Unknown fields are ignored. If `hooks_module` is omitted, MindRoom auto-scans `tools_module` for `@hook`-decorated functions. If both fields point at the same file, MindRoom imports it once and reuses it for both tool registration and hook discovery.
 
 ## Configure plugins
 
@@ -41,7 +44,17 @@ Add plugin paths to `config.yaml`:
 plugins:
   - ./plugins/my-plugin
   - python:my_skill_pack
+  - path: ./plugins/personal-context
+    settings:
+      dawarich_url: http://dawarich.local
+    hooks:
+      enrich_with_location:
+        priority: 20
+      audit_messages:
+        enabled: false
 ```
+
+Plugin entries can be strings (path only) or objects (with `settings` and per-hook overrides). Both forms can be mixed in the same list.
 
 Paths may be:
 
@@ -234,6 +247,17 @@ def needs_runtime_tools() -> type[Toolkit]:
 ## Plugin skills
 
 List skill directories in the manifest `skills` array. Those directories are added to the skill search roots.
+
+## Hooks
+
+Plugins can ship typed event hooks for message enrichment, response transformation, lifecycle observation, reactions, schedules, and custom events. See the [Hooks](https://docs.mindroom.chat/hooks/index.md) page for full documentation including:
+
+- The `@hook` decorator and all parameters
+- All 9 built-in events and their execution modes
+- The enrichment pipeline (`message:enrich`)
+- Custom events
+- Error handling and circuit breaker behavior
+- Testing patterns
 
 ## Reloading plugins
 
