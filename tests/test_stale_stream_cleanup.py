@@ -280,6 +280,40 @@ async def test_relations_lookup_uses_original_event_id_not_latest_edit(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_cleanup_skips_completed_stream_status_even_with_trailing_marker(tmp_path: Path) -> None:
+    """Cleanup must trust persisted stream status over a stale visible marker."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    original = _make_message_event(
+        event_id="$original",
+        body="Partial answer ⋯",
+        timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+    )
+    completed_edit = _make_message_event(
+        event_id="$completed-edit",
+        body="* Finished answer ⋯",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$original"},
+        new_content={
+            "body": "Finished answer ⋯",
+            "msgtype": "m.text",
+            "io.mindroom.stream_status": "completed",
+        },
+    )
+    client.room_messages.return_value = _room_messages_response(original, completed_edit)
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message",
+        new=AsyncMock(return_value="$cleanup-edit"),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_returns_interrupted_thread_per_cleaned_threaded_message(tmp_path: Path) -> None:
     """Cleanup should return one interrupted-thread record per cleaned threaded message."""
     config = _make_config(tmp_path)

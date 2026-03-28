@@ -10,18 +10,18 @@ from typing import TYPE_CHECKING
 import nio
 from nio.api import Api, RelationshipType
 
+from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
-    _latest_thread_event_id,
+    build_threaded_edit_content,
     edit_message,
     get_joined_rooms,
+    resolve_latest_visible_messages,
     send_message,
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
 from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
@@ -69,6 +69,7 @@ class _MessageState:
     latest_timestamp: int = 0
     latest_event_id: str = ""
     thread_id: str | None = None
+    stream_status: str | None = None
     stop_reaction_event_ids: set[str] = field(default_factory=set)
 
 
@@ -187,7 +188,7 @@ async def _cleanup_room_stale_streaming_messages(
 
     for target_event_id, state in candidate_items:
         assert state.latest_body is not None  # guaranteed by filter above
-        if is_in_progress_message(state.latest_body):
+        if _is_cleanup_candidate(state):
             if _is_recent_timestamp(state.latest_timestamp):
                 continue
 
@@ -285,6 +286,7 @@ async def _scan_room_message_states(
 ) -> dict[str, _MessageState]:
     """Scan recent room history and return latest state by original event ID."""
     message_states: dict[str, _MessageState] = {}
+    message_events: list[nio.RoomMessageText] = []
     from_token: str | None = None
 
     for _ in range(_MAX_ROOM_HISTORY_PAGES):
@@ -308,12 +310,7 @@ async def _scan_room_message_states(
         for event in response.chunk:
             try:
                 if isinstance(event, nio.RoomMessageText):
-                    await _record_message_state(
-                        message_states,
-                        event=event,
-                        client=client,
-                        bot_user_id=bot_user_id,
-                    )
+                    message_events.append(event)
                     continue
 
                 _record_stop_reaction(
@@ -334,48 +331,40 @@ async def _scan_room_message_states(
             break
         from_token = response.end
 
+    resolved_messages = await resolve_latest_visible_messages(message_events, client, sender=bot_user_id)
+    for target_event_id, message_data in resolved_messages.items():
+        _merge_resolved_message_state(message_states, target_event_id=target_event_id, message_data=message_data)
+
     return message_states
 
 
-async def _record_message_state(
+def _merge_resolved_message_state(
     message_states: dict[str, _MessageState],
     *,
-    event: nio.RoomMessageText,
-    client: nio.AsyncClient,
-    bot_user_id: str,
+    target_event_id: str,
+    message_data: dict[str, object],
 ) -> None:
-    """Record latest visible body for a self-authored original or edit event."""
-    if event.sender != bot_user_id:
+    """Store one resolved message if it has the fields cleanup needs."""
+    body = message_data.get("body")
+    timestamp = message_data.get("timestamp")
+    latest_event_id = message_data.get("latest_event_id", message_data.get("event_id", ""))
+    if not isinstance(body, str) or not isinstance(timestamp, int) or not isinstance(latest_event_id, str):
         return
 
-    event_info = EventInfo.from_event(event.source)
-    if event_info.is_edit and event_info.original_event_id:
-        body, _ = await extract_edit_body(event.source, client)
-        if body is None:
-            return
-        _merge_message_state(
-            message_states,
-            target_event_id=event_info.original_event_id,
-            body=body,
-            timestamp=event.server_timestamp,
-            latest_event_id=event.event_id,
-            thread_id=event_info.thread_id_from_edit,
-        )
-        return
+    thread_id = message_data.get("thread_id")
+    if thread_id is not None and not isinstance(thread_id, str):
+        thread_id = None
 
-    message_data = await extract_and_resolve_message(event, client)
-    body = message_data["body"]
-    if not isinstance(body, str):
-        return
+    stream_status = message_data.get("stream_status")
+    if stream_status is not None and not isinstance(stream_status, str):
+        stream_status = None
 
-    _merge_message_state(
-        message_states,
-        target_event_id=event.event_id,
-        body=body,
-        timestamp=int(message_data["timestamp"]),
-        latest_event_id=str(message_data["event_id"]),
-        thread_id=event_info.thread_id,
-    )
+    state = message_states.setdefault(target_event_id, _MessageState())
+    state.latest_body = body
+    state.latest_timestamp = timestamp
+    state.latest_event_id = latest_event_id
+    state.thread_id = thread_id
+    state.stream_status = stream_status
 
 
 def _record_stop_reaction(
@@ -405,28 +394,6 @@ def _record_stop_reaction(
     message_states.setdefault(target_event_id, _MessageState()).stop_reaction_event_ids.add(reaction_event_id)
 
 
-def _merge_message_state(
-    message_states: dict[str, _MessageState],
-    *,
-    target_event_id: str,
-    body: str,
-    timestamp: int,
-    latest_event_id: str,
-    thread_id: str | None,
-) -> None:
-    """Keep the newest visible body for one original event ID."""
-    state = message_states.setdefault(target_event_id, _MessageState())
-    if (timestamp, latest_event_id) <= (state.latest_timestamp, state.latest_event_id):
-        if state.thread_id is None and thread_id is not None:
-            state.thread_id = thread_id
-        return
-
-    state.latest_body = body
-    state.latest_timestamp = timestamp
-    state.latest_event_id = latest_event_id
-    state.thread_id = thread_id if thread_id is not None else state.thread_id
-
-
 async def _edit_stale_message(
     client: nio.AsyncClient,
     *,
@@ -439,19 +406,15 @@ async def _edit_stale_message(
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Edit a stale message while preserving thread context when present."""
-    latest_thread_event_id = None
-    if thread_id:
-        latest_thread_event_id = await _latest_thread_event_id(client, room_id, thread_id)
-        if latest_thread_event_id is None:
-            latest_thread_event_id = target_event_id
-
-    content = format_message_with_mentions(
-        config,
-        runtime_paths,
-        new_text,
+    content = await build_threaded_edit_content(
+        client,
+        room_id=room_id,
+        event_id=target_event_id,
+        new_text=new_text,
+        thread_id=thread_id,
+        config=config,
+        runtime_paths=runtime_paths,
         sender_domain=sender_domain,
-        thread_event_id=thread_id,
-        latest_thread_event_id=latest_thread_event_id,
     )
 
     response_event_id = await edit_message(client, room_id, target_event_id, content, new_text)
@@ -668,6 +631,16 @@ def _select_threads_to_resume(
 def _has_restart_interrupted_note(body: str) -> bool:
     """Return whether the body already contains the restart interruption note."""
     return body.rstrip().endswith(_RESTART_INTERRUPTED_RESPONSE_NOTE)
+
+
+def _is_cleanup_candidate(state: _MessageState) -> bool:
+    """Return whether the latest visible state represents stale in-progress output."""
+    if state.stream_status == STREAM_STATUS_COMPLETED:
+        return False
+    if state.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+        return True
+    assert state.latest_body is not None
+    return is_in_progress_message(state.latest_body)
 
 
 def _is_recent_timestamp(timestamp_ms: int) -> bool:
