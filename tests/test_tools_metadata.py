@@ -286,6 +286,40 @@ def test_validate_authored_overrides_accepts_inherit_sentinel_for_required_field
         TOOL_METADATA.pop(tool_name, None)
 
 
+def test_validate_authored_overrides_accepts_string_lists_for_text_fields_with_agent_override_arrays() -> None:
+    """Text config fields may accept list-form values when the agent override schema exposes string arrays."""
+    tool_name = "test_authored_override_string_array_compat"
+
+    class _FakeToolkit(Toolkit):
+        def __init__(self, **_kwargs: object) -> None:
+            super().__init__(name=tool_name, tools=[])
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="Authored Override String Array Compat",
+        description="Test-only toolkit for string-array compatibility coverage.",
+        category=ToolCategory.DEVELOPMENT,
+        config_fields=[
+            ConfigField(name="patterns", label="Patterns", type="text", required=False),
+        ],
+        agent_override_fields=[
+            ConfigField(name="patterns", label="Patterns", type="string[]", required=False),
+        ],
+    )
+    def _fake_tool_factory() -> type[_FakeToolkit]:
+        return _FakeToolkit
+
+    try:
+        assert validate_authored_overrides(
+            tool_name,
+            {"patterns": ["GITEA_*", "WHISPER_URL"]},
+            config_path_prefix="agents.code.tools[0]",
+        ) == {"patterns": "GITEA_*, WHISPER_URL"}
+    finally:
+        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+
 def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> None:
     """Authored overrides should reject bad types, runtime-only fields, and password fields."""
     tool_name = "test_authored_override_errors"

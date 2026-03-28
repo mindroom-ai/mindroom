@@ -104,7 +104,41 @@ def _override_path(
     return f"{tool_name}.{field_name}"
 
 
+def _agent_override_field(tool_name: str, field_name: str) -> ConfigField | None:
+    """Return one tool's agent override field metadata when it exists."""
+    metadata = TOOL_METADATA.get(tool_name)
+    if metadata is None or not metadata.agent_override_fields:
+        return None
+    return next((candidate for candidate in metadata.agent_override_fields if candidate.name == field_name), None)
+
+
+def _validate_text_authored_override_value(
+    tool_name: str,
+    field: ConfigField,
+    value: object,
+    *,
+    full_path: str,
+) -> object:
+    """Validate one authored override for a text-like config field."""
+    agent_override_field = _agent_override_field(tool_name, field.name)
+    if agent_override_field is not None and agent_override_field.type == "string[]":
+        try:
+            normalized = _normalize_string_array_override(value)
+        except TypeError as exc:
+            msg = f"{full_path}: {exc}."
+            raise ToolConfigOverrideError(msg) from exc
+        if normalized is None:
+            return None
+        return ", ".join(normalized)
+
+    if not isinstance(value, str):
+        msg = f"{full_path}: expected a string or null."
+        raise ToolConfigOverrideError(msg)
+    return value
+
+
 def _validate_authored_override_value(
+    tool_name: str,
     field: ConfigField,
     value: object,
     *,
@@ -121,10 +155,7 @@ def _validate_authored_override_value(
         return None
 
     if field.type in _TEXT_CONFIG_FIELD_TYPES:
-        if not isinstance(value, str):
-            msg = f"{full_path}: expected a string or null."
-            raise ToolConfigOverrideError(msg)
-        return value
+        return _validate_text_authored_override_value(tool_name, field, value, full_path=full_path)
 
     if field.type == "boolean":
         if not isinstance(value, bool):
@@ -175,7 +206,12 @@ def validate_authored_overrides(
         if not field.authored_override:
             msg = f"{full_path}: authored overrides are not allowed for this field."
             raise ToolConfigOverrideError(msg)
-        validated[field_name] = _validate_authored_override_value(field, value, full_path=full_path)
+        validated[field_name] = _validate_authored_override_value(
+            tool_name,
+            field,
+            value,
+            full_path=full_path,
+        )
     return validated
 
 

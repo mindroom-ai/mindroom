@@ -232,7 +232,7 @@ agents:
     skills: []
     tools:
     - duckduckgo
-    - newspaper4k
+    - newspaper
   openclaw:
     display_name: OpenClawAgent
     # Drop-in OpenClaw workspace import.
@@ -287,12 +287,7 @@ agents:
     - transcribe
     tools:
     - file
-    - shell:
-        extra_env_passthrough:
-        - GITEA_TOKEN
-        - WHISPER_URL
-        shell_path_prepend:
-        - /run/wrappers/bin
+    - shell
     - scheduler
     - duckduckgo
     - website

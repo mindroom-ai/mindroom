@@ -1963,40 +1963,6 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
-      "config_fields": null,
-      "default_execution_target": "primary",
-      "dependencies": null,
-      "description": "Demo package plugin tool",
-      "display_name": "Demo Package Plugin",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": null,
-      "icon_color": null,
-      "name": "demo_pkg_tool",
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "agent_override_fields": null,
-      "auth_provider": null,
-      "category": "development",
-      "config_fields": null,
-      "default_execution_target": "primary",
-      "dependencies": null,
-      "description": "Demo plugin tool",
-      "display_name": "Demo Plugin",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": null,
-      "icon_color": null,
-      "name": "demo_plugin",
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "agent_override_fields": null,
-      "auth_provider": null,
-      "category": "development",
       "config_fields": [
         {
           "authored_override": true,
@@ -4678,6 +4644,7 @@
     {
       "agent_override_fields": [
         {
+          "authored_override": true,
           "default": null,
           "description": "Extra env var names or glob patterns exposed to shell execution for this agent only.",
           "label": "Env Passthrough",
@@ -4689,6 +4656,7 @@
           "validation": null
         },
         {
+          "authored_override": true,
           "default": null,
           "description": "Path entries prepended to PATH for this agent's shell tool only.",
           "label": "PATH Prepend",
@@ -8912,12 +8880,12 @@
         "lxml_html_clean"
       ],
       "description": "Read and extract content from news articles using advanced web scraping",
-      "display_name": "Newspaper4k",
+      "display_name": "Newspaper",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper4k",
       "helper_text": null,
       "icon": "FaNewspaper",
       "icon_color": "text-blue-600",
-      "name": "newspaper4k",
+      "name": "newspaper",
       "setup_type": "none",
       "status": "available"
     },
