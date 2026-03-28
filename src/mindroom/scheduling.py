@@ -52,6 +52,10 @@ SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not suppor
 # How often running tasks should re-check persisted Matrix state for edits/cancellations.
 _TASK_STATE_POLL_INTERVAL_SECONDS = 30
 
+# Maximum age (in seconds) for a missed one-time task to still be executed on restart.
+# Tasks older than this are marked as failed instead of executed.
+_MISSED_TASK_MAX_AGE_SECONDS = 86400  # 24 hours
+
 # Global task storage for running asyncio tasks
 _running_tasks: dict[str, asyncio.Task] = {}
 _ACTIVE_HOOK_REGISTRY: HookRegistry = HookRegistry.empty()
@@ -1367,10 +1371,35 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
                 if not workflow.execute_at:
                     logger.warning(f"Skipping one-time task {task_id} without execution time")
                     continue
-                # Skip past one-time tasks
+                # Handle past one-time tasks: execute if within grace period, fail if too old
                 if workflow.execute_at <= datetime.now(UTC):
-                    logger.debug(f"Skipping past one-time task {task_id}")
-                    continue
+                    missed_by = (datetime.now(UTC) - workflow.execute_at).total_seconds()
+                    if missed_by > _MISSED_TASK_MAX_AGE_SECONDS:
+                        logger.warning(
+                            "Skipping ancient missed task",
+                            task_id=task_id,
+                            missed_by_seconds=missed_by,
+                        )
+                        try:
+                            await _save_scheduled_task(
+                                client=client,
+                                room_id=room_id,
+                                task_id=task_id,
+                                workflow=workflow,
+                                config=config,
+                                runtime_paths=runtime_paths,
+                                status="failed",
+                                created_at=content.get("created_at"),
+                                restart_task=False,
+                            )
+                        except Exception:
+                            logger.exception("Failed to mark ancient task as failed", task_id=task_id)
+                        continue
+                    logger.warning(
+                        "Executing missed one-time task",
+                        task_id=task_id,
+                        missed_by_seconds=missed_by,
+                    )
             elif workflow.schedule_type == "cron":
                 if not workflow.cron_schedule:
                     logger.warning(f"Skipping recurring task {task_id} without cron schedule")
