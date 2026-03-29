@@ -884,6 +884,7 @@ class TestUserIdPassthrough:
         mock_agent.model.id = "test-model"
         mock_agent.name = "GeneralAgent"
         mock_agent.add_history_to_context = False
+        mock_agent.add_session_summary_to_context = False
         mock_agent.arun = MagicMock()
 
         mock_cache = MagicMock()

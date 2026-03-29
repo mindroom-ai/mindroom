@@ -2875,7 +2875,7 @@ class AgentBot:
         finally:
             self.in_flight_response_count -= 1
 
-    async def _process_and_respond(
+    async def _process_and_respond(  # noqa: C901
         self,
         room_id: str,
         prompt: str,
@@ -3317,7 +3317,7 @@ class AgentBot:
             options_list=interactive_response.options_list,
         )
 
-    async def _process_and_respond_streaming(  # noqa: C901
+    async def _process_and_respond_streaming(  # noqa: C901, PLR0912, PLR0915
         self,
         room_id: str,
         prompt: str,

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import importlib
-from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
@@ -33,7 +32,6 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
 
 from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
 from mindroom.compaction import (
@@ -96,6 +94,7 @@ if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
     from agno.models.message import Message
+    from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
 
     from mindroom.config.main import Config
@@ -228,7 +227,7 @@ def _disable_history_for_run(
     )
 
 
-def _apply_context_window_limit(
+def _apply_context_window_limit(  # noqa: C901
     agent: Agent,
     agent_name: str,
     config: Config,
@@ -1008,7 +1007,7 @@ async def _cached_agent_run(
     return response
 
 
-async def _prepare_agent_and_prompt(
+async def _prepare_agent_and_prompt(  # noqa: C901, PLR0912, PLR0915
     agent_name: str,
     prompt: str,
     runtime_paths: RuntimePaths,
@@ -1226,6 +1225,8 @@ async def ai_response(  # noqa: C901
             run/model/token metadata for Matrix message content.
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
+        compaction_outcomes_collector: Optional list that receives any
+            compaction outcomes produced while preparing or executing this run.
         enrichment_digest: Optional digest of hook-provided enrichment used to vary the local cache key.
 
     Returns:
@@ -1471,6 +1472,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             run/model/token metadata for Matrix message content.
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
+        compaction_outcomes_collector: Optional list that receives any
+            compaction outcomes produced while preparing or streaming this run.
         enrichment_digest: Optional digest of hook-provided enrichment used to vary the local cache key.
 
     Yields:
