@@ -12,6 +12,7 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
+    from mindroom.compaction import PendingCompaction
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -28,11 +29,13 @@ class CompactContextTools(Toolkit):
         config: Config,
         runtime_paths: RuntimePaths,
         execution_identity: ToolExecutionIdentity | None,
+        pending_compaction_buffer: list[PendingCompaction] | None = None,
     ) -> None:
         self._agent_name = agent_name
         self._config = config
         self._runtime_paths = runtime_paths
         self._execution_identity = execution_identity
+        self._pending_compaction_buffer = pending_compaction_buffer
         super().__init__(name="compact_context", tools=[self.compact_context])
 
     async def compact_context(self, keep_recent_runs: int = 2) -> str:
@@ -100,6 +103,7 @@ class CompactContextTools(Toolkit):
                 reserve_tokens=compaction_config.reserve_tokens,
                 notify=compaction_config.notify,
                 compaction_model_context_window=compaction_model_context_window,
+                pending_buffer=self._pending_compaction_buffer,
             )
         except Exception as exc:
             logger.exception(

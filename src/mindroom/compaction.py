@@ -184,9 +184,11 @@ _PENDING_COMPACTION: ContextVar[PendingCompaction | None] = ContextVar(
 )
 
 
-def clear_pending_compaction() -> None:
+def clear_pending_compaction(pending_buffer: list[PendingCompaction] | None = None) -> None:
     """Discard any queued pending compaction without applying it."""
     _PENDING_COMPACTION.set(None)
+    if pending_buffer is not None:
+        pending_buffer.clear()
 
 
 def estimate_message_media_chars(message: Message) -> int:
@@ -450,6 +452,7 @@ async def queue_pending_compaction(
     notify: bool,
     compaction_model_context_window: int | None = None,
     max_passes: int = _DEFAULT_MAX_COMPACTION_PASSES,
+    pending_buffer: list[PendingCompaction] | None = None,
 ) -> CompactionOutcome | None:
     """Queue a deferred post-run compaction for the current session."""
     lock = _get_session_lock(storage, session_id)
@@ -523,28 +526,32 @@ async def queue_pending_compaction(
             notify=notify,
             count_pending_run=True,
         )
-        _PENDING_COMPACTION.set(
-            PendingCompaction(
-                session_id=session_id,
-                agent_name=agent_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-                compacted_count=progress.compacted_count,
-                summary=progress.summary,
-                mode="manual",
-                summary_model=_model_identifier(model),
-                window_tokens=window_tokens,
-                threshold_tokens=threshold_tokens,
-                reserve_tokens=reserve_tokens,
-                keep_recent_tokens=estimate_runs_tokens(recent_runs),
-                notify=notify,
-            ),
+        pending = PendingCompaction(
+            session_id=session_id,
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            compacted_count=progress.compacted_count,
+            summary=progress.summary,
+            mode="manual",
+            summary_model=_model_identifier(model),
+            window_tokens=window_tokens,
+            threshold_tokens=threshold_tokens,
+            reserve_tokens=reserve_tokens,
+            keep_recent_tokens=estimate_runs_tokens(recent_runs),
+            notify=notify,
         )
+        if pending_buffer is not None:
+            pending_buffer.append(pending)
+        else:
+            _PENDING_COMPACTION.set(pending)
         return queued_outcome
 
 
-async def apply_pending_compaction() -> CompactionOutcome | None:
+async def apply_pending_compaction(
+    pending_override: PendingCompaction | None = None,
+) -> CompactionOutcome | None:
     """Apply a queued post-run compaction after Agno saves the current run.
 
     Uses positional prefix removal: the first ``compacted_count`` runs are
@@ -555,7 +562,7 @@ async def apply_pending_compaction() -> CompactionOutcome | None:
     worth of prefix slices, but they still collapse to one stable prefix that
     can be removed after the run save.
     """
-    pending = _PENDING_COMPACTION.get(None)
+    pending = pending_override if pending_override is not None else _PENDING_COMPACTION.get(None)
     _PENDING_COMPACTION.set(None)
     if pending is None:
         return None

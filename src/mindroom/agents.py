@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from agno.models.base import Model
     from agno.tools.toolkit import Toolkit
 
+    from mindroom.compaction import PendingCompaction
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
@@ -406,6 +407,7 @@ def build_agent_toolkit(  # noqa: PLR0911
     tool_init_context: AgentToolInitContext,
     execution_identity: ToolExecutionIdentity | None,
     delegation_depth: int = 0,
+    pending_compaction_buffer: list[PendingCompaction] | None = None,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
@@ -467,6 +469,7 @@ def build_agent_toolkit(  # noqa: PLR0911
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
+            pending_compaction_buffer=pending_compaction_buffer,
         )
 
     return _build_registered_agent_tool(
@@ -748,6 +751,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
     delegation_depth: int = 0,
+    pending_compaction_buffer: list[PendingCompaction] | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -765,6 +769,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             support Matrix reaction-based question flows.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
+        pending_compaction_buffer: Mutable per-request collector shared with
+            the compact-context tool so deferred compaction survives child-task
+            execution and can be applied after the run is saved.
 
     Returns:
         Configured Agent instance
@@ -822,6 +829,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tool_init_context=tool_init_context,
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
+                pending_compaction_buffer=pending_compaction_buffer,
             ):
                 tools.append(prepend_tool_hook_bridge(toolkit, tool_hook_bridge))
         except (ValueError, ImportError) as exc:

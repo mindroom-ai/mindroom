@@ -15,13 +15,16 @@ from agno.models.base import Model
 from agno.models.response import ModelResponse
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
+from agno.tools.function import Function, FunctionCall
 
 from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
 from mindroom.compaction import (
     _PENDING_COMPACTION,
     _WRAPPER_OVERHEAD_TOKENS,
+    PendingCompaction,
     _estimate_serialized_run_tokens,
     apply_pending_compaction,
+    clear_pending_compaction,
     compact_session_now,
     estimate_runs_tokens,
     queue_pending_compaction,
@@ -31,6 +34,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, RuntimePaths, resolve_runtime_paths
+from mindroom.custom_tools.compact_context import _format_outcome
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -296,6 +300,89 @@ async def test_queue_pending_compaction_multi_pass_tracks_total_compacted_count(
     assert saved_session.summary.summary == "## Goal\ndeferred 4"
     assert get_seen_event_ids(saved_session) == {"$e1", "$e2", "$e3", "$e4", "$e5", "$e6"}
     assert _PENDING_COMPACTION.get(None) is None
+
+
+@pytest.mark.asyncio
+async def test_manual_compaction_reported_from_agno_tool_task_should_persist(tmp_path: Path) -> None:
+    """Manual compaction triggered through Agno's tool-task path should persist to storage."""
+    pending_buffer: list[PendingCompaction] = []
+    clear_pending_compaction(pending_buffer)
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    agent = await _seed_session(storage, session_id="sid", turn_count=4)
+    session = _coerce_agent_session(storage.get_session("sid", SessionType.AGENT))
+    assert session.runs is not None
+    compaction_window = _single_run_compaction_window(session.runs[0])
+    child_pending_seen: list[int] = []
+
+    async def compact_tool() -> str:
+        outcome = await queue_pending_compaction(
+            storage=storage,
+            session_id="sid",
+            agent_name="test_agent",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+            model=MagicMock(id="compact-model"),
+            keep_recent_runs=2,
+            window_tokens=16000,
+            threshold_tokens=8000,
+            reserve_tokens=1024,
+            notify=True,
+            compaction_model_context_window=compaction_window,
+            max_passes=10,
+            pending_buffer=pending_buffer,
+        )
+        assert outcome is not None
+        child_pending_seen.append(len(pending_buffer))
+        assert _PENDING_COMPACTION.get(None) is None
+        return _format_outcome(outcome)
+
+    function_call = FunctionCall(
+        function=Function.from_callable(compact_tool, name="compact_context"),
+        call_id="call-1",
+    )
+    model = FakeModel(id="fake-model", provider="fake")
+
+    try:
+        with patch(
+            "mindroom.compaction._generate_compaction_summary",
+            new_callable=AsyncMock,
+            return_value=SessionSummary(summary="## Goal\nsummary", topics=[]),
+        ):
+            async for _ in model.arun_function_calls(
+                function_calls=[function_call],
+                function_call_results=[],
+                skip_pause_check=True,
+            ):
+                pass
+
+        assert child_pending_seen == [1]
+        assert len(pending_buffer) == 1
+        assert isinstance(function_call.result, str)
+        assert "Context compacted:" in function_call.result
+        assert "- Runs: 4 -> 3" in function_call.result
+
+        queued_session = _coerce_agent_session(storage.get_session("sid", SessionType.AGENT))
+        assert len(queued_session.runs or []) == 4
+        assert queued_session.summary is None
+
+        await agent.arun(
+            "turn-5 " * 20,
+            session_id="sid",
+            metadata={"matrix_seen_event_ids": ["$e5"]},
+        )
+        applied = await apply_pending_compaction(pending_override=pending_buffer[-1])
+        pending_buffer.clear()
+
+        assert applied is not None
+        persisted_session = _coerce_agent_session(storage.get_session("sid", SessionType.AGENT))
+        assert len(persisted_session.runs or []) == 3
+        assert persisted_session.summary is not None
+        assert persisted_session.summary.summary == "## Goal\nsummary"
+    finally:
+        clear_pending_compaction(pending_buffer)
 
 
 @pytest.mark.asyncio

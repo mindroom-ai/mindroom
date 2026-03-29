@@ -97,6 +97,7 @@ if TYPE_CHECKING:
     from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
 
+    from mindroom.compaction import PendingCompaction
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.tool_system.events import ToolTraceEntry
@@ -935,6 +936,27 @@ def _track_model_request_metrics(
     if state.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
         state.first_token_latency = float(event.time_to_first_token)
 
+def _latest_pending_compaction(
+    pending_compaction_buffer: list[PendingCompaction] | None,
+) -> PendingCompaction | None:
+    if pending_compaction_buffer:
+        return pending_compaction_buffer[-1]
+    return None
+
+
+async def _apply_manual_compaction_if_queued(
+    *,
+    pending_compaction_buffer: list[PendingCompaction] | None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None,
+) -> None:
+    manual_outcome = await apply_pending_compaction(
+        pending_override=_latest_pending_compaction(pending_compaction_buffer),
+    )
+    if pending_compaction_buffer is not None:
+        pending_compaction_buffer.clear()
+    if manual_outcome is not None and compaction_outcomes_collector is not None:
+        compaction_outcomes_collector.append(manual_outcome)
+
 
 async def _cached_agent_run(
     agent: Agent,
@@ -949,6 +971,7 @@ async def _cached_agent_run(
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    pending_compaction_buffer: list[PendingCompaction] | None = None,
     enrichment_digest: str | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
@@ -975,9 +998,10 @@ async def _cached_agent_run(
             videos=media_inputs.videos,
             metadata=metadata,
         )
-        manual_outcome = await apply_pending_compaction()
-        if manual_outcome is not None and compaction_outcomes_collector is not None:
-            compaction_outcomes_collector.append(manual_outcome)
+        await _apply_manual_compaction_if_queued(
+            pending_compaction_buffer=pending_compaction_buffer,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+        )
         return response
 
     model = agent.model
@@ -996,9 +1020,10 @@ async def _cached_agent_run(
         run_id=run_id,
         metadata=metadata,
     )
-    manual_outcome = await apply_pending_compaction()
-    if manual_outcome is not None and compaction_outcomes_collector is not None:
-        compaction_outcomes_collector.append(manual_outcome)
+    await _apply_manual_compaction_if_queued(
+        pending_compaction_buffer=pending_compaction_buffer,
+        compaction_outcomes_collector=compaction_outcomes_collector,
+    )
 
     if response.status not in {RunStatus.cancelled, RunStatus.error}:
         cache.set(cache_key, response)
@@ -1020,6 +1045,7 @@ async def _prepare_agent_and_prompt(  # noqa: C901, PLR0912, PLR0915
     active_event_ids: Collection[str] = frozenset(),
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    pending_compaction_buffer: list[PendingCompaction] | None = None,
 ) -> tuple[Agent, str, list[str]]:
     """Prepare agent and full prompt for AI processing.
 
@@ -1089,6 +1115,7 @@ async def _prepare_agent_and_prompt(  # noqa: C901, PLR0912, PLR0915
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
         execution_identity=execution_identity,
+        pending_compaction_buffer=pending_compaction_buffer,
     )
     if session_id and storage is not None and session is not None and has_prior_runs and agent_name in config.agents:
         compaction_config = config.get_agent_compaction_config(agent_name)
@@ -1225,8 +1252,9 @@ async def ai_response(  # noqa: C901
             run/model/token metadata for Matrix message content.
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
-        compaction_outcomes_collector: Optional list that receives any
-            compaction outcomes produced while preparing or executing this run.
+        compaction_outcomes_collector: Optional list that receives completed
+            compaction outcomes from auto-compaction and manual `compact_context`
+            tool calls during this run.
         enrichment_digest: Optional digest of hook-provided enrichment used to vary the local cache key.
 
     Returns:
@@ -1235,6 +1263,7 @@ async def ai_response(  # noqa: C901
     """
     logger.info("AI request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
+    pending_compaction_buffer: list[PendingCompaction] = []
 
     # Prepare agent and prompt - this can fail if agent creation fails (e.g., missing API key)
     try:
@@ -1251,6 +1280,7 @@ async def ai_response(  # noqa: C901
             active_event_ids=active_event_ids,
             execution_identity=execution_identity,
             compaction_outcomes_collector=compaction_outcomes_collector,
+            pending_compaction_buffer=pending_compaction_buffer,
         )
     except Exception as e:
         logger.exception("Error preparing agent", agent=agent_name)
@@ -1277,10 +1307,13 @@ async def ai_response(  # noqa: C901
                 run_id_callback=run_id_callback,
                 media=attempt_media_inputs,
                 metadata=metadata,
+                compaction_outcomes_collector=compaction_outcomes_collector,
+                pending_compaction_buffer=pending_compaction_buffer,
                 enrichment_digest=enrichment_digest,
             )
         except Exception as e:
             if not retried_without_inline_media and should_retry_without_inline_media(e, attempt_media_inputs):
+                clear_pending_compaction(pending_compaction_buffer)
                 logger.warning(
                     "Retrying AI response without inline media after validation error",
                     agent=agent_name,
@@ -1292,7 +1325,7 @@ async def ai_response(  # noqa: C901
                 continue
 
             logger.exception("Error generating AI response", agent=agent_name)
-            clear_pending_compaction()
+            clear_pending_compaction(pending_compaction_buffer)
             return get_user_friendly_error_message(e, agent_name)
 
         if response.status == RunStatus.error:
@@ -1472,8 +1505,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             run/model/token metadata for Matrix message content.
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
-        compaction_outcomes_collector: Optional list that receives any
-            compaction outcomes produced while preparing or streaming this run.
+        compaction_outcomes_collector: Optional list that receives completed
+            compaction outcomes from auto-compaction and manual `compact_context`
+            tool calls during this run.
         enrichment_digest: Optional digest of hook-provided enrichment used to vary the local cache key.
 
     Yields:
@@ -1483,6 +1517,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     logger.info("AI streaming request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
     storage_path = runtime_paths.storage_root
+    pending_compaction_buffer: list[PendingCompaction] = []
 
     # Prepare agent and prompt - this can fail if agent creation fails
     try:
@@ -1499,6 +1534,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             active_event_ids=active_event_ids,
             execution_identity=execution_identity,
             compaction_outcomes_collector=compaction_outcomes_collector,
+            pending_compaction_buffer=pending_compaction_buffer,
         )
     except Exception as e:
         logger.exception("Error preparing agent for streaming", agent=agent_name)
@@ -1578,12 +1614,13 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 log_message="Retrying streaming AI response without inline media after validation error",
                 agent_name=agent_name,
             ):
+                clear_pending_compaction(pending_compaction_buffer)
                 attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
                 attempt_media_inputs = MediaInputs()
                 attempt_run_id = _next_retry_run_id(run_id)
                 continue
             logger.exception("Error starting streaming AI response")
-            clear_pending_compaction()
+            clear_pending_compaction(pending_compaction_buffer)
             yield get_user_friendly_error_message(e, agent_name)
             return
 
@@ -1597,9 +1634,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         ):
             yield stream_chunk
 
-        manual_outcome = await apply_pending_compaction()
-        if manual_outcome is not None and compaction_outcomes_collector is not None:
-            compaction_outcomes_collector.append(manual_outcome)
+        await _apply_manual_compaction_if_queued(
+            pending_compaction_buffer=pending_compaction_buffer,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+        )
 
         if state.retry_requested:
             attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
