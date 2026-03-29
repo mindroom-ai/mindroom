@@ -569,7 +569,7 @@ def _track_model_request_metrics(
         state.first_token_latency = float(event.time_to_first_token)
 
 
-async def _run_agent_turn(
+async def cached_agent_run(
     agent: Agent,
     full_prompt: str,
     session_id: str,
@@ -781,7 +781,7 @@ async def ai_response(  # noqa: C901
 
             for retried_without_inline_media in (False, True):
                 try:
-                    response = await _run_agent_turn(
+                    response = await cached_agent_run(
                         agent,
                         attempt_prompt,
                         session_id,
