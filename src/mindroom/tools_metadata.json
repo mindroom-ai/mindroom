@@ -113,6 +113,25 @@
       "dependencies": [
         "agno"
       ],
+      "description": "Low-level Matrix event and state operations (send_event, get_state, put_state, redact, get_event)",
+      "display_name": "Matrix API",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "helper_text": null,
+      "icon": "MessageSquare",
+      "icon_color": "text-emerald-500",
+      "name": "matrix_api",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
+      "config_fields": null,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
       "description": "Send, reply, react, read, room-threads, thread-list, and edit Matrix messages with room/thread context defaults",
       "display_name": "Matrix Message",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
