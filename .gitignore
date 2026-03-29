@@ -247,5 +247,6 @@ wgcf-account.toml
 wgcf-profile.conf
 
 # Local AI-agent artifacts
+.claude/LIVE-TEST.md
 .claude/REPORT.md
 .claude/
