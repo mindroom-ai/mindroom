@@ -202,6 +202,7 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
+_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"scheduled", "hook"})
 
 
 def _create_task_wrapper(
@@ -423,6 +424,21 @@ class _SyntheticTextEvent:
 type _TextDispatchEvent = nio.RoomMessageText | _SyntheticTextEvent
 
 type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
+
+
+def _is_coalescing_exempt_source_kind(event: _DispatchEvent) -> bool:
+    """Return True when coalescing should be skipped for this event.
+
+    Automation messages (scheduled tasks, hooks) are one-shot synthetic events
+    that must never be coalesced — coalescing targets rapid human typing only.
+    """
+    if not isinstance(event.source, dict):
+        return False
+    content = event.source.get("content")
+    if not isinstance(content, dict):
+        return False
+    source_kind = content.get("com.mindroom.source_kind")
+    return isinstance(source_kind, str) and source_kind in _COALESCING_EXEMPT_SOURCE_KINDS
 
 
 def _merge_response_extra_content(
@@ -1695,35 +1711,64 @@ class AgentBot:
         if not context.thread_history:
             return False
 
-        if isinstance(event, _SyntheticTextEvent):
-            return False
-        current_ts = event.server_timestamp
-        if not isinstance(current_ts, int):
+        current_ts = self._coalescing_candidate_timestamp(event)
+        if current_ts is None:
             return False
 
         for msg in context.thread_history:
             if msg.get("event_id") == event.event_id:
                 continue
-            if msg.get("sender") != event.sender:
+            newer_event_id = self._coalescing_replacement_event_id(
+                msg,
+                sender=event.sender,
+                current_ts=current_ts,
+            )
+            if newer_event_id is None:
                 continue
-            msg_ts = msg.get("timestamp")
-            if not isinstance(msg_ts, int) or msg_ts <= current_ts:
-                continue
-            # Skip commands — they exit early without generating an AI response,
-            # so coalescing against them would permanently lose the older message.
-            msg_body = msg.get("body", "")
-            if isinstance(msg_body, str) and msg_body.lstrip().startswith("!"):
-                continue
-            # Found a newer normal message from the same sender — skip if unresponded.
-            if not self.response_tracker.has_responded(msg["event_id"]):
-                self.logger.info(
-                    "Coalescing older message; newer unresponded message exists",
-                    event_id=event.event_id,
-                    coalesced_event_id=msg["event_id"],
-                )
-                return True
+            self.logger.info(
+                "Coalescing older message; newer unresponded message exists",
+                event_id=event.event_id,
+                coalesced_event_id=newer_event_id,
+            )
+            return True
 
         return False
+
+    def _coalescing_candidate_timestamp(self, event: _DispatchEvent) -> int | None:
+        if isinstance(event, _SyntheticTextEvent):
+            return None
+        current_ts = event.server_timestamp
+        if not isinstance(current_ts, int):
+            return None
+        # Automation messages (scheduled tasks, hooks) are one-shot synthetic events
+        # that must never be coalesced — coalescing targets rapid human typing only.
+        if _is_coalescing_exempt_source_kind(event):
+            return None
+        return current_ts
+
+    def _coalescing_replacement_event_id(
+        self,
+        msg: dict,
+        *,
+        sender: str,
+        current_ts: int,
+    ) -> str | None:
+        event_id = msg.get("event_id")
+        if not isinstance(event_id, str):
+            return None
+        if msg.get("sender") != sender:
+            return None
+        msg_ts = msg.get("timestamp")
+        if not isinstance(msg_ts, int) or msg_ts <= current_ts:
+            return None
+        # Skip commands — they exit early without generating an AI response,
+        # so coalescing against them would permanently lose the older message.
+        msg_body = msg.get("body", "")
+        if isinstance(msg_body, str) and msg_body.lstrip().startswith("!"):
+            return None
+        if self.response_tracker.has_responded(event_id):
+            return None
+        return event_id
 
     async def _prepare_dispatch(
         self,

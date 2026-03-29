@@ -13,6 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -196,6 +197,80 @@ class TestHasNewerUnrespondedInScope:
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is False
 
+    def test_scheduled_event_not_coalesced(self, tmp_path: Path) -> None:
+        """Scheduled automation should bypass coalescing even with newer bot activity."""
+        bot = _make_bot(tmp_path)
+        event = _make_event(sender="@mindroom_router:localhost", event_id="$m1", server_timestamp=1000)
+        event.source["content"]["com.mindroom.source_kind"] = "scheduled"
+        context = _make_context(
+            [
+                {
+                    "sender": "@mindroom_router:localhost",
+                    "event_id": "$m1",
+                    "timestamp": 1000,
+                    "body": "scheduled task fire",
+                },
+                {
+                    "sender": "@mindroom_router:localhost",
+                    "event_id": "$m2",
+                    "timestamp": 2000,
+                    "body": "newer bot activity",
+                },
+            ],
+        )
+        assert bot._has_newer_unresponded_in_scope(event, context) is False
+
+    def test_hook_event_not_coalesced(self, tmp_path: Path) -> None:
+        """Hook-originated automation should bypass coalescing even with newer bot activity."""
+        bot = _make_bot(tmp_path)
+        event = _make_event(sender="@mindroom_router:localhost", event_id="$m1", server_timestamp=1000)
+        event.source["content"]["com.mindroom.source_kind"] = "hook"
+        context = _make_context(
+            [
+                {
+                    "sender": "@mindroom_router:localhost",
+                    "event_id": "$m1",
+                    "timestamp": 1000,
+                    "body": "hook fire",
+                },
+                {
+                    "sender": "@mindroom_router:localhost",
+                    "event_id": "$m2",
+                    "timestamp": 2000,
+                    "body": "newer bot activity",
+                },
+            ],
+        )
+        assert bot._has_newer_unresponded_in_scope(event, context) is False
+
+    def test_multiple_scheduled_fires_not_coalesced(self, tmp_path: Path) -> None:
+        """Repeated scheduled fires in one thread should all dispatch independently."""
+        bot = _make_bot(tmp_path)
+        context = _make_context(
+            [
+                {
+                    "sender": "@mindroom_router:localhost",
+                    "event_id": "$m1",
+                    "timestamp": 1000,
+                    "body": "scheduled fire one",
+                },
+                {
+                    "sender": "@mindroom_router:localhost",
+                    "event_id": "$m2",
+                    "timestamp": 2000,
+                    "body": "scheduled fire two",
+                },
+            ],
+        )
+
+        first_event = _make_event(sender="@mindroom_router:localhost", event_id="$m1", server_timestamp=1000)
+        first_event.source["content"]["com.mindroom.source_kind"] = "scheduled"
+        second_event = _make_event(sender="@mindroom_router:localhost", event_id="$m2", server_timestamp=2000)
+        second_event.source["content"]["com.mindroom.source_kind"] = "scheduled"
+
+        assert bot._has_newer_unresponded_in_scope(first_event, context) is False
+        assert bot._has_newer_unresponded_in_scope(second_event, context) is False
+
     def test_command_older_normal_newer_still_coalesces(self, tmp_path: Path) -> None:
         """A command followed by a normal message: the command should still be coalesced by the normal one."""
         bot = _make_bot(tmp_path)
@@ -209,6 +284,41 @@ class TestHasNewerUnrespondedInScope:
             ],
         )
         # $m1 should be coalesced because $m3 is a newer normal message
+        assert bot._has_newer_unresponded_in_scope(event, context) is True
+
+    def test_normal_message_still_coalesces_regression(self, tmp_path: Path) -> None:
+        """Human messages without an exempt source kind should still coalesce."""
+        bot = _make_bot(tmp_path)
+        event = _make_event(event_id="$m1", server_timestamp=1000)
+        context = _make_context(
+            [
+                {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "first"},
+                {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "second"},
+            ],
+        )
+        assert bot._has_newer_unresponded_in_scope(event, context) is True
+
+    def test_bot_relay_without_source_kind_still_coalesces(self, tmp_path: Path) -> None:
+        """Relayed bot-authored messages still coalesce without an exempt source kind."""
+        bot = _make_bot(tmp_path)
+        event = _make_event(sender="@mindroom_router:localhost", event_id="$m1", server_timestamp=1000)
+        event.source["content"][ORIGINAL_SENDER_KEY] = "@user:localhost"
+        context = _make_context(
+            [
+                {
+                    "sender": "@mindroom_router:localhost",
+                    "event_id": "$m1",
+                    "timestamp": 1000,
+                    "body": "relay one",
+                },
+                {
+                    "sender": "@mindroom_router:localhost",
+                    "event_id": "$m2",
+                    "timestamp": 2000,
+                    "body": "relay two",
+                },
+            ],
+        )
         assert bot._has_newer_unresponded_in_scope(event, context) is True
 
     def test_synthetic_event_no_server_timestamp(self, tmp_path: Path) -> None:
