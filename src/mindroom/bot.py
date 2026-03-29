@@ -102,6 +102,7 @@ from mindroom.teams import (
     team_response,
     team_response_stream,
 )
+from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.thread_utils import (
     check_agent_mentioned,
     create_session_id,
@@ -925,6 +926,7 @@ class AgentBot:
 
     async def _on_sync_error(self, _response: nio.SyncError) -> None:
         """Update the watchdog clock on sync errors so it knows the loop is alive."""
+        logger.debug("SyncError received", agent_name=self.agent_name, error=str(_response))
         self._last_sync_monotonic = time.monotonic()
 
     async def ensure_rooms(self) -> None:
@@ -1141,6 +1143,23 @@ class AgentBot:
     ) -> None:
         """Run the normal text/command dispatch pipeline for a prepared text event."""
         assert isinstance(event.body, str)
+
+        # Emit message:received hooks BEFORE command parsing
+        # so hooks can intercept !-prefixed messages (e.g., !ping-hook)
+        context = await self._extract_message_context(room, event)
+        correlation_id = event.event_id
+        envelope = self._build_message_envelope(
+            room_id=room.room_id,
+            event=event,
+            requester_user_id=requester_user_id,
+            context=context,
+        )
+        if await self._emit_message_received_hooks(
+            envelope=envelope,
+            correlation_id=correlation_id,
+        ):
+            self.response_tracker.mark_responded(event.event_id)
+            return
 
         # Router handles commands exclusively
         command = command_parser.parse(event.body)
@@ -2455,9 +2474,9 @@ class AgentBot:
         existing_event_id: str | None = None,
         *,
         payload: _DispatchPayload,
-        response_envelope: MessageEnvelope | None = None,
-        enrichment_digest: str | None = None,
-        correlation_id: str | None = None,
+        response_envelope: MessageEnvelope,
+        enrichment_digest: str | None,  # noqa: ARG002
+        correlation_id: str,
         reason_prefix: str = "Team request",
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot).
@@ -3547,7 +3566,7 @@ class AgentBot:
             return existing_event_id
         return tracked_event_id or existing_event_id
 
-    async def _generate_response(
+    async def _generate_response(  # noqa: C901
         self,
         room_id: str,
         prompt: str,

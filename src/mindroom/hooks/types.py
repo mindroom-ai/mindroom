@@ -37,7 +37,7 @@ BUILTIN_EVENT_NAMES = frozenset(
 RESERVED_EVENT_NAMESPACES = frozenset({"message", "agent", "schedule", "reaction", "config", "tool"})
 EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$")
 DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
-    EVENT_MESSAGE_RECEIVED: 100,
+    EVENT_MESSAGE_RECEIVED: 15000,
     EVENT_MESSAGE_ENRICH: 2000,
     EVENT_MESSAGE_BEFORE_RESPONSE: 200,
     EVENT_MESSAGE_AFTER_RESPONSE: 3000,

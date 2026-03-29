@@ -425,19 +425,18 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot.response_tracker.mark_responded = MagicMock()
+    bot._resolve_dispatch_action = AsyncMock(return_value=None)
 
-    dispatch = await bot._prepare_dispatch(
+    await bot._dispatch_text_message(
         room,
         event,
         requester_user_id="@user:localhost",
-        event_label="message",
     )
 
-    assert dispatch is not None
     assert hook_calls == ["called"]
+    bot._resolve_dispatch_action.assert_awaited_once()
+    dispatch = bot._resolve_dispatch_action.await_args.args[2]
     assert dispatch.envelope.source_kind == "message"
-    bot.response_tracker.mark_responded.assert_not_called()
 
 
 @pytest.mark.asyncio

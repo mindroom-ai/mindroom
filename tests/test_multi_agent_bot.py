@@ -673,6 +673,36 @@ class TestAgentBot:
         )  # invite, message, reaction, audio, image/file/video callbacks
 
     @pytest.mark.asyncio
+    @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
+    @patch("mindroom.bot.login_agent_user")
+    @patch("mindroom.bot.AgentBot.ensure_user_account")
+    async def test_agent_bot_enters_sync_without_startup_cleanup(
+        self,
+        mock_ensure_user: AsyncMock,
+        mock_login: AsyncMock,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """AgentBot should enter sync directly because orchestrator owns stale cleanup."""
+        config = self._config_for_storage(tmp_path)
+        call_order: list[str] = []
+        mock_client = AsyncMock()
+        mock_client.add_event_callback = MagicMock()
+
+        async def _sync_forever(*_args: object, **_kwargs: object) -> None:
+            call_order.append("sync")
+
+        mock_client.sync_forever = AsyncMock(side_effect=_sync_forever)
+        mock_login.return_value = mock_client
+        mock_ensure_user.return_value = None
+
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        await bot.start()
+        await bot.sync_forever()
+
+        assert call_order == ["sync"]
+
+    @pytest.mark.asyncio
     async def test_agent_bot_try_start_reraises_permanent_startup_error(
         self,
         mock_agent_user: AgentMatrixUser,
