@@ -43,6 +43,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig, ToolConfigEntry
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
+    MINDROOM_COMPACTION_METADATA_KEY,
     STREAM_STATUS_STREAMING,
     RuntimePaths,
     resolve_runtime_paths,
@@ -747,6 +748,50 @@ class TestPrepareAgentAndPrompt:
             mock_stuff.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_persisted_compaction_summary_is_replayed_even_without_current_compaction_config(
+        self,
+        config: Config,
+        tmp_path: object,
+    ) -> None:
+        """Stored compaction cutoffs should force summary replay until the session is reset."""
+        session = AgentSession(
+            session_id="sid",
+            runs=[
+                _make_run_output("r1"),
+                _make_run_output("r2"),
+            ],
+            summary=SessionSummary(summary="## Goal\nPrevious work."),
+            metadata={MINDROOM_COMPACTION_METADATA_KEY: {"last_compacted_run_id": "r1"}},
+        )
+        agent = MagicMock(spec=Agent)
+        agent.role = ""
+        agent.instructions = []
+        agent.num_history_runs = None
+        agent.num_history_messages = None
+        agent.add_history_to_context = True
+        agent.add_session_summary_to_context = False
+        agent.max_tool_calls_from_history = None
+        agent.team_id = None
+        agent.id = "calculator"
+
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.create_agent", return_value=agent),
+            patch("mindroom.ai.get_agent_session", return_value=session),
+            patch("mindroom.ai.create_session_storage"),
+        ):
+            prepared_agent, _prompt, _unseen_ids = await _prepare_agent_and_prompt(
+                "calculator",
+                "test",
+                _runtime_paths(tmp_path),
+                config,
+                session_id="sid",
+            )
+
+        assert prepared_agent.add_session_summary_to_context is True
+        assert prepared_agent.num_history_runs == 1
+
+    @pytest.mark.asyncio
     async def test_session_has_runs_but_no_metadata_uses_agno_path(self, config: Config, tmp_path: object) -> None:
         """Session has runs but no matrix metadata → still uses Agno history (no stuffing)."""
         thread_history = [
@@ -1063,6 +1108,73 @@ class TestPrepareAgentAndPrompt:
         mock_compact.assert_awaited_once()
         assert collector == [outcome]
         assert mock_apply_limit.call_args.kwargs["session"] is compacted_session
+
+    @pytest.mark.asyncio
+    async def test_auto_compaction_caps_budget_knobs_to_compaction_model_window(self, tmp_path: object) -> None:
+        """Auto-compaction should normalize reserve and keep-recent against the summary model window."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"calculator": AgentConfig(display_name="Calculator")},
+                models={
+                    "default": ModelConfig(provider="openai", id="chat-model", context_window=128000),
+                    "compact": ModelConfig(provider="openai", id="compact-model", context_window=16000),
+                },
+                defaults=DefaultsConfig(
+                    compaction=CompactionConfig(
+                        enabled=True,
+                        model="compact",
+                        threshold_tokens=20,
+                        reserve_tokens=16384,
+                        keep_recent_tokens=20000,
+                    ),
+                ),
+            ),
+            tmp_path,
+        )
+        session = AgentSession(
+            session_id="sid",
+            runs=[
+                RunOutput(
+                    run_id="r1",
+                    messages=[Message(role="user", content="x" * 600)],
+                    status=RunStatus.running,
+                ),
+            ],
+        )
+        agent = MagicMock(spec=Agent)
+        agent.role = ""
+        agent.instructions = []
+        agent.num_history_runs = None
+        agent.num_history_messages = None
+        agent.add_session_summary_to_context = True
+        agent.add_history_to_context = True
+        agent.max_tool_calls_from_history = None
+
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.create_agent", return_value=agent),
+            patch("mindroom.ai.create_session_storage", return_value=MagicMock(spec=SqliteDb)),
+            patch("mindroom.ai.get_agent_session", return_value=session),
+            patch("mindroom.ai.get_model_instance", return_value=MagicMock(id="compact-model")),
+            patch(
+                "mindroom.compaction_runtime.compact_session_now",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as mock_compact,
+            patch("mindroom.compaction_runtime._apply_context_window_limit"),
+        ):
+            await _prepare_agent_and_prompt(
+                "calculator",
+                "test",
+                _runtime_paths(tmp_path),
+                config,
+                thread_history=[],
+                session_id="sid",
+            )
+
+        mock_compact.assert_awaited_once()
+        assert mock_compact.call_args.kwargs["reserve_tokens"] == 8000
+        assert mock_compact.call_args.kwargs["keep_recent_tokens"] == 8000
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1688,6 +1800,31 @@ class TestApplyContextWindowLimit:
         session = self._make_session(["a" * 100] * 5)
         _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
         assert agent.num_history_runs == 2
+
+    def test_respects_authored_compaction_threshold_percent(self, tmp_path: object) -> None:
+        """Fallback history limiting should honor authored compaction thresholds instead of hardcoding 80%."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"test_agent": AgentConfig(display_name="Test")},
+                models={"default": ModelConfig(provider="openai", id="test", context_window=100)},
+                defaults=DefaultsConfig(
+                    compaction=CompactionConfig(
+                        enabled=True,
+                        threshold_percent=0.95,
+                        reserve_tokens=10,
+                        keep_recent_tokens=5,
+                    ),
+                ),
+            ),
+            tmp_path,
+        )
+        agent = self._make_agent(role="x" * 20, num_history_runs=None)
+        session = self._make_session(["a" * 100] * 3)
+
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 20, "sid", tmp_path, session=session)
+
+        assert agent.add_history_to_context is True
+        assert agent.num_history_runs is None
 
     def test_reduces_with_explicit_limit(self, tmp_path: object) -> None:
         """When num_history_runs is already set but still too high, it gets reduced."""

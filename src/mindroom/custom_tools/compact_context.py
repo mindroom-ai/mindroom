@@ -8,7 +8,11 @@ from agno.tools import Toolkit
 
 from mindroom.agents import create_session_storage, get_agent_session
 from mindroom.compaction import CompactionOutcome, get_visible_session_runs, queue_pending_compaction
-from mindroom.compaction_runtime import _resolve_effective_compaction_threshold, resolve_compaction_model
+from mindroom.compaction_runtime import (
+    normalize_compaction_budget_tokens,
+    resolve_compaction_model,
+    resolve_effective_compaction_threshold,
+)
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -80,7 +84,11 @@ class CompactContextTools(Toolkit):
         window_tokens = (
             active_model_config.context_window if active_model_config and active_model_config.context_window else 0
         )
-        threshold_tokens = _resolve_effective_compaction_threshold(compaction_config, window_tokens)
+        threshold_tokens = resolve_effective_compaction_threshold(compaction_config, window_tokens)
+        reserve_tokens = normalize_compaction_budget_tokens(
+            compaction_config.reserve_tokens,
+            compaction_model_context_window if compaction_model_context_window is not None else window_tokens or None,
+        )
 
         try:
             outcome = await queue_pending_compaction(
@@ -94,7 +102,7 @@ class CompactContextTools(Toolkit):
                 keep_recent_runs=keep_recent_runs,
                 window_tokens=window_tokens,
                 threshold_tokens=threshold_tokens,
-                reserve_tokens=compaction_config.reserve_tokens,
+                reserve_tokens=reserve_tokens,
                 notify=compaction_config.notify,
                 compaction_model_context_window=compaction_model_context_window,
                 pending_buffer=self._pending_compaction_buffer,

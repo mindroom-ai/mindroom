@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-CompactionMode = Literal["auto", "manual"]
+_CompactionMode = Literal["auto", "manual"]
 _K = TypeVar("_K")
 
 _COMPACTION_METADATA_VERSION = 1
@@ -91,7 +91,7 @@ _SESSION_COMPACTION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 class CompactionOutcome:
     """Notice-time telemetry and persisted compaction result."""
 
-    mode: CompactionMode
+    mode: _CompactionMode
     summary: str
     topics: list[str]
     summary_model: str
@@ -154,7 +154,7 @@ class PendingCompaction:
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
     summary: SessionSummary
-    mode: CompactionMode
+    mode: _CompactionMode
     summary_model: str
     last_compacted_run_id: str
     window_tokens: int
@@ -372,7 +372,7 @@ async def compact_session_now(
     session_id: str,
     agent: Agent,
     model: Model,
-    mode: CompactionMode,
+    mode: _CompactionMode,
     window_tokens: int,
     threshold_tokens: int,
     reserve_tokens: int,
@@ -1024,7 +1024,7 @@ def _build_compaction_outcome(
     before_summary: SessionSummary | None,
     after_visible_runs: Sequence[RunOutput | TeamRunOutput],
     new_summary: SessionSummary,
-    mode: CompactionMode,
+    mode: _CompactionMode,
     summary_model: str,
     window_tokens: int,
     threshold_tokens: int,

@@ -69,6 +69,14 @@ def _apply_compaction_cutoff_to_history(agent: Agent, session: AgentSession | No
     """Restrict Agno history replay to runs that remain visible after compaction."""
     if session is None or get_last_compacted_run_id(session) is None:
         return
+    if session.summary is None:
+        logger.warning(
+            "Skipping persisted compaction cutoff without a stored summary",
+            session_id=session.session_id,
+        )
+        return
+
+    agent.add_session_summary_to_context = True
 
     visible_run_count = len(get_replayable_runs(session, agent))
     if visible_run_count <= 0:
@@ -78,6 +86,25 @@ def _apply_compaction_cutoff_to_history(agent: Agent, session: AgentSession | No
     current_limit = agent.num_history_runs
     if current_limit is None or current_limit > visible_run_count:
         agent.num_history_runs = visible_run_count
+
+
+def _resolve_history_budget_target(
+    config: Config,
+    agent_name: str,
+    context_window: int,
+) -> int:
+    """Resolve the prompt-history ceiling for one run."""
+    default_threshold = int(context_window * 0.8)
+    if agent_name not in config.agents:
+        return default_threshold
+
+    compaction_config = config.get_agent_compaction_config(agent_name)
+    if not config.has_authored_agent_compaction_config(agent_name) or not compaction_config.enabled:
+        return default_threshold
+
+    reserve_tokens = min(compaction_config.reserve_tokens, context_window)
+    threshold_tokens = resolve_effective_compaction_threshold(compaction_config, context_window)
+    return min(threshold_tokens, max(0, context_window - reserve_tokens))
 
 
 def _apply_context_window_limit(  # noqa: C901
@@ -100,7 +127,7 @@ def _apply_context_window_limit(  # noqa: C901
         return
 
     context_window = model_config.context_window
-    threshold = int(context_window * 0.8)
+    threshold = _resolve_history_budget_target(config, agent_name, context_window)
     static_tokens = estimate_static_tokens(agent, full_prompt)
 
     if session is None:
@@ -259,7 +286,7 @@ def _estimate_session_summary_tokens(agent: Agent, session: AgentSession) -> int
     return estimate_text_tokens(session.summary.summary)
 
 
-def _resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
+def resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
     """Resolve the absolute token threshold that should trigger auto-compaction."""
     threshold_tokens = compaction_config.threshold_tokens
     if threshold_tokens is not None:
@@ -268,6 +295,13 @@ def _resolve_effective_compaction_threshold(compaction_config: CompactionConfig,
     if threshold_percent is not None:
         return int(context_window * threshold_percent)
     return int(context_window * 0.8)
+
+
+def normalize_compaction_budget_tokens(tokens: int, context_window: int | None) -> int:
+    """Clamp one compaction budget knob against half of the available window."""
+    if context_window is None or context_window <= 0:
+        return tokens
+    return min(tokens, context_window // 2)
 
 
 def resolve_compaction_model(
@@ -328,9 +362,19 @@ async def _maybe_auto_compact_agent_history(  # noqa: PLR0911
         message_limit=history_message_limit,
     )
     summary_tokens = _estimate_session_summary_tokens(agent, session)
-    effective_threshold = _resolve_effective_compaction_threshold(compaction_config, context_window)
-    effective_reserve = min(compaction_config.reserve_tokens, context_window // 2)
-    effective_keep_recent = min(compaction_config.keep_recent_tokens, context_window // 2)
+    compaction_model_name = compaction_config.model or model_name
+    compaction_model_config = config.models.get(compaction_model_name)
+    compaction_budget_window = (
+        compaction_model_config.context_window
+        if compaction_model_config and compaction_model_config.context_window
+        else context_window
+    )
+    effective_threshold = resolve_effective_compaction_threshold(compaction_config, context_window)
+    effective_reserve = normalize_compaction_budget_tokens(compaction_config.reserve_tokens, compaction_budget_window)
+    effective_keep_recent = normalize_compaction_budget_tokens(
+        compaction_config.keep_recent_tokens,
+        compaction_budget_window,
+    )
     target_ceiling = min(
         effective_threshold,
         max(0, context_window - effective_reserve),

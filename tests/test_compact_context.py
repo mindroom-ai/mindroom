@@ -230,6 +230,53 @@ async def test_create_agent_does_not_store_history_messages(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_manual_compaction_uses_compaction_model_window_for_budget(tmp_path: Path) -> None:
+    """Manual compaction should normalize reserve tokens to the summary model window."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(
+                    enabled=True,
+                    model="compact",
+                    reserve_tokens=16384,
+                ),
+            ),
+            models={
+                "default": ModelConfig(provider="openai", id="chat-model", context_window=128000),
+                "compact": ModelConfig(provider="openai", id="compact-model", context_window=16000),
+            },
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    await _seed_session(storage, session_id="sid", turn_count=3)
+    tool = CompactContextTools("test_agent", config, runtime_paths, execution_identity=None)
+
+    with (
+        patch("mindroom.thread_utils.create_session_id", return_value="sid"),
+        patch(
+            "mindroom.custom_tools.compact_context.get_tool_runtime_context",
+            return_value=SimpleNamespace(room_id="!room:localhost", resolved_thread_id="$thread"),
+        ),
+        patch(
+            "mindroom.ai.get_model_instance",
+            return_value=FakeModel(id="compact-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.compaction._generate_compaction_summary",
+            new_callable=AsyncMock,
+            return_value=SessionSummary(summary="## Goal\nqueued", topics=[]),
+        ),
+    ):
+        outcome_text = await tool.compact_context(keep_recent_runs=1)
+
+    assert outcome_text.startswith("Compaction queued:")
+
+
+@pytest.mark.asyncio
 async def test_scrub_history_messages_from_sessions_removes_history_and_preserves_get_messages(tmp_path: Path) -> None:
     """Scrubbing should remove duplicated history rows without changing message replay."""
     storage = _make_storage(tmp_path)

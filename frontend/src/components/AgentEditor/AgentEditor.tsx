@@ -489,11 +489,11 @@ export function AgentEditor() {
     return Number.isNaN(n) || n < 0 ? null : n;
   };
 
-  /** Parse a string to a float in the inclusive range [0, 1] or return null for empty/invalid input. */
+  /** Parse a string to a float in the open interval (0, 1) or return null for empty/invalid input. */
   const parseOptionalUnitFloat = (raw: string): number | null => {
     if (raw.trim() === '') return null;
     const n = parseFloat(raw);
-    return Number.isNaN(n) || n < 0 || n > 1 ? null : n;
+    return Number.isNaN(n) || n <= 0 || n >= 1 ? null : n;
   };
   const toolHasOverrides = (toolName: string): boolean => {
     if (selectedAgentId == null) {
@@ -502,6 +502,14 @@ export function AgentEditor() {
     const overrides = getAgentToolOverrides(selectedAgentId, toolName);
     return overrides != null && Object.keys(overrides).length > 0;
   };
+
+  const [compactionThresholdPercentInput, setCompactionThresholdPercentInput] = useState('');
+
+  useEffect(() => {
+    const nextValue =
+      compactionConfig?.threshold_percent != null ? String(compactionConfig.threshold_percent) : '';
+    setCompactionThresholdPercentInput(nextValue);
+  }, [compactionConfig?.threshold_percent, selectedAgentId]);
 
   if (!selectedAgent) {
     return <EditorPanelEmptyState icon={Bot} message="Select an agent to edit" />;
@@ -1968,27 +1976,42 @@ export function AgentEditor() {
 
                 <FieldGroup
                   label="Threshold Percent"
-                  helperText="Fraction of the context window that triggers compaction, between 0 and 1."
+                  helperText="Fraction of the context window that triggers compaction, greater than 0 and less than 1."
                   htmlFor="compaction_threshold_percent"
                 >
                   <Input
                     id="compaction_threshold_percent"
                     type="number"
-                    min={0}
-                    max={1}
+                    min={0.01}
+                    max={0.99}
                     step="0.01"
-                    value={compactionConfig?.threshold_percent ?? ''}
+                    value={compactionThresholdPercentInput}
                     placeholder={
                       defaultCompaction?.threshold_percent != null
                         ? `Default: ${defaultCompaction.threshold_percent}`
                         : 'Default: 0.8'
                     }
                     onChange={e => {
-                      const value = parseOptionalUnitFloat(e.target.value);
+                      const raw = e.target.value;
+                      setCompactionThresholdPercentInput(raw);
+                      const value = parseOptionalUnitFloat(raw);
+                      if (raw.trim() !== '' && value == null) {
+                        return;
+                      }
                       mutateCompaction(current => ({
                         ...(current ?? {}),
                         threshold_percent: value ?? undefined,
                       }));
+                    }}
+                    onBlur={() => {
+                      const value = parseOptionalUnitFloat(compactionThresholdPercentInput);
+                      if (compactionThresholdPercentInput.trim() !== '' && value == null) {
+                        setCompactionThresholdPercentInput(
+                          compactionConfig?.threshold_percent != null
+                            ? String(compactionConfig.threshold_percent)
+                            : ''
+                        );
+                      }
                     }}
                   />
                 </FieldGroup>
