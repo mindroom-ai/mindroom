@@ -20,6 +20,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.history import PreparedHistory
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
 from mindroom.team_runtime_resolution import (
@@ -169,6 +170,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
+        mock_prepare.return_value = PreparedHistory()
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -185,6 +187,50 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
     assert mock_prepare.await_args.kwargs["session_id"] == "session-123"
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
+
+
+@pytest.mark.asyncio
+async def test_team_response_prefers_persisted_replay_over_thread_context_fallback() -> None:
+    """Stored team replay should inject the summary and skip thread-stuffing fallback."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
+    mock_team = MagicMock()
+    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
+    fake_agent = MagicMock()
+    fake_agent.name = "GeneralAgent"
+
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
+    ):
+        mock_prepare.return_value = PreparedHistory(
+            summary_prompt_prefix=summary_prefix,
+            has_stored_replay_state=True,
+        )
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            thread_history=[{"sender": "user", "body": "Old thread context"}],
+            orchestrator=orchestrator,
+            execution_identity=None,
+            session_id="session-123",
+        )
+
+    assert "Recovered team response" in response
+    assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
+    prompt = mock_team.arun.await_args.args[0]
+    assert prompt == f"{summary_prefix}Analyze this."
+    assert "Thread Context:" not in prompt
+    assert "Old thread context" not in prompt
 
 
 @pytest.mark.asyncio
@@ -649,7 +695,7 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
         raw_stream = await _team_response_stream_raw(
             team=mock_team,
             team_members=team_members,
-            message="Analyze this.",
+            prompt="Analyze this.",
             media=MediaInputs(audio=[audio_input]),
         )
         events = [event async for event in raw_stream]
@@ -720,6 +766,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
             return_value=raw_stream(),
         ) as mock_raw,
     ):
+        mock_prepare.return_value = PreparedHistory()
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -741,6 +788,56 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
     assert mock_raw.await_count == 1
     assert mock_raw.await_args.kwargs["team"] is mock_team
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_prefers_persisted_replay_over_thread_context_fallback() -> None:
+    """Streaming team execution should pass the persisted-summary prompt to the raw stream."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+    fake_agent = MagicMock()
+    fake_agent.name = "GeneralAgent"
+    summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
+    mock_team = MagicMock(name="team")
+
+    async def raw_stream() -> AsyncIterator[object]:
+        yield TeamRunOutput(content="Streamed team response")
+
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
+        patch(
+            "mindroom.teams._team_response_stream_raw",
+            new_callable=AsyncMock,
+            return_value=raw_stream(),
+        ) as mock_raw,
+    ):
+        mock_prepare.return_value = PreparedHistory(
+            summary_prompt_prefix=summary_prefix,
+            has_stored_replay_state=True,
+        )
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
+                message="Analyze this.",
+                thread_history=[{"sender": "user", "body": "Old thread context"}],
+                orchestrator=orchestrator,
+                execution_identity=None,
+                session_id="session-123",
+            )
+        ]
+
+    assert len(chunks) == 1
+    assert "Streamed team response" in str(chunks[0])
+    assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
+    assert mock_raw.await_args.kwargs["prompt"] == f"{summary_prefix}Analyze this."
 
 
 @pytest.mark.asyncio

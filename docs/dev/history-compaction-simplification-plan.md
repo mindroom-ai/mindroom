@@ -2,7 +2,7 @@
 
 Last updated: 2026-03-30
 Owner: MindRoom backend
-Status: Proposed and not yet implemented.
+Status: Implemented.
 
 ## Objective
 

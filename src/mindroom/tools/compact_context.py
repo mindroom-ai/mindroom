@@ -17,7 +17,7 @@ from mindroom.tool_system.metadata import (
 TOOL_METADATA["compact_context"] = ToolMetadata(
     name="compact_context",
     display_name="Context Compaction",
-    description="Compress older conversation history into a summary to free context space",
+    description="Schedule context compaction for the next reply in the current conversation scope",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

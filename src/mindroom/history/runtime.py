@@ -183,22 +183,26 @@ async def prepare_bound_agents_for_run(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-) -> None:
+) -> PreparedHistory:
     """Prepare persisted history for a team's member agents."""
+    prepared_histories: list[PreparedHistory] = []
     for agent in agents:
         agent_id = agent.id
         if not isinstance(agent_id, str) or not agent_id:
             continue
-        await prepare_history_for_run(
-            agent=agent,
-            agent_name=agent_id,
-            full_prompt=full_prompt,
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            compaction_outcomes_collector=compaction_outcomes_collector,
+        prepared_histories.append(
+            await prepare_history_for_run(
+                agent=agent,
+                agent_name=agent_id,
+                full_prompt=full_prompt,
+                session_id=session_id,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+                compaction_outcomes_collector=compaction_outcomes_collector,
+            ),
         )
+    return _merge_bound_prepared_history(prepared_histories)
 
 
 async def stream_with_bound_agent_history(
@@ -232,6 +236,19 @@ def clear_prepared_history(agent: Agent) -> None:
     agent.__dict__["_astart_learning_task"] = binding.original_astart_learning_task
     agent.__dict__["_cleanup_and_store"] = binding.original_cleanup_and_store
     agent.__dict__["_acleanup_and_store"] = binding.original_acleanup_and_store
+
+
+def compose_prompt_with_persisted_history(
+    *,
+    base_prompt: str,
+    prepared_history: PreparedHistory,
+    fallback_prompt: str | None = None,
+) -> str:
+    """Compose the final prompt from persisted replay state and an optional fallback."""
+    prompt_with_summary = f"{prepared_history.summary_prompt_prefix}{base_prompt}"
+    if prepared_history.has_stored_replay_state or fallback_prompt is None:
+        return prompt_with_summary
+    return fallback_prompt
 
 
 def _activate_prepared_history(agent: Agent, history_messages: list[object]) -> None:
@@ -291,6 +308,31 @@ def _activate_prepared_history(agent: Agent, history_messages: list[object]) -> 
     agent.__dict__["_astart_learning_task"] = MethodType(_patched_astart_learning_task, agent)
     agent.__dict__["_cleanup_and_store"] = MethodType(_patched_cleanup_and_store, agent)
     agent.__dict__["_acleanup_and_store"] = MethodType(_patched_acleanup_and_store, agent)
+
+
+def _merge_bound_prepared_history(prepared_histories: list[PreparedHistory]) -> PreparedHistory:
+    if not prepared_histories:
+        return PreparedHistory()
+
+    summary_prompt_prefix = ""
+    seen_summary_prompt_prefixes: set[str] = set()
+    for prepared in prepared_histories:
+        if not prepared.summary_prompt_prefix:
+            continue
+        seen_summary_prompt_prefixes.add(prepared.summary_prompt_prefix)
+        if not summary_prompt_prefix:
+            summary_prompt_prefix = prepared.summary_prompt_prefix
+
+    if len(seen_summary_prompt_prefixes) > 1:
+        logger.warning(
+            "Bound agents produced mismatched summary prefixes; using the first non-empty prefix",
+            summary_prefix_count=len(seen_summary_prompt_prefixes),
+        )
+
+    return PreparedHistory(
+        summary_prompt_prefix=summary_prompt_prefix,
+        has_stored_replay_state=any(prepared.has_stored_replay_state for prepared in prepared_histories),
+    )
 
 
 def _sanitized_run_messages_for_learning(run_messages: RunMessages) -> RunMessages:

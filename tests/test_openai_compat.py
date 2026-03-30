@@ -28,6 +28,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.history import PreparedHistory
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -1832,6 +1833,7 @@ class TestTeamCompletion:
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
+            mock_prepare.return_value = PreparedHistory()
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -1888,6 +1890,7 @@ class TestTeamCompletion:
                 side_effect=passthrough_stream_wrapper,
             ),
         ):
+            mock_prepare.return_value = PreparedHistory()
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -2434,6 +2437,99 @@ class TestTeamCompletion:
         assert "user: Start" in prompt
         assert "assistant: Ack" in prompt
         assert "Current message:\nFollow-up" in prompt
+
+    def test_team_non_streaming_prefers_stored_replay_over_thread_history(self, team_app_client: TestClient) -> None:
+        """Stored team replay should suppress request-history stuffing and inject the summary prefix."""
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
+        mock_team = MagicMock()
+        mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="ok"))
+        mock_agents = [MagicMock(name="GeneralAgent"), MagicMock(name="CodeAgent")]
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_agents_for_run",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = PreparedHistory(
+                summary_prompt_prefix=summary_prefix,
+                has_stored_replay_state=True,
+            )
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [
+                        {"role": "user", "content": "Start"},
+                        {"role": "assistant", "content": "Ack"},
+                        {"role": "user", "content": "Follow-up"},
+                    ],
+                },
+            )
+
+        assert response.status_code == 200
+        assert mock_prepare.await_args.kwargs["full_prompt"] == "Follow-up"
+        prompt = mock_team.arun.call_args.args[0]
+        assert prompt == f"{summary_prefix}Follow-up"
+        assert "Previous conversation in this thread:" not in prompt
+        assert "user: Start" not in prompt
+        assert "assistant: Ack" not in prompt
+
+    def test_team_streaming_prefers_stored_replay_over_thread_history(self, team_app_client: TestClient) -> None:
+        """Stored team replay should suppress request-history stuffing in the streaming path too."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
+        mock_team = MagicMock()
+        mock_agents = [MagicMock(name="GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="Hello world!")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_agents_for_run",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = PreparedHistory(
+                summary_prompt_prefix=summary_prefix,
+                has_stored_replay_state=True,
+            )
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [
+                        {"role": "user", "content": "Start"},
+                        {"role": "assistant", "content": "Ack"},
+                        {"role": "user", "content": "Follow-up"},
+                    ],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert mock_prepare.await_args.kwargs["full_prompt"] == "Follow-up"
+        prompt = mock_team.arun.call_args.args[0]
+        assert prompt == f"{summary_prefix}Follow-up"
+        assert "Previous conversation in this thread:" not in prompt
 
     def test_collaborate_mode_delegates_to_all(self) -> None:
         """Collaborate mode sets delegate_to_all_members=True on Team."""

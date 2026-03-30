@@ -5942,7 +5942,7 @@
       "config_fields": [],
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Compress older conversation history into a summary to free context space",
+      "description": "Schedule context compaction for the next reply in the current conversation scope",
       "display_name": "Context Compaction",
       "docs_url": null,
       "helper_text": null,

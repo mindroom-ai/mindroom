@@ -32,6 +32,7 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.history import (
     CompactionOutcome,
     clear_bound_agent_history_state,
+    compose_prompt_with_persisted_history,
     prepare_bound_agents_for_run,
 )
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
@@ -1170,16 +1171,17 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         return str(exc)
     agents = team_members.agents
 
-    prompt = _build_prompt_with_context(message, thread_history)
+    base_prompt = message
+    fallback_prompt = _build_prompt_with_context(message, thread_history)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
     media_inputs = media or MediaInputs()
     team = _create_team_instance(agents, team_members.requested_agent_names, mode, orchestrator, model_name)
 
     try:
-        await prepare_bound_agents_for_run(
+        prepared_history = await prepare_bound_agents_for_run(
             agents=agents,
-            full_prompt=prompt,
+            full_prompt=base_prompt,
             session_id=session_id,
             runtime_paths=orchestrator.runtime_paths,
             config=orchestrator.config,
@@ -1191,6 +1193,11 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         clear_bound_agent_history_state(agents)
         return get_user_friendly_error_message(e, team_name)
 
+    prompt = compose_prompt_with_persisted_history(
+        base_prompt=base_prompt,
+        prepared_history=prepared_history,
+        fallback_prompt=fallback_prompt,
+    )
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
     logger.info(f"TEAM PROMPT: {prompt[:500]}")
 
@@ -1283,8 +1290,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
 async def _team_response_stream_raw(
     team: Team,
     team_members: ResolvedExactTeamMembers,
-    message: str,
-    thread_history: list[dict] | None = None,
+    prompt: str,
     media: MediaInputs | None = None,
     session_id: str | None = None,
     run_id: str | None = None,
@@ -1305,7 +1311,6 @@ async def _team_response_stream_raw(
         return _empty()
 
     media_inputs = media or MediaInputs()
-    prompt = _build_prompt_with_context(message, thread_history)
     logger.info(
         f"Created team with {len(agents)} agents in {(team.delegate_to_all_members and 'collaborate') or 'coordinate'} mode",
     )
@@ -1385,7 +1390,8 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return
     agent_names = team_members.display_names
     display_names = team_members.display_names
-    prepared_prompt = _build_prompt_with_context(message, thread_history)
+    base_prompt = message
+    fallback_prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(
         team_members.agents,
         team_members.requested_agent_names,
@@ -1395,9 +1401,9 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     )
 
     try:
-        await prepare_bound_agents_for_run(
+        prepared_history = await prepare_bound_agents_for_run(
             agents=team_members.agents,
-            full_prompt=prepared_prompt,
+            full_prompt=base_prompt,
             session_id=session_id,
             runtime_paths=orchestrator.runtime_paths,
             config=orchestrator.config,
@@ -1410,9 +1416,14 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
         yield get_user_friendly_error_message(e, f"Team ({', '.join(agent_names)})")
         return
 
+    prepared_prompt = compose_prompt_with_persisted_history(
+        base_prompt=base_prompt,
+        prepared_history=prepared_history,
+        fallback_prompt=fallback_prompt,
+    )
     logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
     media_inputs = media or MediaInputs()
-    attempt_message = message
+    attempt_prompt = prepared_prompt
     attempt_media_inputs = media_inputs
     attempt_run_id = run_id
     team_name = f"Team ({', '.join(agent_names)})"
@@ -1564,8 +1575,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             raw_stream = await _team_response_stream_raw(
                 team=team,
                 team_members=team_members,
-                message=attempt_message,
-                thread_history=thread_history,
+                prompt=attempt_prompt,
                 media=attempt_media_inputs,
                 session_id=session_id,
                 run_id=attempt_run_id,
@@ -1593,7 +1603,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 agents=", ".join(agent_names),
                                 error=error_text,
                             )
-                            attempt_message = append_inline_media_fallback_prompt(message)
+                            attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             retry_requested = True
@@ -1620,7 +1630,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             agents=", ".join(agent_names),
                             error=error_text,
                         )
-                        attempt_message = append_inline_media_fallback_prompt(message)
+                        attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
                         attempt_media_inputs = MediaInputs()
                         attempt_run_id = _next_retry_run_id(run_id)
                         retry_requested = True

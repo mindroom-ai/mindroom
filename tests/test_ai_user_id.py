@@ -56,7 +56,9 @@ def _config() -> Config:
 
 
 def _prepared_prompt_result(
-    agent: object, *, prompt: str = "test prompt"
+    agent: object,
+    *,
+    prompt: str = "test prompt",
 ) -> tuple[object, str, list[str], PreparedHistory]:
     return agent, prompt, [], PreparedHistory()
 

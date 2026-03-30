@@ -184,13 +184,13 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Custom & Config
 
-| Icon                        | Tool              | Description                                                                                              | Config Required |
-| --------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------- | --------------- |
-| :lucide-sliders-horizontal: | `custom_api`      | Custom API calls                                                                                         | Varies          |
-| :lucide-sliders-horizontal: | `config_manager`  | Build and manage MindRoom agents with expert knowledge of the system                                     | -               |
-| :lucide-minimize-2:         | `compact_context` | Compact older prompt-visible history into a durable summary while keeping the stored session runs intact | -               |
-| :lucide-workflow:           | `subagents`       | Spawn and communicate with sub-agent sessions                                                            | -               |
-| :lucide-workflow:           | `delegate`        | Delegate tasks to other configured agents                                                                | -               |
+| Icon                        | Tool              | Description                                                                                                               | Config Required |
+| --------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| :lucide-sliders-horizontal: | `custom_api`      | Custom API calls                                                                                                          | Varies          |
+| :lucide-sliders-horizontal: | `config_manager`  | Build and manage MindRoom agents with expert knowledge of the system                                                      | -               |
+| :lucide-minimize-2:         | `compact_context` | Schedule context compaction for the next reply in the current conversation scope while keeping stored session runs intact | -               |
+| :lucide-workflow:           | `subagents`       | Spawn and communicate with sub-agent sessions                                                                             | -               |
+| :lucide-workflow:           | `delegate`        | Delegate tasks to other configured agents                                                                                 | -               |
 
 Tool presets are config-only macros, not runtime tools. For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, `matrix_message`, and `attachments`. `attachments` is not directly in the preset — it is implied by `matrix_message` via the `IMPLIED_TOOLS` mapping.
 

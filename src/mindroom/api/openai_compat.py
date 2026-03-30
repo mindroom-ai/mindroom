@@ -38,6 +38,7 @@ from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.history import (
     clear_bound_agent_history_state,
+    compose_prompt_with_persisted_history,
     prepare_bound_agents_for_run,
     stream_with_bound_agent_history,
 )
@@ -1175,12 +1176,12 @@ async def _non_stream_team_completion(
 
     logger.info("Team completion request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 
-    team_prompt = build_prompt_with_thread_history(prompt, thread_history)
+    fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
 
     try:
-        await prepare_bound_agents_for_run(
+        prepared_history = await prepare_bound_agents_for_run(
             agents=agents,
-            full_prompt=team_prompt,
+            full_prompt=prompt,
             session_id=session_id,
             runtime_paths=runtime_paths,
             config=config,
@@ -1191,6 +1192,11 @@ async def _non_stream_team_completion(
         clear_bound_agent_history_state(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
 
+    team_prompt = compose_prompt_with_persisted_history(
+        base_prompt=prompt,
+        prepared_history=prepared_history,
+        fallback_prompt=fallback_prompt,
+    )
     try:
         response = await team.arun(team_prompt, session_id=session_id, user_id=user)
     except Exception:
@@ -1240,12 +1246,12 @@ async def _stream_team_completion(
 
     logger.info("Team streaming request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 
-    team_prompt = build_prompt_with_thread_history(prompt, thread_history)
+    fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
 
     try:
-        await prepare_bound_agents_for_run(
+        prepared_history = await prepare_bound_agents_for_run(
             agents=agents,
-            full_prompt=team_prompt,
+            full_prompt=prompt,
             session_id=session_id,
             runtime_paths=runtime_paths,
             config=config,
@@ -1256,6 +1262,11 @@ async def _stream_team_completion(
         clear_bound_agent_history_state(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
 
+    team_prompt = compose_prompt_with_persisted_history(
+        base_prompt=prompt,
+        prepared_history=prepared_history,
+        fallback_prompt=fallback_prompt,
+    )
     try:
         with tool_execution_identity(execution_identity):
             raw_stream = team.arun(team_prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
