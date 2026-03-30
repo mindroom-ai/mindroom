@@ -769,6 +769,19 @@ class AgentBot:
         event_info = EventInfo.from_event(event_source)
         return thread_id or event_info.safe_thread_root or reply_to_event_id
 
+    def _resolve_response_thread_root(
+        self,
+        thread_id: str | None,
+        reply_to_event_id: str | None,
+        *,
+        room_id: str,
+        response_envelope: MessageEnvelope | None = None,
+    ) -> str | None:
+        """Return the canonical thread root for outbound response delivery."""
+        if response_envelope is not None:
+            return response_envelope.resolved_thread_id
+        return self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id)
+
     @property
     def show_tool_calls(self) -> bool:
         """Whether to show tool call details inline in responses."""
@@ -2759,6 +2772,12 @@ class AgentBot:
             source_kind="message",
         )
         resolved_correlation_id = correlation_id or reply_to_event_id
+        resolved_thread_id = self._resolve_response_thread_root(
+            thread_id,
+            reply_to_event_id,
+            room_id=room_id,
+            response_envelope=resolved_response_envelope,
+        )
         session_id = self._conversation_session_id(
             room_id=room_id,
             thread_id=thread_id,
@@ -2831,7 +2850,7 @@ class AgentBot:
                             client,
                             room_id,
                             reply_to_event_id,
-                            thread_id,
+                            resolved_thread_id,
                             self.matrix_id.domain,
                             self.config,
                             self.runtime_paths,
@@ -2878,7 +2897,7 @@ class AgentBot:
                     delivery_result = await self._deliver_generated_response(
                         room_id=room_id,
                         reply_to_event_id=reply_to_event_id,
-                        thread_id=thread_id,
+                        thread_id=resolved_thread_id,
                         existing_event_id=event_id,
                         response_text=draft.response_text,
                         response_kind="team",
@@ -2936,13 +2955,13 @@ class AgentBot:
                 except asyncio.CancelledError:
                     self.logger.info("Team non-streaming response cancelled by user", message_id=message_id)
                     if message_id:
-                        await self._edit_message(room_id, message_id, _CANCELLED_RESPONSE_TEXT, thread_id)
+                        await self._edit_message(room_id, message_id, _CANCELLED_RESPONSE_TEXT, resolved_thread_id)
                     raise
 
                 delivery_result = await self._deliver_generated_response(
                     room_id=room_id,
                     reply_to_event_id=reply_to_event_id,
-                    thread_id=thread_id,
+                    thread_id=resolved_thread_id,
                     existing_event_id=message_id,
                     response_text=response_text,
                     response_kind="team",
@@ -2962,6 +2981,7 @@ class AgentBot:
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
+            resolved_thread_id=resolved_thread_id,
             response_function=generate_team_response,
             thinking_message=thinking_msg,
             existing_event_id=existing_event_id,
@@ -2982,15 +3002,10 @@ class AgentBot:
             and delivery_result.option_map
             and delivery_result.options_list
         ):
-            thread_root_for_registration = self._resolve_reply_thread_id(
-                thread_id,
-                reply_to_event_id,
-                room_id=room_id,
-            )
             interactive.register_interactive_question(
                 delivery_result.event_id,
                 room_id,
-                thread_root_for_registration,
+                resolved_thread_id,
                 delivery_result.option_map,
                 "team",
             )
@@ -3022,6 +3037,7 @@ class AgentBot:
         reply_to_event_id: str,
         thread_id: str | None,
         response_function: object,  # Function that generates the response (takes message_id)
+        resolved_thread_id: str | None = None,
         thinking_message: str | None = None,  # None means don't send thinking message
         existing_event_id: str | None = None,
         user_id: str | None = None,  # User ID for presence check
@@ -3039,6 +3055,7 @@ class AgentBot:
             reply_to_event_id: Event to reply to
             thread_id: Thread ID if in thread
             response_function: Async function that generates the response (takes message_id parameter)
+            resolved_thread_id: Canonical thread root to reuse for placeholder sends and edits
             thinking_message: Thinking message to show (only used when existing_event_id is None)
             existing_event_id: ID of existing message to edit (for interactive questions)
             user_id: User ID for checking if they're online (for stop button decision)
@@ -3066,11 +3083,16 @@ class AgentBot:
             initial_message_id = None
             if thinking_message:
                 assert not existing_event_id  # Redundant but makes the logic clear
+                response_thread_id = (
+                    resolved_thread_id
+                    if resolved_thread_id is not None
+                    else self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id)
+                )
                 initial_message_id = await self._send_response(
                     room_id,
                     reply_to_event_id,
                     f"{thinking_message} {IN_PROGRESS_MARKER}",
-                    thread_id,
+                    response_thread_id,
                     extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
                 )
 
@@ -3149,6 +3171,7 @@ class AgentBot:
         model_prompt: str | None = None,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
+        resolved_thread_id: str | None = None,
         response_kind: str = "ai",
     ) -> _ResponseDispatchResult:
         """Process a message and send a response (non-streaming)."""
@@ -3157,6 +3180,16 @@ class AgentBot:
             return _ResponseDispatchResult(event_id=existing_event_id, response_text="", delivery_kind=None)
 
         media_inputs = media or MediaInputs()
+        response_thread_id = (
+            resolved_thread_id
+            if resolved_thread_id is not None
+            else self._resolve_response_thread_root(
+                thread_id,
+                reply_to_event_id,
+                room_id=room_id,
+                response_envelope=response_envelope,
+            )
+        )
         session_id = self._conversation_session_id(
             room_id=room_id,
             thread_id=thread_id,
@@ -3235,7 +3268,7 @@ class AgentBot:
             # Handle cancellation - send a message showing it was stopped
             self.logger.info("Non-streaming response cancelled by user", message_id=existing_event_id)
             if existing_event_id:
-                await self._edit_message(room_id, existing_event_id, _CANCELLED_RESPONSE_TEXT, thread_id)
+                await self._edit_message(room_id, existing_event_id, _CANCELLED_RESPONSE_TEXT, response_thread_id)
             raise
         except Exception as e:
             self.logger.exception("Error in non-streaming response", error=str(e))
@@ -3245,7 +3278,7 @@ class AgentBot:
         delivery = await self._deliver_generated_response(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
-            thread_id=thread_id,
+            thread_id=response_thread_id,
             existing_event_id=existing_event_id,
             response_text=response_text,
             response_kind=response_kind,
@@ -3271,19 +3304,10 @@ class AgentBot:
             return delivery
 
         if delivery.event_id and delivery.option_map and delivery.options_list:
-            # For interactive questions, use the same thread root that _send_response uses:
-            # - If already in a thread, use that thread_id
-            # - If not in a thread, use reply_to_event_id (the user's message) as thread root
-            # This ensures consistency with how the bot creates threads
-            thread_root_for_registration = self._resolve_reply_thread_id(
-                thread_id,
-                reply_to_event_id,
-                room_id=room_id,
-            )
             interactive.register_interactive_question(
                 delivery.event_id,
                 room_id,
-                thread_root_for_registration,
+                response_thread_id,
                 delivery.option_map,
                 self.agent_name,
             )
@@ -3626,6 +3650,7 @@ class AgentBot:
         model_prompt: str | None = None,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
+        resolved_thread_id: str | None = None,
         response_kind: str = "ai",
     ) -> _ResponseDispatchResult:
         """Process a message and send a response (streaming)."""
@@ -3634,6 +3659,16 @@ class AgentBot:
             return _ResponseDispatchResult(event_id=existing_event_id, response_text="", delivery_kind=None)
 
         media_inputs = media or MediaInputs()
+        response_thread_id = (
+            resolved_thread_id
+            if resolved_thread_id is not None
+            else self._resolve_response_thread_root(
+                thread_id,
+                reply_to_event_id,
+                room_id=room_id,
+                response_envelope=response_envelope,
+            )
+        )
         session_id = self._conversation_session_id(
             room_id=room_id,
             thread_id=thread_id,
@@ -3714,7 +3749,7 @@ class AgentBot:
                         self.client,
                         room_id,
                         reply_to_event_id,
-                        thread_id,
+                        response_thread_id,
                         self.matrix_id.domain,
                         self.config,
                         self.runtime_paths,
@@ -3744,15 +3779,10 @@ class AgentBot:
         if response_envelope is None or correlation_id is None:
             interactive_response = interactive.parse_and_format_interactive(accumulated, extract_mapping=True)
             if event_id and interactive_response.option_map and interactive_response.options_list:
-                thread_root_for_registration = self._resolve_reply_thread_id(
-                    thread_id,
-                    reply_to_event_id,
-                    room_id=room_id,
-                )
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
-                    thread_root_for_registration,
+                    response_thread_id,
                     interactive_response.option_map,
                     self.agent_name,
                 )
@@ -3800,7 +3830,7 @@ class AgentBot:
             delivery = await self._deliver_generated_response(
                 room_id=room_id,
                 reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
+                thread_id=response_thread_id,
                 existing_event_id=event_id,
                 response_text=draft.response_text,
                 response_kind=response_kind,
@@ -3829,15 +3859,10 @@ class AgentBot:
             )
 
         if delivery.event_id is not None and delivery.option_map and delivery.options_list:
-            thread_root_for_registration = self._resolve_reply_thread_id(
-                thread_id,
-                reply_to_event_id,
-                room_id=room_id,
-            )
             interactive.register_interactive_question(
                 delivery.event_id,
                 room_id,
-                thread_root_for_registration,
+                response_thread_id,
                 delivery.option_map,
                 self.agent_name,
             )
@@ -3985,6 +4010,12 @@ class AgentBot:
         )
         delivery_result: _ResponseDispatchResult | None = None
         response_run_id = str(uuid4())
+        response_thread_id = self._resolve_response_thread_root(
+            thread_id,
+            reply_to_event_id,
+            room_id=room_id,
+            response_envelope=response_envelope,
+        )
 
         # Create async function for generation that takes message_id as parameter
         async def generate(message_id: str | None) -> None:
@@ -4005,6 +4036,7 @@ class AgentBot:
                     model_prompt=model_prompt_text,
                     response_envelope=response_envelope,
                     correlation_id=correlation_id,
+                    resolved_thread_id=response_thread_id,
                 )
             else:
                 delivery_result = await self._process_and_respond(
@@ -4021,6 +4053,7 @@ class AgentBot:
                     model_prompt=model_prompt_text,
                     response_envelope=response_envelope,
                     correlation_id=correlation_id,
+                    resolved_thread_id=response_thread_id,
                 )
 
         # Use unified handler for cancellation support
@@ -4033,6 +4066,7 @@ class AgentBot:
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
+            resolved_thread_id=response_thread_id,
             response_function=generate,
             thinking_message=thinking_msg,
             existing_event_id=existing_event_id,

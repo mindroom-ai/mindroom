@@ -1798,6 +1798,73 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
+    async def test_generate_team_response_helper_uses_resolved_thread_root_for_placeholder_and_edit(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Team helper should preserve the canonical thread root across placeholder and edit flow."""
+        sent_contents: list[dict[str, object]] = []
+
+        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> str:
+            sent_contents.append(content)
+            return "$team"
+
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = MagicMock()
+        bot._edit_message = AsyncMock(return_value=True)
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        matrix_ids = config.get_ids(runtime_paths)
+        envelope = MessageEnvelope(
+            source_event_id="$reply_plain:localhost",
+            room_id="!test:localhost",
+            thread_id="$raw_thread:localhost",
+            resolved_thread_id="$canonical_thread:localhost",
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="team prompt",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=mock_agent_user.agent_name,
+            source_kind="message",
+        )
+
+        with (
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.team_response", new_callable=AsyncMock, return_value="Team reply"),
+            patch("mindroom.bot.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value="$latest:localhost")),
+            patch("mindroom.bot.send_message", new=AsyncMock(side_effect=record_send)),
+        ):
+            event_id = await bot._generate_team_response_helper(
+                room_id="!test:localhost",
+                reply_to_event_id="$reply_plain:localhost",
+                thread_id="$raw_thread:localhost",
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+                thread_history=[],
+                requester_user_id="@user:localhost",
+                payload=_DispatchPayload(prompt="team prompt"),
+                response_envelope=envelope,
+                correlation_id="corr-team",
+            )
+
+        assert event_id == "$team"
+        assert len(sent_contents) == 1
+        content = sent_contents[0]
+        assert content["m.relates_to"]["rel_type"] == "m.thread"
+        assert content["m.relates_to"]["event_id"] == "$canonical_thread:localhost"
+        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply_plain:localhost"
+        assert bot._edit_message.await_args.args[3] == "$canonical_thread:localhost"
+
+    @pytest.mark.asyncio
     async def test_reaction_hooks_run_after_built_in_handlers_decline(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -2278,6 +2345,84 @@ class TestAgentBot:
         process_kwargs = bot._process_and_respond_streaming.await_args.kwargs
         assert process_args[5] == "$thinking"
         assert process_kwargs["adopt_existing_placeholder"] is True
+
+    @pytest.mark.asyncio
+    async def test_generate_response_uses_resolved_thread_root_for_thinking_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Thinking placeholders should use the canonical thread root from the response envelope."""
+        scheduled_tasks: list[asyncio.Task[None]] = []
+        sent_contents: list[dict[str, object]] = []
+
+        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        def schedule_background_task(
+            coro: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            error_handler: object | None = None,  # noqa: ARG001
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+            scheduled_tasks.append(task)
+            return task
+
+        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> str:
+            sent_contents.append(content)
+            return "$thinking"
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._process_and_respond = AsyncMock(
+            return_value=_ResponseDispatchResult(
+                event_id="$thinking",
+                response_text="ok",
+                delivery_kind="edited",
+            ),
+        )
+        envelope = MessageEnvelope(
+            source_event_id="$reply_plain:localhost",
+            room_id="!test:localhost",
+            thread_id=None,
+            resolved_thread_id="$thread_root:localhost",
+            requester_id="@alice:localhost",
+            sender_id="@alice:localhost",
+            body="Continue",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=mock_agent_user.agent_name,
+            source_kind="message",
+        )
+
+        with (
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
+            patch("mindroom.bot.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value="$latest:localhost")),
+            patch("mindroom.bot.send_message", new=AsyncMock(side_effect=record_send)),
+        ):
+            await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Continue",
+                reply_to_event_id="$reply_plain:localhost",
+                thread_id=None,
+                thread_history=[],
+                user_id="@alice:localhost",
+                response_envelope=envelope,
+                correlation_id="$request:localhost",
+            )
+
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+        assert len(sent_contents) == 1
+        content = sent_contents[0]
+        assert content["m.relates_to"]["rel_type"] == "m.thread"
+        assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
+        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply_plain:localhost"
 
     @pytest.mark.asyncio
     async def test_generate_response_queues_thread_summary_for_threaded_reply(
