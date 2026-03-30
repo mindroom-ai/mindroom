@@ -1120,9 +1120,10 @@ async def _prepare_agent_and_prompt(  # noqa: C901, PLR0912, PLR0915
     )
     if session_id and storage is not None and session is not None and has_prior_runs and agent_name in config.agents:
         compaction_config = config.get_agent_compaction_config(agent_name)
+        compaction_authored = config.has_authored_agent_compaction_config(agent_name)
         model_name, model_config = _get_model_config(config, agent_name)
         context_window = model_config.context_window if model_config is not None else None
-        if compaction_config.enabled and context_window is not None:
+        if compaction_authored and compaction_config.enabled and context_window is not None:
             static_tokens = _estimate_static_tokens(agent, full_prompt)
             history_run_limit = (
                 agent.num_history_runs if agent.num_history_runs and agent.num_history_runs > 0 else None

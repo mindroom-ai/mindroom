@@ -61,7 +61,6 @@ export function AgentEditor() {
   const defaultShowToolCalls = config?.defaults.show_tool_calls ?? true;
   const defaultMarkdown = config?.defaults.markdown ?? true;
   const defaultCompressToolResults = config?.defaults.compress_tool_results ?? true;
-  const defaultEnableSessionSummaries = config?.defaults.enable_session_summaries ?? false;
   const globalMemoryBackend = config?.memory?.backend ?? 'mem0';
   const knowledgeBaseNames = useMemo(
     () => Object.keys(config?.knowledge_bases || {}).sort(),
@@ -1877,38 +1876,6 @@ export function AgentEditor() {
             />
           </FieldGroup>
 
-          {/* Enable Session Summaries */}
-          <FieldGroup
-            label="Session Summaries"
-            helperText={`Enable Agno session summaries for conversation compaction (global default: ${
-              defaultEnableSessionSummaries ? 'on' : 'off'
-            })`}
-            htmlFor="enable_session_summaries"
-          >
-            <Controller
-              name="enable_session_summaries"
-              control={control}
-              render={({ field }) => (
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="enable_session_summaries"
-                    checked={field.value ?? defaultEnableSessionSummaries}
-                    onCheckedChange={checked => {
-                      const value = checked === true;
-                      field.onChange(value);
-                      handleFieldChange('enable_session_summaries', value);
-                    }}
-                  />
-                  <label
-                    htmlFor="enable_session_summaries"
-                    className="text-sm font-medium cursor-pointer select-none"
-                  >
-                    Enable session summaries
-                  </label>
-                </div>
-              )}
-            />
-          </FieldGroup>
         </div>
       </div>
     </EditorPanel>

@@ -984,7 +984,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         else defaults.max_tool_calls_from_history
     )
     compaction_config = config.get_agent_compaction_config(agent_name)
-    add_session_summary_to_context = compaction_config.enabled or "compact_context" in tool_names
+    auto_compaction_enabled = (
+        config.has_authored_agent_compaction_config(agent_name) and compaction_config.enabled
+    )
+    add_session_summary_to_context = auto_compaction_enabled or "compact_context" in tool_names
 
     # Warn when the deprecated enable_session_summaries field is explicitly set
     if agent_config.enable_session_summaries is not None or defaults.enable_session_summaries:

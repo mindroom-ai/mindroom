@@ -77,7 +77,6 @@ class SelfConfigTools(Toolkit):
         num_history_runs: int | None = None,
         num_history_messages: int | None = None,
         compress_tool_results: bool | None = None,
-        enable_session_summaries: bool | None = None,
         max_tool_calls_from_history: int | None = None,
         context_files: list[str] | None = None,
     ) -> str:
@@ -101,7 +100,6 @@ class SelfConfigTools(Toolkit):
             num_history_runs: Number of prior runs to include as history
             num_history_messages: Max messages from history
             compress_tool_results: Compress tool results in history
-            enable_session_summaries: Enable session summaries
             max_tool_calls_from_history: Max tool call messages replayed from history
             context_files: Workspace-relative file paths loaded into each freshly built agent instance
 
@@ -160,7 +158,6 @@ class SelfConfigTools(Toolkit):
             ("num_history_runs", num_history_runs),
             ("num_history_messages", num_history_messages),
             ("compress_tool_results", compress_tool_results),
-            ("enable_session_summaries", enable_session_summaries),
             ("max_tool_calls_from_history", max_tool_calls_from_history),
             ("context_files", context_files),
         ]

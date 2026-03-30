@@ -14,8 +14,12 @@ import pytest
 from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
+from agno.media import Audio, File, Image, Video
 from agno.models.base import Model
+from agno.models.message import Message
 from agno.models.response import ModelResponse
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.tools.function import Function, FunctionCall
@@ -25,6 +29,7 @@ from mindroom.bot import AgentBot
 from mindroom.compaction import (
     _PENDING_COMPACTION,
     _WRAPPER_OVERHEAD_TOKENS,
+    _build_summary_input,
     PendingCompaction,
     _estimate_serialized_run_tokens,
     apply_pending_compaction,
@@ -44,8 +49,6 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
-
-    from agno.run.agent import RunOutput
 
 
 class FakeModel(Model):
@@ -132,6 +135,52 @@ def _make_plain_agent(storage: SqliteDb, *, store_history_messages: bool) -> Age
 def _single_run_compaction_window(run: RunOutput, *, reserve_tokens: int = 1024) -> int:
     desired_budget = _estimate_serialized_run_tokens(run) + _WRAPPER_OVERHEAD_TOKENS + 32
     return int((desired_budget + reserve_tokens + 2000) / 0.9) + 1
+
+
+def test_build_summary_input_serializes_message_media_without_raw_content() -> None:
+    """Compaction input should include media metadata without dumping raw bytes."""
+    run = RunOutput(
+        run_id="r1",
+        messages=[
+            Message(
+                role="user",
+                content="uploaded artifacts",
+                images=[Image(content=b"raw-image-bytes", mime_type="image/png", alt_text="architecture diagram")],
+                files=[File(content=b"%PDF-raw", filename="spec.pdf", mime_type="application/pdf")],
+                audio=[Audio(content=b"raw-audio", transcript="meeting notes")],
+                videos=[Video(content=b"raw-video", revised_prompt="demo clip")],
+                image_output=Image(url="mxc://mindroom/image", alt_text="generated mockup"),
+                file_output=File(content="raw file body", filename="report.txt", mime_type="text/plain"),
+            ),
+        ],
+        status=RunStatus.running,
+    )
+
+    summary_input, included_runs, budget_exhausted = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=10_000,
+    )
+
+    assert included_runs == [run]
+    assert budget_exhausted is False
+    assert "<images>" in summary_input
+    assert "<files>" in summary_input
+    assert "<audio>" in summary_input
+    assert "<videos>" in summary_input
+    assert "<image_output>" in summary_input
+    assert "<file_output>" in summary_input
+    assert "architecture diagram" in summary_input
+    assert "spec.pdf" in summary_input
+    assert "meeting notes" in summary_input
+    assert "demo clip" in summary_input
+    assert "mxc://mindroom/image" in summary_input
+    assert "report.txt" in summary_input
+    assert "raw-image-bytes" not in summary_input
+    assert "%PDF-raw" not in summary_input
+    assert "raw-audio" not in summary_input
+    assert "raw-video" not in summary_input
+    assert "raw file body" not in summary_input
 
 
 async def _seed_session(

@@ -641,6 +641,10 @@ class Config(BaseModel):
             merged.update(agent_override.model_dump(exclude_none=True))
         return CompactionConfig.model_validate(merged)
 
+    def has_authored_agent_compaction_config(self, agent_name: str) -> bool:
+        """Return whether auto-compaction was explicitly configured for one agent."""
+        return self.defaults.compaction is not None or self.get_agent(agent_name).compaction is not None
+
     def get_agent_worker_tools(
         self,
         agent_name: str,

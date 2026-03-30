@@ -251,6 +251,7 @@ class TestHistoryConfig:
         with patch("mindroom.agents.SqliteDb"):
             agent = _create_agent_for_test("calculator", config)
         assert agent.enable_session_summaries is False
+        assert agent.add_session_summary_to_context is False
 
     def test_enable_session_summaries_per_agent_true(self) -> None:
         """MindRoom ignores the legacy per-agent auto-summary flag."""
@@ -259,6 +260,7 @@ class TestHistoryConfig:
         with patch("mindroom.agents.SqliteDb"):
             agent = _create_agent_for_test("calculator", config)
         assert agent.enable_session_summaries is False
+        assert agent.add_session_summary_to_context is False
 
     def test_enable_session_summaries_per_agent_false_overrides_defaults_true(self) -> None:
         """Legacy auto-summary flags stay disabled regardless of authored value."""
@@ -313,9 +315,17 @@ class TestHistoryConfig:
         assert effective.model == "default"
         assert effective.notify is False
 
-    def test_auto_compaction_enables_session_summary_context(self) -> None:
-        """Auto-compaction should replay session summaries into the next prompt."""
+    def test_auto_compaction_stays_off_until_authored(self) -> None:
+        """Session-summary replay stays disabled until compaction is explicitly configured."""
         config = _load_default_config()
+        with patch("mindroom.agents.SqliteDb"):
+            agent = _create_agent_for_test("calculator", config)
+        assert agent.add_session_summary_to_context is False
+
+    def test_authored_auto_compaction_enables_session_summary_context(self) -> None:
+        """Authored auto-compaction should replay session summaries into the next prompt."""
+        config = _load_default_config()
+        config.defaults.compaction = CompactionConfig(enabled=True)
         with patch("mindroom.agents.SqliteDb"):
             agent = _create_agent_for_test("calculator", config)
         assert agent.add_session_summary_to_context is True
@@ -964,6 +974,53 @@ class TestPrepareAgentAndPrompt:
             mock_stuff.assert_called_once()
             assert prompt == "stuffed"
             assert unseen_ids == []
+
+    @pytest.mark.asyncio
+    async def test_auto_compaction_skips_when_compaction_not_authored(self, tmp_path: object) -> None:
+        """No authored compaction block means auto-compaction should not run."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"calculator": AgentConfig(display_name="Calculator")},
+                models={"default": ModelConfig(provider="openai", id="test-model", context_window=100)},
+            ),
+            tmp_path,
+        )
+        session = AgentSession(
+            session_id="sid",
+            runs=[
+                RunOutput(
+                    run_id="r1",
+                    messages=[Message(role="user", content="x" * 60)],
+                    status=RunStatus.running,
+                ),
+            ],
+        )
+        agent = MagicMock(spec=Agent)
+        agent.role = "r" * 20
+        agent.instructions = []
+        agent.num_history_runs = None
+        agent.num_history_messages = None
+        agent.add_session_summary_to_context = False
+        agent.max_tool_calls_from_history = None
+
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.create_agent", return_value=agent),
+            patch("mindroom.ai.create_session_storage", return_value=MagicMock(spec=SqliteDb)),
+            patch("mindroom.ai._get_agent_session", return_value=session),
+            patch("mindroom.ai.compact_session_now", new_callable=AsyncMock) as mock_compact,
+            patch("mindroom.ai._apply_context_window_limit"),
+        ):
+            await _prepare_agent_and_prompt(
+                "calculator",
+                "test",
+                _runtime_paths(tmp_path),
+                config,
+                thread_history=[],
+                session_id="sid",
+            )
+
+        mock_compact.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_auto_compaction_runs_before_history_limiting(self, config: Config, tmp_path: object) -> None:

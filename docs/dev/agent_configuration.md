@@ -175,7 +175,7 @@ agents:
 - **num_history_runs**: Number of prior Agno runs to include as history context (per-agent override)
 - **num_history_messages**: Max messages from history (mutually exclusive with `num_history_runs`)
 - **compress_tool_results**: Compress tool results in history to save context (per-agent override)
-- **enable_session_summaries**: Enable Agno session summaries for conversation compaction (per-agent override)
+- **compaction**: Optional per-agent auto-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `keep_recent_tokens`, `model`, `notify`); auto-compaction stays off until a compaction block is authored under `defaults` or the agent
 - **max_tool_calls_from_history**: Max tool call messages replayed from history (per-agent override)
 - **show_tool_calls**: Whether to show tool call details inline in responses (per-agent override)
 - **worker_tools**: Tool names to route through scoped workers (overrides defaults; `null` uses the built-in default routing policy)
@@ -321,7 +321,13 @@ defaults:
   learning: true
   learning_mode: "always"  # "always" or "agentic"
   compress_tool_results: true
-  enable_session_summaries: false
+  # Auto-compaction is disabled until you author this block.
+  # compaction:
+  #   enabled: true
+  #   threshold_percent: 0.8
+  #   reserve_tokens: 16384
+  #   keep_recent_tokens: 20000
+  #   notify: false
   show_tool_calls: true
   allow_self_config: false
   max_preload_chars: 50000  # Hard cap for context_files preload
