@@ -24,7 +24,12 @@ from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionOverrideConfig, DefaultsConfig, ModelConfig
-from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, RuntimePaths, resolve_runtime_paths
+from mindroom.constants import (
+    MINDROOM_COMPACTION_METADATA_KEY,
+    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
+    RuntimePaths,
+    resolve_runtime_paths,
+)
 from mindroom.history import PreparedHistory, clear_prepared_history, prepare_bound_agents_for_run, prepare_history_for_run
 from mindroom.history.replay import build_replay_plan, is_replay_message
 from mindroom.history.storage import (
@@ -523,6 +528,50 @@ def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> Non
 
     assert read_scope_seen_event_ids(session, agent_scope) == {"agent-event"}
     assert read_scope_seen_event_ids(session, team_scope) == {"team-event", "preserved-team-event"}
+
+
+def test_scope_seen_event_ids_reads_legacy_team_metadata_from_previous_commit(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    session = _session(
+        "session-1",
+        metadata={
+            MINDROOM_COMPACTION_METADATA_KEY: {
+                "seen_event_ids": ["event-1"],
+            },
+        },
+    )
+
+    assert read_scope_seen_event_ids(session, HistoryScope(kind="team", scope_id="team-123")) == {"event-1"}
+    assert read_scope_seen_event_ids(session, HistoryScope(kind="agent", scope_id="test_agent")) == set()
+
+
+def test_scope_seen_event_ids_write_preserves_legacy_team_metadata_from_previous_commit(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    session = _session(
+        "session-1",
+        metadata={
+            MINDROOM_COMPACTION_METADATA_KEY: {
+                "seen_event_ids": ["event-1"],
+            },
+        },
+    )
+    scope = HistoryScope(kind="team", scope_id="team-123")
+
+    assert update_scope_seen_event_ids(session, scope, ["event-2"]) is True
+    assert read_scope_seen_event_ids(session, scope) == {"event-1", "event-2"}
+    assert session.metadata == {
+        MINDROOM_COMPACTION_METADATA_KEY: {
+            "seen_event_ids": ["event-1"],
+        },
+        MINDROOM_MATRIX_HISTORY_METADATA_KEY: {
+            "version": 1,
+            "states": {
+                "team:team-123": {
+                    "seen_event_ids": ["event-1", "event-2"],
+                },
+            },
+        },
+    }
 
 
 @pytest.mark.asyncio

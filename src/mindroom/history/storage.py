@@ -104,7 +104,7 @@ def update_scope_seen_event_ids(
         return False
 
     states = _read_scope_seen_event_states(session)
-    existing_seen_ids = states.get(scope.key, set())
+    existing_seen_ids = _read_preserved_scope_seen_event_ids(session, scope)
     updated_seen_ids = sorted(existing_seen_ids.union(normalized_event_ids))
     if updated_seen_ids == sorted(existing_seen_ids):
         return False
@@ -189,7 +189,26 @@ def _migrate_legacy_scope_states(
 
 
 def _read_preserved_scope_seen_event_ids(session: AgentSession, scope: HistoryScope) -> set[str]:
-    return _read_scope_seen_event_states(session).get(scope.key, set())
+    seen_event_ids = set(_read_scope_seen_event_states(session).get(scope.key, set()))
+    if scope.kind == "team":
+        seen_event_ids.update(_read_legacy_team_scope_seen_event_ids(session))
+    return seen_event_ids
+
+
+def _read_legacy_team_scope_seen_event_ids(session: AgentSession) -> set[str]:
+    metadata = session.metadata
+    if not isinstance(metadata, dict):
+        return set()
+
+    raw_compaction_metadata = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
+    if not isinstance(raw_compaction_metadata, dict):
+        return set()
+
+    raw_seen_ids = raw_compaction_metadata.get("seen_event_ids")
+    if not isinstance(raw_seen_ids, list):
+        return set()
+
+    return {event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id}
 
 
 def _read_scope_seen_event_states(session: AgentSession) -> dict[str, set[str]]:

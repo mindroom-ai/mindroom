@@ -675,19 +675,14 @@ def _build_prompt_with_unseen(
     )
 
 
-def _build_run_metadata(reply_to_event_id: str | None, unseen_event_ids: list[str]) -> dict[str, Any] | None:
-    """Build metadata dict for a run, tracking consumed Matrix event_ids."""
+def build_matrix_run_metadata(reply_to_event_id: str | None, unseen_event_ids: list[str]) -> dict[str, Any] | None:
+    """Build metadata dict for a run, tracking consumed Matrix event ids."""
     if not reply_to_event_id:
         return None
     return {
         "matrix_event_id": reply_to_event_id,
         "matrix_seen_event_ids": [reply_to_event_id, *unseen_event_ids],
     }
-
-
-def build_matrix_run_metadata(reply_to_event_id: str | None, unseen_event_ids: list[str]) -> dict[str, Any] | None:
-    """Build Matrix run metadata for persisted seen-event tracking."""
-    return _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
 
 def _build_cache_key(
@@ -1079,7 +1074,7 @@ async def ai_response(  # noqa: C901
         return get_user_friendly_error_message(e, agent_name)
 
     try:
-        metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
+        metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
 
         response: RunOutput | None = None
         attempt_prompt = full_prompt
@@ -1341,7 +1336,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         return
 
     try:
-        metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
+        metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
 
         history_state_requires_bypass = (
             prepared_history.has_stored_replay_state and prepared_history.cache_key_fragment is None
