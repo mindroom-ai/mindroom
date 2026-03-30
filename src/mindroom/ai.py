@@ -33,7 +33,7 @@ from agno.run.agent import (
 )
 from agno.run.base import RunStatus
 
-from mindroom.agents import create_agent, create_session_storage, get_agent_session, get_seen_event_ids
+from mindroom.agents import create_agent, create_session_storage, get_agent_session
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     COMPACTION_NOTICE_CONTENT_KEY,
@@ -56,6 +56,8 @@ from mindroom.history import (
     clear_prepared_history,
     prepare_history_for_run,
 )
+from mindroom.history.replay import resolve_history_scope
+from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
@@ -942,7 +944,8 @@ async def _prepare_agent_and_prompt(
     unseen_event_ids: list[str] = []
     prompt_with_unseen = enhanced_prompt
     if reply_to_event_id and thread_history:
-        seen_ids = get_seen_event_ids(session) if session is not None else set()
+        scope = resolve_history_scope(agent)
+        seen_ids = read_scope_seen_event_ids(session, scope) if session is not None and scope is not None else set()
         matrix_id = config.get_ids(runtime_paths).get(agent_name)
         prompt_with_unseen, unseen_event_ids = build_prompt_with_unseen_thread_context(
             enhanced_prompt,

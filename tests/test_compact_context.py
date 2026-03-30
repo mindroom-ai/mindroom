@@ -195,3 +195,39 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_compactable_pr
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
     assert prepared.compaction_outcomes == []
+
+
+@pytest.mark.asyncio
+async def test_compact_context_uses_canonical_team_owner_storage(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "alpha": AgentConfig(display_name="Alpha"),
+                "beta": AgentConfig(display_name="Beta"),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    owner_storage = create_session_storage("alpha", config, runtime_paths, execution_identity=None)
+    owner_storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="alpha")]))
+
+    tool = CompactContextTools(
+        agent_name="beta",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=SimpleNamespace(session_id="session-1"),
+    )
+    agent = Agent(id="beta", model=FakeModel(id="fake-model", provider="fake"))
+    agent.team_id = "team-123"
+    agent.__dict__["_mindroom_team_scope_owner_agent_name"] = "alpha"
+
+    result = await tool.compact_context(agent=agent)
+
+    persisted = get_agent_session(owner_storage, "session-1")
+    assert persisted is not None
+    team_state = read_scope_state(persisted, HistoryScope(kind="team", scope_id="team-123"))
+    assert team_state.force_compact_before_next_run is True
+    assert result == "Compaction scheduled for the next reply in this conversation scope."

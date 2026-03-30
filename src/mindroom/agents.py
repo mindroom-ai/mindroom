@@ -20,7 +20,7 @@ from agno.session.agent import AgentSession
 
 import mindroom.tools  # noqa: F401
 from mindroom import agent_prompts, constants
-from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
@@ -623,51 +623,6 @@ def get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | None
     if isinstance(raw, dict):
         return AgentSession.from_dict(cast("dict[str, Any]", raw))
     return None
-
-
-def get_seen_event_ids(session: AgentSession) -> set[str]:
-    """Return union of all matrix_seen_event_ids from run metadata."""
-    seen: set[str] = set()
-    metadata = session.metadata
-    if isinstance(metadata, dict):
-        compaction_metadata = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
-        if isinstance(compaction_metadata, dict):
-            preserved_seen_ids = compaction_metadata.get("seen_event_ids")
-            if isinstance(preserved_seen_ids, list):
-                seen.update(event_id for event_id in preserved_seen_ids if isinstance(event_id, str))
-    if not session.runs:
-        return seen
-    for run in session.runs:
-        if isinstance(run, (RunOutput, TeamRunOutput)) and run.metadata:
-            seen_ids = run.metadata.get("matrix_seen_event_ids")
-            if isinstance(seen_ids, list):
-                seen.update(seen_ids)
-    return seen
-
-
-def update_session_seen_event_ids(session: AgentSession, event_ids: list[str]) -> bool:
-    """Merge consumed Matrix event ids into session metadata."""
-    normalized_event_ids = sorted({event_id for event_id in event_ids if event_id})
-    if not normalized_event_ids:
-        return False
-
-    metadata = dict(session.metadata or {})
-    raw_compaction_metadata = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
-    compaction_metadata = dict(raw_compaction_metadata) if isinstance(raw_compaction_metadata, dict) else {}
-    existing_seen_ids = compaction_metadata.get("seen_event_ids")
-    merged_seen_ids = set(normalized_event_ids)
-    if isinstance(existing_seen_ids, list):
-        merged_seen_ids.update(event_id for event_id in existing_seen_ids if isinstance(event_id, str) and event_id)
-    updated_seen_ids = sorted(merged_seen_ids)
-    if isinstance(existing_seen_ids, list) and updated_seen_ids == [
-        event_id for event_id in existing_seen_ids if isinstance(event_id, str) and event_id
-    ]:
-        return False
-
-    compaction_metadata["seen_event_ids"] = updated_seen_ids
-    metadata[MINDROOM_COMPACTION_METADATA_KEY] = compaction_metadata
-    session.metadata = metadata
-    return True
 
 
 def remove_run_by_event_id(storage: SqliteDb, session_id: str, event_id: str) -> bool:

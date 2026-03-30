@@ -25,9 +25,15 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, RuntimePaths, resolve_runtime_paths
-from mindroom.history import clear_prepared_history, prepare_history_for_run
+from mindroom.history import PreparedHistory, clear_prepared_history, prepare_bound_agents_for_run, prepare_history_for_run
 from mindroom.history.replay import build_replay_plan, is_replay_message
-from mindroom.history.storage import read_scope_state, read_scope_states, write_scope_state
+from mindroom.history.storage import (
+    read_scope_seen_event_ids,
+    read_scope_state,
+    read_scope_states,
+    update_scope_seen_event_ids,
+    write_scope_state,
+)
 from mindroom.history.types import CompactionState, HistoryScope
 from tests.conftest import bind_runtime_paths
 
@@ -443,6 +449,80 @@ async def test_prepare_history_for_run_forced_compaction_updates_scope_state(tmp
     assert state.force_compact_before_next_run is False
     assert "merged summary" in prepared.summary_prompt_prefix
     assert len(prepared.compaction_outcomes) == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    owner_agent = _agent()
+    owner_agent.id = "alpha"
+    owner_agent.team_id = "team-123"
+    peer_agent = _agent()
+    peer_agent.id = "beta"
+    peer_agent.team_id = "team-123"
+    replay_message = Message(role="assistant", content="persisted replay")
+
+    async def _fake_prepare(**kwargs: object) -> PreparedHistory:
+        assert kwargs["agent"] is owner_agent
+        owner_agent.additional_input = [replay_message]
+        return PreparedHistory(
+            summary_prompt_prefix="<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n",
+            history_messages=[replay_message],
+            has_stored_replay_state=True,
+        )
+
+    with patch("mindroom.history.runtime.prepare_history_for_run", new=AsyncMock(side_effect=_fake_prepare)) as mock_prepare:
+        prepared = await prepare_bound_agents_for_run(
+            agents=[peer_agent, owner_agent],
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+        )
+
+    assert mock_prepare.await_count == 1
+    assert prepared.has_stored_replay_state is True
+    assert peer_agent.additional_input is not None
+    assert [message.content for message in peer_agent.additional_input] == ["persisted replay"]
+
+
+def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    scope = HistoryScope(kind="team", scope_id="team-123")
+    session = _session("session-1")
+
+    assert update_scope_seen_event_ids(session, scope, ["event-1"]) is True
+    write_scope_state(session, scope, CompactionState(force_compact_before_next_run=True))
+
+    assert read_scope_seen_event_ids(session, scope) == {"event-1"}
+
+
+def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
+    team_scope = HistoryScope(kind="team", scope_id="team-123")
+    session = _session(
+        "session-1",
+        runs=[
+            RunOutput(
+                run_id="agent-run",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={"matrix_seen_event_ids": ["agent-event"]},
+            ),
+            TeamRunOutput(
+                run_id="team-run",
+                team_id="team-123",
+                status=RunStatus.completed,
+                metadata={"matrix_seen_event_ids": ["team-event"]},
+            ),
+        ],
+    )
+    update_scope_seen_event_ids(session, team_scope, ["preserved-team-event"])
+
+    assert read_scope_seen_event_ids(session, agent_scope) == {"agent-event"}
+    assert read_scope_seen_event_ids(session, team_scope) == {"team-event", "preserved-team-event"}
 
 
 @pytest.mark.asyncio

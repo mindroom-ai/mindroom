@@ -24,13 +24,7 @@ from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team
 from pydantic import BaseModel, Field
 
-from mindroom.agents import (
-    create_agent,
-    create_session_storage,
-    get_agent_session,
-    get_seen_event_ids,
-    update_session_seen_event_ids,
-)
+from mindroom.agents import create_agent
 from mindroom.ai import (
     build_matrix_run_metadata,
     build_prompt_with_unseen_thread_context,
@@ -45,6 +39,8 @@ from mindroom.history import (
     compose_prompt_with_persisted_history,
     prepare_bound_agents_for_run,
 )
+from mindroom.history.runtime import load_scope_session_context, resolve_bound_history_owner
+from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
@@ -984,22 +980,20 @@ def _collect_bound_seen_event_ids(
 ) -> set[str]:
     if session_id is None:
         return set()
-
-    seen_event_ids: set[str] = set()
-    for agent in agents:
-        agent_id = agent.id
-        if not isinstance(agent_id, str) or not agent_id:
-            continue
-        storage = create_session_storage(
-            agent_id,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        )
-        session = get_agent_session(storage, session_id)
-        if session is not None:
-            seen_event_ids.update(get_seen_event_ids(session))
-    return seen_event_ids
+    owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
+    if owner_agent is None or owner_agent_name is None:
+        return set()
+    scope_context = load_scope_session_context(
+        agent=owner_agent,
+        agent_name=owner_agent_name,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+    )
+    if scope_context is None or scope_context.session is None:
+        return set()
+    return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
 
 
 def _persist_bound_seen_event_ids(
@@ -1013,22 +1007,22 @@ def _persist_bound_seen_event_ids(
 ) -> None:
     if session_id is None or not event_ids:
         return
-
-    for agent in agents:
-        agent_id = agent.id
-        if not isinstance(agent_id, str) or not agent_id:
-            continue
-        storage = create_session_storage(
-            agent_id,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        )
-        session = get_agent_session(storage, session_id)
-        if session is None:
-            continue
-        if update_session_seen_event_ids(session, event_ids):
-            storage.upsert_session(session)
+    owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
+    if owner_agent is None or owner_agent_name is None:
+        return
+    scope_context = load_scope_session_context(
+        agent=owner_agent,
+        agent_name=owner_agent_name,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        create_session_if_missing=True,
+    )
+    if scope_context is None or scope_context.session is None:
+        return
+    if update_scope_seen_event_ids(scope_context.session, scope_context.scope, event_ids):
+        scope_context.storage.upsert_session(scope_context.session)
 
 
 def _build_agent_from_orchestrator(
@@ -1243,6 +1237,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
 
     base_prompt = message
     fallback_prompt = _build_prompt_with_context(message, thread_history)
+    team = _create_team_instance(agents, team_members.requested_agent_names, mode, orchestrator, model_name)
     seen_event_ids = _collect_bound_seen_event_ids(
         agents=agents,
         session_id=session_id,
@@ -1261,7 +1256,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
     media_inputs = media or MediaInputs()
-    team = _create_team_instance(agents, team_members.requested_agent_names, mode, orchestrator, model_name)
 
     try:
         prepared_history = await prepare_bound_agents_for_run(
@@ -1504,6 +1498,13 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     display_names = team_members.display_names
     base_prompt = message
     fallback_prompt = _build_prompt_with_context(message, thread_history)
+    team = _create_team_instance(
+        team_members.agents,
+        team_members.requested_agent_names,
+        mode,
+        orchestrator,
+        model_name,
+    )
     seen_event_ids = _collect_bound_seen_event_ids(
         agents=team_members.agents,
         session_id=session_id,
@@ -1519,14 +1520,6 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,
     )
-    team = _create_team_instance(
-        team_members.agents,
-        team_members.requested_agent_names,
-        mode,
-        orchestrator,
-        model_name,
-    )
-
     try:
         prepared_history = await prepare_bound_agents_for_run(
             agents=team_members.agents,

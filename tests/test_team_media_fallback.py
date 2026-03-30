@@ -16,12 +16,14 @@ from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 
-from mindroom.agents import create_agent, create_session_storage, get_agent_session, get_seen_event_ids
+from mindroom.agents import create_agent, create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history import PreparedHistory
+from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
+from mindroom.history.types import HistoryScope
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
 from mindroom.team_runtime_resolution import (
@@ -246,14 +248,16 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_stored_
     orchestrator.agent_bots = {"general": MagicMock()}
 
     storage = create_session_storage("general", config, runtime_paths, execution_identity=None)
+    team_scope = HistoryScope(kind="team", scope_id="team-general")
+    session = AgentSession(
+        session_id="session-123",
+        runs=[],
+        created_at=1,
+        updated_at=1,
+    )
+    update_scope_seen_event_ids(session, team_scope, ["event-1"])
     storage.upsert_session(
-        AgentSession(
-            session_id="session-123",
-            runs=[],
-            metadata={"mindroom_compaction": {"seen_event_ids": ["event-1"]}},
-            created_at=1,
-            updated_at=1,
-        ),
+        session,
     )
 
     summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
@@ -262,6 +266,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_stored_
     fake_agent = MagicMock()
     fake_agent.id = "general"
     fake_agent.name = "GeneralAgent"
+    fake_agent.team_id = "team-general"
 
     thread_history = [
         {"event_id": "event-1", "sender": "user", "body": "Already seen"},
@@ -329,6 +334,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
     fake_agent = MagicMock()
     fake_agent.id = "general"
     fake_agent.name = "GeneralAgent"
+    fake_agent.team_id = "team-general"
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -357,7 +363,10 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
 
     session = get_agent_session(storage, "session-456")
     assert session is not None
-    assert get_seen_event_ids(session) == {"event-1", "event-2"}
+    assert read_scope_seen_event_ids(session, HistoryScope(kind="team", scope_id="team-general")) == {
+        "event-1",
+        "event-2",
+    }
 
 
 @pytest.mark.asyncio
@@ -979,19 +988,22 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
     orchestrator.agent_bots = {"general": MagicMock(running=True)}
 
     storage = create_session_storage("general", config, runtime_paths, execution_identity=None)
+    team_scope = HistoryScope(kind="team", scope_id="team-general")
+    session = AgentSession(
+        session_id="session-789",
+        runs=[],
+        created_at=1,
+        updated_at=1,
+    )
+    update_scope_seen_event_ids(session, team_scope, ["event-1"])
     storage.upsert_session(
-        AgentSession(
-            session_id="session-789",
-            runs=[],
-            metadata={"mindroom_compaction": {"seen_event_ids": ["event-1"]}},
-            created_at=1,
-            updated_at=1,
-        ),
+        session,
     )
 
     fake_agent = MagicMock()
     fake_agent.id = "general"
     fake_agent.name = "GeneralAgent"
+    fake_agent.team_id = "team-general"
     summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
     mock_team = MagicMock(name="team")
 

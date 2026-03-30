@@ -26,7 +26,7 @@ from mindroom.history.replay import (
     strip_replay_messages,
 )
 from mindroom.history.storage import read_scope_state, write_scope_state
-from mindroom.history.types import PreparedHistory
+from mindroom.history.types import HistoryScope, PreparedHistory
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _ACTIVE_HISTORY_STATE_ATTR = "_mindroom_active_history_state"
+_TEAM_SCOPE_OWNER_AGENT_ATTR = "_mindroom_team_scope_owner_agent_name"
 
 
 @dataclass
@@ -54,6 +55,16 @@ class _ActiveHistoryState:
     original_astart_learning_task: object
     original_cleanup_and_store: object
     original_acleanup_and_store: object
+
+
+@dataclass(frozen=True)
+class ScopeSessionContext:
+    """Resolved storage/session context for one logical history scope."""
+
+    scope: HistoryScope
+    storage_owner_agent_name: str
+    storage: SqliteDb
+    session: AgentSession | None
 
 
 async def prepare_history_for_run(
@@ -73,10 +84,8 @@ async def prepare_history_for_run(
     clear_prepared_history(agent)
 
     scope = resolve_history_scope(agent)
-    if session_id is None or scope is None:
-        return PreparedHistory()
-
-    storage, resolved_session = _materialize_session(
+    scope_context = load_scope_session_context(
+        agent=agent,
         agent_name=agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
@@ -84,9 +93,13 @@ async def prepare_history_for_run(
         execution_identity=execution_identity,
         storage=storage,
         session=session,
+        scope=scope,
     )
-    if storage is None or resolved_session is None:
+    if scope_context is None or scope_context.session is None:
         return PreparedHistory()
+    scope = scope_context.scope
+    storage = scope_context.storage
+    resolved_session = scope_context.session
 
     state = read_scope_state(resolved_session, scope)
     replay_plan = build_replay_plan(
@@ -185,24 +198,26 @@ async def prepare_bound_agents_for_run(
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
 ) -> PreparedHistory:
     """Prepare persisted history for a team's member agents."""
-    prepared_histories: list[PreparedHistory] = []
+    clear_bound_agent_history_state(agents)
+    owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
+    if owner_agent is None or owner_agent_name is None:
+        return PreparedHistory()
+
+    prepared = await prepare_history_for_run(
+        agent=owner_agent,
+        agent_name=owner_agent_name,
+        full_prompt=full_prompt,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        compaction_outcomes_collector=compaction_outcomes_collector,
+    )
     for agent in agents:
-        agent_id = agent.id
-        if not isinstance(agent_id, str) or not agent_id:
+        if agent is owner_agent:
             continue
-        prepared_histories.append(
-            await prepare_history_for_run(
-                agent=agent,
-                agent_name=agent_id,
-                full_prompt=full_prompt,
-                session_id=session_id,
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=execution_identity,
-                compaction_outcomes_collector=compaction_outcomes_collector,
-            ),
-        )
-    return _merge_bound_prepared_history(prepared_histories)
+        _activate_prepared_history(agent, prepared.history_messages)
+    return prepared
 
 
 async def stream_with_bound_agent_history(
@@ -222,6 +237,74 @@ def clear_bound_agent_history_state(agents: list[Agent]) -> None:
     """Clear prepared replay state from a list of bound agents."""
     for agent in agents:
         clear_prepared_history(agent)
+        agent.__dict__.pop(_TEAM_SCOPE_OWNER_AGENT_ATTR, None)
+
+
+def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str | None]:
+    """Return the canonical storage owner for one bound team run."""
+    candidates = [
+        (agent_id, agent)
+        for agent in agents
+        if isinstance((agent_id := agent.id), str) and agent_id
+    ]
+    if not candidates:
+        return None, None
+
+    owner_agent_name = min(agent_id for agent_id, _agent in candidates)
+    _bind_team_scope_owner_agent_name(agents, owner_agent_name)
+    for agent_id, agent in candidates:
+        if agent_id == owner_agent_name:
+            return agent, owner_agent_name
+    return None, None
+
+
+def load_scope_session_context(
+    *,
+    agent: Agent,
+    agent_name: str,
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    storage: SqliteDb | None = None,
+    session: AgentSession | None = None,
+    scope: HistoryScope | None = None,
+    create_session_if_missing: bool = False,
+) -> ScopeSessionContext | None:
+    """Load the canonical storage/session backing one scope for one live agent."""
+    resolved_scope = scope or resolve_history_scope(agent)
+    if session_id is None or resolved_scope is None:
+        return None
+
+    storage_owner_agent_name = _resolve_scope_storage_owner_agent_name(agent, agent_name, resolved_scope)
+    if storage_owner_agent_name != agent_name:
+        storage = None
+        session = None
+
+    storage, session = _materialize_session(
+        agent_name=storage_owner_agent_name,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        storage=storage,
+        session=session,
+    )
+    assert storage is not None
+    if session is None and create_session_if_missing:
+        session = AgentSession(
+            session_id=session_id,
+            agent_id=storage_owner_agent_name,
+            team_id=resolved_scope.scope_id if resolved_scope.kind == "team" else None,
+            metadata={},
+            runs=[],
+        )
+    return ScopeSessionContext(
+        scope=resolved_scope,
+        storage_owner_agent_name=storage_owner_agent_name,
+        storage=storage,
+        session=session,
+    )
 
 
 def clear_prepared_history(agent: Agent) -> None:
@@ -310,31 +393,6 @@ def _activate_prepared_history(agent: Agent, history_messages: list[object]) -> 
     agent.__dict__["_acleanup_and_store"] = MethodType(_patched_acleanup_and_store, agent)
 
 
-def _merge_bound_prepared_history(prepared_histories: list[PreparedHistory]) -> PreparedHistory:
-    if not prepared_histories:
-        return PreparedHistory()
-
-    summary_prompt_prefix = ""
-    seen_summary_prompt_prefixes: set[str] = set()
-    for prepared in prepared_histories:
-        if not prepared.summary_prompt_prefix:
-            continue
-        seen_summary_prompt_prefixes.add(prepared.summary_prompt_prefix)
-        if not summary_prompt_prefix:
-            summary_prompt_prefix = prepared.summary_prompt_prefix
-
-    if len(seen_summary_prompt_prefixes) > 1:
-        logger.warning(
-            "Bound agents produced mismatched summary prefixes; using the first non-empty prefix",
-            summary_prefix_count=len(seen_summary_prompt_prefixes),
-        )
-
-    return PreparedHistory(
-        summary_prompt_prefix=summary_prompt_prefix,
-        has_stored_replay_state=any(prepared.has_stored_replay_state for prepared in prepared_histories),
-    )
-
-
 def _sanitized_run_messages_for_learning(run_messages: RunMessages) -> RunMessages:
     return replace(
         run_messages,
@@ -400,6 +458,24 @@ def _materialize_session(
     if session is None:
         session = get_agent_session(storage, session_id)
     return storage, session
+
+
+def _bind_team_scope_owner_agent_name(agents: list[Agent], owner_agent_name: str) -> None:
+    for agent in agents:
+        agent.__dict__[_TEAM_SCOPE_OWNER_AGENT_ATTR] = owner_agent_name
+
+
+def _resolve_scope_storage_owner_agent_name(
+    agent: Agent,
+    fallback_agent_name: str,
+    scope: HistoryScope,
+) -> str:
+    if scope.kind != "team":
+        return fallback_agent_name
+    raw_owner = agent.__dict__.get(_TEAM_SCOPE_OWNER_AGENT_ATTR)
+    if isinstance(raw_owner, str) and raw_owner:
+        return raw_owner
+    return fallback_agent_name
 
 
 def _resolve_available_history_budget(

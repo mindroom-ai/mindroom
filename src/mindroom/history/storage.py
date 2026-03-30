@@ -1,4 +1,4 @@
-"""Scoped compaction-state persistence and legacy migration."""
+"""Scoped history-state persistence and legacy migration."""
 
 from __future__ import annotations
 
@@ -11,13 +11,17 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 
-from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY
+from mindroom.constants import (
+    MINDROOM_COMPACTION_METADATA_KEY,
+    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.history.types import CompactionState, HistoryScope
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 _COMPACTION_METADATA_VERSION = 2
+_MATRIX_HISTORY_METADATA_VERSION = 1
 
 
 def read_scope_state(session: AgentSession, scope: HistoryScope) -> CompactionState:
@@ -70,6 +74,44 @@ def write_scope_state(
     session.metadata = session_metadata
     # A single global Agno session summary cannot represent mixed scopes.
     session.summary = None
+
+
+def read_scope_seen_event_ids(session: AgentSession, scope: HistoryScope) -> set[str]:
+    """Return the consumed Matrix event ids for one session scope."""
+    seen_event_ids = _read_preserved_scope_seen_event_ids(session, scope)
+    for run in session.runs or []:
+        if not isinstance(run, (RunOutput, TeamRunOutput)):
+            continue
+        if _scope_for_run(run) != scope:
+            continue
+        metadata = run.metadata
+        if not isinstance(metadata, dict):
+            continue
+        raw_seen_ids = metadata.get("matrix_seen_event_ids")
+        if isinstance(raw_seen_ids, list):
+            seen_event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
+    return seen_event_ids
+
+
+def update_scope_seen_event_ids(
+    session: AgentSession,
+    scope: HistoryScope,
+    event_ids: list[str],
+) -> bool:
+    """Merge consumed Matrix event ids into one session scope."""
+    normalized_event_ids = sorted({event_id for event_id in event_ids if event_id})
+    if not normalized_event_ids:
+        return False
+
+    states = _read_scope_seen_event_states(session)
+    existing_seen_ids = states.get(scope.key, set())
+    updated_seen_ids = sorted(existing_seen_ids.union(normalized_event_ids))
+    if updated_seen_ids == sorted(existing_seen_ids):
+        return False
+
+    states[scope.key] = set(updated_seen_ids)
+    _write_scope_seen_event_states(session, states)
+    return True
 
 
 def _parse_state(raw_state: dict[str, Any]) -> CompactionState:
@@ -144,6 +186,54 @@ def _migrate_legacy_scope_states(
         force_compact_before_next_run=False,
     )
     return {inferred_scope.key: migrated_state}
+
+
+def _read_preserved_scope_seen_event_ids(session: AgentSession, scope: HistoryScope) -> set[str]:
+    return _read_scope_seen_event_states(session).get(scope.key, set())
+
+
+def _read_scope_seen_event_states(session: AgentSession) -> dict[str, set[str]]:
+    metadata = session.metadata
+    if not isinstance(metadata, dict):
+        return {}
+
+    raw_value = metadata.get(MINDROOM_MATRIX_HISTORY_METADATA_KEY)
+    if not isinstance(raw_value, dict):
+        return {}
+
+    if raw_value.get("version") != _MATRIX_HISTORY_METADATA_VERSION:
+        return {}
+
+    raw_states = raw_value.get("states")
+    if not isinstance(raw_states, dict):
+        return {}
+
+    parsed: dict[str, set[str]] = {}
+    for scope_key, raw_state in raw_states.items():
+        if not isinstance(scope_key, str) or not isinstance(raw_state, dict):
+            continue
+        raw_seen_ids = raw_state.get("seen_event_ids")
+        if not isinstance(raw_seen_ids, list):
+            continue
+        parsed[scope_key] = {event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id}
+    return parsed
+
+
+def _write_scope_seen_event_states(session: AgentSession, states: dict[str, set[str]]) -> None:
+    session_metadata = dict(session.metadata or {})
+    serialized_states = {
+        scope_key: {"seen_event_ids": sorted(event_ids)}
+        for scope_key, event_ids in sorted(states.items())
+        if event_ids
+    }
+    if serialized_states:
+        session_metadata[MINDROOM_MATRIX_HISTORY_METADATA_KEY] = {
+            "version": _MATRIX_HISTORY_METADATA_VERSION,
+            "states": serialized_states,
+        }
+    else:
+        session_metadata.pop(MINDROOM_MATRIX_HISTORY_METADATA_KEY, None)
+    session.metadata = session_metadata
 
 
 def _infer_legacy_scope(session: AgentSession) -> HistoryScope | None:
