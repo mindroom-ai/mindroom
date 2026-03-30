@@ -1826,6 +1826,29 @@ class TestApplyContextWindowLimit:
         assert agent.add_history_to_context is True
         assert agent.num_history_runs is None
 
+    def test_normalizes_authored_reserve_for_small_context_windows(self, tmp_path: object) -> None:
+        """Fallback history limiting should not collapse to zero on small windows."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"test_agent": AgentConfig(display_name="Test")},
+                models={"default": ModelConfig(provider="openai", id="test", context_window=16000)},
+                defaults=DefaultsConfig(
+                    compaction=CompactionConfig(
+                        enabled=True,
+                        reserve_tokens=16384,
+                    ),
+                ),
+            ),
+            tmp_path,
+        )
+        agent = self._make_agent(role="", num_history_runs=None)
+        session = self._make_session(["tiny history"])
+
+        _apply_context_window_limit(agent, "test_agent", config, "prompt", "sid", tmp_path, session=session)
+
+        assert agent.add_history_to_context is True
+        assert agent.num_history_runs is None
+
     def test_reduces_with_explicit_limit(self, tmp_path: object) -> None:
         """When num_history_runs is already set but still too high, it gets reduced."""
         config = self._make_config(context_window=100)

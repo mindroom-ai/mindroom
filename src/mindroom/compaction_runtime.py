@@ -102,7 +102,7 @@ def _resolve_history_budget_target(
     if not config.has_authored_agent_compaction_config(agent_name) or not compaction_config.enabled:
         return default_threshold
 
-    reserve_tokens = min(compaction_config.reserve_tokens, context_window)
+    reserve_tokens = normalize_compaction_budget_tokens(compaction_config.reserve_tokens, context_window)
     threshold_tokens = resolve_effective_compaction_threshold(compaction_config, context_window)
     return min(threshold_tokens, max(0, context_window - reserve_tokens))
 
