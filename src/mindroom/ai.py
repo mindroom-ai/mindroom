@@ -39,24 +39,10 @@ from mindroom.compaction import (
     apply_pending_compaction,
     clear_pending_compaction,
     compact_session_now,
-)
-from mindroom.compaction import (
-    estimate_history_tokens as _shared_estimate_history_tokens,
-)
-from mindroom.compaction import (
-    estimate_message_media_chars as _shared_estimate_message_media_chars,
-)
-from mindroom.compaction import (
-    estimate_messages_tokens as _shared_estimate_messages_tokens,
-)
-from mindroom.compaction import (
-    estimate_static_tokens as _shared_estimate_static_tokens,
-)
-from mindroom.compaction import (
-    find_fitting_run_limit as _shared_find_fitting_run_limit,
-)
-from mindroom.compaction import (
-    get_replayable_runs as _shared_get_replayable_runs,
+    estimate_history_tokens,
+    estimate_static_tokens,
+    find_fitting_run_limit,
+    get_replayable_runs,
 )
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
@@ -87,14 +73,12 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection
     from pathlib import Path
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
-    from agno.models.message import Message
-    from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
 
     from mindroom.compaction import PendingCompaction
@@ -183,30 +167,6 @@ def _canonical_provider(provider: str) -> str:
     return provider.strip().lower().replace("-", "_")
 
 
-def _estimate_message_media_chars(message: Message) -> int:
-    return _shared_estimate_message_media_chars(message)
-
-
-def _estimate_messages_tokens(messages: Sequence[Message] | None) -> int:
-    return _shared_estimate_messages_tokens(messages)
-
-
-def _estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
-    return _shared_estimate_static_tokens(agent, full_prompt)
-
-
-def _get_replayable_runs(session: AgentSession, agent: Agent) -> list[RunOutput | TeamRunOutput]:
-    return _shared_get_replayable_runs(session, agent)
-
-
-def _estimate_history_tokens(session: AgentSession, agent: Agent, run_limit: int | None) -> int:
-    return _shared_estimate_history_tokens(session, agent, run_limit)
-
-
-def _find_fitting_run_limit(session: AgentSession, agent: Agent, max_runs: int, budget: int) -> int:
-    return _shared_find_fitting_run_limit(session, agent, max_runs, budget)
-
-
 def _disable_history_for_run(
     agent: Agent,
     *,
@@ -257,7 +217,7 @@ def _apply_context_window_limit(  # noqa: C901
 
     context_window = model_config.context_window
     threshold = int(context_window * 0.8)
-    static_tokens = _estimate_static_tokens(agent, full_prompt)
+    static_tokens = estimate_static_tokens(agent, full_prompt)
 
     # Use pre-loaded session or load from storage
     if session is None:
@@ -271,7 +231,7 @@ def _apply_context_window_limit(  # noqa: C901
     if not session or not session.runs:
         return
 
-    replayable_runs = _get_replayable_runs(session, agent)
+    replayable_runs = get_replayable_runs(session, agent)
     if not replayable_runs:
         return
 
@@ -283,7 +243,7 @@ def _apply_context_window_limit(  # noqa: C901
         else len(replayable_runs)
     )
     initial_run_limit = max_considered_runs if current_limit is not None and current_limit > 0 else None
-    history_tokens = _estimate_history_tokens(session, agent, initial_run_limit)
+    history_tokens = estimate_history_tokens(session, agent, initial_run_limit)
     summary_tokens = 0
     if agent.add_session_summary_to_context and session.summary is not None:
         summary_tokens = estimate_text_tokens(session.summary.summary)
@@ -308,7 +268,7 @@ def _apply_context_window_limit(  # noqa: C901
             )
         reason = "no_history_budget"
     else:
-        new_limit = _find_fitting_run_limit(session, agent, max_considered_runs, budget)
+        new_limit = find_fitting_run_limit(session, agent, max_considered_runs, budget)
         reason = "history_exceeds_budget"
 
     if new_limit == 0:
@@ -1124,7 +1084,7 @@ async def _prepare_agent_and_prompt(  # noqa: C901, PLR0912, PLR0915
         model_name, model_config = _get_model_config(config, agent_name)
         context_window = model_config.context_window if model_config is not None else None
         if compaction_authored and compaction_config.enabled and context_window is not None:
-            static_tokens = _estimate_static_tokens(agent, full_prompt)
+            static_tokens = estimate_static_tokens(agent, full_prompt)
             history_run_limit = (
                 agent.num_history_runs if agent.num_history_runs and agent.num_history_runs > 0 else None
             )
@@ -1133,7 +1093,7 @@ async def _prepare_agent_and_prompt(  # noqa: C901, PLR0912, PLR0915
                 if agent.num_history_messages is not None and agent.num_history_messages > 0
                 else None
             )
-            history_tokens = _shared_estimate_history_tokens(
+            history_tokens = estimate_history_tokens(
                 session,
                 agent,
                 history_run_limit,
