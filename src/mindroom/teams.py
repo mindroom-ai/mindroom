@@ -24,8 +24,18 @@ from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team
 from pydantic import BaseModel, Field
 
-from mindroom.agents import create_agent
-from mindroom.ai import get_model_instance
+from mindroom.agents import (
+    create_agent,
+    create_session_storage,
+    get_agent_session,
+    get_seen_event_ids,
+    update_session_seen_event_ids,
+)
+from mindroom.ai import (
+    build_matrix_run_metadata,
+    build_prompt_with_unseen_thread_context,
+    get_model_instance,
+)
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
@@ -964,6 +974,63 @@ def _build_prompt_with_context(
     return message
 
 
+def _collect_bound_seen_event_ids(
+    *,
+    agents: list[Agent],
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+) -> set[str]:
+    if session_id is None:
+        return set()
+
+    seen_event_ids: set[str] = set()
+    for agent in agents:
+        agent_id = agent.id
+        if not isinstance(agent_id, str) or not agent_id:
+            continue
+        storage = create_session_storage(
+            agent_id,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        )
+        session = get_agent_session(storage, session_id)
+        if session is not None:
+            seen_event_ids.update(get_seen_event_ids(session))
+    return seen_event_ids
+
+
+def _persist_bound_seen_event_ids(
+    *,
+    agents: list[Agent],
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    event_ids: list[str],
+) -> None:
+    if session_id is None or not event_ids:
+        return
+
+    for agent in agents:
+        agent_id = agent.id
+        if not isinstance(agent_id, str) or not agent_id:
+            continue
+        storage = create_session_storage(
+            agent_id,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        )
+        session = get_agent_session(storage, session_id)
+        if session is None:
+            continue
+        if update_session_seen_event_ids(session, event_ids):
+            storage.upsert_session(session)
+
+
 def _build_agent_from_orchestrator(
     agent_name: str,
     orchestrator: MultiAgentOrchestrator,
@@ -1146,6 +1213,9 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     run_id: str | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
+    reply_to_event_id: str | None = None,
+    active_event_ids: Collection[str] = frozenset(),
+    response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     *,
     reason_prefix: str = "Team request",
@@ -1173,6 +1243,21 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
 
     base_prompt = message
     fallback_prompt = _build_prompt_with_context(message, thread_history)
+    seen_event_ids = _collect_bound_seen_event_ids(
+        agents=agents,
+        session_id=session_id,
+        runtime_paths=orchestrator.runtime_paths,
+        config=orchestrator.config,
+        execution_identity=execution_identity,
+    )
+    prompt_for_history, unseen_event_ids = build_prompt_with_unseen_thread_context(
+        base_prompt,
+        thread_history,
+        seen_event_ids=seen_event_ids,
+        current_event_id=reply_to_event_id,
+        active_event_ids=active_event_ids,
+        response_sender_id=response_sender_id,
+    )
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
     media_inputs = media or MediaInputs()
@@ -1181,7 +1266,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     try:
         prepared_history = await prepare_bound_agents_for_run(
             agents=agents,
-            full_prompt=base_prompt,
+            full_prompt=prompt_for_history,
             session_id=session_id,
             runtime_paths=orchestrator.runtime_paths,
             config=orchestrator.config,
@@ -1193,11 +1278,23 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         clear_bound_agent_history_state(agents)
         return get_user_friendly_error_message(e, team_name)
 
-    prompt = compose_prompt_with_persisted_history(
-        base_prompt=base_prompt,
-        prepared_history=prepared_history,
-        fallback_prompt=fallback_prompt,
-    )
+    summary_prompt = f"{prepared_history.summary_prompt_prefix}{base_prompt}"
+    if reply_to_event_id and thread_history:
+        prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
+            summary_prompt,
+            thread_history,
+            seen_event_ids=seen_event_ids,
+            current_event_id=reply_to_event_id,
+            active_event_ids=active_event_ids,
+            response_sender_id=response_sender_id,
+        )
+    else:
+        prompt = compose_prompt_with_persisted_history(
+            base_prompt=base_prompt,
+            prepared_history=prepared_history,
+            fallback_prompt=fallback_prompt,
+        )
+    run_metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
     logger.info(f"TEAM PROMPT: {prompt[:500]}")
 
@@ -1213,6 +1310,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             images=current_media_inputs.images,
             files=current_media_inputs.files,
             videos=current_media_inputs.videos,
+            metadata=run_metadata,
         )
 
     response: object | None = None
@@ -1264,6 +1362,15 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             raise asyncio.CancelledError(response.content or "Run cancelled")
         if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
             return get_user_friendly_error_message(Exception(str(response.content or "Unknown team error")), team_name)
+        if reply_to_event_id:
+            _persist_bound_seen_event_ids(
+                agents=agents,
+                session_id=session_id,
+                runtime_paths=orchestrator.runtime_paths,
+                config=orchestrator.config,
+                execution_identity=execution_identity,
+                event_ids=[reply_to_event_id, *unseen_event_ids],
+            )
 
         if isinstance(response, TeamRunOutput):
             if response.member_responses:
@@ -1291,6 +1398,7 @@ async def _team_response_stream_raw(
     team: Team,
     team_members: ResolvedExactTeamMembers,
     prompt: str,
+    metadata: dict[str, Any] | None = None,
     media: MediaInputs | None = None,
     session_id: str | None = None,
     run_id: str | None = None,
@@ -1329,6 +1437,7 @@ async def _team_response_stream_raw(
             images=current_media_inputs.images,
             files=current_media_inputs.files,
             videos=current_media_inputs.videos,
+            metadata=metadata,
         )
 
     try:
@@ -1357,6 +1466,9 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     run_id: str | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
+    reply_to_event_id: str | None = None,
+    active_event_ids: Collection[str] = frozenset(),
+    response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     *,
     reason_prefix: str = "Team request",
@@ -1392,6 +1504,21 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     display_names = team_members.display_names
     base_prompt = message
     fallback_prompt = _build_prompt_with_context(message, thread_history)
+    seen_event_ids = _collect_bound_seen_event_ids(
+        agents=team_members.agents,
+        session_id=session_id,
+        runtime_paths=orchestrator.runtime_paths,
+        config=orchestrator.config,
+        execution_identity=execution_identity,
+    )
+    prompt_for_history, unseen_event_ids = build_prompt_with_unseen_thread_context(
+        base_prompt,
+        thread_history,
+        seen_event_ids=seen_event_ids,
+        current_event_id=reply_to_event_id,
+        active_event_ids=active_event_ids,
+        response_sender_id=response_sender_id,
+    )
     team = _create_team_instance(
         team_members.agents,
         team_members.requested_agent_names,
@@ -1403,7 +1530,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     try:
         prepared_history = await prepare_bound_agents_for_run(
             agents=team_members.agents,
-            full_prompt=base_prompt,
+            full_prompt=prompt_for_history,
             session_id=session_id,
             runtime_paths=orchestrator.runtime_paths,
             config=orchestrator.config,
@@ -1416,11 +1543,23 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
         yield get_user_friendly_error_message(e, f"Team ({', '.join(agent_names)})")
         return
 
-    prepared_prompt = compose_prompt_with_persisted_history(
-        base_prompt=base_prompt,
-        prepared_history=prepared_history,
-        fallback_prompt=fallback_prompt,
-    )
+    summary_prompt = f"{prepared_history.summary_prompt_prefix}{base_prompt}"
+    if reply_to_event_id and thread_history:
+        prepared_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
+            summary_prompt,
+            thread_history,
+            seen_event_ids=seen_event_ids,
+            current_event_id=reply_to_event_id,
+            active_event_ids=active_event_ids,
+            response_sender_id=response_sender_id,
+        )
+    else:
+        prepared_prompt = compose_prompt_with_persisted_history(
+            base_prompt=base_prompt,
+            prepared_history=prepared_history,
+            fallback_prompt=fallback_prompt,
+        )
+    run_metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
     logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
     media_inputs = media or MediaInputs()
     attempt_prompt = prepared_prompt
@@ -1576,6 +1715,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 team=team,
                 team_members=team_members,
                 prompt=attempt_prompt,
+                metadata=run_metadata,
                 media=attempt_media_inputs,
                 session_id=session_id,
                 run_id=attempt_run_id,
@@ -1584,6 +1724,15 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             async for event in raw_stream:
                 # Handle explicit fallback stream outputs (for example no agents available)
                 if isinstance(event, RunOutput):
+                    if reply_to_event_id:
+                        _persist_bound_seen_event_ids(
+                            agents=team_members.agents,
+                            session_id=session_id,
+                            runtime_paths=orchestrator.runtime_paths,
+                            config=orchestrator.config,
+                            execution_identity=execution_identity,
+                            event_ids=[reply_to_event_id, *unseen_event_ids],
+                        )
                     content = _get_response_content(event)
                     yield content
                     return
@@ -1610,6 +1759,15 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             break
                         yield get_user_friendly_error_message(Exception(error_text), team_name)
                         return
+                    if reply_to_event_id:
+                        _persist_bound_seen_event_ids(
+                            agents=team_members.agents,
+                            session_id=session_id,
+                            runtime_paths=orchestrator.runtime_paths,
+                            config=orchestrator.config,
+                            execution_identity=execution_identity,
+                            event_ids=[reply_to_event_id, *unseen_event_ids],
+                        )
                     parts = format_team_response(event)
                     team_response_text = (
                         "\n\n".join(parts) if parts else str(event.content or "No team response generated.")
@@ -1717,6 +1875,15 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
             if retry_requested:
                 continue
+            if emitted_output and reply_to_event_id:
+                _persist_bound_seen_event_ids(
+                    agents=team_members.agents,
+                    session_id=session_id,
+                    runtime_paths=orchestrator.runtime_paths,
+                    config=orchestrator.config,
+                    execution_identity=execution_identity,
+                    event_ids=[reply_to_event_id, *unseen_event_ids],
+                )
 
             return
     finally:

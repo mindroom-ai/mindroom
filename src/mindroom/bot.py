@@ -2636,6 +2636,9 @@ class AgentBot:
                             run_id=response_run_id,
                             run_id_callback=_note_attempt_run_id,
                             user_id=requester_user_id,
+                            reply_to_event_id=reply_to_event_id,
+                            active_event_ids=self._active_response_event_ids(room_id),
+                            response_sender_id=self.matrix_id.full_id,
                             compaction_outcomes_collector=compaction_outcomes,
                             reason_prefix=reason_prefix,
                         )
@@ -2739,6 +2742,9 @@ class AgentBot:
                                 run_id=response_run_id,
                                 run_id_callback=_note_attempt_run_id,
                                 user_id=requester_user_id,
+                                reply_to_event_id=reply_to_event_id,
+                                active_event_ids=self._active_response_event_ids(room_id),
+                                response_sender_id=self.matrix_id.full_id,
                                 compaction_outcomes_collector=compaction_outcomes,
                                 reason_prefix=reason_prefix,
                             )

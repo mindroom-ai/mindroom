@@ -569,7 +569,24 @@ def _get_unseen_messages(
     still-active in-progress replies.
     """
     matrix_id = config.get_ids(runtime_paths).get(agent_name)
-    agent_sender_id = matrix_id.full_id if matrix_id else None
+    return _get_unseen_messages_for_sender(
+        thread_history,
+        sender_id=matrix_id.full_id if matrix_id else None,
+        seen_event_ids=seen_event_ids,
+        current_event_id=current_event_id,
+        active_event_ids=active_event_ids,
+    )
+
+
+def _get_unseen_messages_for_sender(
+    thread_history: list[dict[str, Any]],
+    *,
+    sender_id: str | None,
+    seen_event_ids: set[str],
+    current_event_id: str | None,
+    active_event_ids: Collection[str],
+) -> tuple[list[dict[str, Any]], set[_PartialReplyKind]]:
+    """Filter thread_history to unseen messages for one Matrix sender."""
     unseen: list[dict[str, Any]] = []
     partial_reply_kinds: set[_PartialReplyKind] = set()
     for msg in thread_history:
@@ -584,7 +601,7 @@ def _get_unseen_messages(
             continue
         if isinstance(content, dict) and COMPACTION_NOTICE_CONTENT_KEY in content:
             continue
-        if agent_sender_id and sender == agent_sender_id:
+        if sender_id and sender == sender_id:
             partial_kind = _classify_partial_reply(
                 msg,
                 active_event_ids=active_event_ids,
@@ -609,6 +626,34 @@ def _get_unseen_messages(
             continue
         unseen.append(msg)
     return unseen, partial_reply_kinds
+
+
+def build_prompt_with_unseen_thread_context(
+    prompt: str,
+    thread_history: list[dict[str, Any]] | None,
+    *,
+    seen_event_ids: set[str],
+    current_event_id: str | None,
+    active_event_ids: Collection[str],
+    response_sender_id: str | None,
+) -> tuple[str, list[str]]:
+    """Prepend unseen thread messages and return their persisted event ids."""
+    if not current_event_id or not thread_history:
+        return prompt, []
+
+    unseen_messages, partial_reply_kinds = _get_unseen_messages_for_sender(
+        thread_history,
+        sender_id=response_sender_id,
+        seen_event_ids=seen_event_ids,
+        current_event_id=current_event_id,
+        active_event_ids=active_event_ids,
+    )
+    prompt_with_unseen = _build_prompt_with_unseen(
+        prompt,
+        unseen_messages,
+        partial_reply_kinds=partial_reply_kinds,
+    )
+    return prompt_with_unseen, _get_unseen_event_ids_for_metadata(unseen_messages)
 
 
 def _build_prompt_with_unseen(
@@ -636,6 +681,11 @@ def _build_run_metadata(reply_to_event_id: str | None, unseen_event_ids: list[st
         "matrix_event_id": reply_to_event_id,
         "matrix_seen_event_ids": [reply_to_event_id, *unseen_event_ids],
     }
+
+
+def build_matrix_run_metadata(reply_to_event_id: str | None, unseen_event_ids: list[str]) -> dict[str, Any] | None:
+    """Build Matrix run metadata for persisted seen-event tracking."""
+    return _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
 
 def _build_cache_key(
@@ -890,25 +940,17 @@ async def _prepare_agent_and_prompt(
     )
 
     unseen_event_ids: list[str] = []
-    unseen_messages: list[dict[str, Any]] = []
-    partial_reply_kinds: set[_PartialReplyKind] = set()
     prompt_with_unseen = enhanced_prompt
     if reply_to_event_id and thread_history:
         seen_ids = get_seen_event_ids(session) if session is not None else set()
-        unseen_messages, partial_reply_kinds = _get_unseen_messages(
-            thread_history,
-            agent_name,
-            config,
-            runtime_paths,
-            seen_ids,
-            reply_to_event_id,
-            active_event_ids=active_event_ids,
-        )
-        unseen_event_ids = _get_unseen_event_ids_for_metadata(unseen_messages)
-        prompt_with_unseen = _build_prompt_with_unseen(
+        matrix_id = config.get_ids(runtime_paths).get(agent_name)
+        prompt_with_unseen, unseen_event_ids = build_prompt_with_unseen_thread_context(
             enhanced_prompt,
-            unseen_messages,
-            partial_reply_kinds=partial_reply_kinds,
+            thread_history,
+            seen_event_ids=seen_ids,
+            current_event_id=reply_to_event_id,
+            active_event_ids=active_event_ids,
+            response_sender_id=matrix_id.full_id if matrix_id else None,
         )
 
     prepared_history = await prepare_history_for_run(
@@ -926,10 +968,14 @@ async def _prepare_agent_and_prompt(
     prompt_with_summary = f"{prepared_history.summary_prompt_prefix}{enhanced_prompt}"
 
     if reply_to_event_id and thread_history:
-        full_prompt = _build_prompt_with_unseen(
+        matrix_id = config.get_ids(runtime_paths).get(agent_name)
+        full_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
             prompt_with_summary,
-            unseen_messages,
-            partial_reply_kinds=partial_reply_kinds,
+            thread_history,
+            seen_event_ids=seen_ids,
+            current_event_id=reply_to_event_id,
+            active_event_ids=active_event_ids,
+            response_sender_id=matrix_id.full_id if matrix_id else None,
         )
     elif prepared_history.has_stored_replay_state:
         full_prompt = prompt_with_summary

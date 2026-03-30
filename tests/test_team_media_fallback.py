@@ -9,13 +9,14 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.session.agent import AgentSession
 from agno.run.base import RunStatus
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 
-from mindroom.agents import create_agent
+from mindroom.agents import create_agent, create_session_storage, get_agent_session, get_seen_event_ids
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -231,6 +232,132 @@ async def test_team_response_prefers_persisted_replay_over_thread_context_fallba
     assert prompt == f"{summary_prefix}Analyze this."
     assert "Thread Context:" not in prompt
     assert "Old thread context" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_team_response_preserves_unseen_matrix_thread_context_with_stored_replay() -> None:
+    """Matrix team runs should include unseen live thread messages alongside stored replay."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    storage = create_session_storage("general", config, runtime_paths, execution_identity=None)
+    storage.upsert_session(
+        AgentSession(
+            session_id="session-123",
+            runs=[],
+            metadata={"mindroom_compaction": {"seen_event_ids": ["event-1"]}},
+            created_at=1,
+            updated_at=1,
+        ),
+    )
+
+    summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
+    mock_team = MagicMock()
+    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
+    fake_agent = MagicMock()
+    fake_agent.id = "general"
+    fake_agent.name = "GeneralAgent"
+
+    thread_history = [
+        {"event_id": "event-1", "sender": "user", "body": "Already seen"},
+        {"event_id": "event-2", "sender": "user", "body": "Fresh follow-up"},
+        {"event_id": "event-3", "sender": "user", "body": "Current message body"},
+    ]
+
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
+    ):
+        mock_prepare.return_value = PreparedHistory(
+            summary_prompt_prefix=summary_prefix,
+            has_stored_replay_state=True,
+        )
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            thread_history=thread_history,
+            orchestrator=orchestrator,
+            execution_identity=None,
+            session_id="session-123",
+            reply_to_event_id="event-3",
+            response_sender_id="@mindroom_team:example.org",
+        )
+
+    assert "Recovered team response" in response
+    budget_prompt = mock_prepare.await_args.kwargs["full_prompt"]
+    assert "Fresh follow-up" in budget_prompt
+    assert "Already seen" not in budget_prompt
+    assert "Current message body" not in budget_prompt
+    prompt = mock_team.arun.await_args.args[0]
+    assert summary_prefix in prompt
+    assert "Fresh follow-up" in prompt
+    assert "Already seen" not in prompt
+    assert "Thread Context:" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
+    """Successful Matrix team runs should mark the triggering and unseen events as consumed."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    storage = create_session_storage("general", config, runtime_paths, execution_identity=None)
+    storage.upsert_session(
+        AgentSession(
+            session_id="session-456",
+            runs=[],
+            created_at=1,
+            updated_at=1,
+        ),
+    )
+
+    mock_team = MagicMock()
+    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
+    fake_agent = MagicMock()
+    fake_agent.id = "general"
+    fake_agent.name = "GeneralAgent"
+
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
+    ):
+        mock_prepare.return_value = PreparedHistory(
+            summary_prompt_prefix="<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n",
+            has_stored_replay_state=True,
+        )
+        await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            thread_history=[
+                {"event_id": "event-1", "sender": "user", "body": "Fresh follow-up"},
+                {"event_id": "event-2", "sender": "user", "body": "Current message body"},
+            ],
+            orchestrator=orchestrator,
+            execution_identity=None,
+            session_id="session-456",
+            reply_to_event_id="event-2",
+            response_sender_id="@mindroom_team:example.org",
+        )
+
+    session = get_agent_session(storage, "session-456")
+    assert session is not None
+    assert get_seen_event_ids(session) == {"event-1", "event-2"}
 
 
 @pytest.mark.asyncio
@@ -838,6 +965,80 @@ async def test_team_response_stream_prefers_persisted_replay_over_thread_context
     assert "Streamed team response" in str(chunks[0])
     assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
     assert mock_raw.await_args.kwargs["prompt"] == f"{summary_prefix}Analyze this."
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_stored_replay() -> None:
+    """Streaming Matrix team runs should include unseen live thread messages alongside stored replay."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    storage = create_session_storage("general", config, runtime_paths, execution_identity=None)
+    storage.upsert_session(
+        AgentSession(
+            session_id="session-789",
+            runs=[],
+            metadata={"mindroom_compaction": {"seen_event_ids": ["event-1"]}},
+            created_at=1,
+            updated_at=1,
+        ),
+    )
+
+    fake_agent = MagicMock()
+    fake_agent.id = "general"
+    fake_agent.name = "GeneralAgent"
+    summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
+    mock_team = MagicMock(name="team")
+
+    async def raw_stream() -> AsyncIterator[object]:
+        yield TeamRunOutput(content="Streamed team response")
+
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
+        patch(
+            "mindroom.teams._team_response_stream_raw",
+            new_callable=AsyncMock,
+            return_value=raw_stream(),
+        ) as mock_raw,
+    ):
+        mock_prepare.return_value = PreparedHistory(
+            summary_prompt_prefix=summary_prefix,
+            has_stored_replay_state=True,
+        )
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[config.get_ids(runtime_paths)["general"]],
+                message="Analyze this.",
+                thread_history=[
+                    {"event_id": "event-1", "sender": "user", "body": "Already seen"},
+                    {"event_id": "event-2", "sender": "user", "body": "Fresh follow-up"},
+                    {"event_id": "event-3", "sender": "user", "body": "Current message body"},
+                ],
+                orchestrator=orchestrator,
+                execution_identity=None,
+                session_id="session-789",
+                reply_to_event_id="event-3",
+                response_sender_id="@mindroom_team:example.org",
+            )
+        ]
+
+    assert len(chunks) == 1
+    budget_prompt = mock_prepare.await_args.kwargs["full_prompt"]
+    assert "Fresh follow-up" in budget_prompt
+    assert "Already seen" not in budget_prompt
+    prompt = mock_raw.await_args.kwargs["prompt"]
+    assert summary_prefix in prompt
+    assert "Fresh follow-up" in prompt
+    assert "Already seen" not in prompt
 
 
 @pytest.mark.asyncio

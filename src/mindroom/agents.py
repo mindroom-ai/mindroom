@@ -15,6 +15,7 @@ from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from agno.run.agent import RunOutput
+from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 
 import mindroom.tools  # noqa: F401
@@ -637,11 +638,36 @@ def get_seen_event_ids(session: AgentSession) -> set[str]:
     if not session.runs:
         return seen
     for run in session.runs:
-        if isinstance(run, RunOutput) and run.metadata:
+        if isinstance(run, (RunOutput, TeamRunOutput)) and run.metadata:
             seen_ids = run.metadata.get("matrix_seen_event_ids")
             if isinstance(seen_ids, list):
                 seen.update(seen_ids)
     return seen
+
+
+def update_session_seen_event_ids(session: AgentSession, event_ids: list[str]) -> bool:
+    """Merge consumed Matrix event ids into session metadata."""
+    normalized_event_ids = sorted({event_id for event_id in event_ids if event_id})
+    if not normalized_event_ids:
+        return False
+
+    metadata = dict(session.metadata or {})
+    raw_compaction_metadata = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
+    compaction_metadata = dict(raw_compaction_metadata) if isinstance(raw_compaction_metadata, dict) else {}
+    existing_seen_ids = compaction_metadata.get("seen_event_ids")
+    merged_seen_ids = set(normalized_event_ids)
+    if isinstance(existing_seen_ids, list):
+        merged_seen_ids.update(event_id for event_id in existing_seen_ids if isinstance(event_id, str) and event_id)
+    updated_seen_ids = sorted(merged_seen_ids)
+    if isinstance(existing_seen_ids, list) and updated_seen_ids == [
+        event_id for event_id in existing_seen_ids if isinstance(event_id, str) and event_id
+    ]:
+        return False
+
+    compaction_metadata["seen_event_ids"] = updated_seen_ids
+    metadata[MINDROOM_COMPACTION_METADATA_KEY] = compaction_metadata
+    session.metadata = metadata
+    return True
 
 
 def remove_run_by_event_id(storage: SqliteDb, session_id: str, event_id: str) -> bool:
