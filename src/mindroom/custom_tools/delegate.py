@@ -7,6 +7,7 @@ response as the tool result.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -16,6 +17,7 @@ from mindroom.agents import describe_agent
 from mindroom.ai import ai_response
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -107,18 +109,31 @@ class DelegateTools(Toolkit):
                 depth=self._delegation_depth + 1,
                 task_preview=task[:100],
             )
-            response = await ai_response(
-                agent_name=agent_name,
-                prompt=task,
-                session_id=f"delegate:{self._agent_name}:{agent_name}:{uuid4()}",
-                runtime_paths=self._runtime_paths,
-                config=self._config,
-                knowledge=knowledge,
-                user_id=self._execution_identity.requester_id if self._execution_identity is not None else None,
-                include_interactive_questions=False,
-                execution_identity=self._execution_identity,
-                delegation_depth=self._delegation_depth + 1,
+            session_id = f"delegate:{self._agent_name}:{agent_name}:{uuid4()}"
+            execution_identity = (
+                replace(self._execution_identity, agent_name=agent_name, session_id=session_id)
+                if self._execution_identity is not None
+                else None
             )
+            runtime_context = get_tool_runtime_context()
+            delegated_runtime_context = (
+                replace(runtime_context, agent_name=agent_name, session_id=session_id)
+                if runtime_context is not None
+                else None
+            )
+            with tool_runtime_context(delegated_runtime_context):
+                response = await ai_response(
+                    agent_name=agent_name,
+                    prompt=task,
+                    session_id=session_id,
+                    runtime_paths=self._runtime_paths,
+                    config=self._config,
+                    knowledge=knowledge,
+                    user_id=execution_identity.requester_id if execution_identity is not None else None,
+                    include_interactive_questions=False,
+                    execution_identity=execution_identity,
+                    delegation_depth=self._delegation_depth + 1,
+                )
         except Exception as e:
             logger.exception(
                 "Delegation failed",

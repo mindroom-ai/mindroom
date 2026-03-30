@@ -2217,6 +2217,7 @@ class AgentBot:
         thread_id: str | None,
         reply_to_event_id: str | None,
         user_id: str | None,
+        session_id: str | None = None,
         *,
         agent_name: str | None = None,
         attachment_ids: list[str] | None = None,
@@ -2234,6 +2235,7 @@ class AgentBot:
             client=self.client,
             config=self.config,
             runtime_paths=self.runtime_paths,
+            session_id=session_id,
             room=self._cached_room(room_id),
             reply_to_event_id=reply_to_event_id,
             storage_path=self.storage_path,
@@ -2570,6 +2572,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
+            session_id=session_id,
             attachment_ids=payload.attachment_ids,
             correlation_id=resolved_correlation_id,
         )
@@ -2969,6 +2972,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
+            session_id=session_id,
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
         )
@@ -3152,6 +3156,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
+            session_id=session_id,
             agent_name=agent_name,
         )
         execution_identity = self._build_tool_execution_identity(
@@ -3437,6 +3442,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
+            session_id=session_id,
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
         )

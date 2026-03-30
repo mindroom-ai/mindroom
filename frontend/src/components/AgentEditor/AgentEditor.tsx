@@ -1936,7 +1936,7 @@ export function AgentEditor() {
                 >
                   Enable auto-compaction
                 </label>
-                {selectedAgent.compaction != null && (
+                {compactionConfig != null && (
                   <Button
                     type="button"
                     variant="outline"

@@ -45,6 +45,7 @@ from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.compact_context import CompactContextTools, _format_outcome
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -252,14 +253,23 @@ async def test_manual_compaction_uses_compaction_model_window_for_budget(tmp_pat
     runtime_paths = runtime_paths_for(config)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     await _seed_session(storage, session_id="sid", turn_count=3)
-    tool = CompactContextTools("test_agent", config, runtime_paths, execution_identity=None)
+    tool = CompactContextTools(
+        "test_agent",
+        config,
+        runtime_paths,
+        execution_identity=ToolExecutionIdentity(
+            channel="openai_compat",
+            agent_name="test_agent",
+            requester_id="@user:example.org",
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="sid",
+        ),
+    )
 
     with (
-        patch("mindroom.thread_utils.create_session_id", return_value="sid"),
-        patch(
-            "mindroom.custom_tools.compact_context.get_tool_runtime_context",
-            return_value=SimpleNamespace(room_id="!room:localhost", resolved_thread_id="$thread"),
-        ),
+        patch("mindroom.custom_tools.compact_context.get_tool_runtime_context", return_value=None),
         patch(
             "mindroom.ai.get_model_instance",
             return_value=FakeModel(id="compact-model", provider="fake"),
