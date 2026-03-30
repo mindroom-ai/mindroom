@@ -2016,7 +2016,7 @@ export function AgentEditor() {
 
                 <FieldGroup
                   label="Keep Recent Tokens"
-                  helperText="How much of the newest history should stay verbatim during compaction."
+                  helperText="How much of the newest history should stay verbatim in prompt context after compaction."
                   htmlFor="compaction_keep_recent_tokens"
                 >
                   <Input

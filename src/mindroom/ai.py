@@ -42,6 +42,7 @@ from mindroom.compaction import (
     estimate_history_tokens,
     estimate_static_tokens,
     find_fitting_run_limit,
+    get_last_compacted_run_id,
     get_replayable_runs,
 )
 from mindroom.constants import (
@@ -189,6 +190,21 @@ def _disable_history_for_run(
         context_window=context_window,
         threshold=threshold,
     )
+
+
+def _apply_compaction_cutoff_to_history(agent: Agent, session: AgentSession | None) -> None:
+    """Restrict Agno history replay to runs that remain visible after compaction."""
+    if session is None or get_last_compacted_run_id(session) is None:
+        return
+
+    visible_run_count = len(get_replayable_runs(session, agent))
+    if visible_run_count <= 0:
+        agent.add_history_to_context = False
+        return
+
+    current_limit = agent.num_history_runs
+    if current_limit is None or current_limit > visible_run_count:
+        agent.num_history_runs = visible_run_count
 
 
 def _apply_context_window_limit(  # noqa: C901
@@ -1109,6 +1125,7 @@ async def prepare_agent_history_for_run(
         session=session,
     )
 
+    _apply_compaction_cutoff_to_history(agent, session)
     _apply_context_window_limit(
         agent,
         agent_name,

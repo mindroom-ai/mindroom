@@ -36,6 +36,7 @@ from mindroom.compaction import (
     clear_pending_compaction,
     compact_session_now,
     estimate_runs_tokens,
+    get_visible_session_runs,
     queue_pending_compaction,
     scrub_history_messages_from_sessions,
 )
@@ -288,17 +289,20 @@ async def test_compact_session_now_multi_pass_compacts_multiple_runs(tmp_path: P
     assert outcome.compacted_run_count == 4
     assert outcome.runs_before == 5
     assert outcome.runs_after == 2
-    assert len(updated_session.runs or []) == 1
+    assert len(updated_session.runs or []) == 5
+    assert len(get_visible_session_runs(updated_session)) == 1
     assert updated_session.summary is not None
     assert updated_session.summary.summary == "## Goal\npass 4"
     metadata = updated_session.metadata[MINDROOM_COMPACTION_METADATA_KEY]
     assert metadata["seen_event_ids"] == ["$e1", "$e2", "$e3", "$e4"]
+    assert updated_session.runs is not None
+    assert metadata["last_compacted_run_id"] == updated_session.runs[3].run_id
     assert get_seen_event_ids(updated_session) == {"$e1", "$e2", "$e3", "$e4", "$e5"}
 
 
 @pytest.mark.asyncio
-async def test_queue_pending_compaction_multi_pass_tracks_total_compacted_count(tmp_path: Path) -> None:
-    """Deferred compaction should accumulate the total runs compacted across passes."""
+async def test_queue_pending_compaction_multi_pass_tracks_cutoff_run_id(tmp_path: Path) -> None:
+    """Deferred compaction should remember the last run hidden behind the summary cutoff."""
     config = _make_config(tmp_path)
     storage = _make_storage(tmp_path)
     agent = await _seed_session(storage, session_id="sid", turn_count=5)
@@ -334,7 +338,7 @@ async def test_queue_pending_compaction_multi_pass_tracks_total_compacted_count(
         assert queued is not None
         pending = _PENDING_COMPACTION.get(None)
         assert pending is not None
-        assert pending.compacted_count == 4
+        assert pending.last_compacted_run_id == session.runs[3].run_id
         assert mock_summary.await_count == 4
 
         await agent.arun(
@@ -349,7 +353,8 @@ async def test_queue_pending_compaction_multi_pass_tracks_total_compacted_count(
     assert applied.runs_before == 6
     assert applied.runs_after == 2
     saved_session = _coerce_agent_session(storage.get_session("sid", SessionType.AGENT))
-    assert len(saved_session.runs or []) == 2
+    assert len(saved_session.runs or []) == 6
+    assert len(get_visible_session_runs(saved_session)) == 2
     assert saved_session.summary is not None
     assert saved_session.summary.summary == "## Goal\ndeferred 4"
     assert get_seen_event_ids(saved_session) == {"$e1", "$e2", "$e3", "$e4", "$e5", "$e6"}
@@ -436,7 +441,8 @@ async def test_second_turn_waits_for_queued_compaction_to_apply(  # noqa: PLR091
     allow_first_turn_to_finish = asyncio.Event()
     second_turn_started = asyncio.Event()
     tool_messages: list[str] = []
-    second_turn_runs: list[int] = []
+    second_turn_visible_runs: list[int] = []
+    second_turn_total_runs: list[int] = []
     second_turn_summaries: list[str | None] = []
     ai_call_count = 0
 
@@ -480,7 +486,8 @@ async def test_second_turn_waits_for_queued_compaction_to_apply(  # noqa: PLR091
         second_turn_started.set()
         session = _get_agent_session(storage, resolved_session_id)
         assert session is not None
-        second_turn_runs.append(len(session.runs or []))
+        second_turn_total_runs.append(len(session.runs or []))
+        second_turn_visible_runs.append(len(get_visible_session_runs(session)))
         second_turn_summaries.append(session.summary.summary if session.summary is not None else None)
         return "second response"
 
@@ -531,7 +538,8 @@ async def test_second_turn_waits_for_queued_compaction_to_apply(  # noqa: PLR091
     assert len(tool_messages) == 1
     assert tool_messages[0].startswith("Compaction queued:")
     assert "Will apply after this response finishes." in tool_messages[0]
-    assert second_turn_runs == [2]
+    assert second_turn_total_runs == [4]
+    assert second_turn_visible_runs == [2]
     assert second_turn_summaries == ["## Goal\nqueued"]
 
 
@@ -596,7 +604,7 @@ async def test_manual_compaction_reported_from_agno_tool_task_should_persist(tmp
         assert isinstance(function_call.result, str)
         assert "Compaction queued:" in function_call.result
         assert "Will apply after this response finishes." in function_call.result
-        assert "- Runs: 4 -> 3" in function_call.result
+        assert "- Visible runs: 4 -> 3" in function_call.result
 
         queued_session = _coerce_agent_session(storage.get_session("sid", SessionType.AGENT))
         assert len(queued_session.runs or []) == 4
@@ -612,7 +620,8 @@ async def test_manual_compaction_reported_from_agno_tool_task_should_persist(tmp
 
         assert applied is not None
         persisted_session = _coerce_agent_session(storage.get_session("sid", SessionType.AGENT))
-        assert len(persisted_session.runs or []) == 3
+        assert len(persisted_session.runs or []) == 5
+        assert len(get_visible_session_runs(persisted_session)) == 3
         assert persisted_session.summary is not None
         assert persisted_session.summary.summary == "## Goal\nsummary"
     finally:
@@ -656,7 +665,8 @@ async def test_compact_session_now_partial_failure_preserves_last_successful_pas
     updated_session, outcome = result
     assert mock_summary.await_count == 2
     assert outcome.compacted_run_count == 1
-    assert len(updated_session.runs or []) == 3
+    assert len(updated_session.runs or []) == 4
+    assert len(get_visible_session_runs(updated_session)) == 3
     assert updated_session.summary is not None
     assert updated_session.summary.summary == "## Goal\nfirst pass"
     metadata = updated_session.metadata[MINDROOM_COMPACTION_METADATA_KEY]

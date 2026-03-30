@@ -158,7 +158,7 @@ class CompactionOverrideConfig(BaseModel):
     keep_recent_tokens: int | None = Field(
         default=None,
         ge=0,
-        description="Amount of newest history to keep verbatim during auto-compaction",
+        description="Amount of newest history to keep verbatim in prompt context after auto-compaction",
     )
     model: str | None = Field(
         default=None,
@@ -193,7 +193,7 @@ class CompactionConfig(CompactionOverrideConfig):
     keep_recent_tokens: int = Field(
         default=20000,
         ge=0,
-        description="Amount of newest history to keep verbatim during auto-compaction",
+        description="Amount of newest history to keep verbatim in prompt context after auto-compaction",
     )
     notify: bool = Field(
         default=False,

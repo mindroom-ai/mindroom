@@ -1026,6 +1026,7 @@ class TestPrepareAgentAndPrompt:
             runs_before=1,
             runs_after=1,
             compacted_run_count=1,
+            last_compacted_run_id="r1",
             compacted_at="2026-03-22T20:15:00Z",
             notify=True,
         )

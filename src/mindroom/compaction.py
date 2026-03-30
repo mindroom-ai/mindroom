@@ -101,6 +101,7 @@ class CompactionOutcome:
     runs_before: int
     runs_after: int
     compacted_run_count: int
+    last_compacted_run_id: str | None
     compacted_at: str
     notify: bool
 
@@ -126,7 +127,7 @@ class CompactionOutcome:
 
     def to_session_metadata(self, seen_event_ids: set[str]) -> dict[str, Any]:
         """Return the persisted session bookkeeping payload."""
-        return {
+        metadata = {
             "version": _COMPACTION_METADATA_VERSION,
             "seen_event_ids": sorted(seen_event_ids),
             "compacted_at": self.compacted_at,
@@ -135,6 +136,9 @@ class CompactionOutcome:
             "mode": self.mode,
             "summary_model": self.summary_model,
         }
+        if self.last_compacted_run_id is not None:
+            metadata["last_compacted_run_id"] = self.last_compacted_run_id
+        return metadata
 
 
 @dataclass(frozen=True)
@@ -146,10 +150,10 @@ class PendingCompaction:
     config: Config
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
-    compacted_count: int
     summary: SessionSummary
     mode: str
     summary_model: str
+    last_compacted_run_id: str
     window_tokens: int
     threshold_tokens: int
     reserve_tokens: int
@@ -173,7 +177,7 @@ class _CompactionProgress:
     """In-memory multi-pass compaction state."""
 
     summary: SessionSummary | None
-    remaining_compacted_runs: list[RunOutput | TeamRunOutput]
+    remaining_runs: list[RunOutput | TeamRunOutput]
     compacted_count: int
     budget_exhausted_on_first_pass: bool
 
@@ -244,17 +248,51 @@ def get_team_scope(agent: Agent) -> tuple[str | None, str | None]:
     return team_id, agent_id if isinstance(agent_id, str) and agent_id else None
 
 
-def get_replayable_runs(session: AgentSession, agent: Agent) -> list[RunOutput | TeamRunOutput]:
-    """Return runs that Agno can replay for prompt history."""
+def get_last_compacted_run_id(session: AgentSession) -> str | None:
+    """Return the last run id hidden behind the current summary cutoff."""
+    metadata = session.metadata
+    if not isinstance(metadata, dict):
+        return None
+    compaction_metadata = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
+    if not isinstance(compaction_metadata, dict):
+        return None
+    last_compacted_run_id = compaction_metadata.get("last_compacted_run_id")
+    return last_compacted_run_id if isinstance(last_compacted_run_id, str) else None
+
+
+def _runs_after_run_id(
+    runs: Sequence[RunOutput | TeamRunOutput],
+    after_run_id: str | None,
+) -> list[RunOutput | TeamRunOutput]:
+    if after_run_id is None:
+        return list(runs)
+    after_index = next((index for index, run in enumerate(runs) if run.run_id == after_run_id), None)
+    if after_index is None:
+        return list(runs)
+    return list(runs[after_index + 1 :])
+
+
+def _get_top_level_completed_runs(session: AgentSession) -> list[RunOutput | TeamRunOutput]:
+    """Return top-level completed runs in storage order."""
     runs = [run for run in session.runs or [] if isinstance(run, (RunOutput, TeamRunOutput))]
+    skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
+    return [run for run in runs if run.parent_run_id is None and run.status not in skip_statuses]
+
+
+def get_visible_session_runs(session: AgentSession) -> list[RunOutput | TeamRunOutput]:
+    """Return top-level session runs still visible after the current compaction cutoff."""
+    return _runs_after_run_id(_get_top_level_completed_runs(session), get_last_compacted_run_id(session))
+
+
+def get_replayable_runs(session: AgentSession, agent: Agent) -> list[RunOutput | TeamRunOutput]:
+    """Return replayable runs still visible in prompt history for this agent."""
+    runs = _get_top_level_completed_runs(session)
     team_id, agent_id = get_team_scope(agent)
     if team_id is not None:
         runs = [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == team_id]
     elif agent_id:
         runs = [run for run in runs if isinstance(run, RunOutput) and run.agent_id == agent_id]
-
-    skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
-    return [run for run in runs if run.parent_run_id is None and run.status not in skip_statuses]
+    return _runs_after_run_id(runs, get_last_compacted_run_id(session))
 
 
 def estimate_history_tokens(
@@ -265,11 +303,17 @@ def estimate_history_tokens(
     message_limit: int | None = None,
 ) -> int:
     """Estimate replayed history tokens using Agno's message construction path."""
+    visible_runs = get_replayable_runs(session, agent)
+    if not visible_runs:
+        return 0
+    visible_run_limit = len(visible_runs) if run_limit is None else min(run_limit, len(visible_runs))
+    if visible_run_limit <= 0:
+        return 0
     team_id, agent_id = get_team_scope(agent)
     messages = session.get_messages(
         agent_id=agent_id,
         team_id=team_id,
-        last_n_runs=run_limit,
+        last_n_runs=visible_run_limit,
         limit=message_limit,
         skip_roles=get_history_skip_roles(agent),
     )
@@ -334,16 +378,11 @@ async def compact_session_now(
     compaction_model_context_window: int | None = None,
     max_passes: int = _DEFAULT_MAX_COMPACTION_PASSES,
 ) -> tuple[AgentSession, CompactionOutcome] | None:
-    """Compact one stored session immediately and persist the mutated state.
+    """Compact one stored session immediately and persist a summary cutoff.
 
-    Uses selective pruning: only runs that fit the compaction model's input
-    budget are included in the summary and removed from the session.
-    Oversized runs that don't fit are left in place.
-
-    With multi-pass compaction enabled, the engine summarizes one contiguous
-    prefix slice per pass, feeds that merged summary back in as
-    ``<previous_summary>``, and continues from the next oldest remaining run
-    until all eligible runs are compacted or ``max_passes`` is exhausted.
+    Stored runs remain intact in SQLite.
+    Compaction only updates ``session.summary`` and records the last summarized
+    run id so future prompt assembly can ignore the compacted prefix.
     """
     lock = _get_session_lock(storage, session_id)
     async with lock:
@@ -351,14 +390,16 @@ async def compact_session_now(
         if session is None or not session.runs:
             return None
 
-        cut_index = _find_auto_cut_index(session, agent, keep_recent_tokens)
-        if cut_index is None:
+        before_visible_runs = get_replayable_runs(session, agent)
+        runs_to_compact, kept_visible_runs = _split_runs_for_auto_compaction(
+            before_visible_runs,
+            agent=agent,
+            keep_recent_tokens=keep_recent_tokens,
+        )
+        if not runs_to_compact:
             return None
 
-        before_runs = list(session.runs)
         previous_summary = session.summary
-        compacted_runs = before_runs[:cut_index]
-        recent_runs = before_runs[cut_index:]
 
         # Compute budget from the compaction model's context window
         effective_window = compaction_model_context_window or window_tokens
@@ -379,7 +420,7 @@ async def compact_session_now(
             model=model,
             session_id=session_id,
             previous_summary=previous_summary,
-            compacted_runs=compacted_runs,
+            compacted_runs=runs_to_compact,
             summary_input_budget=summary_input_budget,
             max_passes=max_passes,
         )
@@ -388,7 +429,7 @@ async def compact_session_now(
             logger.warning(
                 "Compaction skipped: no runs fit the input budget",
                 session_id=session_id,
-                candidate_runs=len(compacted_runs),
+                candidate_runs=len(runs_to_compact),
                 budget=summary_input_budget,
                 summary_tokens=summary_tokens,
                 has_prior_summary=previous_summary is not None,
@@ -396,16 +437,20 @@ async def compact_session_now(
             )
             return None
 
-        removed_runs = compacted_runs[: progress.compacted_count]
-        # Contiguous prefix: included_runs is always a prefix of compacted_runs.
-        # In the multi-pass flow, each pass advances by the next prefix slice,
-        # so the total removed runs are still one contiguous prefix.
-        # Remove the compacted prefix, keep remaining uncompacted runs + recent runs.
-        remaining_runs = list(progress.remaining_compacted_runs) + list(recent_runs)
+        compacted_runs = runs_to_compact[: progress.compacted_count]
+        after_visible_runs = list(progress.remaining_runs) + list(kept_visible_runs)
+        last_compacted_run_id = _require_last_compacted_run_id(compacted_runs)
+        if last_compacted_run_id is None:
+            logger.warning(
+                "Compaction skipped: compacted run has no run_id",
+                session_id=session_id,
+                compacted_run_count=len(compacted_runs),
+            )
+            return None
         outcome = _build_compaction_outcome(
-            before_runs=before_runs,
+            before_visible_runs=before_visible_runs,
             before_summary=previous_summary,
-            after_runs=remaining_runs,
+            after_visible_runs=after_visible_runs,
             new_summary=progress.summary,
             mode=mode,
             summary_model=_model_identifier(model),
@@ -413,12 +458,12 @@ async def compact_session_now(
             threshold_tokens=threshold_tokens,
             reserve_tokens=reserve_tokens,
             keep_recent_tokens=keep_recent_tokens,
+            last_compacted_run_id=last_compacted_run_id,
             notify=notify,
             count_pending_run=True,
         )
-        seen_event_ids = _merge_seen_event_ids(session_metadata=session.metadata, removed_runs=removed_runs)
+        seen_event_ids = _merge_seen_event_ids(session_metadata=session.metadata, compacted_runs=compacted_runs)
         session.summary = progress.summary
-        session.runs = remaining_runs
         session.metadata = {
             **(session.metadata or {}),
             MINDROOM_COMPACTION_METADATA_KEY: outcome.to_session_metadata(seen_event_ids),
@@ -454,14 +499,17 @@ async def queue_pending_compaction(
         if keep_recent_runs < 0:
             msg = "keep_recent_runs must be >= 0"
             raise ValueError(msg)
-        cut_index = len(session.runs) - keep_recent_runs
-        if cut_index <= 0:
+        before_visible_runs = get_visible_session_runs(session)
+        if len(before_visible_runs) <= keep_recent_runs:
             return None
 
-        before_runs = list(session.runs)
         previous_summary = session.summary
-        compacted_runs = before_runs[:cut_index]
-        recent_runs = before_runs[cut_index:]
+        if keep_recent_runs == 0:
+            runs_to_compact = list(before_visible_runs)
+            kept_visible_runs: list[RunOutput | TeamRunOutput] = []
+        else:
+            runs_to_compact = list(before_visible_runs[:-keep_recent_runs])
+            kept_visible_runs = list(before_visible_runs[-keep_recent_runs:])
 
         # Compute budget from the compaction model's context window
         effective_window = compaction_model_context_window or window_tokens
@@ -482,7 +530,7 @@ async def queue_pending_compaction(
             model=model,
             session_id=session_id,
             previous_summary=previous_summary,
-            compacted_runs=compacted_runs,
+            compacted_runs=runs_to_compact,
             summary_input_budget=summary_input_budget,
             max_passes=max_passes,
         )
@@ -491,7 +539,7 @@ async def queue_pending_compaction(
             logger.warning(
                 "Manual compaction skipped: no runs fit the input budget",
                 session_id=session_id,
-                candidate_runs=len(compacted_runs),
+                candidate_runs=len(runs_to_compact),
                 budget=summary_input_budget,
                 summary_tokens=summary_tokens,
                 has_prior_summary=previous_summary is not None,
@@ -499,21 +547,28 @@ async def queue_pending_compaction(
             )
             return None
 
-        # Contiguous prefix: included_runs is always a prefix of compacted_runs.
-        # In the multi-pass flow, each pass advances by the next prefix slice,
-        # so the queued removal is still one contiguous prefix.
-        remaining_runs = list(progress.remaining_compacted_runs) + list(recent_runs)
+        compacted_runs = runs_to_compact[: progress.compacted_count]
+        after_visible_runs = list(progress.remaining_runs) + list(kept_visible_runs)
+        last_compacted_run_id = _require_last_compacted_run_id(compacted_runs)
+        if last_compacted_run_id is None:
+            logger.warning(
+                "Manual compaction skipped: compacted run has no run_id",
+                session_id=session_id,
+                compacted_run_count=len(compacted_runs),
+            )
+            return None
         queued_outcome = _build_compaction_outcome(
-            before_runs=before_runs,
+            before_visible_runs=before_visible_runs,
             before_summary=previous_summary,
-            after_runs=remaining_runs,
+            after_visible_runs=after_visible_runs,
             new_summary=progress.summary,
             mode="manual",
             summary_model=_model_identifier(model),
             window_tokens=window_tokens,
             threshold_tokens=threshold_tokens,
             reserve_tokens=reserve_tokens,
-            keep_recent_tokens=estimate_runs_tokens(recent_runs),
+            keep_recent_tokens=estimate_runs_tokens(kept_visible_runs),
+            last_compacted_run_id=last_compacted_run_id,
             notify=notify,
             count_pending_run=True,
         )
@@ -523,14 +578,14 @@ async def queue_pending_compaction(
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
-            compacted_count=progress.compacted_count,
             summary=progress.summary,
             mode="manual",
             summary_model=_model_identifier(model),
+            last_compacted_run_id=last_compacted_run_id,
             window_tokens=window_tokens,
             threshold_tokens=threshold_tokens,
             reserve_tokens=reserve_tokens,
-            keep_recent_tokens=estimate_runs_tokens(recent_runs),
+            keep_recent_tokens=estimate_runs_tokens(kept_visible_runs),
             notify=notify,
         )
         if pending_buffer is not None:
@@ -543,16 +598,7 @@ async def queue_pending_compaction(
 async def apply_pending_compaction(
     pending_override: PendingCompaction | None = None,
 ) -> CompactionOutcome | None:
-    """Apply a queued post-run compaction after Agno saves the current run.
-
-    Uses positional prefix removal: the first ``compacted_count`` runs are
-    removed from the session.  Agno appends new runs at the end, so the
-    compacted prefix stays stable between queue and apply.
-
-    In the multi-pass flow, ``compacted_count`` may represent several passes
-    worth of prefix slices, but they still collapse to one stable prefix that
-    can be removed after the run save.
-    """
+    """Apply a queued post-run compaction after Agno saves the current run."""
     pending = pending_override if pending_override is not None else _PENDING_COMPACTION.get(None)
     _PENDING_COMPACTION.set(None)
     if pending is None:
@@ -575,25 +621,24 @@ async def apply_pending_compaction(
             )
             return None
 
-        if len(session.runs) < pending.compacted_count:
+        before_visible_runs = get_visible_session_runs(session)
+        if not any(run.run_id == pending.last_compacted_run_id for run in before_visible_runs):
             logger.warning(
-                "Pending compaction skipped: session has fewer runs than expected",
+                "Pending compaction skipped: compacted cutoff run is no longer visible",
                 agent=pending.agent_name,
                 session_id=pending.session_id,
-                expected_prefix=pending.compacted_count,
-                current_runs=len(session.runs),
+                last_compacted_run_id=pending.last_compacted_run_id,
             )
             return None
 
-        before_runs = list(session.runs)
         previous_summary = session.summary
-        removed_runs = before_runs[: pending.compacted_count]
-        remaining_runs = before_runs[pending.compacted_count :]
+        after_visible_runs = _runs_after_run_id(before_visible_runs, pending.last_compacted_run_id)
+        compacted_runs = before_visible_runs[: len(before_visible_runs) - len(after_visible_runs)]
 
         outcome = _build_compaction_outcome(
-            before_runs=before_runs,
+            before_visible_runs=before_visible_runs,
             before_summary=previous_summary,
-            after_runs=remaining_runs,
+            after_visible_runs=after_visible_runs,
             new_summary=pending.summary,
             mode=pending.mode,
             summary_model=pending.summary_model,
@@ -601,11 +646,11 @@ async def apply_pending_compaction(
             threshold_tokens=pending.threshold_tokens,
             reserve_tokens=pending.reserve_tokens,
             keep_recent_tokens=pending.keep_recent_tokens,
+            last_compacted_run_id=pending.last_compacted_run_id,
             notify=pending.notify,
         )
-        seen_event_ids = _merge_seen_event_ids(session_metadata=session.metadata, removed_runs=removed_runs)
+        seen_event_ids = _merge_seen_event_ids(session_metadata=session.metadata, compacted_runs=compacted_runs)
         session.summary = pending.summary
-        session.runs = remaining_runs
         session.metadata = {
             **(session.metadata or {}),
             MINDROOM_COMPACTION_METADATA_KEY: outcome.to_session_metadata(seen_event_ids),
@@ -614,17 +659,21 @@ async def apply_pending_compaction(
         return outcome
 
 
-def _find_auto_cut_index(session: AgentSession, agent: Agent, keep_recent_tokens: int) -> int | None:
-    replayable_runs = get_replayable_runs(session, agent)
-    if not replayable_runs:
-        return None
+def _split_runs_for_auto_compaction(
+    visible_runs: Sequence[RunOutput | TeamRunOutput],
+    *,
+    agent: Agent,
+    keep_recent_tokens: int,
+) -> tuple[list[RunOutput | TeamRunOutput], list[RunOutput | TeamRunOutput]]:
+    """Split visible runs into a compactable prefix and a kept recent suffix."""
+    if not visible_runs:
+        return [], []
     if keep_recent_tokens <= 0:
-        return len(session.runs or [])
+        return list(visible_runs), []
 
-    all_runs = session.runs or []
     kept_count = 0
     kept_tokens = 0
-    for run in reversed(replayable_runs):
+    for run in reversed(visible_runs):
         kept_count += 1
         kept_tokens += estimate_runs_tokens(
             [run],
@@ -633,13 +682,18 @@ def _find_auto_cut_index(session: AgentSession, agent: Agent, keep_recent_tokens
         if kept_tokens >= keep_recent_tokens:
             break
 
-    if kept_count == len(replayable_runs):
+    if kept_count >= len(visible_runs):
+        return [], list(visible_runs)
+    return list(visible_runs[:-kept_count]), list(visible_runs[-kept_count:])
+
+
+def _require_last_compacted_run_id(compacted_runs: Sequence[RunOutput | TeamRunOutput]) -> str | None:
+    """Return the last compacted run id, or ``None`` when the cutoff cannot be represented."""
+    if not compacted_runs:
         return None
-    oldest_kept_run = replayable_runs[len(replayable_runs) - kept_count]
-    # Find the index of this run in the full session.runs list by identity
-    for index, run in enumerate(all_runs):
-        if run is oldest_kept_run:
-            return index
+    last_run_id = compacted_runs[-1].run_id
+    if isinstance(last_run_id, str) and last_run_id:
+        return last_run_id
     return None
 
 
@@ -653,14 +707,14 @@ async def _execute_compaction_passes(
     max_passes: int,
 ) -> _CompactionProgress:
     working_summary = previous_summary
-    working_compacted_runs = list(compacted_runs)
+    remaining_runs_to_compact = list(compacted_runs)
     compacted_count = 0
     budget_exhausted_on_first_pass = False
 
     for pass_index in range(max_passes):
         summary_input, included_runs, budget_exhausted = _build_summary_input(
             previous_summary=working_summary,
-            compacted_runs=working_compacted_runs,
+            compacted_runs=remaining_runs_to_compact,
             max_input_tokens=summary_input_budget,
         )
         if pass_index == 0:
@@ -684,23 +738,23 @@ async def _execute_compaction_passes(
             )
             break
 
-        working_compacted_runs = working_compacted_runs[len(included_runs) :]
+        remaining_runs_to_compact = remaining_runs_to_compact[len(included_runs) :]
         compacted_count += len(included_runs)
-        if not working_compacted_runs:
+        if not remaining_runs_to_compact:
             break
 
-    if working_compacted_runs and compacted_count > 0 and max_passes > 0:
+    if remaining_runs_to_compact and compacted_count > 0 and max_passes > 0:
         logger.info(
             "Compaction pass loop finished",
             session_id=session_id,
             compacted_count=compacted_count,
-            remaining_runs=len(working_compacted_runs),
+            remaining_runs=len(remaining_runs_to_compact),
             max_passes=max_passes,
         )
 
     return _CompactionProgress(
         summary=working_summary,
-        remaining_compacted_runs=working_compacted_runs,
+        remaining_runs=remaining_runs_to_compact,
         compacted_count=compacted_count,
         budget_exhausted_on_first_pass=budget_exhausted_on_first_pass,
     )
@@ -961,9 +1015,9 @@ def _escape_xml_content(text: str) -> str:
 
 def _build_compaction_outcome(
     *,
-    before_runs: Sequence[RunOutput | TeamRunOutput],
+    before_visible_runs: Sequence[RunOutput | TeamRunOutput],
     before_summary: SessionSummary | None,
-    after_runs: Sequence[RunOutput | TeamRunOutput],
+    after_visible_runs: Sequence[RunOutput | TeamRunOutput],
     new_summary: SessionSummary,
     mode: str,
     summary_model: str,
@@ -971,15 +1025,16 @@ def _build_compaction_outcome(
     threshold_tokens: int,
     reserve_tokens: int,
     keep_recent_tokens: int,
+    last_compacted_run_id: str | None,
     notify: bool,
     count_pending_run: bool = False,
 ) -> CompactionOutcome:
-    before_tokens = estimate_runs_tokens(before_runs) + estimate_text_tokens(
+    before_tokens = estimate_runs_tokens(before_visible_runs) + estimate_text_tokens(
         before_summary.summary if before_summary else "",
     )
-    after_tokens = estimate_runs_tokens(after_runs) + estimate_text_tokens(new_summary.summary)
+    after_tokens = estimate_runs_tokens(after_visible_runs) + estimate_text_tokens(new_summary.summary)
     compacted_at = _iso_utc_now()
-    runs_after = len(after_runs) + (1 if count_pending_run else 0)
+    runs_after = len(after_visible_runs) + (1 if count_pending_run else 0)
     return CompactionOutcome(
         mode=mode,
         summary=new_summary.summary,
@@ -991,9 +1046,10 @@ def _build_compaction_outcome(
         threshold_tokens=threshold_tokens,
         reserve_tokens=reserve_tokens,
         keep_recent_tokens=keep_recent_tokens,
-        runs_before=len(before_runs),
+        runs_before=len(before_visible_runs),
         runs_after=runs_after,
-        compacted_run_count=len(before_runs) - len(after_runs),
+        compacted_run_count=len(before_visible_runs) - len(after_visible_runs),
+        last_compacted_run_id=last_compacted_run_id,
         compacted_at=compacted_at,
         notify=notify,
     )
@@ -1002,10 +1058,10 @@ def _build_compaction_outcome(
 def _merge_seen_event_ids(
     *,
     session_metadata: dict[str, Any] | None,
-    removed_runs: Sequence[RunOutput | TeamRunOutput],
+    compacted_runs: Sequence[RunOutput | TeamRunOutput],
 ) -> set[str]:
     seen_event_ids = _existing_compaction_seen_event_ids(session_metadata)
-    for run in removed_runs:
+    for run in compacted_runs:
         metadata = run.metadata
         if not isinstance(metadata, dict):
             continue

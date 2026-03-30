@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.agents import _get_agent_session, create_session_storage
-from mindroom.compaction import CompactionOutcome, queue_pending_compaction
+from mindroom.compaction import CompactionOutcome, get_visible_session_runs, queue_pending_compaction
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -59,9 +59,14 @@ class CompactContextTools(Toolkit):
             execution_identity=self._execution_identity,
         )
         session = _get_agent_session(storage, session_id)
-        if not session or not session.runs or len(session.runs) <= keep_recent_runs:
-            run_count = len(session.runs) if session and session.runs else 0
-            return f"Nothing to compact: {run_count} run(s) in session (need more than {keep_recent_runs} to compact)."
+        visible_runs = get_visible_session_runs(session) if session is not None else []
+        if len(visible_runs) <= keep_recent_runs:
+            run_count = len(visible_runs)
+            return (
+                "Nothing to compact: "
+                f"{run_count} visible run(s) in session "
+                f"(need more than {keep_recent_runs} to compact)."
+            )
 
         compaction_config = self._config.get_agent_compaction_config(self._agent_name)
         summary_model_name = compaction_config.model or self._config.get_entity_model_name(self._agent_name)
@@ -135,7 +140,7 @@ def _format_outcome(outcome: CompactionOutcome) -> str:
 
     return (
         "Compaction queued:\n"
-        f"- Runs: {outcome.runs_before} -> {outcome.runs_after}\n"
+        f"- Visible runs: {outcome.runs_before} -> {outcome.runs_after}\n"
         f"- Tokens: ~{outcome.before_tokens:,} -> ~{outcome.after_tokens:,} "
         f"({reduction_pct}% reduction)\n"
         "- Status: Will apply after this response finishes."

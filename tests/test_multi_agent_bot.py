@@ -262,6 +262,7 @@ def _make_compaction_outcome(*, mode: str = "auto", notify: bool = True) -> Comp
         runs_before=18,
         runs_after=7,
         compacted_run_count=12,
+        last_compacted_run_id="run-12",
         compacted_at="2026-03-22T20:15:00Z",
         notify=notify,
     )
