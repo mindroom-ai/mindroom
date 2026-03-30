@@ -216,9 +216,7 @@ async def apply_manual_compaction_if_queued(
     compaction_outcomes_collector: list[CompactionOutcome] | None,
 ) -> None:
     """Apply the newest queued manual compaction and record its outcome."""
-    manual_outcome = await apply_pending_compaction(
-        pending_override=_latest_pending_compaction(pending_compaction_buffer),
-    )
+    manual_outcome = await apply_pending_compaction(_latest_pending_compaction(pending_compaction_buffer))
     if pending_compaction_buffer is not None:
         pending_compaction_buffer.clear()
     if manual_outcome is not None and compaction_outcomes_collector is not None:

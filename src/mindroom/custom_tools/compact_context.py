@@ -40,7 +40,7 @@ class CompactContextTools(Toolkit):
         self._config = config
         self._runtime_paths = runtime_paths
         self._execution_identity = execution_identity
-        self._pending_compaction_buffer = pending_compaction_buffer
+        self._pending_compaction_buffer = pending_compaction_buffer if pending_compaction_buffer is not None else []
         super().__init__(name="compact_context", tools=[self.compact_context])
 
     async def compact_context(self, keep_recent_runs: int = 2) -> str:

@@ -27,7 +27,6 @@ from agno.tools.function import Function, FunctionCall
 from mindroom.agents import create_agent, create_session_storage, get_agent_session, get_seen_event_ids
 from mindroom.bot import AgentBot
 from mindroom.compaction import (
-    _PENDING_COMPACTION,
     _WRAPPER_OVERHEAD_TOKENS,
     PendingCompaction,
     _build_summary_input,
@@ -353,6 +352,7 @@ async def test_queue_pending_compaction_multi_pass_tracks_cutoff_run_id(tmp_path
     config = _make_config(tmp_path)
     storage = _make_storage(tmp_path)
     agent = await _seed_session(storage, session_id="sid", turn_count=5)
+    pending_buffer: list[PendingCompaction] = []
     session = _coerce_agent_session(storage.get_session("sid", SessionType.AGENT))
     assert session.runs is not None
     compaction_window = _single_run_compaction_window(session.runs[0])
@@ -381,10 +381,11 @@ async def test_queue_pending_compaction_multi_pass_tracks_cutoff_run_id(tmp_path
             notify=True,
             compaction_model_context_window=compaction_window,
             max_passes=10,
+            pending_buffer=pending_buffer,
         )
         assert queued is not None
-        pending = _PENDING_COMPACTION.get(None)
-        assert pending is not None
+        assert len(pending_buffer) == 1
+        pending = pending_buffer[-1]
         assert pending.last_compacted_run_id == session.runs[3].run_id
         assert mock_summary.await_count == 4
 
@@ -393,7 +394,7 @@ async def test_queue_pending_compaction_multi_pass_tracks_cutoff_run_id(tmp_path
             session_id="sid",
             metadata={"matrix_seen_event_ids": ["$e6"]},
         )
-        applied = await apply_pending_compaction()
+        applied = await apply_pending_compaction(pending)
 
     assert applied is not None
     assert applied.compacted_run_count == 4
@@ -405,7 +406,6 @@ async def test_queue_pending_compaction_multi_pass_tracks_cutoff_run_id(tmp_path
     assert saved_session.summary is not None
     assert saved_session.summary.summary == "## Goal\ndeferred 4"
     assert get_seen_event_ids(saved_session) == {"$e1", "$e2", "$e3", "$e4", "$e5", "$e6"}
-    assert _PENDING_COMPACTION.get(None) is None
 
 
 @pytest.mark.asyncio
@@ -491,6 +491,7 @@ async def test_second_turn_waits_for_queued_compaction_to_apply(  # noqa: PLR091
     second_turn_visible_runs: list[int] = []
     second_turn_total_runs: list[int] = []
     second_turn_summaries: list[str | None] = []
+    pending_buffer: list[PendingCompaction] = []
     ai_call_count = 0
 
     @asynccontextmanager
@@ -513,9 +514,15 @@ async def test_second_turn_waits_for_queued_compaction_to_apply(  # noqa: PLR091
         assert isinstance(collector, list)
 
         if ai_call_count == 1:
-            tool = CompactContextTools("test_agent", config, runtime_paths, execution_identity)
+            tool = CompactContextTools(
+                "test_agent",
+                config,
+                runtime_paths,
+                execution_identity,
+                pending_compaction_buffer=pending_buffer,
+            )
             tool_messages.append(await tool.compact_context(keep_recent_runs=1))
-            assert _PENDING_COMPACTION.get(None) is not None
+            assert len(pending_buffer) == 1
             compaction_queued.set()
 
             await allow_first_turn_to_finish.wait()
@@ -525,7 +532,8 @@ async def test_second_turn_waits_for_queued_compaction_to_apply(  # noqa: PLR091
                 session_id=resolved_session_id,
                 metadata={"matrix_seen_event_ids": ["$e4"]},
             )
-            outcome = await apply_pending_compaction()
+            outcome = await apply_pending_compaction(pending_buffer[-1])
+            pending_buffer.clear()
             assert outcome is not None
             collector.append(outcome)
             return "first response"
@@ -624,7 +632,6 @@ async def test_manual_compaction_reported_from_agno_tool_task_should_persist(tmp
         )
         assert outcome is not None
         child_pending_seen.append(len(pending_buffer))
-        assert _PENDING_COMPACTION.get(None) is None
         return _format_outcome(outcome)
 
     function_call = FunctionCall(
@@ -662,7 +669,7 @@ async def test_manual_compaction_reported_from_agno_tool_task_should_persist(tmp
             session_id="sid",
             metadata={"matrix_seen_event_ids": ["$e5"]},
         )
-        applied = await apply_pending_compaction(pending_override=pending_buffer[-1])
+        applied = await apply_pending_compaction(pending_buffer[-1])
         pending_buffer.clear()
 
         assert applied is not None

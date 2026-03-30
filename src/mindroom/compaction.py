@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
-from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -185,17 +184,9 @@ class _CompactionProgress:
     budget_exhausted_on_first_pass: bool
 
 
-_PENDING_COMPACTION: ContextVar[PendingCompaction | None] = ContextVar(
-    "pending_compaction",
-    default=None,
-)
-
-
-def clear_pending_compaction(pending_buffer: list[PendingCompaction] | None = None) -> None:
+def clear_pending_compaction(pending_buffer: list[PendingCompaction]) -> None:
     """Discard any queued pending compaction without applying it."""
-    _PENDING_COMPACTION.set(None)
-    if pending_buffer is not None:
-        pending_buffer.clear()
+    pending_buffer.clear()
 
 
 def _estimate_message_media_chars(message: Message) -> int:
@@ -491,7 +482,7 @@ async def queue_pending_compaction(
     notify: bool,
     compaction_model_context_window: int | None = None,
     max_passes: int = _DEFAULT_MAX_COMPACTION_PASSES,
-    pending_buffer: list[PendingCompaction] | None = None,
+    pending_buffer: list[PendingCompaction],
 ) -> CompactionOutcome | None:
     """Queue a deferred post-run compaction for the current session."""
     lock = _get_session_lock(storage, session_id)
@@ -593,19 +584,14 @@ async def queue_pending_compaction(
             keep_recent_tokens=kept_tokens,
             notify=notify,
         )
-        if pending_buffer is not None:
-            pending_buffer.append(pending)
-        else:
-            _PENDING_COMPACTION.set(pending)
+        pending_buffer.append(pending)
         return queued_outcome
 
 
 async def apply_pending_compaction(
-    pending_override: PendingCompaction | None = None,
+    pending: PendingCompaction | None,
 ) -> CompactionOutcome | None:
     """Apply a queued post-run compaction after Agno saves the current run."""
-    pending = pending_override if pending_override is not None else _PENDING_COMPACTION.get(None)
-    _PENDING_COMPACTION.set(None)
     if pending is None:
         return None
 
