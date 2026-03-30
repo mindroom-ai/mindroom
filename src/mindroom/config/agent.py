@@ -229,10 +229,6 @@ class AgentConfig(BaseModel):
         default=None,
         description="Compress tool results in history to save context (per-agent override)",
     )
-    enable_session_summaries: bool | None = Field(
-        default=None,
-        description="Enable Agno session summaries for conversation compaction (per-agent override)",
-    )
     max_tool_calls_from_history: int | None = Field(
         default=None,
         ge=0,

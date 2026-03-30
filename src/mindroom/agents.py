@@ -987,13 +987,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     auto_compaction_enabled = config.has_authored_agent_compaction_config(agent_name) and compaction_config.enabled
     add_session_summary_to_context = auto_compaction_enabled or "compact_context" in tool_names
 
-    # Warn when the deprecated enable_session_summaries field is explicitly set
-    if agent_config.enable_session_summaries is not None or defaults.enable_session_summaries:
-        logger.warning(
-            "enable_session_summaries is deprecated and ignored; use compaction config instead",
-            agent=agent_name,
-        )
-
     agent = Agent(
         name=agent_config.display_name,
         id=agent_name,
@@ -1016,7 +1009,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
         compress_tool_results=compress_tool_results,
-        enable_session_summaries=False,
         add_session_summary_to_context=add_session_summary_to_context,
         max_tool_calls_from_history=max_tool_calls_from_history,
     )

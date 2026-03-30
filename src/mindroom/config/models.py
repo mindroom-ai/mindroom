@@ -238,10 +238,6 @@ class DefaultsConfig(BaseModel):
         default=True,
         description="Compress tool results in history to save context",
     )
-    enable_session_summaries: bool = Field(
-        default=False,
-        description="Enable Agno session summaries for conversation compaction",
-    )
     max_tool_calls_from_history: int | None = Field(
         default=None,
         ge=0,

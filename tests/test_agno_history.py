@@ -225,52 +225,6 @@ class TestHistoryConfig:
             agent = _create_agent_for_test("calculator", config)
         assert agent.compress_tool_results is False
 
-    # -- enable_session_summaries --
-
-    def test_enable_session_summaries_default_false(self) -> None:
-        """DefaultsConfig.enable_session_summaries defaults to False."""
-        defaults = DefaultsConfig()
-        assert defaults.enable_session_summaries is False
-
-    def test_agent_config_enable_session_summaries_default_none(self) -> None:
-        """AgentConfig.enable_session_summaries defaults to None (inherit)."""
-        agent = AgentConfig(display_name="Test")
-        assert agent.enable_session_summaries is None
-
-    def test_enable_session_summaries_wired_default(self) -> None:
-        """create_agent() sets enable_session_summaries=False by default."""
-        config = _load_default_config()
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.enable_session_summaries is False
-
-    def test_enable_session_summaries_defaults_override(self) -> None:
-        """MindRoom keeps Agno auto summaries disabled even if the legacy default is true."""
-        config = _load_default_config()
-        config.defaults.enable_session_summaries = True
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.enable_session_summaries is False
-        assert agent.add_session_summary_to_context is False
-
-    def test_enable_session_summaries_per_agent_true(self) -> None:
-        """MindRoom ignores the legacy per-agent auto-summary flag."""
-        config = _load_default_config()
-        config.agents["calculator"].enable_session_summaries = True
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.enable_session_summaries is False
-        assert agent.add_session_summary_to_context is False
-
-    def test_enable_session_summaries_per_agent_false_overrides_defaults_true(self) -> None:
-        """Legacy auto-summary flags stay disabled regardless of authored value."""
-        config = _load_default_config()
-        config.defaults.enable_session_summaries = True
-        config.agents["calculator"].enable_session_summaries = False
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.enable_session_summaries is False
-
     def test_compaction_defaults_are_absent_until_authored(self) -> None:
         """DefaultsConfig.compaction is None when not explicitly set."""
         defaults = DefaultsConfig()

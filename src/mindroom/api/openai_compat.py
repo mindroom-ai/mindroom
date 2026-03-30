@@ -30,9 +30,14 @@ from mindroom.agents import create_agent
 from mindroom.ai import (
     AIStreamChunk,
     ai_response,
+    apply_bound_agent_compactions,
+    bind_agent_compaction_state,
     build_prompt_with_thread_history,
+    clear_bound_agent_compactions,
     get_model_instance,
+    prepare_bound_agents_for_run,
     stream_agent_response,
+    stream_with_bound_agent_compactions,
 )
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
@@ -1102,10 +1107,9 @@ def _build_team(
     model_name = team_config.model or "default"
     model = get_model_instance(config, runtime_paths, model_name)
 
-    team_members = materialize_exact_requested_team_members(
-        team_config.agents,
-        materializable_agent_names=None,
-        build_member=lambda member_name: create_agent(
+    def _build_member(member_name: str) -> Agent:
+        pending_compaction_buffer: list = []
+        agent = create_agent(
             member_name,
             config,
             runtime_paths,
@@ -1117,7 +1121,19 @@ def _build_team(
                 on_missing_bases=_log_missing_knowledge_bases(member_name),
             ),
             include_interactive_questions=False,
-        ),
+            pending_compaction_buffer=pending_compaction_buffer,
+        )
+        bind_agent_compaction_state(
+            agent,
+            agent_name=member_name,
+            pending_compaction_buffer=pending_compaction_buffer,
+        )
+        return agent
+
+    team_members = materialize_exact_requested_team_members(
+        team_config.agents,
+        materializable_agent_names=None,
+        build_member=_build_member,
     )
 
     final_resolution = resolve_configured_team(
@@ -1170,9 +1186,25 @@ async def _non_stream_team_completion(
     team_prompt = build_prompt_with_thread_history(prompt, thread_history)
 
     try:
+        await prepare_bound_agents_for_run(
+            agents=agents,
+            full_prompt=team_prompt,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+        )
+    except Exception:
+        logger.exception("Team member preparation failed", team=team_name)
+        clear_bound_agent_compactions(agents)
+        return _error_response(500, "Team execution failed", error_type="server_error")
+
+    try:
         response = await team.arun(team_prompt, session_id=session_id, user_id=user)
+        await apply_bound_agent_compactions(agents=agents)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
+        clear_bound_agent_compactions(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
 
     response_text = _format_team_output(response) if isinstance(response, TeamRunOutput) else str(response)
@@ -1219,16 +1251,33 @@ async def _stream_team_completion(
     team_prompt = build_prompt_with_thread_history(prompt, thread_history)
 
     try:
+        await prepare_bound_agents_for_run(
+            agents=agents,
+            full_prompt=team_prompt,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+        )
+    except Exception:
+        logger.exception("Team member preparation failed", team=team_name)
+        clear_bound_agent_compactions(agents)
+        return _error_response(500, "Team execution failed", error_type="server_error")
+
+    try:
         with tool_execution_identity(execution_identity):
-            stream = team.arun(team_prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
+            raw_stream = team.arun(team_prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
+            stream = stream_with_bound_agent_compactions(raw_stream, agents=agents)
             # Peek at first event
             first_event = await anext(aiter(stream), None)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
+        clear_bound_agent_compactions(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
 
     preflight_error = _team_stream_preflight_error(first_event, team_name)
     if preflight_error is not None:
+        await stream.aclose()
         return preflight_error
 
     assert first_event is not None

@@ -2606,6 +2606,7 @@ class AgentBot:
         # Create async function for team response generation that takes message_id as parameter
         client = self.client
         delivery_result: _ResponseDispatchResult | None = None
+        compaction_outcomes: list[CompactionOutcome] = []
 
         async def generate_team_response(message_id: str | None) -> None:
             nonlocal delivery_result
@@ -2634,6 +2635,7 @@ class AgentBot:
                             run_id=response_run_id,
                             run_id_callback=_note_attempt_run_id,
                             user_id=requester_user_id,
+                            compaction_outcomes_collector=compaction_outcomes,
                             reason_prefix=reason_prefix,
                         )
 
@@ -2736,6 +2738,7 @@ class AgentBot:
                                 run_id=response_run_id,
                                 run_id_callback=_note_attempt_run_id,
                                 user_id=requester_user_id,
+                                compaction_outcomes_collector=compaction_outcomes,
                                 reason_prefix=reason_prefix,
                             )
                 except asyncio.CancelledError:
@@ -2812,6 +2815,17 @@ class AgentBot:
                 delivery_result.event_id,
                 delivery_result.options_list,
             )
+
+        if delivery_result is not None and delivery_result.event_id is not None:
+            for outcome in compaction_outcomes:
+                if outcome.notify:
+                    await self._send_compaction_notice(
+                        room_id=room_id,
+                        reply_to_event_id=reply_to_event_id,
+                        main_response_event_id=delivery_result.event_id,
+                        thread_id=thread_id,
+                        outcome=outcome,
+                    )
 
         if delivery_result is not None and delivery_result.event_id is not None:
             return delivery_result.event_id

@@ -1822,9 +1822,19 @@ class TestTeamCompletion:
         mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Team consensus result"))
         mock_agents = [MagicMock(name="GeneralAgent"), MagicMock(name="CodeAgent")]
 
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_agents_for_run",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+            patch(
+                "mindroom.api.openai_compat.apply_bound_agent_compactions",
+                new_callable=AsyncMock,
+            ) as mock_apply,
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -1840,6 +1850,10 @@ class TestTeamCompletion:
         assert data["object"] == "chat.completion"
         assert data["choices"][0]["finish_reason"] == "stop"
         assert "Team consensus result" in data["choices"][0]["message"]["content"]
+        assert mock_prepare.await_count == 1
+        assert mock_prepare.await_args.kwargs["agents"] == mock_agents
+        assert mock_apply.await_count == 1
+        assert mock_apply.await_args.kwargs["agents"] == mock_agents
 
     def test_team_streaming(self, team_app_client: TestClient) -> None:
         """Streaming team completion streams TeamContentEvent (leader text) directly."""
@@ -1849,16 +1863,38 @@ class TestTeamCompletion:
 
         mock_team = MagicMock()
         mock_agents = [MagicMock(name="GeneralAgent")]
+        stream_wrapper_calls: list[list[MagicMock]] = []
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             yield TeamContentEvent(content="Hello ")
             yield TeamContentEvent(content="world!")
 
+        async def passthrough_stream_wrapper(
+            raw_stream: AsyncIterator[object],
+            *,
+            agents: list[MagicMock],
+            compaction_outcomes_collector: list[object] | None = None,
+        ) -> AsyncIterator[object]:
+            assert compaction_outcomes_collector is None
+            stream_wrapper_calls.append(agents)
+            async for event in raw_stream:
+                yield event
+
         mock_team.arun = mock_stream_events
 
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_agents_for_run",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+            patch(
+                "mindroom.api.openai_compat.stream_with_bound_agent_compactions",
+                side_effect=passthrough_stream_wrapper,
+            ),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -1892,6 +1928,9 @@ class TestTeamCompletion:
         # Each TeamContentEvent is a separate chunk (streamed directly)
         assert "Hello " in content_parts
         assert "world!" in content_parts
+        assert mock_prepare.await_count == 1
+        assert mock_prepare.await_args.kwargs["agents"] == mock_agents
+        assert stream_wrapper_calls == [mock_agents]
 
     def test_team_streaming_keeps_execution_identity_for_full_stream(self, team_app_client: TestClient) -> None:
         """Team streaming must keep worker-routing identity active after preflight."""
