@@ -958,6 +958,45 @@ def test_entity_compaction_override_enables_and_clears_inherited_thresholds(tmp_
     assert resolved.threshold_percent == pytest.approx(0.6)
 
 
+def test_entity_compaction_override_enabled_null_still_enables_override(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "alpha": AgentConfig(
+                    display_name="Alpha",
+                    compaction=CompactionOverrideConfig(
+                        enabled=None,
+                        threshold_percent=0.6,
+                    ),
+                ),
+            },
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(
+                    enabled=False,
+                    threshold_tokens=1_000,
+                    reserve_tokens=0,
+                ),
+            ),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="default-model",
+                    context_window=4_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+
+    resolved = config.get_entity_compaction_config("alpha")
+
+    assert resolved.enabled is True
+    assert resolved.threshold_tokens is None
+    assert resolved.threshold_percent == pytest.approx(0.6)
+
+
 @pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)

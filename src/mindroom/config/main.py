@@ -726,7 +726,7 @@ class Config(BaseModel):
                 merged.pop("threshold_percent", None)
             if "threshold_percent" in override.model_fields_set and override.threshold_percent is not None:
                 merged.pop("threshold_tokens", None)
-            if override.model_fields_set and "enabled" not in override.model_fields_set:
+            if override.model_fields_set and override.enabled is not False:
                 merged["enabled"] = True
         return CompactionConfig.model_validate(merged)
 
