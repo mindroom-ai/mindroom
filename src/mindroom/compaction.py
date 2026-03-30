@@ -53,84 +53,33 @@ _WRAPPER_OVERHEAD_TOKENS = 200
 _SUMMARY_TRUNCATION_RATIO = 0.5
 _DEFAULT_MAX_COMPACTION_PASSES = 10
 
-_COMPACTION_SYSTEM_PROMPT = """\
-You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.
+_COMPACTION_SUMMARY_PROMPT = """\
+You are updating a durable conversation handoff summary for a future model call.
 
-Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary."""
+You will receive:
+1. An optional <previous_summary> block that already contains everything summarized before this compaction.
+2. A <new_conversation> block containing only the runs that became old enough to compact in this pass.
 
-_COMPACTION_INITIAL_PROMPT = """\
-The <new_conversation> block above is a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
+Your job is to produce one merged handoff summary as plain text.
+Return only the summary text.
 
-Use this EXACT format:
+Rules:
+- Preserve all still-relevant information from <previous_summary>.
+- Add only the new information from <new_conversation>.
+- Keep unchanged wording verbatim when it is still correct so future prompt prefixes remain stable.
+- Never paraphrase away exact technical details such as file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, or error text.
+- Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
+- Do not invent facts.
+- If a section has no content, write `None.`.
 
+Write a plain-text summary in exactly this markdown structure:
 ## Goal
-[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
-
-## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned by user]
-- [Or "None." if none were mentioned]
-
+## Constraints
 ## Progress
-### Done
-- [x] [Completed tasks/changes]
-
-### In Progress
-- [ ] [Current work]
-
-### Blocked
-- [Issues preventing progress, if any]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale]
-
+## Decisions
 ## Next Steps
-1. [Ordered list of what should happen next]
-
 ## Critical Context
-- [Any data, examples, or references needed to continue]
-- [Or "None." if not applicable]
-
-Keep each section concise. Preserve exact file paths, function names, class names, commands, error messages, IDs, config keys, numeric thresholds, ports, and URLs."""
-
-_COMPACTION_UPDATE_PROMPT = """\
-The <new_conversation> block above contains NEW conversation messages to incorporate into the existing summary provided in <previous_summary> tags.
-
-Update the existing structured summary with new information. RULES:
-- PRESERVE all existing information from the previous summary.
-- ADD new progress, decisions, and context from the new messages.
-- UPDATE the Progress section: move items from "In Progress" to "Done" when completed.
-- UPDATE "Next Steps" based on what was accomplished.
-- PRESERVE exact file paths, function names, class names, commands, error messages, IDs, config keys, numeric thresholds, ports, and URLs.
-- If something is no longer relevant, you may remove it.
-
-Use this EXACT format:
-
-## Goal
-[Preserve existing goals, add new ones if the task expanded]
-
-## Constraints & Preferences
-- [Preserve existing, add new ones discovered]
-
-## Progress
-### Done
-- [x] [Include previously done items AND newly completed items]
-
-### In Progress
-- [ ] [Current work - update based on progress]
-
-### Blocked
-- [Current blockers - remove if resolved]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale] (preserve all previous, add new)
-
-## Next Steps
-1. [Update based on current state]
-
-## Critical Context
-- [Preserve important context, add new if needed]
-
-Keep each section concise. Preserve exact file paths, function names, class names, commands, error messages, IDs, config keys, numeric thresholds, ports, and URLs."""
+"""
 
 _SESSION_COMPACTION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 
@@ -723,7 +672,6 @@ async def _execute_compaction_passes(
             working_summary = await _generate_compaction_summary(
                 model=model,
                 summary_input=summary_input,
-                has_previous_summary=working_summary is not None,
             )
         except Exception:
             if compacted_count == 0:
@@ -762,13 +710,11 @@ async def _generate_compaction_summary(
     *,
     model: Model,
     summary_input: str,
-    has_previous_summary: bool = False,
 ) -> SessionSummary:
-    user_prompt = _COMPACTION_UPDATE_PROMPT if has_previous_summary else _COMPACTION_INITIAL_PROMPT
     response = await model.aresponse(
         messages=[
-            Message(role="system", content=_COMPACTION_SYSTEM_PROMPT),
-            Message(role="user", content=f"{summary_input}\n\n{user_prompt}"),
+            Message(role="system", content=_COMPACTION_SUMMARY_PROMPT),
+            Message(role="user", content=summary_input),
         ],
     )
     raw_text = response.content if isinstance(response.content, str) else ""
