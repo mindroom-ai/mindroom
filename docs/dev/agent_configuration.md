@@ -203,12 +203,26 @@ teams:
     agents: [research, code]
     mode: coordinate  # "coordinate" or "collaborate"
     model: "default"  # Optional model override
+    num_history_runs: 8  # Optional team-scoped replay policy
+    num_history_messages: null  # Optional; mutually exclusive with num_history_runs
+    max_tool_calls_from_history: 6  # Optional replay trimming for tool calls
+    compaction:  # Optional team-scoped auto-compaction overrides
+      enabled: true
+      threshold_percent: 0.8
+      reserve_tokens: 16384
+      notify: false
     rooms:
       - lobby
 ```
 
 - **coordinate**: A lead agent orchestrates the others
 - **collaborate**: All members respond in parallel with a consensus summary
+- **num_history_runs / num_history_messages**: Optional team-owned replay policy for named teams
+- **max_tool_calls_from_history**: Optional cap on replayed tool call messages for the shared team scope
+- **compaction**: Optional team-owned auto-compaction overrides for the shared team scope
+
+Named teams use these explicit team settings for replay and compaction when provided.
+Dynamic teams have no named config block, so they inherit replay and compaction settings from `defaults`.
 
 ## Cultures Configuration
 

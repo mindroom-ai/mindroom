@@ -106,7 +106,6 @@ export interface CompactionConfig {
   threshold_tokens?: number | null;
   threshold_percent?: number | null;
   reserve_tokens?: number;
-  keep_recent_tokens?: number;
   model?: string | null;
   notify?: boolean;
 }
@@ -150,6 +149,10 @@ export interface Team {
   rooms: string[];
   mode: 'coordinate' | 'collaborate';
   model?: string; // Optional team-specific model
+  compaction?: CompactionConfig | null; // Per-team auto-compaction overrides
+  num_history_runs?: number | null; // Number of prior scoped runs to include as team history
+  num_history_messages?: number | null; // Max team-scoped history messages (mutually exclusive with num_history_runs)
+  max_tool_calls_from_history?: number | null; // Max tool call messages replayed from team history
 }
 
 export interface Culture {
@@ -302,6 +305,17 @@ export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Pa
     normalizedUpdates.private = normalizePrivateConfig(nextPrivate);
     normalizedUpdates.worker_scope = undefined;
   }
+
+  if ('compaction' in updates || nextCompaction != null) {
+    normalizedUpdates.compaction = normalizeCompactionConfig(nextCompaction);
+  }
+
+  return normalizedUpdates;
+}
+
+export function normalizeTeamUpdates(team: Team, updates: Partial<Team>): Partial<Team> {
+  const normalizedUpdates: Partial<Team> = { ...updates };
+  const nextCompaction = 'compaction' in updates ? updates.compaction : team.compaction;
 
   if ('compaction' in updates || nextCompaction != null) {
     normalizedUpdates.compaction = normalizeCompactionConfig(nextCompaction);

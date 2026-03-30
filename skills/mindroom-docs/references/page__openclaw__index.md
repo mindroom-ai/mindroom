@@ -134,7 +134,7 @@ Recommended for OpenClaw-style setups: `memory_backend: file` with the canonical
 
 MindRoom includes built-in context controls for OpenClaw-style agents:
 
-- **Conversation history** is managed by Agno's session system — previous turns (including tool calls and results) are automatically replayed. Control depth with `num_history_runs` or `num_history_messages` (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md)).
+- **Conversation history** is stored in Agno sessions, but MindRoom decides what replay summary and raw history messages are injected into each run. Control replay depth with `num_history_runs` or `num_history_messages`, and optional auto-compaction with `compaction` (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md)).
 - **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars` (configured in `config.yaml` under `defaults`). When the combined context exceeds this limit, chunks are trimmed from the end and a truncation marker is inserted.
 
 ## Known limitations

@@ -60,20 +60,38 @@ teams:
 
     # Model for team coordination (default: "default")
     model: sonnet
+
+    # Team-scoped replay controls (optional; inherit from defaults when omitted)
+    num_history_runs: 8
+    num_history_messages: null
+    max_tool_calls_from_history: 6
+
+    # Team-scoped auto-compaction overrides (optional)
+    compaction:
+      enabled: true
+      threshold_percent: 0.8
+      reserve_tokens: 16384
+      notify: false
 ```
 
 ## Configuration Fields
 
-| Field          | Required | Default      | Description                                       |
-| -------------- | -------- | ------------ | ------------------------------------------------- |
-| `display_name` | Yes      | -            | Human-readable name shown in Matrix               |
-| `role`         | Yes      | -            | Description of the team's purpose                 |
-| `agents`       | Yes      | -            | List of agent names that compose this team        |
-| `mode`         | No       | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
-| `rooms`        | No       | `[]`         | List of room names the team responds in           |
-| `model`        | No       | `default`    | Model used for team coordination and synthesis    |
+| Field                         | Required | Default                                | Description                                                                                                                     |
+| ----------------------------- | -------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `display_name`                | Yes      | -                                      | Human-readable name shown in Matrix                                                                                             |
+| `role`                        | Yes      | -                                      | Description of the team's purpose                                                                                               |
+| `agents`                      | Yes      | -                                      | List of agent names that compose this team                                                                                      |
+| `mode`                        | No       | `coordinate`                           | Collaboration mode: `coordinate` or `collaborate`                                                                               |
+| `rooms`                       | No       | `[]`                                   | List of room names the team responds in                                                                                         |
+| `model`                       | No       | `default`                              | Model used for team coordination and synthesis                                                                                  |
+| `num_history_runs`            | No       | `defaults.num_history_runs`            | Number of prior team-scoped runs to replay                                                                                      |
+| `num_history_messages`        | No       | `defaults.num_history_messages`        | Max messages from team-scoped history replayed into the next run                                                                |
+| `max_tool_calls_from_history` | No       | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history                                                                        |
+| `compaction`                  | No       | `defaults.compaction`                  | Team-scoped auto-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`, `notify`) |
 
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
+
+`num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings. When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.
 
 ## When to Use Each Mode
 
@@ -102,3 +120,5 @@ When AI mode selection is unavailable or fails, MindRoom falls back to:
 
 - **coordinate** when multiple agents are explicitly tagged in the message (they likely have different roles to fulfill)
 - **collaborate** for all other cases, such as agents from thread history or DM rooms (likely discussing the same topic)
+
+Dynamic teams do not have a named `teams:` entry, so their history replay and compaction policy comes from `defaults`, not from any participating agent's overrides.

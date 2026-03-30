@@ -1,6 +1,7 @@
-import { useEffect, useCallback, useMemo } from 'react';
+import { useEffect, useCallback, useMemo, useState } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { useSwipeBack } from '@/hooks/useSwipeBack';
+import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -13,7 +14,7 @@ import {
 } from '@/components/ui/select';
 import { Users } from 'lucide-react';
 import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
-import { useForm, Controller } from 'react-hook-form';
+import { useForm, useWatch, Controller } from 'react-hook-form';
 import { Team } from '@/types/config';
 import { useScopedConfigValidation } from '@/hooks/useScopedConfigValidation';
 
@@ -46,6 +47,13 @@ export function TeamEditor() {
   const roleError = validationErrorForPath(['role'], true);
   const modeError = validationErrorForPath(['mode'], true);
   const modelError = validationErrorForPath(['model'], true);
+  const numHistoryRunsError = validationErrorForPath(['num_history_runs'], true);
+  const numHistoryMessagesError = validationErrorForPath(['num_history_messages'], true);
+  const maxToolCallsFromHistoryError = validationErrorForPath(
+    ['max_tool_calls_from_history'],
+    true
+  );
+  const compactionError = validationErrorForPath(['compaction'], true);
   const membersError = validationErrorForPath(['agents']);
   const roomsError = validationErrorForPath(['rooms']);
 
@@ -55,7 +63,7 @@ export function TeamEditor() {
     enabled: !!selectedTeamId && window.innerWidth < 1024,
   });
 
-  const { control, reset } = useForm<Team>({
+  const { control, reset, setValue, getValues } = useForm<Team>({
     defaultValues: selectedTeam || {
       id: '',
       display_name: '',
@@ -63,24 +71,81 @@ export function TeamEditor() {
       agents: [],
       rooms: [],
       mode: 'coordinate',
+      compaction: undefined,
     },
   });
+  const numHistoryRuns = useWatch({ name: 'num_history_runs', control });
+  const numHistoryMessages = useWatch({ name: 'num_history_messages', control });
+  const compactionConfig = useWatch({ name: 'compaction', control });
+  const [compactionThresholdPercentInput, setCompactionThresholdPercentInput] = useState('');
 
   // Reset form when selected team changes
   useEffect(() => {
     if (selectedTeam) {
-      reset(selectedTeam);
+      reset({
+        ...selectedTeam,
+        compaction: selectedTeam.compaction ?? undefined,
+      });
     }
   }, [selectedTeam, reset]);
-  // Create a debounced update function
+
+  // Let the store normalize against current state so sequential UI updates do not
+  // reuse stale render-time team data.
   const handleFieldChange = useCallback(
-    (fieldName: keyof Team, value: any) => {
+    <K extends keyof Team>(fieldName: K, value: Team[K]) => {
       if (selectedTeamId) {
         updateTeam(selectedTeamId, { [fieldName]: value });
       }
     },
     [selectedTeamId, updateTeam]
   );
+
+  const updateCompaction = useCallback(
+    (nextCompaction: Team['compaction']) => {
+      setValue('compaction', nextCompaction);
+      handleFieldChange('compaction', nextCompaction);
+    },
+    [handleFieldChange, setValue]
+  );
+
+  const mutateCompaction = useCallback(
+    (mutator: (current: Team['compaction']) => Team['compaction']) => {
+      updateCompaction(mutator(getValues('compaction')));
+    },
+    [getValues, updateCompaction]
+  );
+
+  const parseOptionalInt = (raw: string): number | null => {
+    const trimmed = raw.trim();
+    if (trimmed === '') {
+      return null;
+    }
+    return Number.parseInt(trimmed, 10);
+  };
+
+  const parseOptionalUnitFloat = (raw: string): number | null => {
+    const trimmed = raw.trim();
+    if (trimmed === '') {
+      return null;
+    }
+    const value = Number.parseFloat(trimmed);
+    if (!Number.isFinite(value) || value <= 0 || value >= 1) {
+      return null;
+    }
+    return value;
+  };
+
+  useEffect(() => {
+    setCompactionThresholdPercentInput(
+      compactionConfig?.threshold_percent != null ? String(compactionConfig.threshold_percent) : ''
+    );
+  }, [compactionConfig?.threshold_percent, selectedTeamId]);
+
+  const defaultCompaction = config?.defaults.compaction ?? null;
+  const effectiveCompactionEnabled =
+    compactionConfig != null
+      ? compactionConfig.enabled ?? true
+      : defaultCompaction?.enabled ?? false;
 
   const handleDelete = () => {
     if (selectedTeamId && confirm('Are you sure you want to delete this team?')) {
@@ -229,6 +294,302 @@ export function TeamEditor() {
           )}
         />
       </FieldGroup>
+
+      <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">
+        <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
+          History & Context
+        </h3>
+
+        <div className="space-y-4">
+          <FieldGroup
+            label="History Runs"
+            helperText={`Number of prior team-scoped runs to include as replay. Leave empty to use default${
+              config?.defaults.num_history_runs != null
+                ? ` (${config.defaults.num_history_runs})`
+                : ' (all)'
+            }.`}
+            htmlFor="num_history_runs"
+            error={numHistoryRunsError}
+          >
+            <Controller
+              name="num_history_runs"
+              control={control}
+              render={({ field }) => (
+                <Input
+                  id="num_history_runs"
+                  type="number"
+                  min={0}
+                  value={field.value ?? ''}
+                  placeholder={
+                    config?.defaults.num_history_runs != null
+                      ? `Default: ${config.defaults.num_history_runs}`
+                      : 'Default: all'
+                  }
+                  disabled={numHistoryMessages != null}
+                  onChange={e => {
+                    const value = parseOptionalInt(e.target.value);
+                    field.onChange(value);
+                    handleFieldChange('num_history_runs', value);
+                  }}
+                />
+              )}
+            />
+            {numHistoryMessages != null && (
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                Disabled because History Messages is set.
+              </p>
+            )}
+          </FieldGroup>
+
+          <FieldGroup
+            label="History Messages"
+            helperText={`Max replay messages from team-scoped history. Leave empty to use default${
+              config?.defaults.num_history_messages != null
+                ? ` (${config.defaults.num_history_messages})`
+                : ' (all)'
+            }.`}
+            htmlFor="num_history_messages"
+            error={numHistoryMessagesError}
+          >
+            <Controller
+              name="num_history_messages"
+              control={control}
+              render={({ field }) => (
+                <Input
+                  id="num_history_messages"
+                  type="number"
+                  min={0}
+                  value={field.value ?? ''}
+                  placeholder={
+                    config?.defaults.num_history_messages != null
+                      ? `Default: ${config.defaults.num_history_messages}`
+                      : 'Default: all'
+                  }
+                  disabled={numHistoryRuns != null}
+                  onChange={e => {
+                    const value = parseOptionalInt(e.target.value);
+                    field.onChange(value);
+                    handleFieldChange('num_history_messages', value);
+                  }}
+                />
+              )}
+            />
+            {numHistoryRuns != null && (
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                Disabled because History Runs is set.
+              </p>
+            )}
+          </FieldGroup>
+
+          <FieldGroup
+            label="Max Tool Calls from History"
+            helperText={`Max tool call messages replayed from team history. Leave empty to use default${
+              config?.defaults.max_tool_calls_from_history != null
+                ? ` (${config.defaults.max_tool_calls_from_history})`
+                : ' (no limit)'
+            }.`}
+            htmlFor="max_tool_calls_from_history"
+            error={maxToolCallsFromHistoryError}
+          >
+            <Controller
+              name="max_tool_calls_from_history"
+              control={control}
+              render={({ field }) => (
+                <Input
+                  id="max_tool_calls_from_history"
+                  type="number"
+                  min={0}
+                  value={field.value ?? ''}
+                  placeholder={
+                    config?.defaults.max_tool_calls_from_history != null
+                      ? `Default: ${config.defaults.max_tool_calls_from_history}`
+                      : 'Default: no limit'
+                  }
+                  onChange={e => {
+                    const value = parseOptionalInt(e.target.value);
+                    field.onChange(value);
+                    handleFieldChange('max_tool_calls_from_history', value);
+                  }}
+                />
+              )}
+            />
+          </FieldGroup>
+
+          <FieldGroup
+            label="Auto-Compaction"
+            helperText="Automatically compact older team-scoped history before the next run when the context budget gets tight."
+            htmlFor="compaction_enabled"
+            error={compactionError}
+          >
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <Checkbox
+                  id="compaction_enabled"
+                  checked={effectiveCompactionEnabled}
+                  onCheckedChange={checked => {
+                    mutateCompaction(current => ({
+                      ...(current ?? {}),
+                      enabled: checked === true,
+                    }));
+                  }}
+                />
+                <label
+                  htmlFor="compaction_enabled"
+                  className="text-sm font-medium cursor-pointer select-none"
+                >
+                  Enable auto-compaction
+                </label>
+                {compactionConfig != null && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => updateCompaction(undefined)}
+                  >
+                    Use inherited settings
+                  </Button>
+                )}
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <FieldGroup
+                  label="Threshold Tokens"
+                  helperText="Absolute token threshold that triggers compaction."
+                  htmlFor="compaction_threshold_tokens"
+                >
+                  <Input
+                    id="compaction_threshold_tokens"
+                    type="number"
+                    min={1}
+                    value={compactionConfig?.threshold_tokens ?? ''}
+                    placeholder={
+                      defaultCompaction?.threshold_tokens != null
+                        ? `Default: ${defaultCompaction.threshold_tokens}`
+                        : 'Default: derived from context window'
+                    }
+                    onChange={e => {
+                      const value = parseOptionalInt(e.target.value);
+                      mutateCompaction(current => ({
+                        ...(current ?? {}),
+                        threshold_tokens: value ?? undefined,
+                      }));
+                    }}
+                  />
+                </FieldGroup>
+
+                <FieldGroup
+                  label="Threshold Percent"
+                  helperText="Fraction of the context window that triggers compaction, greater than 0 and less than 1."
+                  htmlFor="compaction_threshold_percent"
+                >
+                  <Input
+                    id="compaction_threshold_percent"
+                    type="number"
+                    min={0.01}
+                    max={0.99}
+                    step="0.01"
+                    value={compactionThresholdPercentInput}
+                    placeholder={
+                      defaultCompaction?.threshold_percent != null
+                        ? `Default: ${defaultCompaction.threshold_percent}`
+                        : 'Default: 0.8'
+                    }
+                    onChange={e => {
+                      const raw = e.target.value;
+                      setCompactionThresholdPercentInput(raw);
+                      const value = parseOptionalUnitFloat(raw);
+                      if (raw.trim() !== '' && value == null) {
+                        return;
+                      }
+                      mutateCompaction(current => ({
+                        ...(current ?? {}),
+                        threshold_percent: value ?? undefined,
+                      }));
+                    }}
+                    onBlur={() => {
+                      const value = parseOptionalUnitFloat(compactionThresholdPercentInput);
+                      if (compactionThresholdPercentInput.trim() !== '' && value == null) {
+                        setCompactionThresholdPercentInput(
+                          compactionConfig?.threshold_percent != null
+                            ? String(compactionConfig.threshold_percent)
+                            : ''
+                        );
+                      }
+                    }}
+                  />
+                </FieldGroup>
+
+                <FieldGroup
+                  label="Reserve Tokens"
+                  helperText="Headroom reserved for the current prompt, tools, and model output."
+                  htmlFor="compaction_reserve_tokens"
+                >
+                  <Input
+                    id="compaction_reserve_tokens"
+                    type="number"
+                    min={0}
+                    value={compactionConfig?.reserve_tokens ?? ''}
+                    placeholder={`Default: ${defaultCompaction?.reserve_tokens ?? 16384}`}
+                    onChange={e => {
+                      const value = parseOptionalInt(e.target.value);
+                      mutateCompaction(current => ({
+                        ...(current ?? {}),
+                        reserve_tokens: value ?? undefined,
+                      }));
+                    }}
+                  />
+                </FieldGroup>
+
+                <FieldGroup
+                  label="Compaction Model"
+                  helperText="Optional model config name used only for summary generation during compaction."
+                  htmlFor="compaction_model"
+                >
+                  <Input
+                    id="compaction_model"
+                    value={compactionConfig?.model ?? ''}
+                    placeholder={defaultCompaction?.model ?? 'Default: team run model'}
+                    onChange={e => {
+                      const value = e.target.value.trim();
+                      mutateCompaction(current => ({
+                        ...(current ?? {}),
+                        model: value === '' ? undefined : value,
+                      }));
+                    }}
+                  />
+                </FieldGroup>
+
+                <FieldGroup
+                  label="Notify Room"
+                  helperText={`Post a room notice after compaction completes (default: ${
+                    defaultCompaction?.notify ? 'on' : 'off'
+                  }).`}
+                  htmlFor="compaction_notify"
+                >
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="compaction_notify"
+                      checked={compactionConfig?.notify ?? defaultCompaction?.notify ?? false}
+                      onCheckedChange={checked => {
+                        mutateCompaction(current => ({
+                          ...(current ?? {}),
+                          notify: checked === true,
+                        }));
+                      }}
+                    />
+                    <label
+                      htmlFor="compaction_notify"
+                      className="text-sm font-medium cursor-pointer select-none"
+                    >
+                      Send compaction notices
+                    </label>
+                  </div>
+                </FieldGroup>
+              </div>
+            </div>
+          </FieldGroup>
+        </div>
+      </div>
 
       {/* Team Members (Agents) */}
       <FieldGroup

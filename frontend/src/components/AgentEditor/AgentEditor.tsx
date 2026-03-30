@@ -2040,27 +2040,6 @@ export function AgentEditor() {
                 </FieldGroup>
 
                 <FieldGroup
-                  label="Keep Recent Tokens"
-                  helperText="How much of the newest history should stay verbatim in prompt context after compaction."
-                  htmlFor="compaction_keep_recent_tokens"
-                >
-                  <Input
-                    id="compaction_keep_recent_tokens"
-                    type="number"
-                    min={0}
-                    value={compactionConfig?.keep_recent_tokens ?? ''}
-                    placeholder={`Default: ${defaultCompaction?.keep_recent_tokens ?? 20000}`}
-                    onChange={e => {
-                      const value = parseOptionalInt(e.target.value);
-                      mutateCompaction(current => ({
-                        ...(current ?? {}),
-                        keep_recent_tokens: value ?? undefined,
-                      }));
-                    }}
-                  />
-                </FieldGroup>
-
-                <FieldGroup
                   label="Compaction Model"
                   helperText="Optional model config name used only for summary generation during compaction."
                   htmlFor="compaction_model"

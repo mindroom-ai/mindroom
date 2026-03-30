@@ -10,6 +10,7 @@ import {
   Culture,
   getDefaultPrivateConfig,
   normalizeAgentUpdates,
+  normalizeTeamUpdates,
 } from '@/types/config';
 import * as configService from '@/services/configService';
 import type { ConfigDiagnostic } from '@/lib/configValidation';
@@ -689,11 +690,21 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Update an existing team
   updateTeam: (teamId, updates) => {
-    set(state => ({
-      teams: state.teams.map(team => (team.id === teamId ? { ...team, ...updates } : team)),
-      isDirty: true,
-      diagnostics: [],
-    }));
+    set(state => {
+      const currentTeam = state.teams.find(team => team.id === teamId);
+      if (!currentTeam) {
+        return state;
+      }
+
+      const normalizedUpdates = normalizeTeamUpdates(currentTeam, updates);
+      return {
+        teams: state.teams.map(team =>
+          team.id === teamId ? { ...team, ...normalizedUpdates } : team
+        ),
+        isDirty: true,
+        diagnostics: [],
+      };
+    });
   },
 
   // Create a new team

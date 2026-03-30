@@ -16,6 +16,7 @@ describe('TeamEditor', () => {
     rooms: ['dev', 'lobby'],
     mode: 'coordinate',
     model: 'default',
+    num_history_runs: 6,
   };
 
   const mockAgents: Agent[] = [
@@ -73,6 +74,17 @@ describe('TeamEditor', () => {
       default: { provider: 'ollama', id: 'llama2' },
       gpt4: { provider: 'openai', id: 'gpt-4' },
       claude: { provider: 'anthropic', id: 'claude-3' },
+    },
+    defaults: {
+      markdown: true,
+      num_history_messages: 20,
+      max_tool_calls_from_history: 4,
+      compaction: {
+        enabled: false,
+        reserve_tokens: 16384,
+        threshold_percent: 0.8,
+        notify: false,
+      },
     },
   };
 
@@ -171,6 +183,7 @@ describe('TeamEditor', () => {
       config: mockConfig,
       isDirty: false,
       diagnostics: [],
+      selectTeam: vi.fn(),
     });
   });
 
@@ -239,6 +252,92 @@ describe('TeamEditor', () => {
 
     expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
       mode: 'collaborate',
+    });
+  });
+
+  it('updates team history runs', async () => {
+    render(<TeamEditor />);
+
+    const historyRunsInput = screen.getByLabelText('History Runs');
+    fireEvent.change(historyRunsInput, { target: { value: '8' } });
+
+    await waitFor(() => {
+      expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
+        num_history_runs: 8,
+      });
+    });
+  });
+
+  it('updates team history messages', async () => {
+    const messageTeam: Team = {
+      ...mockTeam,
+      num_history_runs: null,
+      num_history_messages: 12,
+    };
+    (useConfigStore as any).mockReturnValue({
+      teams: [messageTeam],
+      agents: mockAgents,
+      rooms: [
+        {
+          id: 'dev',
+          display_name: 'Dev',
+          description: 'Development room',
+          agents: ['code', 'shell'],
+        },
+      ],
+      selectedTeamId: 'dev_team',
+      updateTeam: mockUpdateTeam,
+      deleteTeam: mockDeleteTeam,
+      saveConfig: mockSaveConfig,
+      agentPoliciesByAgent: mockAgentPoliciesByAgent,
+      config: mockConfig,
+      isDirty: false,
+      diagnostics: [],
+      selectTeam: vi.fn(),
+    });
+
+    render(<TeamEditor />);
+
+    const historyMessagesInput = screen.getByLabelText('History Messages');
+    fireEvent.change(historyMessagesInput, { target: { value: '15' } });
+
+    await waitFor(() => {
+      expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
+        num_history_messages: 15,
+      });
+    });
+  });
+
+  it('updates max tool calls from history', async () => {
+    render(<TeamEditor />);
+
+    const maxToolCallsInput = screen.getByLabelText('Max Tool Calls from History');
+    fireEvent.change(maxToolCallsInput, { target: { value: '3' } });
+
+    await waitFor(() => {
+      expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
+        max_tool_calls_from_history: 3,
+      });
+    });
+  });
+
+  it('authors and clears team compaction overrides', async () => {
+    render(<TeamEditor />);
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /enable auto-compaction/i }));
+
+    await waitFor(() => {
+      expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
+        compaction: { enabled: true },
+      });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /use inherited settings/i }));
+
+    await waitFor(() => {
+      expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
+        compaction: undefined,
+      });
     });
   });
 

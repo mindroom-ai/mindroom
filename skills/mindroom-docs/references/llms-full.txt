@@ -927,6 +927,14 @@ teams:
     agents: [researcher, writer]   # Required: List of agent names
     mode: collaborate              # Optional: "coordinate" or "collaborate" (default: coordinate)
     model: sonnet                  # Optional: Model for team coordination (default: "default")
+    num_history_runs: 8            # Optional: Team-scoped replay policy
+    num_history_messages: null     # Optional: Mutually exclusive with num_history_runs
+    max_tool_calls_from_history: 6 # Optional: Limit replayed tool call messages
+    compaction:                    # Optional: Team-scoped auto-compaction overrides
+      enabled: true
+      threshold_percent: 0.8
+      reserve_tokens: 16384
+      notify: false
     rooms: []                      # Optional: Rooms to auto-join
 
 # Culture configurations (optional)
@@ -1888,20 +1896,38 @@ teams:
 
     # Model for team coordination (default: "default")
     model: sonnet
+
+    # Team-scoped replay controls (optional; inherit from defaults when omitted)
+    num_history_runs: 8
+    num_history_messages: null
+    max_tool_calls_from_history: 6
+
+    # Team-scoped auto-compaction overrides (optional)
+    compaction:
+      enabled: true
+      threshold_percent: 0.8
+      reserve_tokens: 16384
+      notify: false
 ```
 
 ## Configuration Fields
 
-| Field          | Required | Default      | Description                                       |
-| -------------- | -------- | ------------ | ------------------------------------------------- |
-| `display_name` | Yes      | -            | Human-readable name shown in Matrix               |
-| `role`         | Yes      | -            | Description of the team's purpose                 |
-| `agents`       | Yes      | -            | List of agent names that compose this team        |
-| `mode`         | No       | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
-| `rooms`        | No       | `[]`         | List of room names the team responds in           |
-| `model`        | No       | `default`    | Model used for team coordination and synthesis    |
+| Field                         | Required | Default                                | Description                                                                                                                     |
+| ----------------------------- | -------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `display_name`                | Yes      | -                                      | Human-readable name shown in Matrix                                                                                             |
+| `role`                        | Yes      | -                                      | Description of the team's purpose                                                                                               |
+| `agents`                      | Yes      | -                                      | List of agent names that compose this team                                                                                      |
+| `mode`                        | No       | `coordinate`                           | Collaboration mode: `coordinate` or `collaborate`                                                                               |
+| `rooms`                       | No       | `[]`                                   | List of room names the team responds in                                                                                         |
+| `model`                       | No       | `default`                              | Model used for team coordination and synthesis                                                                                  |
+| `num_history_runs`            | No       | `defaults.num_history_runs`            | Number of prior team-scoped runs to replay                                                                                      |
+| `num_history_messages`        | No       | `defaults.num_history_messages`        | Max messages from team-scoped history replayed into the next run                                                                |
+| `max_tool_calls_from_history` | No       | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history                                                                        |
+| `compaction`                  | No       | `defaults.compaction`                  | Team-scoped auto-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`, `notify`) |
 
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
+
+`num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings. When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.
 
 ## When to Use Each Mode
 
@@ -1930,6 +1956,8 @@ When AI mode selection is unavailable or fails, MindRoom falls back to:
 
 - **coordinate** when multiple agents are explicitly tagged in the message (they likely have different roles to fulfill)
 - **collaborate** for all other cases, such as agents from thread history or DM rooms (likely discussing the same topic)
+
+Dynamic teams do not have a named `teams:` entry, so their history replay and compaction policy comes from `defaults`, not from any participating agent's overrides.
 
 # Culture Configuration
 
@@ -2719,7 +2747,7 @@ Recommended for OpenClaw-style setups: `memory_backend: file` with the canonical
 
 MindRoom includes built-in context controls for OpenClaw-style agents:
 
-- **Conversation history** is managed by Agno's session system — previous turns (including tool calls and results) are automatically replayed. Control depth with `num_history_runs` or `num_history_messages` (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md)).
+- **Conversation history** is stored in Agno sessions, but MindRoom decides what replay summary and raw history messages are injected into each run. Control replay depth with `num_history_runs` or `num_history_messages`, and optional auto-compaction with `compaction` (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md)).
 - **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars` (configured in `config.yaml` under `defaults`). When the combined context exceeds this limit, chunks are trimmed from the end and a truncation marker is inserted.
 
 ## Known limitations

@@ -194,6 +194,14 @@ teams:
     agents: [researcher, writer]   # Required: List of agent names
     mode: collaborate              # Optional: "coordinate" or "collaborate" (default: coordinate)
     model: sonnet                  # Optional: Model for team coordination (default: "default")
+    num_history_runs: 8            # Optional: Team-scoped replay policy
+    num_history_messages: null     # Optional: Mutually exclusive with num_history_runs
+    max_tool_calls_from_history: 6 # Optional: Limit replayed tool call messages
+    compaction:                    # Optional: Team-scoped auto-compaction overrides
+      enabled: true
+      threshold_percent: 0.8
+      reserve_tokens: 16384
+      notify: false
     rooms: []                      # Optional: Rooms to auto-join
 
 # Culture configurations (optional)
