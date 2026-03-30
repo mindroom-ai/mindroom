@@ -68,7 +68,6 @@ The existing config fields `num_history_runs` and `num_history_messages` remain 
   - `CompactionOutcome`
 - `src/mindroom/history/storage.py`
   - Read and write scoped compaction state in session metadata.
-  - Handle one-time migration from the current session-global compaction format.
 - `src/mindroom/history/replay.py`
   - Resolve scope.
   - Select completed runs for one scope.
@@ -106,8 +105,8 @@ states:
 
 `session.summary` stops being authoritative MindRoom compaction state.
 MindRoom reads and writes only its own scoped metadata records.
-The current session-global format is migrated only when one unambiguous scope can be inferred safely.
-If an old session contains mixed scopes and only one legacy global cutoff, MindRoom drops the legacy compaction state and rebuilds fresh scoped state later.
+The old session-global format is ignored.
+Sessions that only have the old format start fresh under the scoped model.
 
 ## Replay Policy
 
@@ -292,12 +291,11 @@ At minimum, that fragment must cover the structured replay messages digest and t
 If the history module cannot produce a stable replay-aware cache fragment for a run, the caller must bypass cache for that run.
 Cache correctness may not depend on `agent.add_history_to_context`, `agent.add_session_summary_to_context`, or `session.summary`.
 
-## Migration Plan
+## Implementation Plan
 
 ### Phase 1
 
 Create the new `history/` package and add scoped compaction storage with a versioned metadata format.
-Add safe migration logic from the current session-global format.
 
 ### Phase 2
 
@@ -347,8 +345,6 @@ Update tool metadata and user-facing docs for the zero-argument `compact_context
 - The next run for that scope consumes the flag, compacts in the normal pre-run path, and clears the flag.
 - `compact_context` called from a team member run sets `force_compact_before_next_run` for the team scope only.
 - The next team member run in that team scope consumes and clears the flag without changing direct-agent scope state.
-- Legacy session-global compaction metadata migrates safely for single-scope sessions.
-- Legacy mixed-scope sessions ignore old compaction state instead of applying the wrong cutoff.
 
 ## Deletions Expected In This Refactor
 
