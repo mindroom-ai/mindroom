@@ -57,6 +57,7 @@ class CompactContextTools(Toolkit):
             runtime_paths=self._runtime_paths,
             config=self._config,
             execution_identity=self._execution_identity,
+            create_session_if_missing=True,
         )
         if scope_context is None:
             return "Error: Current agent has no replay scope. Cannot compact context."

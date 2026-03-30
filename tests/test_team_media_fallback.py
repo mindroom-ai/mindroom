@@ -16,12 +16,13 @@ from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 
-from mindroom.agents import create_agent, create_session_storage, get_agent_session
+from mindroom.agents import create_agent, create_session_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history import PreparedHistory
+from mindroom.history.runtime import load_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.identity import MatrixID
@@ -361,9 +362,17 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
             response_sender_id="@mindroom_team:example.org",
         )
 
-    session = get_agent_session(storage, "session-456")
-    assert session is not None
-    assert read_scope_seen_event_ids(session, HistoryScope(kind="team", scope_id="team-general")) == {
+    scope_context = load_scope_session_context(
+        agent=fake_agent,
+        agent_name="general",
+        session_id="session-456",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
+    assert scope_context is not None
+    assert scope_context.session is not None
+    assert read_scope_seen_event_ids(scope_context.session, HistoryScope(kind="team", scope_id="team-general")) == {
         "event-1",
         "event-2",
     }

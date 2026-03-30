@@ -568,6 +568,19 @@ def create_session_storage(
     )
 
 
+def create_state_storage_db(
+    storage_name: str,
+    state_root: Path,
+    *,
+    subdir: str,
+    session_table: str,
+) -> SqliteDb:
+    """Create a persistent SQLite database from an already-resolved state root."""
+    db_dir = state_root / subdir
+    db_dir.mkdir(parents=True, exist_ok=True)
+    return SqliteDb(session_table=session_table, db_file=str(db_dir / f"{storage_name}.db"))
+
+
 def _create_agent_state_db(
     agent_name: str,
     config: Config,
@@ -584,25 +597,12 @@ def _create_agent_state_db(
         runtime_paths,
         execution_identity=execution_identity,
     ).state_root
-    return _create_agent_state_db_from_state_root(
-        agent_name,
-        state_storage_path,
+    return create_state_storage_db(
+        storage_name=agent_name,
+        state_root=state_storage_path,
         subdir=subdir,
         session_table=session_table,
     )
-
-
-def _create_agent_state_db_from_state_root(
-    agent_name: str,
-    state_storage_path: Path,
-    *,
-    subdir: str,
-    session_table: str,
-) -> SqliteDb:
-    """Create a persistent SQLite database from an already-resolved agent state root."""
-    db_dir = state_storage_path / subdir
-    db_dir.mkdir(parents=True, exist_ok=True)
-    return SqliteDb(session_table=session_table, db_file=str(db_dir / f"{agent_name}.db"))
 
 
 def _create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
@@ -812,16 +812,16 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 error=str(exc),
             )
 
-    storage = _create_agent_state_db_from_state_root(
-        agent_name,
-        agent_runtime.state_root,
+    storage = create_state_storage_db(
+        storage_name=agent_name,
+        state_root=agent_runtime.state_root,
         subdir="sessions",
         session_table=f"{agent_name}_sessions",
     )
     learning_storage = (
-        _create_agent_state_db_from_state_root(
-            agent_name,
-            agent_runtime.state_root,
+        create_state_storage_db(
+            storage_name=agent_name,
+            state_root=agent_runtime.state_root,
             subdir="learning",
             session_table=f"{agent_name}_learning_sessions",
         )

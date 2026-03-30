@@ -20,6 +20,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.history import prepare_history_for_run
+from mindroom.history.runtime import load_scope_session_context
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import CompactionState, HistoryScope
 from tests.conftest import bind_runtime_paths
@@ -159,12 +160,23 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
         execution_identity=SimpleNamespace(session_id="session-1"),
     )
 
-    await tool.compact_context(agent=_agent(team_id="team-123"))
+    team_agent = _agent(team_id="team-123")
+    await tool.compact_context(agent=team_agent)
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     direct_state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
-    team_state = read_scope_state(persisted, HistoryScope(kind="team", scope_id="team-123"))
+    team_context = load_scope_session_context(
+        agent=team_agent,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
+    assert team_context is not None
+    assert team_context.session is not None
+    team_state = read_scope_state(team_context.session, HistoryScope(kind="team", scope_id="team-123"))
     assert direct_state.force_compact_before_next_run is False
     assert team_state.force_compact_before_next_run is True
 
@@ -209,8 +221,8 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_compactable_pr
 
 
 @pytest.mark.asyncio
-async def test_compact_context_uses_canonical_team_owner_storage(tmp_path: Path) -> None:
-    """Team-scoped compaction should persist through the canonical owner session store."""
+async def test_compact_context_uses_stable_team_scope_storage(tmp_path: Path) -> None:
+    """Team-scoped compaction should persist through the stable team session store."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -223,8 +235,8 @@ async def test_compact_context_uses_canonical_team_owner_storage(tmp_path: Path)
         ),
         runtime_paths,
     )
-    owner_storage = create_session_storage("alpha", config, runtime_paths, execution_identity=None)
-    owner_storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="alpha")]))
+    legacy_storage = create_session_storage("alpha", config, runtime_paths, execution_identity=None)
+    legacy_storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="alpha")]))
 
     tool = CompactContextTools(
         agent_name="beta",
@@ -238,8 +250,16 @@ async def test_compact_context_uses_canonical_team_owner_storage(tmp_path: Path)
 
     result = await tool.compact_context(agent=agent)
 
-    persisted = get_agent_session(owner_storage, "session-1")
-    assert persisted is not None
-    team_state = read_scope_state(persisted, HistoryScope(kind="team", scope_id="team-123"))
+    team_context = load_scope_session_context(
+        agent=agent,
+        agent_name="beta",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
+    assert team_context is not None
+    assert team_context.session is not None
+    team_state = read_scope_state(team_context.session, HistoryScope(kind="team", scope_id="team-123"))
     assert team_state.force_compact_before_next_run is True
     assert result == "Compaction scheduled for the next reply in this conversation scope."

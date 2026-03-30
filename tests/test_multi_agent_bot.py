@@ -31,6 +31,7 @@ from mindroom.bot import (
     MultiKnowledgeVectorDb,
     TeamBot,
     _DispatchPayload,
+    _get_or_create_lock,
     _MessageContext,
     _PreparedDispatch,
     _ResponseAction,
@@ -142,6 +143,17 @@ def _hook_envelope(*, body: str = "hello", source_event_id: str = "$event") -> M
         agent_name="calculator",
         source_kind="message",
     )
+
+
+def test_get_or_create_lock_evicts_enough_unlocked_entries_to_stay_bounded() -> None:
+    """Evict unlocked cached thread locks until the cache stays within bounds."""
+    locks = {f"thread-{index}": asyncio.Lock() for index in range(101)}
+
+    new_lock = _get_or_create_lock(locks, "thread-new", max_entries=100)
+
+    assert isinstance(new_lock, asyncio.Lock)
+    assert "thread-new" in locks
+    assert len(locks) == 100
 
 
 @asynccontextmanager

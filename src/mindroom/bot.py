@@ -213,11 +213,12 @@ def _get_or_create_lock(locks: dict[object, asyncio.Lock], key: object, *, max_e
     lock = locks.get(key)
     if lock is not None:
         return lock
-    if len(locks) > max_entries:
-        to_remove = [candidate for candidate, candidate_lock in list(locks.items()) if not candidate_lock.locked()]
-        for candidate in to_remove:
-            if len(locks) - 1 <= max_entries:
+    if len(locks) >= max_entries:
+        for candidate, candidate_lock in list(locks.items()):
+            if len(locks) < max_entries:
                 break
+            if candidate_lock.locked():
+                continue
             locks.pop(candidate, None)
     lock = asyncio.Lock()
     locks[key] = lock
