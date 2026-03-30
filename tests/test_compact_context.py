@@ -31,14 +31,14 @@ from mindroom.compaction import (
     _WRAPPER_OVERHEAD_TOKENS,
     PendingCompaction,
     _build_summary_input,
+    _estimate_runs_tokens,
     _estimate_serialized_run_tokens,
+    _scrub_history_messages_from_sessions,
     apply_pending_compaction,
     clear_pending_compaction,
     compact_session_now,
-    estimate_runs_tokens,
     get_visible_session_runs,
     queue_pending_compaction,
-    scrub_history_messages_from_sessions,
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -240,7 +240,7 @@ async def test_scrub_history_messages_from_sessions_removes_history_and_preserve
     session = _coerce_agent_session(storage.get_session("sid", SessionType.AGENT))
     expected_messages = [message.content for message in session.get_messages()]
 
-    stats = scrub_history_messages_from_sessions(storage)
+    stats = _scrub_history_messages_from_sessions(storage)
 
     assert stats.sessions_scanned == 1
     assert stats.sessions_changed == 1
@@ -277,7 +277,7 @@ async def test_compact_session_now_multi_pass_compacts_multiple_runs(tmp_path: P
             window_tokens=16000,
             threshold_tokens=8000,
             reserve_tokens=1024,
-            keep_recent_tokens=estimate_runs_tokens([recent_run]),
+            keep_recent_tokens=_estimate_runs_tokens([recent_run]),
             notify=True,
             compaction_model_context_window=compaction_window,
             max_passes=10,
@@ -655,7 +655,7 @@ async def test_compact_session_now_partial_failure_preserves_last_successful_pas
             window_tokens=16000,
             threshold_tokens=8000,
             reserve_tokens=1024,
-            keep_recent_tokens=estimate_runs_tokens([recent_run]),
+            keep_recent_tokens=_estimate_runs_tokens([recent_run]),
             notify=True,
             compaction_model_context_window=compaction_window,
             max_passes=10,

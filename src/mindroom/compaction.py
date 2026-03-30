@@ -162,7 +162,7 @@ class PendingCompaction:
 
 
 @dataclass(frozen=True)
-class HistoryScrubStats:
+class _HistoryScrubStats:
     """Aggregate results for one history-message scrub run."""
 
     sessions_scanned: int
@@ -195,7 +195,7 @@ def clear_pending_compaction(pending_buffer: list[PendingCompaction] | None = No
         pending_buffer.clear()
 
 
-def estimate_message_media_chars(message: Message) -> int:
+def _estimate_message_media_chars(message: Message) -> int:
     """Estimate serialized media payload size for one message."""
     media_chars = 0
     for _tag, media_value in _message_media_entries(message):
@@ -205,7 +205,7 @@ def estimate_message_media_chars(message: Message) -> int:
     return media_chars
 
 
-def estimate_messages_tokens(messages: Sequence[Message] | None) -> int:
+def _estimate_messages_tokens(messages: Sequence[Message] | None) -> int:
     """Estimate token count for messages using the shared chars / 4 heuristic."""
     if not messages:
         return 0
@@ -214,7 +214,7 @@ def estimate_messages_tokens(messages: Sequence[Message] | None) -> int:
         total_chars += len(_render_message_content(msg))
         if msg.tool_calls:
             total_chars += len(_stable_serialize(msg.tool_calls))
-        total_chars += estimate_message_media_chars(msg)
+        total_chars += _estimate_message_media_chars(msg)
     return total_chars // 4
 
 
@@ -231,7 +231,7 @@ def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
     return static_chars // 4
 
 
-def get_history_skip_roles(agent: Agent) -> list[str] | None:
+def _get_history_skip_roles(agent: Agent) -> list[str] | None:
     """Return history roles skipped by Agno for this agent."""
     system_role = agent.system_message_role
     if isinstance(system_role, str) and system_role not in {"user", "assistant", "tool"}:
@@ -239,7 +239,7 @@ def get_history_skip_roles(agent: Agent) -> list[str] | None:
     return None
 
 
-def get_team_scope(agent: Agent) -> tuple[str | None, str | None]:
+def _get_team_scope(agent: Agent) -> tuple[str | None, str | None]:
     """Return the active (team_id, agent_id) scope for this agent."""
     team_id = agent.team_id
     if not isinstance(team_id, str) or not team_id:
@@ -287,7 +287,7 @@ def get_visible_session_runs(session: AgentSession) -> list[RunOutput | TeamRunO
 def get_replayable_runs(session: AgentSession, agent: Agent) -> list[RunOutput | TeamRunOutput]:
     """Return replayable runs still visible in prompt history for this agent."""
     runs = _get_top_level_completed_runs(session)
-    team_id, agent_id = get_team_scope(agent)
+    team_id, agent_id = _get_team_scope(agent)
     if team_id is not None:
         runs = [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == team_id]
     elif agent_id:
@@ -309,20 +309,20 @@ def estimate_history_tokens(
     visible_run_limit = len(visible_runs) if run_limit is None else min(run_limit, len(visible_runs))
     if visible_run_limit <= 0:
         return 0
-    team_id, agent_id = get_team_scope(agent)
+    team_id, agent_id = _get_team_scope(agent)
     messages = session.get_messages(
         agent_id=agent_id,
         team_id=team_id,
         last_n_runs=visible_run_limit,
         limit=message_limit,
-        skip_roles=get_history_skip_roles(agent),
+        skip_roles=_get_history_skip_roles(agent),
     )
     max_tool_calls_from_history = agent.max_tool_calls_from_history
     if max_tool_calls_from_history is None:
-        return estimate_messages_tokens(messages)
+        return _estimate_messages_tokens(messages)
     history_copy = [deepcopy(msg) for msg in messages]
     filter_tool_calls(history_copy, max_tool_calls_from_history)
-    return estimate_messages_tokens(history_copy)
+    return _estimate_messages_tokens(history_copy)
 
 
 def find_fitting_run_limit(session: AgentSession, agent: Agent, max_runs: int, budget: int) -> int:
@@ -341,7 +341,7 @@ def find_fitting_run_limit(session: AgentSession, agent: Agent, max_runs: int, b
     return best
 
 
-def estimate_runs_tokens(
+def _estimate_runs_tokens(
     runs: Sequence[RunOutput | TeamRunOutput] | None,
     *,
     max_tool_calls_from_history: int | None = None,
@@ -355,11 +355,11 @@ def estimate_runs_tokens(
         if not messages:
             continue
         if max_tool_calls_from_history is None:
-            total += estimate_messages_tokens(messages)
+            total += _estimate_messages_tokens(messages)
             continue
         filtered_messages = [deepcopy(message) for message in messages]
         filter_tool_calls(filtered_messages, max_tool_calls_from_history)
-        total += estimate_messages_tokens(filtered_messages)
+        total += _estimate_messages_tokens(filtered_messages)
     return total
 
 
@@ -567,7 +567,7 @@ async def queue_pending_compaction(
             window_tokens=window_tokens,
             threshold_tokens=threshold_tokens,
             reserve_tokens=reserve_tokens,
-            keep_recent_tokens=estimate_runs_tokens(kept_visible_runs),
+            keep_recent_tokens=_estimate_runs_tokens(kept_visible_runs),
             last_compacted_run_id=last_compacted_run_id,
             notify=notify,
             count_pending_run=True,
@@ -585,7 +585,7 @@ async def queue_pending_compaction(
             window_tokens=window_tokens,
             threshold_tokens=threshold_tokens,
             reserve_tokens=reserve_tokens,
-            keep_recent_tokens=estimate_runs_tokens(kept_visible_runs),
+            keep_recent_tokens=_estimate_runs_tokens(kept_visible_runs),
             notify=notify,
         )
         if pending_buffer is not None:
@@ -675,7 +675,7 @@ def _split_runs_for_auto_compaction(
     kept_tokens = 0
     for run in reversed(visible_runs):
         kept_count += 1
-        kept_tokens += estimate_runs_tokens(
+        kept_tokens += _estimate_runs_tokens(
             [run],
             max_tool_calls_from_history=agent.max_tool_calls_from_history,
         )
@@ -1029,10 +1029,10 @@ def _build_compaction_outcome(
     notify: bool,
     count_pending_run: bool = False,
 ) -> CompactionOutcome:
-    before_tokens = estimate_runs_tokens(before_visible_runs) + estimate_text_tokens(
+    before_tokens = _estimate_runs_tokens(before_visible_runs) + estimate_text_tokens(
         before_summary.summary if before_summary else "",
     )
-    after_tokens = estimate_runs_tokens(after_visible_runs) + estimate_text_tokens(new_summary.summary)
+    after_tokens = _estimate_runs_tokens(after_visible_runs) + estimate_text_tokens(new_summary.summary)
     compacted_at = _iso_utc_now()
     runs_after = len(after_visible_runs) + (1 if count_pending_run else 0)
     return CompactionOutcome(
@@ -1120,7 +1120,7 @@ def _iso_utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def scrub_history_messages_from_sessions(storage: SqliteDb) -> HistoryScrubStats:
+def _scrub_history_messages_from_sessions(storage: SqliteDb) -> _HistoryScrubStats:
     """Remove redundant ``from_history`` messages from every stored session.
 
     .. warning::
@@ -1170,7 +1170,7 @@ def scrub_history_messages_from_sessions(storage: SqliteDb) -> HistoryScrubStats
         sessions_changed += 1
         storage.upsert_session(session)
 
-    stats = HistoryScrubStats(
+    stats = _HistoryScrubStats(
         sessions_scanned=sessions_scanned,
         sessions_changed=sessions_changed,
         messages_removed=messages_removed,

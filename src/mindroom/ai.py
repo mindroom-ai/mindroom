@@ -110,7 +110,7 @@ _PARTIAL_REPLY_SENDER_LABELS = {
 }
 
 
-class PartialReplyKind(str, Enum):
+class _PartialReplyKind(str, Enum):
     """Classification for a self-authored partial reply preserved in prompt context."""
 
     IN_PROGRESS = "in_progress"
@@ -495,28 +495,28 @@ def _classify_partial_reply(
     msg: dict[str, Any],
     *,
     active_event_ids: Collection[str],
-) -> PartialReplyKind | None:
+) -> _PartialReplyKind | None:
     """Classify a self-authored partial reply from persisted stream metadata first."""
     status = msg.get("stream_status")
     if status == STREAM_STATUS_COMPLETED:
         return None
 
-    partial_kind: PartialReplyKind | None = None
+    partial_kind: _PartialReplyKind | None = None
     if status in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR}:
-        partial_kind = PartialReplyKind.INTERRUPTED
+        partial_kind = _PartialReplyKind.INTERRUPTED
     elif status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
         event_id = msg.get("event_id")
         if isinstance(event_id, str):
-            return PartialReplyKind.IN_PROGRESS if event_id in active_event_ids else PartialReplyKind.INTERRUPTED
-        partial_kind = PartialReplyKind.IN_PROGRESS
+            return _PartialReplyKind.IN_PROGRESS if event_id in active_event_ids else _PartialReplyKind.INTERRUPTED
+        partial_kind = _PartialReplyKind.IN_PROGRESS
     else:
         body = msg.get("body", "")
         if not isinstance(body, str):
             return None
         if is_interrupted_partial_reply(body):
-            partial_kind = PartialReplyKind.INTERRUPTED
+            partial_kind = _PartialReplyKind.INTERRUPTED
         elif is_in_progress_message(body):
-            partial_kind = PartialReplyKind.IN_PROGRESS
+            partial_kind = _PartialReplyKind.IN_PROGRESS
 
     return partial_kind
 
@@ -526,13 +526,13 @@ def _clean_partial_reply_body(body: str) -> str:
     return clean_partial_reply_text(body)
 
 
-def _build_unseen_messages_header(partial_reply_kinds: set[PartialReplyKind]) -> str:
+def _build_unseen_messages_header(partial_reply_kinds: set[_PartialReplyKind]) -> str:
     """Choose the unseen-context header for the partial-reply mix present."""
     if not partial_reply_kinds:
         return _DEFAULT_UNSEEN_MESSAGES_HEADER
-    if partial_reply_kinds == {PartialReplyKind.INTERRUPTED}:
+    if partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}:
         return _INTERRUPTED_PARTIAL_REPLY_HEADER
-    if partial_reply_kinds == {PartialReplyKind.IN_PROGRESS}:
+    if partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}:
         return _IN_PROGRESS_PARTIAL_REPLY_HEADER
     return _MIXED_PARTIAL_REPLY_HEADER
 
@@ -544,7 +544,7 @@ def _get_unseen_event_ids_for_metadata(unseen_messages: list[dict[str, Any]]) ->
         event_id = msg.get("event_id")
         if not isinstance(event_id, str):
             continue
-        if msg.get("partial_reply_kind") is PartialReplyKind.IN_PROGRESS:
+        if msg.get("partial_reply_kind") is _PartialReplyKind.IN_PROGRESS:
             continue
         event_ids.append(event_id)
     return event_ids
@@ -559,7 +559,7 @@ def _get_unseen_messages(
     current_event_id: str | None,
     *,
     active_event_ids: Collection[str],
-) -> tuple[list[dict[str, Any]], set[PartialReplyKind]]:
+) -> tuple[list[dict[str, Any]], set[_PartialReplyKind]]:
     """Filter thread_history to messages not yet consumed by this agent.
 
     Excludes:
@@ -573,7 +573,7 @@ def _get_unseen_messages(
     matrix_id = config.get_ids(runtime_paths).get(agent_name)
     agent_sender_id = matrix_id.full_id if matrix_id else None
     unseen: list[dict[str, Any]] = []
-    partial_reply_kinds: set[PartialReplyKind] = set()
+    partial_reply_kinds: set[_PartialReplyKind] = set()
     for msg in thread_history:
         event_id = msg.get("event_id")
         sender = msg.get("sender")
@@ -617,7 +617,7 @@ def _build_prompt_with_unseen(
     prompt: str,
     unseen_messages: list[dict[str, Any]],
     *,
-    partial_reply_kinds: set[PartialReplyKind] | None,
+    partial_reply_kinds: set[_PartialReplyKind] | None,
 ) -> str:
     """Prepend unseen messages from other participants to the prompt."""
     if not unseen_messages:
