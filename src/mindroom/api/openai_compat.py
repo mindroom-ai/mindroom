@@ -12,7 +12,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from uuid import uuid4
 
 from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -60,7 +60,7 @@ _TEAM_MODEL_PREFIX = "team/"
 _RESERVED_MODEL_NAMES = {_AUTO_MODEL_NAME}
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
@@ -1267,20 +1267,25 @@ async def _stream_team_completion(
     try:
         with tool_execution_identity(execution_identity):
             raw_stream = team.arun(team_prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
-            stream = stream_with_bound_agent_compactions(raw_stream, agents=agents)
+            stream = cast(
+                "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None]",
+                stream_with_bound_agent_compactions(raw_stream, agents=agents),
+            )
             # Peek at first event
-            first_event = await anext(aiter(stream), None)
+            first_event = await anext(stream, None)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
         clear_bound_agent_compactions(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
 
-    preflight_error = _team_stream_preflight_error(first_event, team_name)
-    if preflight_error is not None:
+    if first_event is None:
         await stream.aclose()
-        return preflight_error
-
-    assert first_event is not None
+        return _error_response(500, "Team returned empty response", error_type="server_error")
+    first_error = _extract_team_stream_error(first_event)
+    if first_error is not None:
+        logger.warning("Team streaming returned error", team=team_name, error=first_error)
+        await stream.aclose()
+        return _error_response(500, "Team execution failed", error_type="server_error")
 
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     created = int(time.time())
@@ -1303,22 +1308,6 @@ def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent) -> st
     if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
         return str(event.content or "Unknown team error")
     return None
-
-
-def _team_stream_preflight_error(
-    first_event: RunOutputEvent | TeamRunOutputEvent | None,
-    team_name: str,
-) -> JSONResponse | None:
-    """Validate first team stream event before SSE response begins."""
-    if first_event is None:
-        return _error_response(500, "Team returned empty response", error_type="server_error")
-
-    first_error = _extract_team_stream_error(first_event)
-    if first_error is None:
-        return None
-
-    logger.warning("Team streaming returned error", team=team_name, error=first_error)
-    return _error_response(500, "Team execution failed", error_type="server_error")
 
 
 def _classify_team_event(

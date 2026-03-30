@@ -34,7 +34,6 @@ from mindroom.ai import (
     stream_with_bound_agent_compactions,
 )
 from mindroom.authorization import get_available_agents_in_room
-from mindroom.compaction import CompactionOutcome
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
@@ -61,6 +60,7 @@ if TYPE_CHECKING:
     import nio
     from agno.models.response import ToolExecution
 
+    from mindroom.compaction import CompactionOutcome
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.manager import KnowledgeManager
@@ -1143,7 +1143,7 @@ def select_model_for_team(
     return "default"
 
 
-async def team_response(  # noqa: C901, PLR0915
+async def team_response(  # noqa: C901, PLR0912, PLR0915
     agent_names: list[str],
     mode: TeamMode,
     message: str,
@@ -1351,7 +1351,7 @@ async def _team_response_stream_raw(
         return _error()
 
 
-async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
+async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     agent_ids: list[MatrixID],
     message: str,
     orchestrator: MultiAgentOrchestrator,

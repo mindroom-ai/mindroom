@@ -77,13 +77,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.agent import Agent
+    from agno.db.sqlite import SqliteDb
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
     from agno.session.agent import AgentSession
 
     from mindroom.compaction import PendingCompaction
     from mindroom.config.main import Config
-    from mindroom.config.models import ModelConfig
+    from mindroom.config.models import CompactionConfig, ModelConfig
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -941,6 +942,138 @@ def _get_bound_agent_compaction_state(
     )
 
 
+def _session_has_prior_runs(session: AgentSession | None) -> bool:
+    """Return whether the stored Agno session has replayable history."""
+    return session is not None and (bool(session.runs) or session.summary is not None)
+
+
+def _ensure_agent_storage_and_session(
+    *,
+    agent_name: str,
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None = None,
+    storage: SqliteDb | None = None,
+    session: AgentSession | None = None,
+) -> tuple[SqliteDb | None, AgentSession | None]:
+    """Materialize the session storage and current stored session when needed."""
+    if session_id is None:
+        return storage, session
+    if storage is None:
+        storage = create_session_storage(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        )
+    if session is None:
+        session = _get_agent_session(storage, session_id)
+    return storage, session
+
+
+def _estimate_session_summary_tokens(agent: Agent, session: AgentSession) -> int:
+    """Estimate tokens contributed by the stored Agno session summary."""
+    if not agent.add_session_summary_to_context or session.summary is None:
+        return 0
+    return estimate_text_tokens(session.summary.summary)
+
+
+def _resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
+    """Resolve the absolute token threshold that should trigger auto-compaction."""
+    if compaction_config.threshold_tokens is not None:
+        return compaction_config.threshold_tokens
+    if compaction_config.threshold_percent is not None:
+        return int(context_window * compaction_config.threshold_percent)
+    return int(context_window * 0.8)
+
+
+async def _maybe_auto_compact_agent_history(  # noqa: PLR0911
+    *,
+    agent: Agent,
+    agent_name: str,
+    full_prompt: str,
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    storage: SqliteDb | None = None,
+    session: AgentSession | None = None,
+) -> AgentSession | None:
+    """Apply configured auto-compaction before an agent run when the session is near budget."""
+    if session_id is None or storage is None or session is None or not _session_has_prior_runs(session):
+        return session
+    if agent_name not in config.agents:
+        return session
+
+    compaction_config = config.get_agent_compaction_config(agent_name)
+    if not config.has_authored_agent_compaction_config(agent_name) or not compaction_config.enabled:
+        return session
+
+    model_name, model_config = _get_model_config(config, agent_name)
+    context_window = model_config.context_window if model_config is not None else None
+    if context_window is None:
+        return session
+
+    history_run_limit = agent.num_history_runs if agent.num_history_runs and agent.num_history_runs > 0 else None
+    history_message_limit = (
+        agent.num_history_messages
+        if agent.num_history_messages is not None and agent.num_history_messages > 0
+        else None
+    )
+    static_tokens = estimate_static_tokens(agent, full_prompt)
+    history_tokens = estimate_history_tokens(
+        session,
+        agent,
+        history_run_limit,
+        message_limit=history_message_limit,
+    )
+    summary_tokens = _estimate_session_summary_tokens(agent, session)
+    effective_threshold = _resolve_effective_compaction_threshold(compaction_config, context_window)
+    effective_reserve = min(compaction_config.reserve_tokens, context_window // 2)
+    effective_keep_recent = min(compaction_config.keep_recent_tokens, context_window // 2)
+    target_ceiling = min(
+        effective_threshold,
+        max(0, context_window - effective_reserve),
+    )
+    if static_tokens + history_tokens + summary_tokens <= target_ceiling or target_ceiling < 0:
+        return session
+
+    try:
+        summary_model_name = compaction_config.model or model_name or config.get_entity_model_name(agent_name)
+        summary_model = get_model_instance(config, runtime_paths, summary_model_name)
+        summary_model_config = config.models.get(summary_model_name)
+        compaction_model_context_window = (
+            summary_model_config.context_window
+            if summary_model_config and summary_model_config.context_window
+            else None
+        )
+        compaction_result = await compact_session_now(
+            storage=storage,
+            session_id=session_id,
+            agent=agent,
+            model=summary_model,
+            mode="auto",
+            window_tokens=context_window,
+            threshold_tokens=effective_threshold,
+            reserve_tokens=effective_reserve,
+            keep_recent_tokens=effective_keep_recent,
+            notify=compaction_config.notify,
+            compaction_model_context_window=compaction_model_context_window,
+        )
+    except Exception:
+        logger.exception("Auto-compaction failed, falling back to context window limit")
+        return session
+
+    if compaction_result is None:
+        return session
+
+    updated_session, outcome = compaction_result
+    if compaction_outcomes_collector is not None:
+        compaction_outcomes_collector.append(outcome)
+    return updated_session
+
+
 async def prepare_agent_history_for_run(
     *,
     agent: Agent,
@@ -951,90 +1084,30 @@ async def prepare_agent_history_for_run(
     config: Config,
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    storage: Any | None = None,
+    storage: SqliteDb | None = None,
     session: AgentSession | None = None,
 ) -> AgentSession | None:
     """Apply auto-compaction and dynamic history limiting for one agent run."""
-    has_prior_runs = session is not None and (bool(session.runs) or session.summary is not None)
-    if session_id and storage is None:
-        storage = create_session_storage(
-            agent_name,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        )
-    if session_id and session is None and storage is not None:
-        session = _get_agent_session(storage, session_id)
-        has_prior_runs = session is not None and (bool(session.runs) or session.summary is not None)
-
-    if session_id and storage is not None and session is not None and has_prior_runs and agent_name in config.agents:
-        compaction_config = config.get_agent_compaction_config(agent_name)
-        compaction_authored = config.has_authored_agent_compaction_config(agent_name)
-        model_name, model_config = _get_model_config(config, agent_name)
-        context_window = model_config.context_window if model_config is not None else None
-        if compaction_authored and compaction_config.enabled and context_window is not None:
-            static_tokens = estimate_static_tokens(agent, full_prompt)
-            history_run_limit = (
-                agent.num_history_runs if agent.num_history_runs and agent.num_history_runs > 0 else None
-            )
-            history_message_limit = (
-                agent.num_history_messages
-                if agent.num_history_messages is not None and agent.num_history_messages > 0
-                else None
-            )
-            history_tokens = estimate_history_tokens(
-                session,
-                agent,
-                history_run_limit,
-                message_limit=history_message_limit,
-            )
-            summary_tokens = 0
-            if agent.add_session_summary_to_context and session.summary is not None:
-                summary_tokens = estimate_text_tokens(session.summary.summary)
-            if compaction_config.threshold_tokens is not None:
-                effective_threshold = compaction_config.threshold_tokens
-            elif compaction_config.threshold_percent is not None:
-                effective_threshold = int(context_window * compaction_config.threshold_percent)
-            else:
-                effective_threshold = int(context_window * 0.8)
-            effective_reserve = min(compaction_config.reserve_tokens, context_window // 2)
-            effective_keep_recent = min(compaction_config.keep_recent_tokens, context_window // 2)
-            target_ceiling = min(
-                effective_threshold,
-                max(0, context_window - effective_reserve),
-            )
-            if static_tokens + history_tokens + summary_tokens > target_ceiling >= 0:
-                try:
-                    summary_model_name = (
-                        compaction_config.model or model_name or config.get_entity_model_name(agent_name)
-                    )
-                    summary_model = get_model_instance(config, runtime_paths, summary_model_name)
-                    summary_model_config = config.models.get(summary_model_name)
-                    compaction_model_context_window = (
-                        summary_model_config.context_window
-                        if summary_model_config and summary_model_config.context_window
-                        else None
-                    )
-                    compaction_result = await compact_session_now(
-                        storage=storage,
-                        session_id=session_id,
-                        agent=agent,
-                        model=summary_model,
-                        mode="auto",
-                        window_tokens=context_window,
-                        threshold_tokens=effective_threshold,
-                        reserve_tokens=effective_reserve,
-                        keep_recent_tokens=effective_keep_recent,
-                        notify=compaction_config.notify,
-                        compaction_model_context_window=compaction_model_context_window,
-                    )
-                except Exception:
-                    logger.exception("Auto-compaction failed, falling back to context window limit")
-                    compaction_result = None
-                if compaction_result is not None:
-                    session, outcome = compaction_result
-                    if compaction_outcomes_collector is not None:
-                        compaction_outcomes_collector.append(outcome)
+    storage, session = _ensure_agent_storage_and_session(
+        agent_name=agent_name,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        storage=storage,
+        session=session,
+    )
+    session = await _maybe_auto_compact_agent_history(
+        agent=agent,
+        agent_name=agent_name,
+        full_prompt=full_prompt,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        compaction_outcomes_collector=compaction_outcomes_collector,
+        storage=storage,
+        session=session,
+    )
 
     _apply_context_window_limit(
         agent,
@@ -1097,7 +1170,7 @@ async def stream_with_bound_agent_compactions(
     *,
     agents: list[Agent],
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-) -> AsyncIterator[object]:
+) -> AsyncGenerator[object, None]:
     """Yield a stream and commit queued bound-agent compactions when it ends."""
     try:
         async for event in stream:
@@ -1352,6 +1425,7 @@ async def ai_response(  # noqa: C901
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
         enrichment_digest: Optional digest of hook-provided enrichment used to vary the local cache key.
+        delegation_depth: Current nested delegation depth for delegated-agent runs.
 
     Returns:
         Agent response string
@@ -1607,6 +1681,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
         enrichment_digest: Optional digest of hook-provided enrichment used to vary the local cache key.
+        delegation_depth: Current nested delegation depth for delegated-agent runs.
 
     Yields:
         Streaming chunks/events as they become available
