@@ -61,7 +61,6 @@ export function AgentEditor() {
   const defaultShowToolCalls = config?.defaults.show_tool_calls ?? true;
   const defaultMarkdown = config?.defaults.markdown ?? true;
   const defaultCompressToolResults = config?.defaults.compress_tool_results ?? true;
-  const defaultEnableSessionSummaries = config?.defaults.enable_session_summaries ?? false;
   const globalMemoryBackend = config?.memory?.backend ?? 'mem0';
   const knowledgeBaseNames = useMemo(
     () => Object.keys(config?.knowledge_bases || {}).sort(),
@@ -104,6 +103,7 @@ export function AgentEditor() {
       delegate_to: [],
       context_files: [],
       private: undefined,
+      compaction: undefined,
       learning: defaultLearning,
       learning_mode: defaultLearningMode,
       memory_backend: undefined,
@@ -113,6 +113,7 @@ export function AgentEditor() {
   const effectiveLearningEnabled = learningEnabled ?? defaultLearning;
   const numHistoryRuns = useWatch({ name: 'num_history_runs', control });
   const numHistoryMessages = useWatch({ name: 'num_history_messages', control });
+  const compactionConfig = useWatch({ name: 'compaction', control });
   const agentTools = useWatch({ name: 'tools', control });
   const includeDefaultTools = useWatch({ name: 'include_default_tools', control });
   const privateConfig = useWatch({ name: 'private', control });
@@ -265,6 +266,7 @@ export function AgentEditor() {
         delegate_to: selectedAgent.delegate_to ?? [],
         context_files: selectedAgent.context_files ?? [],
         private: selectedAgent.private ?? undefined,
+        compaction: selectedAgent.compaction ?? undefined,
         learning: selectedAgent.learning ?? defaultLearning,
         learning_mode: selectedAgent.learning_mode ?? defaultLearningMode,
       });
@@ -378,6 +380,21 @@ export function AgentEditor() {
     }
   };
 
+  const updateCompaction = useCallback(
+    (nextCompaction: Agent['compaction']) => {
+      setValue('compaction', nextCompaction);
+      handleFieldChange('compaction', nextCompaction);
+    },
+    [handleFieldChange, setValue]
+  );
+
+  const mutateCompaction = useCallback(
+    (mutator: (current: Agent['compaction']) => Agent['compaction']) => {
+      updateCompaction(mutator(getValues('compaction')));
+    },
+    [getValues, updateCompaction]
+  );
+
   const handlePrivateScopeChange = (per: AgentPrivateConfig['per']) => {
     mutatePrivate(current => ({
       ...ensurePrivateConfig(current),
@@ -471,6 +488,13 @@ export function AgentEditor() {
     const n = parseInt(raw, 10);
     return Number.isNaN(n) || n < 0 ? null : n;
   };
+
+  /** Parse a string to a float in the open interval (0, 1) or return null for empty/invalid input. */
+  const parseOptionalUnitFloat = (raw: string): number | null => {
+    if (raw.trim() === '') return null;
+    const n = parseFloat(raw);
+    return Number.isNaN(n) || n <= 0 || n >= 1 ? null : n;
+  };
   const toolHasOverrides = (toolName: string): boolean => {
     if (selectedAgentId == null) {
       return false;
@@ -479,9 +503,21 @@ export function AgentEditor() {
     return overrides != null && Object.keys(overrides).length > 0;
   };
 
+  const [compactionThresholdPercentInput, setCompactionThresholdPercentInput] = useState('');
+
+  useEffect(() => {
+    const nextValue =
+      compactionConfig?.threshold_percent != null ? String(compactionConfig.threshold_percent) : '';
+    setCompactionThresholdPercentInput(nextValue);
+  }, [compactionConfig?.threshold_percent, selectedAgentId]);
+
   if (!selectedAgent) {
     return <EditorPanelEmptyState icon={Bot} message="Select an agent to edit" />;
   }
+
+  const defaultCompaction = config?.defaults.compaction ?? null;
+  const effectiveCompactionEnabled =
+    compactionConfig?.enabled ?? defaultCompaction?.enabled ?? false;
 
   return (
     <EditorPanel
@@ -1877,37 +1913,198 @@ export function AgentEditor() {
             />
           </FieldGroup>
 
-          {/* Enable Session Summaries */}
           <FieldGroup
-            label="Session Summaries"
-            helperText={`Enable Agno session summaries for conversation compaction (global default: ${
-              defaultEnableSessionSummaries ? 'on' : 'off'
-            })`}
-            htmlFor="enable_session_summaries"
+            label="Auto-Compaction"
+            helperText="Automatically compact older session history before a run when the context budget gets tight."
+            htmlFor="compaction_enabled"
           >
-            <Controller
-              name="enable_session_summaries"
-              control={control}
-              render={({ field }) => (
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="enable_session_summaries"
-                    checked={field.value ?? defaultEnableSessionSummaries}
-                    onCheckedChange={checked => {
-                      const value = checked === true;
-                      field.onChange(value);
-                      handleFieldChange('enable_session_summaries', value);
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <Checkbox
+                  id="compaction_enabled"
+                  checked={effectiveCompactionEnabled}
+                  onCheckedChange={checked => {
+                    mutateCompaction(current => ({
+                      ...(current ?? {}),
+                      enabled: checked === true,
+                    }));
+                  }}
+                />
+                <label
+                  htmlFor="compaction_enabled"
+                  className="text-sm font-medium cursor-pointer select-none"
+                >
+                  Enable auto-compaction
+                </label>
+                {compactionConfig != null && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => updateCompaction(undefined)}
+                  >
+                    Use inherited settings
+                  </Button>
+                )}
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <FieldGroup
+                  label="Threshold Tokens"
+                  helperText="Absolute token threshold that triggers compaction. Leave empty to use threshold percent or the runtime fallback."
+                  htmlFor="compaction_threshold_tokens"
+                >
+                  <Input
+                    id="compaction_threshold_tokens"
+                    type="number"
+                    min={1}
+                    value={compactionConfig?.threshold_tokens ?? ''}
+                    placeholder={
+                      defaultCompaction?.threshold_tokens != null
+                        ? `Default: ${defaultCompaction.threshold_tokens}`
+                        : 'Default: derived from context window'
+                    }
+                    onChange={e => {
+                      const value = parseOptionalInt(e.target.value);
+                      mutateCompaction(current => ({
+                        ...(current ?? {}),
+                        threshold_tokens: value ?? undefined,
+                      }));
                     }}
                   />
-                  <label
-                    htmlFor="enable_session_summaries"
-                    className="text-sm font-medium cursor-pointer select-none"
-                  >
-                    Enable session summaries
-                  </label>
-                </div>
-              )}
-            />
+                </FieldGroup>
+
+                <FieldGroup
+                  label="Threshold Percent"
+                  helperText="Fraction of the context window that triggers compaction, greater than 0 and less than 1."
+                  htmlFor="compaction_threshold_percent"
+                >
+                  <Input
+                    id="compaction_threshold_percent"
+                    type="number"
+                    min={0.01}
+                    max={0.99}
+                    step="0.01"
+                    value={compactionThresholdPercentInput}
+                    placeholder={
+                      defaultCompaction?.threshold_percent != null
+                        ? `Default: ${defaultCompaction.threshold_percent}`
+                        : 'Default: 0.8'
+                    }
+                    onChange={e => {
+                      const raw = e.target.value;
+                      setCompactionThresholdPercentInput(raw);
+                      const value = parseOptionalUnitFloat(raw);
+                      if (raw.trim() !== '' && value == null) {
+                        return;
+                      }
+                      mutateCompaction(current => ({
+                        ...(current ?? {}),
+                        threshold_percent: value ?? undefined,
+                      }));
+                    }}
+                    onBlur={() => {
+                      const value = parseOptionalUnitFloat(compactionThresholdPercentInput);
+                      if (compactionThresholdPercentInput.trim() !== '' && value == null) {
+                        setCompactionThresholdPercentInput(
+                          compactionConfig?.threshold_percent != null
+                            ? String(compactionConfig.threshold_percent)
+                            : ''
+                        );
+                      }
+                    }}
+                  />
+                </FieldGroup>
+
+                <FieldGroup
+                  label="Reserve Tokens"
+                  helperText="Headroom reserved for the current prompt, tools, and model output."
+                  htmlFor="compaction_reserve_tokens"
+                >
+                  <Input
+                    id="compaction_reserve_tokens"
+                    type="number"
+                    min={0}
+                    value={compactionConfig?.reserve_tokens ?? ''}
+                    placeholder={`Default: ${defaultCompaction?.reserve_tokens ?? 16384}`}
+                    onChange={e => {
+                      const value = parseOptionalInt(e.target.value);
+                      mutateCompaction(current => ({
+                        ...(current ?? {}),
+                        reserve_tokens: value ?? undefined,
+                      }));
+                    }}
+                  />
+                </FieldGroup>
+
+                <FieldGroup
+                  label="Keep Recent Tokens"
+                  helperText="How much of the newest history should stay verbatim in prompt context after compaction."
+                  htmlFor="compaction_keep_recent_tokens"
+                >
+                  <Input
+                    id="compaction_keep_recent_tokens"
+                    type="number"
+                    min={0}
+                    value={compactionConfig?.keep_recent_tokens ?? ''}
+                    placeholder={`Default: ${defaultCompaction?.keep_recent_tokens ?? 20000}`}
+                    onChange={e => {
+                      const value = parseOptionalInt(e.target.value);
+                      mutateCompaction(current => ({
+                        ...(current ?? {}),
+                        keep_recent_tokens: value ?? undefined,
+                      }));
+                    }}
+                  />
+                </FieldGroup>
+
+                <FieldGroup
+                  label="Compaction Model"
+                  helperText="Optional model config name used only for summary generation during compaction."
+                  htmlFor="compaction_model"
+                >
+                  <Input
+                    id="compaction_model"
+                    value={compactionConfig?.model ?? ''}
+                    placeholder={defaultCompaction?.model ?? 'Default: agent model'}
+                    onChange={e => {
+                      const value = e.target.value.trim();
+                      mutateCompaction(current => ({
+                        ...(current ?? {}),
+                        model: value === '' ? undefined : value,
+                      }));
+                    }}
+                  />
+                </FieldGroup>
+
+                <FieldGroup
+                  label="Notify Room"
+                  helperText={`Post a room notice after compaction completes (default: ${
+                    defaultCompaction?.notify ? 'on' : 'off'
+                  }).`}
+                  htmlFor="compaction_notify"
+                >
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="compaction_notify"
+                      checked={compactionConfig?.notify ?? defaultCompaction?.notify ?? false}
+                      onCheckedChange={checked => {
+                        mutateCompaction(current => ({
+                          ...(current ?? {}),
+                          notify: checked === true,
+                        }));
+                      }}
+                    />
+                    <label
+                      htmlFor="compaction_notify"
+                      className="text-sm font-medium cursor-pointer select-none"
+                    >
+                      Send compaction notices
+                    </label>
+                  </div>
+                </FieldGroup>
+              </div>
+            </div>
           </FieldGroup>
         </div>
       </div>

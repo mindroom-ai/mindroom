@@ -56,7 +56,7 @@ Tools are organized by category:
 - **Smart Home** - Home Assistant
 - **Media & Entertainment** - YouTube, Spotify, Giphy, MoviePy, Unsplash, Brandfetch
 - **Memory & Storage** - Memory, Mem0, Zep, Attachments
-- **Custom & Config** - Custom API, Config Manager, Subagents, Delegate
+- **Custom & Config** - Custom API, Config Manager, Context Compaction, Subagents, Delegate
 
 ## Quick Examples
 

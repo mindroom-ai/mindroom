@@ -27,6 +27,13 @@ from pydantic import BaseModel, Field
 from mindroom.agents import create_agent
 from mindroom.ai import get_model_instance
 from mindroom.authorization import get_available_agents_in_room
+from mindroom.compaction_runtime import (
+    apply_bound_agent_compactions,
+    bind_agent_compaction_state,
+    clear_bound_agent_compactions,
+    prepare_bound_agents_for_run,
+    stream_with_bound_agent_compactions,
+)
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
@@ -53,6 +60,7 @@ if TYPE_CHECKING:
     import nio
     from agno.models.response import ToolExecution
 
+    from mindroom.compaction import CompactionOutcome
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.manager import KnowledgeManager
@@ -985,14 +993,22 @@ def _build_agent_from_orchestrator(
         shared_manager_lookup=_shared_manager,
         on_missing_bases=_on_missing_agent_bases,
     )
-    return create_agent(
+    pending_compaction_buffer: list = []
+    agent = create_agent(
         agent_name,
         orchestrator.config,
         orchestrator.runtime_paths,
         execution_identity=execution_identity,
         knowledge=knowledge,
         include_interactive_questions=False,
+        pending_compaction_buffer=pending_compaction_buffer,
     )
+    bind_agent_compaction_state(
+        agent,
+        agent_name=agent_name,
+        pending_compaction_buffer=pending_compaction_buffer,
+    )
+    return agent
 
 
 def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
@@ -1127,7 +1143,7 @@ def select_model_for_team(
     return "default"
 
 
-async def team_response(  # noqa: C901, PLR0915
+async def team_response(  # noqa: C901, PLR0912, PLR0915
     agent_names: list[str],
     mode: TeamMode,
     message: str,
@@ -1140,6 +1156,7 @@ async def team_response(  # noqa: C901, PLR0915
     run_id: str | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     *,
     reason_prefix: str = "Team request",
 ) -> str:
@@ -1164,11 +1181,27 @@ async def team_response(  # noqa: C901, PLR0915
         return str(exc)
     agents = team_members.agents
 
-    media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
-    team = _create_team_instance(agents, team_members.requested_agent_names, mode, orchestrator, model_name)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
+    media_inputs = media or MediaInputs()
+
+    try:
+        await prepare_bound_agents_for_run(
+            agents=agents,
+            full_prompt=prompt,
+            session_id=session_id,
+            runtime_paths=orchestrator.runtime_paths,
+            config=orchestrator.config,
+            execution_identity=execution_identity,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+        )
+    except Exception as e:
+        logger.exception("Error preparing team members", agents=agent_list)
+        clear_bound_agent_compactions(agents)
+        return get_user_friendly_error_message(e, team_name)
+
+    team = _create_team_instance(agents, team_members.requested_agent_names, mode, orchestrator, model_name)
 
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
     logger.info(f"TEAM PROMPT: {prompt[:500]}")
@@ -1195,8 +1228,13 @@ async def team_response(  # noqa: C901, PLR0915
     for retried_without_inline_media in (False, True):
         try:
             response = await _run(attempt_prompt, attempt_media_inputs, attempt_run_id)
+            await apply_bound_agent_compactions(
+                agents=agents,
+                compaction_outcomes_collector=compaction_outcomes_collector,
+            )
         except Exception as e:
             if not retried_without_inline_media and should_retry_without_inline_media(e, attempt_media_inputs):
+                clear_bound_agent_compactions(agents)
                 logger.warning(
                     "Retrying team response without inline media after validation error",
                     agents=agent_list,
@@ -1208,6 +1246,7 @@ async def team_response(  # noqa: C901, PLR0915
                 continue
 
             logger.exception(f"Error in team response with agents {agent_list}")
+            clear_bound_agent_compactions(agents)
             return get_user_friendly_error_message(e, team_name)
 
         if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
@@ -1312,7 +1351,7 @@ async def _team_response_stream_raw(
         return _error()
 
 
-async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
+async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     agent_ids: list[MatrixID],
     message: str,
     orchestrator: MultiAgentOrchestrator,
@@ -1326,6 +1365,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     run_id: str | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     *,
     reason_prefix: str = "Team request",
 ) -> AsyncIterator[_TeamStreamChunk]:
@@ -1358,6 +1398,23 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         return
     agent_names = team_members.display_names
     display_names = team_members.display_names
+    prepared_prompt = _build_prompt_with_context(message, thread_history)
+
+    try:
+        await prepare_bound_agents_for_run(
+            agents=team_members.agents,
+            full_prompt=prepared_prompt,
+            session_id=session_id,
+            runtime_paths=orchestrator.runtime_paths,
+            config=orchestrator.config,
+            execution_identity=execution_identity,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+        )
+    except Exception as e:
+        logger.exception("Error preparing team members for streaming", agents=agent_names)
+        clear_bound_agent_compactions(team_members.agents)
+        yield get_user_friendly_error_message(e, f"Team ({', '.join(agent_names)})")
+        return
 
     logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
     media_inputs = media or MediaInputs()
@@ -1520,6 +1577,11 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             session_id=session_id,
             run_id=attempt_run_id,
             user_id=user_id,
+        )
+        raw_stream = stream_with_bound_agent_compactions(
+            raw_stream,
+            agents=team_members.agents,
+            compaction_outcomes_collector=compaction_outcomes_collector,
         )
         async for event in raw_stream:
             # Handle explicit fallback stream outputs (for example no agents available)

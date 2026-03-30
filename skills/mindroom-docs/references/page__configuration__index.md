@@ -224,7 +224,13 @@ defaults:
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
   compress_tool_results: true      # Compress tool results in history to save context
-  enable_session_summaries: false  # AI summaries of older conversation segments (costs extra LLM call)
+  # Auto-compaction is disabled until you author a compaction block.
+  # compaction:
+  #   enabled: true
+  #   threshold_percent: 0.8
+  #   reserve_tokens: 16384
+  #   keep_recent_tokens: 20000
+  #   notify: false
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
@@ -235,6 +241,10 @@ defaults:
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
 # defaults.streaming is also global-only and controls streamed message edit cadence.
 # Tools can be plain strings or single-key dicts with per-agent config overrides.
+
+# Auto-compaction is non-destructive.
+# It updates the stored session summary and replay cutoff, but keeps the raw
+# runs in the session database.
 # Use __MINDROOM_INHERIT__ inside a tool override to clear one inherited authored field
 # while keeping the rest of defaults.tools for that agent.
 # See agents.md for the full per-agent tool configuration syntax.

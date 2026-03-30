@@ -101,6 +101,16 @@ export type CultureMode = 'automatic' | 'agentic' | 'manual';
 
 export type ThreadMode = 'thread' | 'room';
 
+export interface CompactionConfig {
+  enabled?: boolean;
+  threshold_tokens?: number | null;
+  threshold_percent?: number | null;
+  reserve_tokens?: number;
+  keep_recent_tokens?: number;
+  model?: string | null;
+  notify?: boolean;
+}
+
 export interface Agent {
   id: string; // The key in the agents object
   display_name: string;
@@ -116,6 +126,7 @@ export interface Agent {
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
   memory_backend?: MemoryBackend; // Per-agent memory backend override (inherits memory.backend when omitted)
+  compaction?: CompactionConfig | null; // Per-agent auto-compaction overrides
   model?: string; // Reference to a model in the models section
   show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
   worker_tools?: string[]; // Tool names to route through scoped workers (overrides defaults)
@@ -127,7 +138,6 @@ export interface Agent {
   num_history_runs?: number | null; // Number of prior runs to include as history
   num_history_messages?: number | null; // Max messages from history (mutually exclusive with num_history_runs)
   compress_tool_results?: boolean; // Compress tool results in history
-  enable_session_summaries?: boolean; // Enable session summaries for conversation compaction
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from history
   allow_self_config?: boolean; // Allow agent to modify its own configuration via a tool
 }
@@ -185,6 +195,7 @@ export interface Config {
     markdown: boolean;
     learning?: boolean;
     learning_mode?: LearningMode;
+    compaction?: CompactionConfig;
     show_tool_calls?: boolean;
     worker_scope?: WorkerScope | null;
     worker_tools?: string[]; // Tool names to route through scoped workers by default for all agents
@@ -194,7 +205,6 @@ export interface Config {
     num_history_runs?: number | null;
     num_history_messages?: number | null;
     compress_tool_results?: boolean;
-    enable_session_summaries?: boolean;
     max_tool_calls_from_history?: number | null;
     allow_self_config?: boolean;
   };
@@ -255,6 +265,25 @@ function normalizePrivateConfig(
   };
 }
 
+function normalizeCompactionConfig(
+  compaction: CompactionConfig | null | undefined
+): CompactionConfig | null | undefined {
+  if (compaction == null) {
+    return compaction;
+  }
+
+  const normalizedCompaction: CompactionConfig = {
+    ...compaction,
+    model: compaction.model?.trim() ? compaction.model.trim() : undefined,
+  };
+
+  if (Object.values(normalizedCompaction).every(value => value == null)) {
+    return undefined;
+  }
+
+  return normalizedCompaction;
+}
+
 export function getDefaultPrivateConfig(agent: Pick<Agent, 'private'>): AgentPrivateConfig {
   if (agent.private != null) {
     return agent.private;
@@ -267,10 +296,15 @@ export function getDefaultPrivateConfig(agent: Pick<Agent, 'private'>): AgentPri
 export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Partial<Agent> {
   const normalizedUpdates: Partial<Agent> = { ...updates };
   const nextPrivate = 'private' in updates ? updates.private : agent.private;
+  const nextCompaction = 'compaction' in updates ? updates.compaction : agent.compaction;
 
   if (nextPrivate != null) {
     normalizedUpdates.private = normalizePrivateConfig(nextPrivate);
     normalizedUpdates.worker_scope = undefined;
+  }
+
+  if ('compaction' in updates || nextCompaction != null) {
+    normalizedUpdates.compaction = normalizeCompactionConfig(nextCompaction);
   }
 
   return normalizedUpdates;

@@ -104,6 +104,7 @@ optional-dependencies.clickup = [
   "requests",
 ]
 optional-dependencies.coding = [  ]
+optional-dependencies.compact_context = [  ]
 optional-dependencies.composio = [
   "composio-agno",
 ]

@@ -10,12 +10,12 @@ import nio
 import pytest
 
 from mindroom.ai import (
-    PartialReplyKind,
     _build_prompt_with_unseen,
     _classify_partial_reply,
     _clean_partial_reply_body,
     _get_unseen_event_ids_for_metadata,
     _get_unseen_messages,
+    _PartialReplyKind,
 )
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -87,7 +87,7 @@ class TestClassifyPartialReply:
                 {"body": "Partial answer", "stream_status": STREAM_STATUS_CANCELLED},
                 active_event_ids=set(),
             )
-            is PartialReplyKind.INTERRUPTED
+            is _PartialReplyKind.INTERRUPTED
         )
 
     def test_error_metadata_is_interrupted(self) -> None:
@@ -97,7 +97,7 @@ class TestClassifyPartialReply:
                 {"body": "Partial answer", "stream_status": STREAM_STATUS_ERROR},
                 active_event_ids=set(),
             )
-            is PartialReplyKind.INTERRUPTED
+            is _PartialReplyKind.INTERRUPTED
         )
 
     def test_pending_metadata_is_in_progress(self) -> None:
@@ -107,7 +107,7 @@ class TestClassifyPartialReply:
                 {"body": "Thinking...", "stream_status": STREAM_STATUS_PENDING},
                 active_event_ids=set(),
             )
-            is PartialReplyKind.IN_PROGRESS
+            is _PartialReplyKind.IN_PROGRESS
         )
 
     def test_streaming_metadata_is_in_progress(self) -> None:
@@ -117,7 +117,7 @@ class TestClassifyPartialReply:
                 {"body": "Partial answer ⋯", "stream_status": STREAM_STATUS_STREAMING},
                 active_event_ids=set(),
             )
-            is PartialReplyKind.IN_PROGRESS
+            is _PartialReplyKind.IN_PROGRESS
         )
 
     def test_streaming_metadata_with_live_event_id_is_in_progress_even_when_old(self) -> None:
@@ -132,7 +132,7 @@ class TestClassifyPartialReply:
                 },
                 active_event_ids={"e1"},
             )
-            is PartialReplyKind.IN_PROGRESS
+            is _PartialReplyKind.IN_PROGRESS
         )
 
     def test_streaming_metadata_without_live_event_id_is_interrupted_immediately(self) -> None:
@@ -147,7 +147,7 @@ class TestClassifyPartialReply:
                 },
                 active_event_ids=set(),
             )
-            is PartialReplyKind.INTERRUPTED
+            is _PartialReplyKind.INTERRUPTED
         )
 
     def test_completed_metadata_wins_over_trailing_marker(self) -> None:
@@ -167,7 +167,7 @@ class TestClassifyPartialReply:
                 {"body": "Legacy partial ⋯"},
                 active_event_ids=set(),
             )
-            is PartialReplyKind.IN_PROGRESS
+            is _PartialReplyKind.IN_PROGRESS
         )
 
     @pytest.mark.parametrize(
@@ -187,7 +187,7 @@ class TestClassifyPartialReply:
                 {"body": body},
                 active_event_ids=set(),
             )
-            is PartialReplyKind.INTERRUPTED
+            is _PartialReplyKind.INTERRUPTED
         )
 
     def test_no_metadata_and_no_marker_is_not_partial(self) -> None:
@@ -248,7 +248,7 @@ class TestUnseenMessagesPartialReplies:
                 {"sender": "You (reply still streaming)", "body": "Live draft"},
                 {"sender": "You (interrupted reply draft)", "body": "Interrupted draft"},
             ],
-            partial_reply_kinds={PartialReplyKind.IN_PROGRESS, PartialReplyKind.INTERRUPTED},
+            partial_reply_kinds={_PartialReplyKind.IN_PROGRESS, _PartialReplyKind.INTERRUPTED},
         )
 
         assert "Some partial content from your previous response is still being delivered" in prompt
@@ -282,10 +282,10 @@ class TestUnseenMessagesPartialReplies:
             active_event_ids={"e2"},
         )
 
-        assert partial_reply_kinds == {PartialReplyKind.IN_PROGRESS}
+        assert partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}
         assert len(unseen) == 1
         assert unseen[0]["body"] == "Partial reply"
-        assert unseen[0]["partial_reply_kind"] is PartialReplyKind.IN_PROGRESS
+        assert unseen[0]["partial_reply_kind"] is _PartialReplyKind.IN_PROGRESS
 
         prompt = _build_prompt_with_unseen("Answer the new question.", unseen, partial_reply_kinds=partial_reply_kinds)
         assert "Your previous response is still being delivered." in prompt
@@ -318,10 +318,10 @@ class TestUnseenMessagesPartialReplies:
             active_event_ids=set(),
         )
 
-        assert partial_reply_kinds == {PartialReplyKind.INTERRUPTED}
+        assert partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}
         assert len(unseen) == 1
         assert unseen[0]["body"] == "Partial answer"
-        assert unseen[0]["partial_reply_kind"] is PartialReplyKind.INTERRUPTED
+        assert unseen[0]["partial_reply_kind"] is _PartialReplyKind.INTERRUPTED
 
         prompt = _build_prompt_with_unseen("Continue.", unseen, partial_reply_kinds=partial_reply_kinds)
         assert "Your previous response was interrupted before completion." in prompt
@@ -353,7 +353,7 @@ class TestUnseenMessagesPartialReplies:
         )
 
         assert [msg["event_id"] for msg in unseen] == ["e1", "e2"]
-        assert partial_reply_kinds == {PartialReplyKind.IN_PROGRESS}
+        assert partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}
         assert _get_unseen_event_ids_for_metadata(unseen) == ["e2"]
 
     def test_recent_streaming_reply_without_live_event_id_is_treated_as_interrupted(self) -> None:
@@ -382,8 +382,8 @@ class TestUnseenMessagesPartialReplies:
             active_event_ids=set(),
         )
 
-        assert partial_reply_kinds == {PartialReplyKind.INTERRUPTED}
-        assert unseen[0]["partial_reply_kind"] is PartialReplyKind.INTERRUPTED
+        assert partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}
+        assert unseen[0]["partial_reply_kind"] is _PartialReplyKind.INTERRUPTED
 
     def test_placeholder_only_self_reply_is_not_injected(self) -> None:
         """Do not inject placeholder-only self replies as meaningful unseen context."""
@@ -459,7 +459,7 @@ class TestUnseenMessagesPartialReplies:
         )
 
         assert [msg["event_id"] for msg in initial_unseen] == ["e1"]
-        assert initial_kinds == {PartialReplyKind.INTERRUPTED}
+        assert initial_kinds == {_PartialReplyKind.INTERRUPTED}
         assert _get_unseen_event_ids_for_metadata(initial_unseen) == ["e1"]
         assert repeated_unseen == []
         assert repeated_kinds == set()
@@ -509,7 +509,7 @@ class TestUnseenMessagesPartialReplies:
             active_event_ids=set(),
         )
 
-        assert updated_kinds == {PartialReplyKind.INTERRUPTED}
+        assert updated_kinds == {_PartialReplyKind.INTERRUPTED}
         assert [msg["event_id"] for msg in updated_unseen] == ["e1"]
         assert updated_unseen[0]["body"] == "Partial reply"
 

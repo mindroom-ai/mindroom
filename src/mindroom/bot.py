@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
+from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -56,6 +57,7 @@ from mindroom.matrix.identity import (
 )
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.presence import (
     build_agent_status_message,
     is_user_online,
@@ -143,6 +145,7 @@ from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import config_confirmation
 from .commands.handler import CommandEvent, CommandHandlerContext, _generate_welcome_message, handle_command
 from .commands.parsing import Command, command_parser
+from .compaction import get_or_create_lock
 from .constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -188,6 +191,7 @@ if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
     from agno.media import Image
 
+    from mindroom.compaction import CompactionOutcome
     from mindroom.config.main import Config
     from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.orchestrator import MultiAgentOrchestrator
@@ -474,6 +478,10 @@ class AgentBot:
     _first_sync_done: bool = field(default=False, init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches, init=False)
+    _response_lifecycle_locks: dict[tuple[str, str | None], asyncio.Lock] = field(
+        default_factory=dict,
+        init=False,
+    )
     in_flight_response_count: int = field(default=0, init=False)
 
     @property
@@ -498,6 +506,10 @@ class AgentBot:
         if self.agent_name in self.config.teams:
             return "team"
         return "agent"
+
+    def _response_lifecycle_lock(self, room_id: str, thread_id: str | None) -> asyncio.Lock:
+        """Return the per-thread lock that serializes one response lifecycle."""
+        return get_or_create_lock(self._response_lifecycle_locks, (room_id, thread_id))
 
     def _hook_base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
         """Return shared base fields for hook context construction."""
@@ -2205,6 +2217,7 @@ class AgentBot:
         thread_id: str | None,
         reply_to_event_id: str | None,
         user_id: str | None,
+        session_id: str | None = None,
         *,
         agent_name: str | None = None,
         attachment_ids: list[str] | None = None,
@@ -2222,6 +2235,7 @@ class AgentBot:
             client=self.client,
             config=self.config,
             runtime_paths=self.runtime_paths,
+            session_id=session_id,
             room=self._cached_room(room_id),
             reply_to_event_id=reply_to_event_id,
             storage_path=self.storage_path,
@@ -2443,7 +2457,7 @@ class AgentBot:
         )
         await emit(self.hook_registry, EVENT_MESSAGE_AFTER_RESPONSE, context)
 
-    async def _generate_team_response_helper(  # noqa: C901, PLR0915
+    async def _generate_team_response_helper(
         self,
         room_id: str,
         reply_to_event_id: str,
@@ -2464,6 +2478,42 @@ class AgentBot:
 
         Returns the initial message ID if created, None otherwise.
         """
+        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id)
+        async with lifecycle_lock:
+            return await self._generate_team_response_helper_locked(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                team_agents=team_agents,
+                team_mode=team_mode,
+                thread_history=thread_history,
+                requester_user_id=requester_user_id,
+                existing_event_id=existing_event_id,
+                payload=payload,
+                response_envelope=response_envelope,
+                enrichment_digest=enrichment_digest,
+                correlation_id=correlation_id,
+                reason_prefix=reason_prefix,
+            )
+
+    async def _generate_team_response_helper_locked(  # noqa: C901, PLR0915
+        self,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        team_agents: list[MatrixID],
+        team_mode: str,
+        thread_history: list[dict],
+        requester_user_id: str,
+        existing_event_id: str | None = None,
+        *,
+        payload: _DispatchPayload,
+        response_envelope: MessageEnvelope | None = None,
+        enrichment_digest: str | None = None,
+        correlation_id: str | None = None,
+        reason_prefix: str = "Team request",
+    ) -> str | None:
+        """Generate a team response once the per-thread lifecycle lock is held."""
         assert self.client is not None
         prompt, thread_history = self._timestamp_model_user_context(
             payload.model_prompt or payload.prompt,
@@ -2522,6 +2572,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
+            session_id=session_id,
             attachment_ids=payload.attachment_ids,
             correlation_id=resolved_correlation_id,
         )
@@ -2541,6 +2592,7 @@ class AgentBot:
         # Create async function for team response generation that takes message_id as parameter
         client = self.client
         delivery_result: _ResponseDispatchResult | None = None
+        compaction_outcomes: list[CompactionOutcome] = []
 
         async def generate_team_response(message_id: str | None) -> None:
             nonlocal delivery_result
@@ -2569,6 +2621,7 @@ class AgentBot:
                             run_id=response_run_id,
                             run_id_callback=_note_attempt_run_id,
                             user_id=requester_user_id,
+                            compaction_outcomes_collector=compaction_outcomes,
                             reason_prefix=reason_prefix,
                         )
 
@@ -2671,6 +2724,7 @@ class AgentBot:
                                 run_id=response_run_id,
                                 run_id_callback=_note_attempt_run_id,
                                 user_id=requester_user_id,
+                                compaction_outcomes_collector=compaction_outcomes,
                                 reason_prefix=reason_prefix,
                             )
                 except asyncio.CancelledError:
@@ -2746,6 +2800,15 @@ class AgentBot:
                 room_id,
                 delivery_result.event_id,
                 delivery_result.options_list,
+            )
+
+        if delivery_result is not None:
+            await self._dispatch_compaction_notices(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                main_response_event_id=delivery_result.event_id,
+                thread_id=thread_id,
+                compaction_outcomes=compaction_outcomes,
             )
 
         if delivery_result is not None and delivery_result.event_id is not None:
@@ -2909,6 +2972,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
+            session_id=session_id,
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
         )
@@ -2924,6 +2988,7 @@ class AgentBot:
             execution_identity,
         )
         tool_trace: list[ToolTraceEntry] = []
+        compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(room_id)
 
@@ -2960,6 +3025,7 @@ class AgentBot:
                         tool_trace_collector=tool_trace,
                         run_metadata_collector=run_metadata_content,
                         execution_identity=execution_identity,
+                        compaction_outcomes_collector=compaction_outcomes,
                         enrichment_digest=enrichment_digest,
                     )
         except asyncio.CancelledError:
@@ -3020,6 +3086,14 @@ class AgentBot:
             )
             await interactive.add_reaction_buttons(self.client, room_id, delivery.event_id, delivery.options_list)
 
+        await self._dispatch_compaction_notices(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            main_response_event_id=delivery.event_id,
+            thread_id=thread_id,
+            compaction_outcomes=compaction_outcomes,
+        )
+
         return delivery
 
     async def _send_skill_command_response(
@@ -3035,6 +3109,32 @@ class AgentBot:
         reply_to_event: nio.RoomMessageText | None = None,
     ) -> str | None:
         """Send a skill command response using a specific agent."""
+        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id)
+        async with lifecycle_lock:
+            return await self._send_skill_command_response_locked(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                thread_history=thread_history,
+                prompt=prompt,
+                agent_name=agent_name,
+                user_id=user_id,
+                reply_to_event=reply_to_event,
+            )
+
+    async def _send_skill_command_response_locked(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        thread_history: list[dict],
+        prompt: str,
+        agent_name: str,
+        user_id: str | None,
+        reply_to_event: nio.RoomMessageText | None = None,
+    ) -> str | None:
+        """Send a skill command response after acquiring the per-thread lock."""
         assert self.client is not None
         if not prompt.strip():
             return None
@@ -3056,6 +3156,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
+            session_id=session_id,
             agent_name=agent_name,
         )
         execution_identity = self._build_tool_execution_identity(
@@ -3301,7 +3402,7 @@ class AgentBot:
             options_list=interactive_response.options_list,
         )
 
-    async def _process_and_respond_streaming(  # noqa: C901
+    async def _process_and_respond_streaming(  # noqa: C901, PLR0915
         self,
         room_id: str,
         prompt: str,
@@ -3341,6 +3442,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
+            session_id=session_id,
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
         )
@@ -3355,6 +3457,7 @@ class AgentBot:
             [self.agent_name],
             execution_identity,
         )
+        compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(room_id)
         tool_trace: list[ToolTraceEntry] = []
@@ -3391,6 +3494,7 @@ class AgentBot:
                         show_tool_calls=self.show_tool_calls,
                         run_metadata_collector=run_metadata_content,
                         execution_identity=execution_identity,
+                        compaction_outcomes_collector=compaction_outcomes,
                         enrichment_digest=enrichment_digest,
                     )
                     response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
@@ -3533,6 +3637,14 @@ class AgentBot:
                 delivery.options_list,
             )
 
+        await self._dispatch_compaction_notices(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            main_response_event_id=delivery.event_id,
+            thread_id=thread_id,
+            compaction_outcomes=compaction_outcomes,
+        )
+
         return delivery
 
     def _resolve_response_event_id(
@@ -3585,6 +3697,41 @@ class AgentBot:
             Event ID of the response message, or None if failed
 
         """
+        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id)
+        async with lifecycle_lock:
+            return await self._generate_response_locked(
+                room_id=room_id,
+                prompt=prompt,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                thread_history=thread_history,
+                existing_event_id=existing_event_id,
+                user_id=user_id,
+                media=media,
+                attachment_ids=attachment_ids,
+                model_prompt=model_prompt,
+                enrichment_digest=enrichment_digest,
+                response_envelope=response_envelope,
+                correlation_id=correlation_id,
+            )
+
+    async def _generate_response_locked(
+        self,
+        room_id: str,
+        prompt: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        thread_history: list[dict],
+        existing_event_id: str | None = None,
+        user_id: str | None = None,
+        media: MediaInputs | None = None,
+        attachment_ids: list[str] | None = None,
+        model_prompt: str | None = None,
+        enrichment_digest: str | None = None,
+        response_envelope: MessageEnvelope | None = None,
+        correlation_id: str | None = None,
+    ) -> str | None:
+        """Generate one agent response after acquiring the per-thread lock."""
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             self._prepare_memory_and_model_context(
@@ -3837,6 +3984,75 @@ class AgentBot:
             self.logger.info("Sent response", event_id=event_id, room_id=room_id)
             return event_id
         self.logger.error("Failed to send response to room", room_id=room_id)
+        return None
+
+    async def _dispatch_compaction_notices(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        main_response_event_id: str | None,
+        thread_id: str | None,
+        compaction_outcomes: list[CompactionOutcome],
+    ) -> None:
+        """Send compaction notices for all outcomes that have notify=True."""
+        if main_response_event_id is None:
+            return
+        for outcome in compaction_outcomes:
+            if outcome.notify:
+                await self._send_compaction_notice(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    main_response_event_id=main_response_event_id,
+                    thread_id=thread_id,
+                    outcome=outcome,
+                )
+
+    async def _send_compaction_notice(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        main_response_event_id: str,
+        thread_id: str | None,
+        outcome: CompactionOutcome,
+    ) -> str | None:
+        """Send a compaction notice without mention parsing side effects."""
+        if self.client is None:
+            return None
+
+        summary_line = (
+            "Conversation compacted "
+            f"(~{outcome.before_tokens:,} -> ~{outcome.after_tokens:,} / {outcome.window_tokens:,} tokens, "
+            f"{outcome.compacted_run_count} runs summarized)."
+        )
+        formatted_body = f"<em>{html_escape(summary_line)}</em>"
+        effective_thread_id = self._resolve_reply_thread_id(
+            thread_id,
+            reply_to_event_id,
+            room_id=room_id,
+        )
+        content = build_message_content(
+            summary_line,
+            formatted_body=formatted_body,
+            thread_event_id=effective_thread_id,
+            reply_to_event_id=main_response_event_id,
+            extra_content={
+                "msgtype": "m.notice",
+                constants.COMPACTION_NOTICE_CONTENT_KEY: outcome.to_notice_metadata(),
+                "com.mindroom.skip_mentions": True,
+            },
+        )
+        event_id = await send_message(self.client, room_id, content)
+        if event_id:
+            self.logger.info(
+                "Sent compaction notice",
+                event_id=event_id,
+                room_id=room_id,
+                summary_model=outcome.summary_model,
+            )
+            return event_id
+        self.logger.error("Failed to send compaction notice", room_id=room_id)
         return None
 
     async def _hook_send_message(

@@ -15,7 +15,12 @@ from pydantic import (
 
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.memory import MemoryBackend  # noqa: TC001
-from mindroom.config.models import AgentLearningMode, ToolConfigEntry, validate_unique_tool_entries
+from mindroom.config.models import (
+    AgentLearningMode,
+    CompactionOverrideConfig,
+    ToolConfigEntry,
+    validate_unique_tool_entries,
+)
 from mindroom.tool_system.metadata import TOOL_METADATA, normalize_authored_tool_overrides
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
@@ -188,6 +193,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Memory backend override for this agent ('mem0' or 'file'); inherits memory.backend when omitted",
     )
+    compaction: CompactionOverrideConfig | None = Field(
+        default=None,
+        description="Per-agent auto-compaction overrides",
+    )
     private: AgentPrivateConfig | None = Field(
         default=None,
         description="Optional requester-private state materialized per private.per partition",
@@ -219,10 +228,6 @@ class AgentConfig(BaseModel):
     compress_tool_results: bool | None = Field(
         default=None,
         description="Compress tool results in history to save context (per-agent override)",
-    )
-    enable_session_summaries: bool | None = Field(
-        default=None,
-        description="Enable Agno session summaries for conversation compaction (per-agent override)",
     )
     max_tool_calls_from_history: int | None = Field(
         default=None,

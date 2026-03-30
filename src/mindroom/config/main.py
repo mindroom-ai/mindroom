@@ -25,7 +25,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
 from mindroom.config.memory import MemoryBackend, MemoryConfig
-from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig, ToolConfigEntry
+from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
@@ -631,6 +631,19 @@ class Config(BaseModel):
             msg = f"Unknown agent: {agent_name}. Available agents: {available}"
             raise ValueError(msg)
         return self.agents[agent_name]
+
+    def get_agent_compaction_config(self, agent_name: str) -> CompactionConfig:
+        """Return the effective automatic compaction config for one agent."""
+        base = self.defaults.compaction
+        merged = base.model_dump() if base is not None else {}
+        agent_override = self.get_agent(agent_name).compaction
+        if agent_override is not None:
+            merged.update(agent_override.model_dump(exclude_none=True))
+        return CompactionConfig.model_validate(merged)
+
+    def has_authored_agent_compaction_config(self, agent_name: str) -> bool:
+        """Return whether auto-compaction was explicitly configured for one agent."""
+        return self.defaults.compaction is not None or self.get_agent(agent_name).compaction is not None
 
     def get_agent_worker_tools(
         self,

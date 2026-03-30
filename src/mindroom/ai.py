@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import importlib
-from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
@@ -33,12 +32,19 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.utils.message import filter_tool_calls
 
-from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
+from mindroom.agents import create_agent, create_session_storage, get_agent_session, get_seen_event_ids
+from mindroom.compaction import (
+    CompactionOutcome,
+    clear_pending_compaction,
+)
+from mindroom.compaction_runtime import (
+    apply_manual_compaction_if_queued,
+    prepare_agent_history_for_run,
+)
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
+    COMPACTION_NOTICE_CONTENT_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -65,15 +71,14 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection
     from pathlib import Path
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
-    from agno.models.message import Message
-    from agno.session.agent import AgentSession
 
+    from mindroom.compaction import PendingCompaction
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.tool_system.events import ToolTraceEntry
@@ -106,7 +111,7 @@ _PARTIAL_REPLY_SENDER_LABELS = {
 }
 
 
-class PartialReplyKind(str, Enum):
+class _PartialReplyKind(str, Enum):
     """Classification for a self-authored partial reply preserved in prompt context."""
 
     IN_PROGRESS = "in_progress"
@@ -157,238 +162,6 @@ class _StreamingAttemptState:
 def _canonical_provider(provider: str) -> str:
     """Return normalized provider key for model dispatch."""
     return provider.strip().lower().replace("-", "_")
-
-
-def _estimate_message_media_chars(message: Message) -> int:
-    media_values = (
-        message.images,
-        message.audio,
-        message.videos,
-        message.files,
-        message.audio_output,
-        message.image_output,
-        message.video_output,
-        message.file_output,
-    )
-    media_chars = 0
-    for media_value in media_values:
-        if media_value:
-            media_chars += len(str(media_value))
-    return media_chars
-
-
-def _estimate_messages_tokens(messages: Sequence[Message] | None) -> int:
-    """Estimate token count for messages using chars / 4 approximation."""
-    if not messages:
-        return 0
-    total_chars = 0
-    for msg in messages:
-        content = msg.compressed_content or msg.content
-        if isinstance(content, str):
-            total_chars += len(content)
-        elif isinstance(content, list):
-            for part in content:
-                total_chars += len(str(part))
-        elif content is not None:
-            total_chars += len(str(content))
-        tool_calls = msg.tool_calls
-        if tool_calls:
-            total_chars += len(str(tool_calls))
-        total_chars += _estimate_message_media_chars(msg)
-    return total_chars // 4
-
-
-def _estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
-    """Estimate tokens for the system prompt and current user message (chars / 4)."""
-    static_chars = len(agent.role or "")
-    instructions = agent.instructions
-    if isinstance(instructions, str):
-        static_chars += len(instructions)
-    elif isinstance(instructions, list):
-        for instruction in instructions:
-            static_chars += len(str(instruction))
-    static_chars += len(full_prompt)
-    return static_chars // 4
-
-
-def _get_history_skip_roles(agent: Agent) -> list[str] | None:
-    """Return history skip_roles matching Agno's run-message construction."""
-    system_role = agent.system_message_role
-    if isinstance(system_role, str) and system_role not in {"user", "assistant", "tool"}:
-        return [system_role]
-    return None
-
-
-def _get_team_scope(agent: Agent) -> tuple[str | None, str | None]:
-    """Return (team_id, agent_id) only when agent is actually in a team scope."""
-    team_id = agent.team_id
-    if not isinstance(team_id, str) or not team_id:
-        return None, None
-    agent_id = agent.id
-    return team_id, agent_id if isinstance(agent_id, str) and agent_id else None
-
-
-def _get_replayable_runs(session: AgentSession, agent: Agent) -> list[RunOutput | TeamRunOutput]:
-    """Get runs eligible for history replay, matching Agno session filtering."""
-    runs = [run for run in session.runs or [] if isinstance(run, (RunOutput, TeamRunOutput))]
-
-    team_id, agent_id = _get_team_scope(agent)
-    if team_id is not None:
-        runs = [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == team_id]
-    elif agent_id:
-        runs = [run for run in runs if isinstance(run, RunOutput) and run.agent_id == agent_id]
-
-    skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
-    return [run for run in runs if run.parent_run_id is None and run.status not in skip_statuses]
-
-
-def _estimate_history_tokens(session: AgentSession, agent: Agent, run_limit: int | None) -> int:
-    """Estimate tokens for replayed history messages using Agno's get_messages path."""
-    team_id, agent_id = _get_team_scope(agent)
-    messages = session.get_messages(
-        agent_id=agent_id,
-        team_id=team_id,
-        last_n_runs=run_limit,
-        limit=None,
-        skip_roles=_get_history_skip_roles(agent),
-    )
-    max_tool_calls_from_history = agent.max_tool_calls_from_history
-    if max_tool_calls_from_history is None:
-        return _estimate_messages_tokens(messages)
-    history_copy = [deepcopy(msg) for msg in messages]
-    filter_tool_calls(history_copy, max_tool_calls_from_history)
-    return _estimate_messages_tokens(history_copy)
-
-
-def _find_fitting_run_limit(session: AgentSession, agent: Agent, max_runs: int, budget: int) -> int:
-    """Find the largest run limit whose replayed history stays within budget."""
-    low = 0
-    high = max_runs
-    best = 0
-
-    while low <= high:
-        mid = (low + high) // 2
-        tokens = 0 if mid == 0 else _estimate_history_tokens(session, agent, mid)
-        if tokens <= budget:
-            best = mid
-            low = mid + 1
-        else:
-            high = mid - 1
-
-    return best
-
-
-def _disable_history_for_run(
-    agent: Agent,
-    *,
-    reason: str,
-    agent_name: str,
-    context_window: int,
-    threshold: int,
-) -> None:
-    """Disable history context for this run when no safe history budget remains."""
-    if not agent.add_history_to_context:
-        return
-    agent.add_history_to_context = False
-    logger.warning(
-        "Context window limit approaching, disabling history for this run",
-        agent=agent_name,
-        reason=reason,
-        context_window=context_window,
-        threshold=threshold,
-    )
-
-
-def _apply_context_window_limit(
-    agent: Agent,
-    agent_name: str,
-    config: Config,
-    full_prompt: str,
-    session_id: str | None,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-    session: AgentSession | None = None,
-) -> None:
-    """Dynamically reduce ``agent.num_history_runs`` when the estimated context approaches the model's context window.
-
-    Uses chars/4 token estimation and an 80 % threshold to leave headroom
-    for the model response and tool definitions.  Only applies to run-based
-    history limits (skipped when ``num_history_messages`` is set).
-
-    Pass a pre-loaded *session* to avoid a redundant SQLite read when the
-    caller already loaded it.
-    """
-    if agent.num_history_messages is not None or not session_id:
-        return
-
-    model_name = config.get_entity_model_name(agent_name)
-    model_config = config.models.get(model_name)
-    if model_config is None or model_config.context_window is None:
-        return
-
-    context_window = model_config.context_window
-    threshold = int(context_window * 0.8)
-    static_tokens = _estimate_static_tokens(agent, full_prompt)
-
-    # Use pre-loaded session or load from storage
-    if session is None:
-        storage = create_session_storage(
-            agent_name,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        )
-        session = _get_agent_session(storage, session_id)
-    if not session or not session.runs:
-        return
-
-    replayable_runs = _get_replayable_runs(session, agent)
-    if not replayable_runs:
-        return
-
-    # Determine how many runs the agent currently considers
-    current_limit = agent.num_history_runs
-    max_considered_runs = (
-        min(current_limit, len(replayable_runs))
-        if current_limit is not None and current_limit > 0
-        else len(replayable_runs)
-    )
-    initial_run_limit = max_considered_runs if current_limit is not None and current_limit > 0 else None
-    history_tokens = _estimate_history_tokens(session, agent, initial_run_limit)
-    total_tokens = static_tokens + history_tokens
-    if total_tokens <= threshold:
-        return
-
-    original = current_limit if current_limit is not None else len(replayable_runs)
-    budget = threshold - static_tokens
-    if budget <= 0:
-        new_limit = 0
-        reason = "no_history_budget"
-    else:
-        new_limit = _find_fitting_run_limit(session, agent, max_considered_runs, budget)
-        reason = "history_exceeds_budget"
-
-    if new_limit == 0:
-        _disable_history_for_run(
-            agent,
-            reason=reason,
-            agent_name=agent_name,
-            context_window=context_window,
-            threshold=threshold,
-        )
-        return
-
-    if new_limit < original:
-        agent.num_history_runs = new_limit
-        logger.warning(
-            "Context window limit approaching, reducing history",
-            agent=agent_name,
-            original_runs=original,
-            reduced_runs=new_limit,
-            estimated_tokens=total_tokens,
-            context_window=context_window,
-            threshold=threshold,
-        )
 
 
 def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = True) -> str:
@@ -723,28 +496,28 @@ def _classify_partial_reply(
     msg: dict[str, Any],
     *,
     active_event_ids: Collection[str],
-) -> PartialReplyKind | None:
+) -> _PartialReplyKind | None:
     """Classify a self-authored partial reply from persisted stream metadata first."""
     status = msg.get("stream_status")
     if status == STREAM_STATUS_COMPLETED:
         return None
 
-    partial_kind: PartialReplyKind | None = None
+    partial_kind: _PartialReplyKind | None = None
     if status in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR}:
-        partial_kind = PartialReplyKind.INTERRUPTED
+        partial_kind = _PartialReplyKind.INTERRUPTED
     elif status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
         event_id = msg.get("event_id")
         if isinstance(event_id, str):
-            return PartialReplyKind.IN_PROGRESS if event_id in active_event_ids else PartialReplyKind.INTERRUPTED
-        partial_kind = PartialReplyKind.IN_PROGRESS
+            return _PartialReplyKind.IN_PROGRESS if event_id in active_event_ids else _PartialReplyKind.INTERRUPTED
+        partial_kind = _PartialReplyKind.IN_PROGRESS
     else:
         body = msg.get("body", "")
         if not isinstance(body, str):
             return None
         if is_interrupted_partial_reply(body):
-            partial_kind = PartialReplyKind.INTERRUPTED
+            partial_kind = _PartialReplyKind.INTERRUPTED
         elif is_in_progress_message(body):
-            partial_kind = PartialReplyKind.IN_PROGRESS
+            partial_kind = _PartialReplyKind.IN_PROGRESS
 
     return partial_kind
 
@@ -754,13 +527,13 @@ def _clean_partial_reply_body(body: str) -> str:
     return clean_partial_reply_text(body)
 
 
-def _build_unseen_messages_header(partial_reply_kinds: set[PartialReplyKind]) -> str:
+def _build_unseen_messages_header(partial_reply_kinds: set[_PartialReplyKind]) -> str:
     """Choose the unseen-context header for the partial-reply mix present."""
     if not partial_reply_kinds:
         return _DEFAULT_UNSEEN_MESSAGES_HEADER
-    if partial_reply_kinds == {PartialReplyKind.INTERRUPTED}:
+    if partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}:
         return _INTERRUPTED_PARTIAL_REPLY_HEADER
-    if partial_reply_kinds == {PartialReplyKind.IN_PROGRESS}:
+    if partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}:
         return _IN_PROGRESS_PARTIAL_REPLY_HEADER
     return _MIXED_PARTIAL_REPLY_HEADER
 
@@ -772,7 +545,7 @@ def _get_unseen_event_ids_for_metadata(unseen_messages: list[dict[str, Any]]) ->
         event_id = msg.get("event_id")
         if not isinstance(event_id, str):
             continue
-        if msg.get("partial_reply_kind") is PartialReplyKind.IN_PROGRESS:
+        if msg.get("partial_reply_kind") is _PartialReplyKind.IN_PROGRESS:
             continue
         event_ids.append(event_id)
     return event_ids
@@ -787,7 +560,7 @@ def _get_unseen_messages(
     current_event_id: str | None,
     *,
     active_event_ids: Collection[str],
-) -> tuple[list[dict[str, Any]], set[PartialReplyKind]]:
+) -> tuple[list[dict[str, Any]], set[_PartialReplyKind]]:
     """Filter thread_history to messages not yet consumed by this agent.
 
     Excludes:
@@ -801,15 +574,18 @@ def _get_unseen_messages(
     matrix_id = config.get_ids(runtime_paths).get(agent_name)
     agent_sender_id = matrix_id.full_id if matrix_id else None
     unseen: list[dict[str, Any]] = []
-    partial_reply_kinds: set[PartialReplyKind] = set()
+    partial_reply_kinds: set[_PartialReplyKind] = set()
     for msg in thread_history:
         event_id = msg.get("event_id")
         sender = msg.get("sender")
+        content = msg.get("content")
         # Skip already-seen messages
         if event_id and event_id in seen_event_ids:
             continue
         # Skip the current triggering message
         if current_event_id and event_id == current_event_id:
+            continue
+        if isinstance(content, dict) and COMPACTION_NOTICE_CONTENT_KEY in content:
             continue
         if agent_sender_id and sender == agent_sender_id:
             partial_kind = _classify_partial_reply(
@@ -842,7 +618,7 @@ def _build_prompt_with_unseen(
     prompt: str,
     unseen_messages: list[dict[str, Any]],
     *,
-    partial_reply_kinds: set[PartialReplyKind] | None,
+    partial_reply_kinds: set[_PartialReplyKind] | None,
 ) -> str:
     """Prepend unseen messages from other participants to the prompt."""
     if not unseen_messages:
@@ -999,21 +775,24 @@ async def _cached_agent_run(
     run_id_callback: Callable[[str], None] | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    pending_compaction_buffer: list[PendingCompaction] | None = None,
     enrichment_digest: str | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
     media_inputs = media or MediaInputs()
     storage_path = runtime_paths.storage_root
-    # Skip cache when media is present (large bytes, unlikely to repeat)
-    # or when Agno history is enabled (prompt can be identical but replayed history differs)
+    # Skip cache when media is present (large bytes, unlikely to repeat),
+    # when Agno history is enabled (prompt can be identical but replayed history differs),
+    # or when session summary replay is active (summary state is not in the cache key)
     cache = (
         None
-        if (media_inputs.has_any() or agent.add_history_to_context)
+        if (media_inputs.has_any() or agent.add_history_to_context or agent.add_session_summary_to_context)
         else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
     )
     if cache is None:
         _note_attempt_run_id(run_id_callback, run_id)
-        return await agent.arun(
+        response = await agent.arun(
             full_prompt,
             session_id=session_id,
             user_id=user_id,
@@ -1024,6 +803,11 @@ async def _cached_agent_run(
             videos=media_inputs.videos,
             metadata=metadata,
         )
+        await apply_manual_compaction_if_queued(
+            pending_compaction_buffer=pending_compaction_buffer,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+        )
+        return response
 
     model = agent.model
     assert model is not None
@@ -1040,6 +824,10 @@ async def _cached_agent_run(
         user_id=user_id,
         run_id=run_id,
         metadata=metadata,
+    )
+    await apply_manual_compaction_if_queued(
+        pending_compaction_buffer=pending_compaction_buffer,
+        compaction_outcomes_collector=compaction_outcomes_collector,
     )
 
     if response.status not in {RunStatus.cancelled, RunStatus.error}:
@@ -1061,6 +849,9 @@ async def _prepare_agent_and_prompt(
     reply_to_event_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
     execution_identity: ToolExecutionIdentity | None = None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    pending_compaction_buffer: list[PendingCompaction] | None = None,
+    delegation_depth: int = 0,
 ) -> tuple[Agent, str, list[str]]:
     """Prepare agent and full prompt for AI processing.
 
@@ -1082,18 +873,18 @@ async def _prepare_agent_and_prompt(
 
     unseen_event_ids: list[str] = []
 
-    # Check whether Agno already has prior runs for this session.
+    storage = None
     session = None
     has_prior_runs = False
-    if session_id and thread_history:
+    if session_id:
         storage = create_session_storage(
             agent_name,
             config,
             runtime_paths,
             execution_identity=execution_identity,
         )
-        session = _get_agent_session(storage, session_id)
-        has_prior_runs = session is not None and bool(session.runs)
+        session = get_agent_session(storage, session_id)
+        has_prior_runs = session is not None and (bool(session.runs) or session.summary is not None)
 
     if reply_to_event_id and thread_history:
         # Matrix bot path: reuse unseen-message extraction even on first turn or
@@ -1130,15 +921,19 @@ async def _prepare_agent_and_prompt(
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
         execution_identity=execution_identity,
+        pending_compaction_buffer=pending_compaction_buffer,
+        delegation_depth=delegation_depth,
     )
-    _apply_context_window_limit(
-        agent,
-        agent_name,
-        config,
-        full_prompt,
-        session_id,
-        runtime_paths,
+    await prepare_agent_history_for_run(
+        agent=agent,
+        agent_name=agent_name,
+        full_prompt=full_prompt,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
         execution_identity=execution_identity,
+        compaction_outcomes_collector=compaction_outcomes_collector,
+        storage=storage,
         session=session,
     )
     return agent, full_prompt, unseen_event_ids
@@ -1164,7 +959,9 @@ async def ai_response(  # noqa: C901
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     enrichment_digest: str | None = None,
+    delegation_depth: int = 0,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -1196,7 +993,11 @@ async def ai_response(  # noqa: C901
             run/model/token metadata for Matrix message content.
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
+        compaction_outcomes_collector: Optional list that receives completed
+            compaction outcomes from auto-compaction and manual `compact_context`
+            tool calls during this run.
         enrichment_digest: Optional digest of hook-provided enrichment used to vary the local cache key.
+        delegation_depth: Current nested delegation depth for delegated-agent runs.
 
     Returns:
         Agent response string
@@ -1204,8 +1005,8 @@ async def ai_response(  # noqa: C901
     """
     logger.info("AI request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
+    pending_compaction_buffer: list[PendingCompaction] = []
 
-    # Prepare agent and prompt - this can fail if agent creation fails (e.g., missing API key)
     try:
         agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
             agent_name,
@@ -1219,6 +1020,9 @@ async def ai_response(  # noqa: C901
             reply_to_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
             execution_identity=execution_identity,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+            pending_compaction_buffer=pending_compaction_buffer,
+            delegation_depth=delegation_depth,
         )
     except Exception as e:
         logger.exception("Error preparing agent", agent=agent_name)
@@ -1226,7 +1030,6 @@ async def ai_response(  # noqa: C901
 
     metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
-    # Execute the AI call - this can fail for network, rate limits, etc.
     response: RunOutput | None = None
     attempt_prompt = full_prompt
     attempt_media_inputs = media_inputs
@@ -1245,10 +1048,13 @@ async def ai_response(  # noqa: C901
                 run_id_callback=run_id_callback,
                 media=attempt_media_inputs,
                 metadata=metadata,
+                compaction_outcomes_collector=compaction_outcomes_collector,
+                pending_compaction_buffer=pending_compaction_buffer,
                 enrichment_digest=enrichment_digest,
             )
         except Exception as e:
             if not retried_without_inline_media and should_retry_without_inline_media(e, attempt_media_inputs):
+                clear_pending_compaction(pending_compaction_buffer)
                 logger.warning(
                     "Retrying AI response without inline media after validation error",
                     agent=agent_name,
@@ -1260,6 +1066,7 @@ async def ai_response(  # noqa: C901
                 continue
 
             logger.exception("Error generating AI response", agent=agent_name)
+            clear_pending_compaction(pending_compaction_buffer)
             return get_user_friendly_error_message(e, agent_name)
 
         if response.status == RunStatus.error:
@@ -1405,7 +1212,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     show_tool_calls: bool = True,
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     enrichment_digest: str | None = None,
+    delegation_depth: int = 0,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -1438,7 +1247,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             run/model/token metadata for Matrix message content.
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
+        compaction_outcomes_collector: Optional list that receives completed
+            compaction outcomes from auto-compaction and manual `compact_context`
+            tool calls during this run.
         enrichment_digest: Optional digest of hook-provided enrichment used to vary the local cache key.
+        delegation_depth: Current nested delegation depth for delegated-agent runs.
 
     Yields:
         Streaming chunks/events as they become available
@@ -1447,8 +1260,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     logger.info("AI streaming request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
     storage_path = runtime_paths.storage_root
+    pending_compaction_buffer: list[PendingCompaction] = []
 
-    # Prepare agent and prompt - this can fail if agent creation fails
     try:
         agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
             agent_name,
@@ -1462,6 +1275,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             reply_to_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
             execution_identity=execution_identity,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+            pending_compaction_buffer=pending_compaction_buffer,
+            delegation_depth=delegation_depth,
         )
     except Exception as e:
         logger.exception("Error preparing agent for streaming", agent=agent_name)
@@ -1470,10 +1286,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
     metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
-    # Check cache (skip when media is present or history is enabled)
+    # Check cache (skip when media is present, history is enabled, or summary replay is active)
     cache = (
         None
-        if (media_inputs.has_any() or agent.add_history_to_context)
+        if (media_inputs.has_any() or agent.add_history_to_context or agent.add_session_summary_to_context)
         else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
     )
     if cache is not None:
@@ -1541,11 +1357,13 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 log_message="Retrying streaming AI response without inline media after validation error",
                 agent_name=agent_name,
             ):
+                clear_pending_compaction(pending_compaction_buffer)
                 attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
                 attempt_media_inputs = MediaInputs()
                 attempt_run_id = _next_retry_run_id(run_id)
                 continue
             logger.exception("Error starting streaming AI response")
+            clear_pending_compaction(pending_compaction_buffer)
             yield get_user_friendly_error_message(e, agent_name)
             return
 
@@ -1558,6 +1376,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             retried_without_inline_media=retried_without_inline_media,
         ):
             yield stream_chunk
+
+        await apply_manual_compaction_if_queued(
+            pending_compaction_buffer=pending_compaction_buffer,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+        )
 
         if state.retry_requested:
             attempt_prompt = append_inline_media_fallback_prompt(full_prompt)

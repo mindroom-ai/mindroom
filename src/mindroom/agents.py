@@ -19,7 +19,7 @@ from agno.session.agent import AgentSession
 
 import mindroom.tools  # noqa: F401
 from mindroom import agent_prompts, constants
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from agno.models.base import Model
     from agno.tools.toolkit import Toolkit
 
+    from mindroom.compaction import PendingCompaction
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
@@ -395,7 +396,7 @@ def _tool_init_context_from_runtime(agent_runtime: ResolvedAgentRuntime) -> Agen
     )
 
 
-def build_agent_toolkit(
+def build_agent_toolkit(  # noqa: PLR0911
     tool_name: str,
     *,
     agent_name: str,
@@ -406,6 +407,7 @@ def build_agent_toolkit(
     tool_init_context: AgentToolInitContext,
     execution_identity: ToolExecutionIdentity | None,
     delegation_depth: int = 0,
+    pending_compaction_buffer: list[PendingCompaction] | None = None,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
@@ -458,6 +460,17 @@ def build_agent_toolkit(
         from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
 
         return SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths)
+
+    if tool_name == "compact_context":
+        from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
+
+        return CompactContextTools(
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            pending_compaction_buffer=pending_compaction_buffer,
+        )
 
     return _build_registered_agent_tool(
         tool_name,
@@ -602,7 +615,7 @@ def _create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
     return SqliteDb(db_file=str(culture_dir / f"{culture_name}.db"))
 
 
-def _get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | None:
+def get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | None:
     """Retrieve and deserialize an AgentSession from storage."""
     raw = storage.get_session(session_id, SessionType.AGENT)
     if raw is None:
@@ -616,9 +629,16 @@ def _get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | Non
 
 def get_seen_event_ids(session: AgentSession) -> set[str]:
     """Return union of all matrix_seen_event_ids from run metadata."""
-    if not session.runs:
-        return set()
     seen: set[str] = set()
+    metadata = session.metadata
+    if isinstance(metadata, dict):
+        compaction_metadata = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
+        if isinstance(compaction_metadata, dict):
+            preserved_seen_ids = compaction_metadata.get("seen_event_ids")
+            if isinstance(preserved_seen_ids, list):
+                seen.update(event_id for event_id in preserved_seen_ids if isinstance(event_id, str))
+    if not session.runs:
+        return seen
     for run in session.runs:
         if isinstance(run, RunOutput) and run.metadata:
             seen_ids = run.metadata.get("matrix_seen_event_ids")
@@ -632,7 +652,7 @@ def remove_run_by_event_id(storage: SqliteDb, session_id: str, event_id: str) ->
 
     Returns True if a run was removed.
     """
-    session = _get_agent_session(storage, session_id)
+    session = get_agent_session(storage, session_id)
     if session is None or not session.runs:
         return False
     original_len = len(session.runs)
@@ -731,6 +751,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
     delegation_depth: int = 0,
+    pending_compaction_buffer: list[PendingCompaction] | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -748,6 +769,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             support Matrix reaction-based question flows.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
+        pending_compaction_buffer: Mutable per-request collector shared with
+            the compact-context tool so deferred compaction survives child-task
+            execution and can be applied after the run is saved.
 
     Returns:
         Configured Agent instance
@@ -805,6 +829,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tool_init_context=tool_init_context,
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
+                pending_compaction_buffer=pending_compaction_buffer,
             ):
                 tools.append(prepend_tool_hook_bridge(toolkit, tool_hook_bridge))
         except (ValueError, ImportError) as exc:
@@ -953,17 +978,14 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         else defaults.compress_tool_results
     )
 
-    enable_session_summaries = (
-        agent_config.enable_session_summaries
-        if agent_config.enable_session_summaries is not None
-        else defaults.enable_session_summaries
-    )
-
     max_tool_calls_from_history = (
         agent_config.max_tool_calls_from_history
         if agent_config.max_tool_calls_from_history is not None
         else defaults.max_tool_calls_from_history
     )
+    compaction_config = config.get_agent_compaction_config(agent_name)
+    auto_compaction_enabled = config.has_authored_agent_compaction_config(agent_name) and compaction_config.enabled
+    add_session_summary_to_context = auto_compaction_enabled or "compact_context" in tool_names
 
     agent = Agent(
         name=agent_config.display_name,
@@ -981,12 +1003,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         add_history_to_context=True,
         num_history_runs=num_history_runs,
         num_history_messages=num_history_messages,
+        store_history_messages=False,
         culture_manager=culture_manager,
         add_culture_to_context=add_culture_to_context,
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
         compress_tool_results=compress_tool_results,
-        enable_session_summaries=enable_session_summaries,
+        add_session_summary_to_context=add_session_summary_to_context,
         max_tool_calls_from_history=max_tool_calls_from_history,
     )
     # Agno hardcodes num_history_runs=3 when both are None. Override after
