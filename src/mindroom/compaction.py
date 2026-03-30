@@ -143,6 +143,27 @@ class CompactionOutcome:
 
 
 @dataclass(frozen=True)
+class CompactionScope:
+    """One replay/compaction scope within a stored session."""
+
+    kind: _RunScopeKind
+    scope_id: str
+
+
+@dataclass(frozen=True)
+class ReplayState:
+    """Resolved history view for one session-wide or scoped replay calculation."""
+
+    summary: SessionSummary | None
+    last_compacted_run_id: str | None
+    requested_scope: CompactionScope | None
+    visible_scope: CompactionScope | None
+    completed_runs: list[RunOutput | TeamRunOutput]
+    scoped_runs: list[RunOutput | TeamRunOutput]
+    visible_runs: list[RunOutput | TeamRunOutput]
+
+
+@dataclass(frozen=True)
 class PendingCompaction:
     """Deferred compaction state queued during the current tool call."""
 
@@ -160,8 +181,7 @@ class PendingCompaction:
     reserve_tokens: int
     keep_recent_tokens: int
     notify: bool
-    scope_kind: _RunScopeKind | None = None
-    scope_id: str | None = None
+    scope: CompactionScope | None = None
 
 
 @dataclass(frozen=True)
@@ -274,22 +294,22 @@ def _get_top_level_completed_runs(session: AgentSession) -> list[RunOutput | Tea
     return [run for run in runs if run.parent_run_id is None and run.status not in skip_statuses]
 
 
-def _run_scope_key(run: RunOutput | TeamRunOutput) -> tuple[_RunScopeKind, str] | None:
+def _run_scope_key(run: RunOutput | TeamRunOutput) -> CompactionScope | None:
     """Return the compaction scope represented by one stored top-level run."""
     if isinstance(run, TeamRunOutput):
         team_id = run.team_id
         if isinstance(team_id, str) and team_id:
-            return ("team", team_id)
+            return CompactionScope(kind="team", scope_id=team_id)
         return None
     agent_id = run.agent_id
     if isinstance(agent_id, str) and agent_id:
-        return ("agent", agent_id)
+        return CompactionScope(kind="agent", scope_id=agent_id)
     return None
 
 
 def _get_single_run_scope(
     runs: Sequence[RunOutput | TeamRunOutput],
-) -> tuple[_RunScopeKind, str] | None:
+) -> CompactionScope | None:
     """Return the shared scope for *runs*, or ``None`` when they are mixed/unknown."""
     if not runs:
         return None
@@ -301,20 +321,140 @@ def _get_single_run_scope(
     return first_scope
 
 
+def get_agent_replay_scope(agent: Agent) -> CompactionScope | None:
+    """Return the replay scope currently addressed by one live agent."""
+    team_id, agent_id = _get_team_scope(agent)
+    if team_id is not None:
+        return CompactionScope(kind="team", scope_id=team_id)
+    direct_agent_id = agent.id
+    if isinstance(direct_agent_id, str) and direct_agent_id:
+        return CompactionScope(kind="agent", scope_id=direct_agent_id)
+    return None
+
+
+def _filter_runs_for_scope(
+    runs: Sequence[RunOutput | TeamRunOutput],
+    scope: CompactionScope | None,
+) -> list[RunOutput | TeamRunOutput]:
+    """Return only runs visible inside *scope*."""
+    if scope is None:
+        return list(runs)
+    if scope.kind == "team":
+        return [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id]
+    return [run for run in runs if isinstance(run, RunOutput) and run.agent_id == scope.scope_id]
+
+
+def resolve_replay_state(
+    session: AgentSession,
+    *,
+    scope: CompactionScope | None = None,
+) -> ReplayState:
+    """Resolve the current stored replay view for a session and optional scope."""
+    last_compacted_run_id = get_last_compacted_run_id(session)
+    completed_runs = _get_top_level_completed_runs(session)
+    scoped_runs = _filter_runs_for_scope(completed_runs, scope)
+    visible_runs = _runs_after_run_id(scoped_runs, last_compacted_run_id)
+    return ReplayState(
+        summary=session.summary,
+        last_compacted_run_id=last_compacted_run_id,
+        requested_scope=scope,
+        visible_scope=_get_single_run_scope(visible_runs),
+        completed_runs=completed_runs,
+        scoped_runs=scoped_runs,
+        visible_runs=visible_runs,
+    )
+
+
+def resolve_agent_replay_state(session: AgentSession, agent: Agent) -> ReplayState:
+    """Resolve the replay state that applies to one live agent run."""
+    return resolve_replay_state(session, scope=get_agent_replay_scope(agent))
+
+
 def get_visible_session_runs(session: AgentSession) -> list[RunOutput | TeamRunOutput]:
     """Return top-level session runs still visible after the current compaction cutoff."""
-    return _runs_after_run_id(_get_top_level_completed_runs(session), get_last_compacted_run_id(session))
+    return resolve_replay_state(session).visible_runs
 
 
 def get_replayable_runs(session: AgentSession, agent: Agent) -> list[RunOutput | TeamRunOutput]:
     """Return replayable runs still visible in prompt history for this agent."""
-    runs = _get_top_level_completed_runs(session)
-    team_id, agent_id = _get_team_scope(agent)
-    if team_id is not None:
-        runs = [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == team_id]
-    elif agent_id:
-        runs = [run for run in runs if isinstance(run, RunOutput) and run.agent_id == agent_id]
-    return _runs_after_run_id(runs, get_last_compacted_run_id(session))
+    return resolve_agent_replay_state(session, agent).visible_runs
+
+
+def _limit_replayable_runs(
+    visible_runs: Sequence[RunOutput | TeamRunOutput],
+    run_limit: int | None,
+) -> list[RunOutput | TeamRunOutput]:
+    """Return the suffix of visible runs selected for replay."""
+    if not visible_runs:
+        return []
+    visible_run_limit = len(visible_runs) if run_limit is None else min(run_limit, len(visible_runs))
+    if visible_run_limit <= 0:
+        return []
+    return list(visible_runs[-visible_run_limit:])
+
+
+def _collect_replayable_history_messages(
+    runs: Sequence[RunOutput | TeamRunOutput],
+    *,
+    skip_roles: Sequence[str] | None,
+) -> tuple[Message | None, list[Message]]:
+    """Collect history messages from *runs* while preserving Agno's system-message rules."""
+    history_messages: list[Message] = []
+    system_message: Message | None = None
+
+    for run in runs:
+        for message in run.messages or []:
+            if message.from_history:
+                continue
+            if skip_roles and message.role in skip_roles:
+                continue
+            if message.role == "system":
+                if system_message is None:
+                    system_message = message
+                continue
+            history_messages.append(message)
+
+    return system_message, history_messages
+
+
+def _apply_history_message_limit(
+    system_message: Message | None,
+    history_messages: list[Message],
+    message_limit: int | None,
+) -> list[Message]:
+    """Apply Agno-style message limiting to already-filtered history messages."""
+    if message_limit is None:
+        return ([system_message] if system_message is not None else []) + history_messages
+    if message_limit <= 0:
+        return []
+    if system_message is None:
+        limited_messages = history_messages[-message_limit:]
+    elif message_limit == 1:
+        limited_messages = [system_message]
+    else:
+        limited_messages = [system_message, *history_messages[-(message_limit - 1) :]]
+    while limited_messages and limited_messages[0].role == "tool":
+        limited_messages.pop(0)
+    return limited_messages
+
+
+def get_replayable_history_messages(
+    session: AgentSession,
+    agent: Agent,
+    run_limit: int | None,
+    *,
+    message_limit: int | None = None,
+    skip_roles: list[str] | None = None,
+) -> list[Message]:
+    """Return replayed history messages after applying scope and compaction cutoff."""
+    selected_runs = _limit_replayable_runs(get_replayable_runs(session, agent), run_limit)
+    if not selected_runs:
+        return []
+    system_message, history_messages = _collect_replayable_history_messages(
+        selected_runs,
+        skip_roles=skip_roles if skip_roles is not None else _get_history_skip_roles(agent),
+    )
+    return _apply_history_message_limit(system_message, history_messages, message_limit)
 
 
 def estimate_history_tokens(
@@ -325,20 +465,14 @@ def estimate_history_tokens(
     message_limit: int | None = None,
 ) -> int:
     """Estimate replayed history tokens using Agno's message construction path."""
-    visible_runs = get_replayable_runs(session, agent)
-    if not visible_runs:
-        return 0
-    visible_run_limit = len(visible_runs) if run_limit is None else min(run_limit, len(visible_runs))
-    if visible_run_limit <= 0:
-        return 0
-    team_id, agent_id = _get_team_scope(agent)
-    messages = session.get_messages(
-        agent_id=agent_id,
-        team_id=team_id,
-        last_n_runs=visible_run_limit,
-        limit=message_limit,
-        skip_roles=_get_history_skip_roles(agent),
+    messages = get_replayable_history_messages(
+        session,
+        agent,
+        run_limit,
+        message_limit=message_limit,
     )
+    if not messages:
+        return 0
     max_tool_calls_from_history = agent.max_tool_calls_from_history
     if max_tool_calls_from_history is None:
         return _estimate_messages_tokens(messages)
@@ -412,7 +546,7 @@ async def compact_session_now(
         if session is None or not session.runs:
             return None
 
-        before_visible_runs = get_replayable_runs(session, agent)
+        before_visible_runs = resolve_agent_replay_state(session, agent).visible_runs
         runs_to_compact, kept_visible_runs = _split_runs_for_auto_compaction(
             before_visible_runs,
             agent=agent,
@@ -508,6 +642,7 @@ async def queue_pending_compaction(
     threshold_tokens: int,
     reserve_tokens: int,
     notify: bool,
+    scope: CompactionScope | None = None,
     compaction_model_context_window: int | None = None,
     max_passes: int = _DEFAULT_MAX_COMPACTION_PASSES,
     pending_buffer: list[PendingCompaction],
@@ -521,10 +656,11 @@ async def queue_pending_compaction(
         if keep_recent_runs < 0:
             msg = "keep_recent_runs must be >= 0"
             raise ValueError(msg)
-        before_visible_runs = get_visible_session_runs(session)
+        replay_state = resolve_replay_state(session, scope=scope)
+        before_visible_runs = replay_state.visible_runs
         if len(before_visible_runs) <= keep_recent_runs:
             return None
-        run_scope = _get_single_run_scope(before_visible_runs)
+        run_scope = replay_state.visible_scope
         if run_scope is None:
             msg = "Compaction is unavailable for this session because its visible history mixes multiple run scopes."
             logger.warning(
@@ -620,8 +756,7 @@ async def queue_pending_compaction(
             reserve_tokens=reserve_tokens,
             keep_recent_tokens=kept_tokens,
             notify=notify,
-            scope_kind=run_scope[0],
-            scope_id=run_scope[1],
+            scope=run_scope,
         )
         pending_buffer.append(pending)
         return queued_outcome
@@ -651,8 +786,9 @@ async def apply_pending_compaction(
             )
             return None
 
-        before_visible_runs = get_visible_session_runs(session)
-        current_scope = _get_single_run_scope(before_visible_runs)
+        replay_state = resolve_replay_state(session, scope=pending.scope)
+        before_visible_runs = replay_state.visible_runs
+        current_scope = replay_state.visible_scope
         if current_scope is None:
             logger.warning(
                 "Pending compaction skipped: visible session history spans multiple scopes",
@@ -661,17 +797,15 @@ async def apply_pending_compaction(
                 visible_runs=len(before_visible_runs),
             )
             return None
-        if pending.scope_kind is not None and pending.scope_id is not None:
-            expected_scope = (pending.scope_kind, pending.scope_id)
-            if current_scope != expected_scope:
-                logger.warning(
-                    "Pending compaction skipped: session scope changed before apply",
-                    agent=pending.agent_name,
-                    session_id=pending.session_id,
-                    expected_scope=expected_scope,
-                    current_scope=current_scope,
-                )
-                return None
+        if pending.scope is not None and current_scope != pending.scope:
+            logger.warning(
+                "Pending compaction skipped: session scope changed before apply",
+                agent=pending.agent_name,
+                session_id=pending.session_id,
+                expected_scope=pending.scope,
+                current_scope=current_scope,
+            )
+            return None
         if not any(run.run_id == pending.last_compacted_run_id for run in before_visible_runs):
             logger.warning(
                 "Pending compaction skipped: compacted cutoff run is no longer visible",

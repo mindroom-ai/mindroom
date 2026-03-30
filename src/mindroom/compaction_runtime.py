@@ -7,7 +7,11 @@ bookkeeping that runs immediately before and after an agent execution.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from types import MethodType
+from typing import TYPE_CHECKING, Literal
+
+from agno.session.agent import AgentSession
 
 from mindroom.agents import create_session_storage, get_agent_session
 from mindroom.compaction import (
@@ -19,8 +23,8 @@ from mindroom.compaction import (
     estimate_history_tokens,
     estimate_static_tokens,
     find_fitting_run_limit,
-    get_last_compacted_run_id,
-    get_replayable_runs,
+    get_replayable_history_messages,
+    resolve_agent_replay_state,
 )
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_text_tokens
@@ -31,7 +35,8 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
     from agno.models.base import Model
-    from agno.session.agent import AgentSession
+    from agno.models.message import Message
+    from agno.run.base import RunStatus
 
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
@@ -42,6 +47,141 @@ logger = get_logger(__name__)
 
 _BOUND_AGENT_NAME_ATTR = "_mindroom_requested_agent_name"
 _BOUND_PENDING_COMPACTION_BUFFER_ATTR = "_mindroom_pending_compaction_buffer"
+_HistoryReplayMode = Literal["all", "runs", "messages"]
+
+
+@dataclass(frozen=True)
+class _HistoryReplayPlan:
+    """Effective history replay contract for one prepared run."""
+
+    source_mode: _HistoryReplayMode
+    add_history_to_context: bool
+    add_session_summary_to_context: bool
+    num_history_runs: int | None
+    num_history_messages: int | None
+
+
+def _current_history_replay_mode(agent: Agent) -> _HistoryReplayMode:
+    """Return the configured history replay mode for one live agent."""
+    if agent.num_history_messages is not None:
+        return "messages"
+    if agent.num_history_runs is not None:
+        return "runs"
+    return "all"
+
+
+def _current_history_replay_plan(agent: Agent) -> _HistoryReplayPlan:
+    """Return the live agent's current replay configuration as a plan."""
+    return _HistoryReplayPlan(
+        source_mode=_current_history_replay_mode(agent),
+        add_history_to_context=agent.add_history_to_context,
+        add_session_summary_to_context=bool(agent.add_session_summary_to_context),
+        num_history_runs=agent.num_history_runs,
+        num_history_messages=agent.num_history_messages,
+    )
+
+
+def _summary_only_history_replay_plan(source_mode: _HistoryReplayMode) -> _HistoryReplayPlan:
+    """Return a plan that replays only the persisted summary."""
+    return _HistoryReplayPlan(
+        source_mode=source_mode,
+        add_history_to_context=False,
+        add_session_summary_to_context=True,
+        num_history_runs=None,
+        num_history_messages=None,
+    )
+
+
+def _build_history_replay_plan(
+    agent: Agent,
+    session: AgentSession | None,
+) -> _HistoryReplayPlan:
+    """Resolve the effective history replay plan for the current stored session."""
+    current_plan = _current_history_replay_plan(agent)
+    if session is None:
+        return current_plan
+
+    replay_state = resolve_agent_replay_state(session, agent)
+    if replay_state.last_compacted_run_id is None:
+        return current_plan
+    if replay_state.summary is None:
+        logger.warning(
+            "Skipping persisted compaction cutoff without a stored summary",
+            session_id=session.session_id,
+        )
+        return current_plan
+
+    source_mode = current_plan.source_mode
+    visible_run_count = len(replay_state.visible_runs)
+    if visible_run_count <= 0:
+        return _summary_only_history_replay_plan(source_mode)
+
+    return _HistoryReplayPlan(
+        source_mode=source_mode,
+        add_history_to_context=current_plan.add_history_to_context,
+        add_session_summary_to_context=True,
+        num_history_runs=current_plan.num_history_runs,
+        num_history_messages=current_plan.num_history_messages,
+    )
+
+
+def _apply_history_replay_plan(agent: Agent, plan: _HistoryReplayPlan) -> None:
+    """Project one replay plan onto the live Agno agent instance."""
+    agent.add_history_to_context = plan.add_history_to_context
+    agent.add_session_summary_to_context = plan.add_session_summary_to_context
+    agent.num_history_runs = plan.num_history_runs
+    agent.num_history_messages = plan.num_history_messages
+
+
+def _bind_replayable_history_session(
+    agent: Agent,
+    session: AgentSession | None,
+    replay_plan: _HistoryReplayPlan,
+) -> None:
+    """Force the live run to read history from the replayable post-cutoff slice."""
+    if session is None:
+        return
+
+    replay_state = resolve_agent_replay_state(session, agent)
+    if (
+        replay_state.last_compacted_run_id is None
+        or replay_state.summary is None
+        or not replay_plan.add_history_to_context
+    ):
+        return
+
+    def _get_messages_override(
+        self_session: AgentSession,
+        agent_id: str | None = None,
+        team_id: str | None = None,
+        last_n_runs: int | None = None,
+        limit: int | None = None,
+        skip_roles: list[str] | None = None,
+        skip_statuses: list[RunStatus] | None = None,
+        skip_history_messages: bool = True,
+    ) -> list[Message]:
+        if not skip_history_messages or skip_statuses is not None:
+            return AgentSession.get_messages(
+                self_session,
+                agent_id=agent_id,
+                team_id=team_id,
+                last_n_runs=last_n_runs,
+                limit=limit,
+                skip_roles=skip_roles,
+                skip_statuses=skip_statuses,
+                skip_history_messages=skip_history_messages,
+            )
+        run_limit = None if limit is not None else last_n_runs
+        return get_replayable_history_messages(
+            self_session,
+            agent,
+            run_limit,
+            message_limit=limit,
+            skip_roles=skip_roles,
+        )
+
+    session.__dict__["get_messages"] = MethodType(_get_messages_override, session)
+    agent.__dict__["_cached_session"] = session
 
 
 def _disable_history_for_run(
@@ -63,29 +203,6 @@ def _disable_history_for_run(
         context_window=context_window,
         threshold=threshold,
     )
-
-
-def _apply_compaction_cutoff_to_history(agent: Agent, session: AgentSession | None) -> None:
-    """Restrict Agno history replay to runs that remain visible after compaction."""
-    if session is None or get_last_compacted_run_id(session) is None:
-        return
-    if session.summary is None:
-        logger.warning(
-            "Skipping persisted compaction cutoff without a stored summary",
-            session_id=session.session_id,
-        )
-        return
-
-    agent.add_session_summary_to_context = True
-
-    visible_run_count = len(get_replayable_runs(session, agent))
-    if visible_run_count <= 0:
-        agent.add_history_to_context = False
-        return
-
-    current_limit = agent.num_history_runs
-    if current_limit is None or current_limit > visible_run_count:
-        agent.num_history_runs = visible_run_count
 
 
 def _resolve_history_budget_target(
@@ -116,9 +233,10 @@ def _apply_context_window_limit(  # noqa: C901
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     session: AgentSession | None = None,
+    history_mode: _HistoryReplayMode | None = None,
 ) -> None:
     """Reduce ``agent.num_history_runs`` when estimated context approaches the window."""
-    if agent.num_history_messages is not None or not session_id:
+    if history_mode == "messages" or agent.num_history_messages is not None or not session_id:
         return
 
     model_name = config.get_entity_model_name(agent_name)
@@ -141,7 +259,7 @@ def _apply_context_window_limit(  # noqa: C901
     if not session or not session.runs:
         return
 
-    replayable_runs = get_replayable_runs(session, agent)
+    replayable_runs = resolve_agent_replay_state(session, agent).visible_runs
     if not replayable_runs:
         return
 
@@ -277,13 +395,6 @@ def _ensure_agent_storage_and_session(
     return storage, session
 
 
-def _estimate_session_summary_tokens(agent: Agent, session: AgentSession) -> int:
-    """Estimate tokens contributed by the stored Agno session summary."""
-    if not agent.add_session_summary_to_context or session.summary is None:
-        return 0
-    return estimate_text_tokens(session.summary.summary)
-
-
 def resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
     """Resolve the absolute token threshold that should trigger auto-compaction."""
     threshold_tokens = compaction_config.threshold_tokens
@@ -318,48 +429,50 @@ def resolve_compaction_model(
     return model, context_window
 
 
-async def _maybe_auto_compact_agent_history(  # noqa: PLR0911
+def _estimate_replay_plan_tokens(
     *,
+    session: AgentSession,
     agent: Agent,
-    agent_name: str,
     full_prompt: str,
-    session_id: str | None,
-    runtime_paths: RuntimePaths,
+    replay_plan: _HistoryReplayPlan,
+) -> tuple[int, int, int]:
+    """Estimate static, history, and summary tokens for one replay plan."""
+    static_tokens = estimate_static_tokens(agent, full_prompt)
+    history_run_limit = (
+        replay_plan.num_history_runs if replay_plan.num_history_runs and replay_plan.num_history_runs > 0 else None
+    )
+    history_message_limit = (
+        replay_plan.num_history_messages
+        if replay_plan.num_history_messages is not None and replay_plan.num_history_messages > 0
+        else None
+    )
+    history_tokens = 0
+    if replay_plan.add_history_to_context:
+        history_tokens = estimate_history_tokens(
+            session,
+            agent,
+            history_run_limit,
+            message_limit=history_message_limit,
+        )
+    summary_tokens = 0
+    if replay_plan.add_session_summary_to_context and session.summary is not None:
+        summary_tokens = estimate_text_tokens(session.summary.summary)
+    return static_tokens, history_tokens, summary_tokens
+
+
+def _resolve_auto_compaction_budget_settings(
+    *,
     config: Config,
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    storage: SqliteDb | None = None,
-    session: AgentSession | None = None,
-) -> AgentSession | None:
-    """Apply configured auto-compaction before an agent run when the session is near budget."""
-    if session_id is None or storage is None or session is None or not _session_has_prior_runs(session):
-        return session
-    if agent_name not in config.agents:
-        return session
-
-    compaction_config = config.get_agent_compaction_config(agent_name)
-    if not config.has_authored_agent_compaction_config(agent_name) or not compaction_config.enabled:
-        return session
-
+    agent_name: str,
+    compaction_config: CompactionConfig,
+) -> tuple[int, int, int, int] | None:
+    """Return context and budget settings for one auto-compaction decision."""
     model_name = config.get_entity_model_name(agent_name)
     model_config = config.models.get(model_name)
     context_window = model_config.context_window if model_config is not None else None
     if context_window is None:
-        return session
+        return None
 
-    history_run_limit = agent.num_history_runs if agent.num_history_runs and agent.num_history_runs > 0 else None
-    history_message_limit = (
-        agent.num_history_messages
-        if agent.num_history_messages is not None and agent.num_history_messages > 0
-        else None
-    )
-    static_tokens = estimate_static_tokens(agent, full_prompt)
-    history_tokens = estimate_history_tokens(
-        session,
-        agent,
-        history_run_limit,
-        message_limit=history_message_limit,
-    )
-    summary_tokens = _estimate_session_summary_tokens(agent, session)
     compaction_model_name = compaction_config.model or model_name
     compaction_model_config = config.models.get(compaction_model_name)
     compaction_budget_window = (
@@ -372,6 +485,47 @@ async def _maybe_auto_compact_agent_history(  # noqa: PLR0911
     effective_keep_recent = normalize_compaction_budget_tokens(
         compaction_config.keep_recent_tokens,
         compaction_budget_window,
+    )
+    return context_window, effective_threshold, effective_reserve, effective_keep_recent
+
+
+async def _maybe_auto_compact_agent_history(  # noqa: PLR0911
+    *,
+    agent: Agent,
+    agent_name: str,
+    full_prompt: str,
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    storage: SqliteDb | None = None,
+    session: AgentSession | None = None,
+    replay_plan: _HistoryReplayPlan,
+) -> AgentSession | None:
+    """Apply configured auto-compaction before an agent run when the session is near budget."""
+    if session_id is None or storage is None or session is None or not _session_has_prior_runs(session):
+        return session
+    if agent_name not in config.agents:
+        return session
+
+    compaction_config = config.get_agent_compaction_config(agent_name)
+    if not config.has_authored_agent_compaction_config(agent_name) or not compaction_config.enabled:
+        return session
+
+    budget_settings = _resolve_auto_compaction_budget_settings(
+        config=config,
+        agent_name=agent_name,
+        compaction_config=compaction_config,
+    )
+    if budget_settings is None:
+        return session
+    context_window, effective_threshold, effective_reserve, effective_keep_recent = budget_settings
+
+    static_tokens, history_tokens, summary_tokens = _estimate_replay_plan_tokens(
+        session=session,
+        agent=agent,
+        full_prompt=full_prompt,
+        replay_plan=replay_plan,
     )
     target_ceiling = min(
         effective_threshold,
@@ -436,6 +590,7 @@ async def prepare_agent_history_for_run(
         storage=storage,
         session=session,
     )
+    replay_plan = _build_history_replay_plan(agent, session)
     session = await _maybe_auto_compact_agent_history(
         agent=agent,
         agent_name=agent_name,
@@ -446,9 +601,11 @@ async def prepare_agent_history_for_run(
         compaction_outcomes_collector=compaction_outcomes_collector,
         storage=storage,
         session=session,
+        replay_plan=replay_plan,
     )
-
-    _apply_compaction_cutoff_to_history(agent, session)
+    replay_plan = _build_history_replay_plan(agent, session)
+    _apply_history_replay_plan(agent, replay_plan)
+    _bind_replayable_history_session(agent, session, replay_plan)
     _apply_context_window_limit(
         agent,
         agent_name,
@@ -458,6 +615,7 @@ async def prepare_agent_history_for_run(
         runtime_paths,
         execution_identity=execution_identity,
         session=session,
+        history_mode=replay_plan.source_mode,
     )
     return session
 

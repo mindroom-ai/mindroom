@@ -29,6 +29,7 @@ from mindroom.agents import create_agent, create_session_storage, get_agent_sess
 from mindroom.bot import AgentBot
 from mindroom.compaction import (
     _WRAPPER_OVERHEAD_TOKENS,
+    CompactionScope,
     PendingCompaction,
     _build_summary_input,
     _estimate_runs_tokens,
@@ -37,6 +38,7 @@ from mindroom.compaction import (
     apply_pending_compaction,
     clear_pending_compaction,
     compact_session_now,
+    get_replayable_history_messages,
     get_visible_session_runs,
     queue_pending_compaction,
 )
@@ -280,7 +282,7 @@ async def test_manual_compaction_uses_compaction_model_window_for_budget(tmp_pat
     )
     runtime_paths = runtime_paths_for(config)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    await _seed_session(storage, session_id="sid", turn_count=3)
+    agent = await _seed_session(storage, session_id="sid", turn_count=3)
     tool = CompactContextTools(
         "test_agent",
         config,
@@ -297,6 +299,7 @@ async def test_manual_compaction_uses_compaction_model_window_for_budget(tmp_pat
     )
 
     with (
+        patch("mindroom.custom_tools.compact_context.create_session_storage", return_value=storage),
         patch("mindroom.custom_tools.compact_context.get_tool_runtime_context", return_value=None),
         patch(
             "mindroom.ai.get_model_instance",
@@ -308,7 +311,7 @@ async def test_manual_compaction_uses_compaction_model_window_for_budget(tmp_pat
             return_value=SessionSummary(summary="## Goal\nqueued", topics=[]),
         ),
     ):
-        outcome_text = await tool.compact_context(keep_recent_runs=1)
+        outcome_text = await tool.compact_context(keep_recent_runs=1, agent=agent)
 
     assert outcome_text.startswith("Compaction queued:")
 
@@ -483,8 +486,8 @@ async def test_queue_pending_compaction_rejects_mixed_visible_run_scopes(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_apply_pending_compaction_skips_when_visible_scope_changes(tmp_path: Path) -> None:
-    """Queued compaction must not apply after another scope writes into the same visible window."""
+async def test_apply_pending_compaction_applies_with_unrelated_visible_scope(tmp_path: Path) -> None:
+    """Queued compaction should still apply when another scope appends outside the pending scope."""
     config = _make_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     storage = _make_storage(tmp_path)
@@ -513,8 +516,7 @@ async def test_apply_pending_compaction_skips_when_visible_scope_changes(tmp_pat
         reserve_tokens=1024,
         keep_recent_tokens=1000,
         notify=False,
-        scope_kind="agent",
-        scope_id="agent-a",
+        scope=CompactionScope(kind="agent", scope_id="agent-a"),
     )
     storage.upsert_session(
         _session_with_runs(
@@ -531,9 +533,190 @@ async def test_apply_pending_compaction_skips_when_visible_scope_changes(tmp_pat
     with patch("mindroom.compaction.create_session_storage", return_value=storage):
         applied = await apply_pending_compaction(pending)
 
+    assert applied is not None
+    persisted_session = _coerce_agent_session(storage.get_session("sid", SessionType.AGENT))
+    assert persisted_session.summary is not None
+    assert persisted_session.summary.summary == "## Goal\nqueued"
+
+
+@pytest.mark.asyncio
+async def test_apply_pending_compaction_skips_when_cutoff_run_leaves_pending_scope(tmp_path: Path) -> None:
+    """Queued compaction must not apply after the pending scope's cutoff run is no longer visible."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    storage = _make_storage(tmp_path)
+    summary = SessionSummary(summary="## Goal\nqueued", topics=[])
+    storage.upsert_session(
+        _session_with_runs(
+            "sid",
+            [
+                _completed_run("r1", agent_id="agent-a", content="alpha"),
+                _completed_run("r2", agent_id="agent-a", content="bravo"),
+                _completed_run("r3", agent_id="agent-a", content="charlie"),
+            ],
+        ),
+    )
+    pending = PendingCompaction(
+        session_id="sid",
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+        summary=summary,
+        mode="manual",
+        summary_model="compact-model",
+        last_compacted_run_id="r2",
+        window_tokens=16000,
+        threshold_tokens=8000,
+        reserve_tokens=1024,
+        keep_recent_tokens=1000,
+        notify=False,
+        scope=CompactionScope(kind="agent", scope_id="agent-a"),
+    )
+    storage.upsert_session(
+        _session_with_runs(
+            "sid",
+            [
+                _completed_run("r1", agent_id="agent-a", content="alpha"),
+                _completed_run("r2", agent_id="agent-b", content="bravo"),
+                _completed_run("r3", agent_id="agent-b", content="charlie"),
+            ],
+        ),
+    )
+
+    with patch("mindroom.compaction.create_session_storage", return_value=storage):
+        applied = await apply_pending_compaction(pending)
+
     assert applied is None
     persisted_session = _coerce_agent_session(storage.get_session("sid", SessionType.AGENT))
     assert persisted_session.summary is None
+
+
+def test_get_replayable_history_messages_respects_cutoff_before_message_limit() -> None:
+    """Message-limited history replay must not include compacted runs."""
+    session = AgentSession(
+        session_id="sid",
+        runs=[
+            RunOutput(
+                run_id="r1",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                messages=[
+                    Message(role="user", content="compacted question"),
+                    Message(role="assistant", content="compacted answer"),
+                ],
+            ),
+            RunOutput(
+                run_id="r2",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                messages=[
+                    Message(role="user", content="recent question"),
+                    Message(role="assistant", content="recent answer"),
+                ],
+            ),
+            RunOutput(
+                run_id="r3",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                messages=[
+                    Message(role="user", content="latest question"),
+                    Message(role="assistant", content="latest answer"),
+                ],
+            ),
+        ],
+        summary=SessionSummary(summary="## Goal\nPrevious work."),
+        metadata={MINDROOM_COMPACTION_METADATA_KEY: {"last_compacted_run_id": "r1"}},
+    )
+    agent = Agent(
+        id="test_agent",
+        model=FakeModel(id="fake-model", provider="fake"),
+        add_history_to_context=True,
+        num_history_messages=3,
+        store_history_messages=False,
+    )
+
+    messages = get_replayable_history_messages(session, agent, None, message_limit=3)
+
+    assert [str(message.content) for message in messages] == [
+        "recent answer",
+        "latest question",
+        "latest answer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_manual_compaction_tool_uses_caller_scope_not_session_wide(tmp_path: Path) -> None:
+    """Manual compaction should resolve visibility from the invoking agent scope."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(
+                    enabled=True,
+                    reserve_tokens=1024,
+                    notify=False,
+                ),
+            ),
+            models={
+                "default": ModelConfig(provider="openai", id="test-model", context_window=16000),
+            },
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    storage = _make_storage(tmp_path)
+    storage.upsert_session(
+        _session_with_runs(
+            "sid",
+            [
+                _completed_run("r1", agent_id="test_agent", content="alpha"),
+                _completed_run("r2", agent_id="test_agent", content="bravo"),
+                _completed_run("r3", agent_id="other_agent", content="charlie"),
+            ],
+        ),
+    )
+    tool = CompactContextTools(
+        "test_agent",
+        config,
+        runtime_paths,
+        execution_identity=ToolExecutionIdentity(
+            channel="openai_compat",
+            agent_name="test_agent",
+            requester_id="@user:example.org",
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="sid",
+        ),
+        pending_compaction_buffer=[],
+    )
+    live_agent = Agent(
+        id="test_agent",
+        model=FakeModel(id="fake-model", provider="fake"),
+        add_history_to_context=True,
+        store_history_messages=False,
+    )
+
+    with (
+        patch("mindroom.custom_tools.compact_context.create_session_storage", return_value=storage),
+        patch("mindroom.custom_tools.compact_context.get_tool_runtime_context", return_value=None),
+        patch(
+            "mindroom.ai.get_model_instance",
+            return_value=FakeModel(id="compact-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.compaction._generate_compaction_summary",
+            new_callable=AsyncMock,
+            return_value=SessionSummary(summary="## Goal\nscoped", topics=[]),
+        ),
+    ):
+        outcome_text = await tool.compact_context(keep_recent_runs=1, agent=live_agent)
+
+    assert outcome_text.startswith("Compaction queued:")
+    assert len(tool._pending_compaction_buffer) == 1
+    assert tool._pending_compaction_buffer[0].scope == CompactionScope(kind="agent", scope_id="test_agent")
 
 
 @pytest.mark.asyncio
@@ -649,7 +832,7 @@ async def test_second_turn_waits_for_queued_compaction_to_apply(  # noqa: PLR091
                 execution_identity,
                 pending_compaction_buffer=pending_buffer,
             )
-            tool_messages.append(await tool.compact_context(keep_recent_runs=1))
+            tool_messages.append(await tool.compact_context(keep_recent_runs=1, agent=agent))
             assert len(pending_buffer) == 1
             compaction_queued.set()
 

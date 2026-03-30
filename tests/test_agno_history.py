@@ -5,8 +5,9 @@ from __future__ import annotations
 import importlib
 import os
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -14,8 +15,10 @@ import pytest
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.media import Image
+from agno.models.base import Model
 from agno.models.message import Message
 from agno.models.ollama import Ollama
+from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
@@ -37,7 +40,7 @@ from mindroom.ai import (
 )
 from mindroom.bot import AgentBot
 from mindroom.compaction import CompactionOutcome
-from mindroom.compaction_runtime import _apply_context_window_limit
+from mindroom.compaction_runtime import _apply_context_window_limit, prepare_agent_history_for_run
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig, ToolConfigEntry
@@ -53,6 +56,9 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
 
 # ---------------------------------------------------------------------------
 # Config tests
@@ -116,6 +122,46 @@ def _edit_test_config() -> Config:
             models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
     )
+
+
+@dataclass
+class RecordingModel(Model):
+    """Minimal model that records the final message list sent by Agno."""
+
+    seen_messages: list[Message] = field(default_factory=list)
+
+    def invoke(self, *_args: object, **kwargs: object) -> ModelResponse:
+        """Return a successful response and capture the prompt messages."""
+        messages = kwargs.get("messages")
+        if isinstance(messages, list):
+            self.seen_messages = list(messages)
+        return ModelResponse(content="ok")
+
+    async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
+        """Return a successful async response and capture the prompt messages."""
+        messages = kwargs.get("messages")
+        if isinstance(messages, list):
+            self.seen_messages = list(messages)
+        return ModelResponse(content="ok")
+
+    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
+        """Yield one successful streamed response chunk."""
+        yield ModelResponse(content="ok")
+
+    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        """Yield one successful async streamed response chunk."""
+        yield ModelResponse(content="ok")
+
+    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
+        return response
+
+    def _parse_provider_response_delta(
+        self,
+        response: ModelResponse,
+        *_args: object,
+        **_kwargs: object,
+    ) -> ModelResponse:
+        return response
 
 
 def test_mindroom_forces_agno_telemetry_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -789,7 +835,156 @@ class TestPrepareAgentAndPrompt:
             )
 
         assert prepared_agent.add_session_summary_to_context is True
-        assert prepared_agent.num_history_runs == 1
+        assert prepared_agent.num_history_runs is None
+
+    @pytest.mark.asyncio
+    async def test_persisted_compaction_summary_preserves_message_limited_history_mode(
+        self,
+        config: Config,
+        tmp_path: object,
+    ) -> None:
+        """Compaction cutoffs should preserve the configured message-limited replay mode."""
+        session = AgentSession(
+            session_id="sid",
+            runs=[
+                RunOutput(
+                    run_id="r1",
+                    agent_id="calculator",
+                    status=RunStatus.completed,
+                    messages=[
+                        Message(role="user", content="compacted question"),
+                        Message(role="assistant", content="compacted answer"),
+                    ],
+                ),
+                RunOutput(
+                    run_id="r2",
+                    agent_id="calculator",
+                    status=RunStatus.completed,
+                    messages=[
+                        Message(role="user", content="recent question"),
+                        Message(role="assistant", content="recent answer"),
+                    ],
+                ),
+                RunOutput(
+                    run_id="r3",
+                    agent_id="calculator",
+                    status=RunStatus.completed,
+                    messages=[
+                        Message(role="user", content="latest question"),
+                        Message(role="assistant", content="latest answer"),
+                    ],
+                ),
+            ],
+            summary=SessionSummary(summary="## Goal\nPrevious work."),
+            metadata={MINDROOM_COMPACTION_METADATA_KEY: {"last_compacted_run_id": "r1"}},
+        )
+        agent = MagicMock(spec=Agent)
+        agent.role = ""
+        agent.instructions = []
+        agent.num_history_runs = None
+        agent.num_history_messages = 3
+        agent.add_history_to_context = True
+        agent.add_session_summary_to_context = False
+        agent.max_tool_calls_from_history = None
+        agent.team_id = None
+        agent.id = "calculator"
+
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.create_agent", return_value=agent),
+            patch("mindroom.ai.get_agent_session", return_value=session),
+            patch("mindroom.ai.create_session_storage"),
+        ):
+            prepared_agent, _prompt, _unseen_ids = await _prepare_agent_and_prompt(
+                "calculator",
+                "test",
+                _runtime_paths(tmp_path),
+                config,
+                session_id="sid",
+            )
+
+        assert prepared_agent.add_session_summary_to_context is True
+        assert prepared_agent.num_history_messages == 3
+        assert prepared_agent.num_history_runs is None
+
+    @pytest.mark.asyncio
+    async def test_message_limited_cutoff_replays_latest_visible_messages_to_model(self, tmp_path: Path) -> None:
+        """A persisted cutoff should preserve Agno's latest-N-messages behavior within visible runs."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"calculator": AgentConfig(display_name="Calculator")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+            ),
+            tmp_path,
+        )
+        storage = mindroom.agents.create_session_storage(
+            "calculator",
+            config,
+            runtime_paths_for(config),
+            execution_identity=None,
+        )
+        storage.upsert_session(
+            AgentSession(
+                session_id="sid",
+                runs=[
+                    RunOutput(
+                        run_id="r1",
+                        agent_id="calculator",
+                        status=RunStatus.completed,
+                        messages=[
+                            Message(role="user", content="compacted question"),
+                            Message(role="assistant", content="compacted answer"),
+                        ],
+                    ),
+                    RunOutput(
+                        run_id="r2",
+                        agent_id="calculator",
+                        status=RunStatus.completed,
+                        messages=[
+                            Message(role="user", content="recent question"),
+                            Message(role="assistant", content="recent answer"),
+                            Message(role="user", content="latest question"),
+                            Message(role="assistant", content="latest answer"),
+                        ],
+                    ),
+                ],
+                summary=SessionSummary(summary="## Goal\nPrevious work."),
+                metadata={MINDROOM_COMPACTION_METADATA_KEY: {"last_compacted_run_id": "r1"}},
+                created_at=1,
+                updated_at=1,
+            ),
+        )
+        model = RecordingModel(id="recording-model", provider="fake")
+        agent = Agent(
+            id="calculator",
+            model=model,
+            db=storage,
+            add_history_to_context=True,
+            num_history_messages=3,
+            add_session_summary_to_context=False,
+            store_history_messages=False,
+        )
+
+        await prepare_agent_history_for_run(
+            agent=agent,
+            agent_name="calculator",
+            full_prompt="current prompt",
+            session_id="sid",
+            runtime_paths=runtime_paths_for(config),
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=get_agent_session(storage, "sid"),
+        )
+        await agent.arun("current prompt", session_id="sid")
+
+        non_system_contents = [str(message.content) for message in model.seen_messages if message.role != "system"]
+        assert non_system_contents == [
+            "recent answer",
+            "latest question",
+            "latest answer",
+            "current prompt",
+        ]
 
     @pytest.mark.asyncio
     async def test_session_has_runs_but_no_metadata_uses_agno_path(self, config: Config, tmp_path: object) -> None:
