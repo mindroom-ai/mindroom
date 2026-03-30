@@ -17,6 +17,8 @@ export type { EditorPanelProps, EditorPanelEmptyStateProps } from './EditorPanel
 export { FieldGroup } from './FieldGroup';
 export type { FieldGroupProps } from './FieldGroup';
 
+export { HistoryContextSection } from './HistoryContextSection';
+
 export { CheckboxListField } from './CheckboxListField';
 export type { CheckboxListFieldProps, CheckboxListItem } from './CheckboxListField';
 

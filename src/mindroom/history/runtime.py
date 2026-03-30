@@ -271,6 +271,32 @@ def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str 
     return None, None
 
 
+def load_bound_scope_session_context(
+    *,
+    agents: list[Agent],
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    create_session_if_missing: bool = False,
+) -> ScopeSessionContext | None:
+    """Load the canonical scope-backed session context for one bound team run."""
+    if session_id is None:
+        return None
+    owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
+    if owner_agent is None or owner_agent_name is None:
+        return None
+    return load_scope_session_context(
+        agent=owner_agent,
+        agent_name=owner_agent_name,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        create_session_if_missing=create_session_if_missing,
+    )
+
+
 def load_scope_session_context(
     *,
     agent: Agent,

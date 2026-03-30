@@ -287,6 +287,22 @@ function normalizeCompactionConfig(
   return normalizedCompaction;
 }
 
+function normalizeCompactionUpdates<T extends { compaction?: CompactionConfig | null }>(
+  entity: T,
+  updates: Partial<T>
+): Partial<T> {
+  const normalizedUpdates: Partial<T> = { ...updates };
+  const nextCompaction = 'compaction' in updates ? updates.compaction : entity.compaction;
+
+  if ('compaction' in updates || nextCompaction != null) {
+    normalizedUpdates.compaction = normalizeCompactionConfig(
+      nextCompaction
+    ) as Partial<T>['compaction'];
+  }
+
+  return normalizedUpdates;
+}
+
 export function getDefaultPrivateConfig(agent: Pick<Agent, 'private'>): AgentPrivateConfig {
   if (agent.private != null) {
     return agent.private;
@@ -297,29 +313,17 @@ export function getDefaultPrivateConfig(agent: Pick<Agent, 'private'>): AgentPri
 }
 
 export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Partial<Agent> {
-  const normalizedUpdates: Partial<Agent> = { ...updates };
+  const normalizedUpdates = normalizeCompactionUpdates(agent, updates);
   const nextPrivate = 'private' in updates ? updates.private : agent.private;
-  const nextCompaction = 'compaction' in updates ? updates.compaction : agent.compaction;
 
   if (nextPrivate != null) {
     normalizedUpdates.private = normalizePrivateConfig(nextPrivate);
     normalizedUpdates.worker_scope = undefined;
   }
 
-  if ('compaction' in updates || nextCompaction != null) {
-    normalizedUpdates.compaction = normalizeCompactionConfig(nextCompaction);
-  }
-
   return normalizedUpdates;
 }
 
 export function normalizeTeamUpdates(team: Team, updates: Partial<Team>): Partial<Team> {
-  const normalizedUpdates: Partial<Team> = { ...updates };
-  const nextCompaction = 'compaction' in updates ? updates.compaction : team.compaction;
-
-  if ('compaction' in updates || nextCompaction != null) {
-    normalizedUpdates.compaction = normalizeCompactionConfig(nextCompaction);
-  }
-
-  return normalizedUpdates;
+  return normalizeCompactionUpdates(team, updates);
 }

@@ -19,6 +19,7 @@ import {
   FieldGroup,
   CheckboxListField,
   CheckboxListItem,
+  HistoryContextSection,
 } from '@/components/shared';
 import { useForm, useWatch, Controller } from 'react-hook-form';
 import {
@@ -111,9 +112,6 @@ export function AgentEditor() {
   });
   const learningEnabled = useWatch({ name: 'learning', control });
   const effectiveLearningEnabled = learningEnabled ?? defaultLearning;
-  const numHistoryRuns = useWatch({ name: 'num_history_runs', control });
-  const numHistoryMessages = useWatch({ name: 'num_history_messages', control });
-  const compactionConfig = useWatch({ name: 'compaction', control });
   const agentTools = useWatch({ name: 'tools', control });
   const includeDefaultTools = useWatch({ name: 'include_default_tools', control });
   const privateConfig = useWatch({ name: 'private', control });
@@ -481,20 +479,6 @@ export function AgentEditor() {
       watch,
     }));
   };
-
-  /** Parse a string to a non-negative integer or return null for empty/invalid input. */
-  const parseOptionalInt = (raw: string): number | null => {
-    if (raw.trim() === '') return null;
-    const n = parseInt(raw, 10);
-    return Number.isNaN(n) || n < 0 ? null : n;
-  };
-
-  /** Parse a string to a float in the open interval (0, 1) or return null for empty/invalid input. */
-  const parseOptionalUnitFloat = (raw: string): number | null => {
-    if (raw.trim() === '') return null;
-    const n = parseFloat(raw);
-    return Number.isNaN(n) || n <= 0 || n >= 1 ? null : n;
-  };
   const toolHasOverrides = (toolName: string): boolean => {
     if (selectedAgentId == null) {
       return false;
@@ -503,23 +487,9 @@ export function AgentEditor() {
     return overrides != null && Object.keys(overrides).length > 0;
   };
 
-  const [compactionThresholdPercentInput, setCompactionThresholdPercentInput] = useState('');
-
-  useEffect(() => {
-    const nextValue =
-      compactionConfig?.threshold_percent != null ? String(compactionConfig.threshold_percent) : '';
-    setCompactionThresholdPercentInput(nextValue);
-  }, [compactionConfig?.threshold_percent, selectedAgentId]);
-
   if (!selectedAgent) {
     return <EditorPanelEmptyState icon={Bot} message="Select an agent to edit" />;
   }
-
-  const defaultCompaction = config?.defaults.compaction ?? null;
-  const effectiveCompactionEnabled =
-    compactionConfig != null
-      ? compactionConfig.enabled ?? true
-      : defaultCompaction?.enabled ?? false;
 
   return (
     <EditorPanel
@@ -1761,334 +1731,41 @@ export function AgentEditor() {
         />
       </FieldGroup>
 
-      {/* History & Context Settings */}
-      <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">
-        <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
-          History & Context
-        </h3>
-
-        {/* Num History Runs */}
-        <div className="space-y-4">
-          <FieldGroup
-            label="History Runs"
-            helperText={`Number of prior conversation runs to include as history context. Leave empty to use default${
-              config?.defaults.num_history_runs != null
-                ? ` (${config.defaults.num_history_runs})`
-                : ' (all)'
-            }.`}
-            htmlFor="num_history_runs"
-          >
-            <Controller
-              name="num_history_runs"
-              control={control}
-              render={({ field }) => (
-                <Input
-                  id="num_history_runs"
-                  type="number"
-                  min={0}
-                  value={field.value ?? ''}
-                  placeholder={
-                    config?.defaults.num_history_runs != null
-                      ? `Default: ${config.defaults.num_history_runs}`
-                      : 'Default: all'
-                  }
-                  disabled={numHistoryMessages != null}
-                  onChange={e => {
-                    const value = parseOptionalInt(e.target.value);
-                    field.onChange(value);
-                    handleFieldChange('num_history_runs', value);
-                  }}
-                />
-              )}
-            />
-            {numHistoryMessages != null && (
-              <p className="text-xs text-amber-600 dark:text-amber-400">
-                Disabled because History Messages is set (mutually exclusive).
-              </p>
-            )}
-          </FieldGroup>
-
-          {/* Num History Messages */}
-          <FieldGroup
-            label="History Messages"
-            helperText={`Max messages from history (mutually exclusive with History Runs). Leave empty to use default${
-              config?.defaults.num_history_messages != null
-                ? ` (${config.defaults.num_history_messages})`
-                : ' (all)'
-            }.`}
-            htmlFor="num_history_messages"
-          >
-            <Controller
-              name="num_history_messages"
-              control={control}
-              render={({ field }) => (
-                <Input
-                  id="num_history_messages"
-                  type="number"
-                  min={0}
-                  value={field.value ?? ''}
-                  placeholder={
-                    config?.defaults.num_history_messages != null
-                      ? `Default: ${config.defaults.num_history_messages}`
-                      : 'Default: all'
-                  }
-                  disabled={numHistoryRuns != null}
-                  onChange={e => {
-                    const value = parseOptionalInt(e.target.value);
-                    field.onChange(value);
-                    handleFieldChange('num_history_messages', value);
-                  }}
-                />
-              )}
-            />
-            {numHistoryRuns != null && (
-              <p className="text-xs text-amber-600 dark:text-amber-400">
-                Disabled because History Runs is set (mutually exclusive).
-              </p>
-            )}
-          </FieldGroup>
-
-          {/* Max Tool Calls From History */}
-          <FieldGroup
-            label="Max Tool Calls from History"
-            helperText={`Max tool call messages replayed from history. Leave empty to use default${
-              config?.defaults.max_tool_calls_from_history != null
-                ? ` (${config.defaults.max_tool_calls_from_history})`
-                : ' (no limit)'
-            }.`}
-            htmlFor="max_tool_calls_from_history"
-          >
-            <Controller
-              name="max_tool_calls_from_history"
-              control={control}
-              render={({ field }) => (
-                <Input
-                  id="max_tool_calls_from_history"
-                  type="number"
-                  min={0}
-                  value={field.value ?? ''}
-                  placeholder={
-                    config?.defaults.max_tool_calls_from_history != null
-                      ? `Default: ${config.defaults.max_tool_calls_from_history}`
-                      : 'Default: no limit'
-                  }
-                  onChange={e => {
-                    const value = parseOptionalInt(e.target.value);
-                    field.onChange(value);
-                    handleFieldChange('max_tool_calls_from_history', value);
-                  }}
-                />
-              )}
-            />
-          </FieldGroup>
-
-          {/* Compress Tool Results */}
-          <FieldGroup
-            label="Compress Tool Results"
-            helperText={`Compress tool results in history to save context (global default: ${
-              defaultCompressToolResults ? 'on' : 'off'
-            })`}
-            htmlFor="compress_tool_results"
-          >
-            <Controller
-              name="compress_tool_results"
-              control={control}
-              render={({ field }) => (
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="compress_tool_results"
-                    checked={field.value ?? defaultCompressToolResults}
-                    onCheckedChange={checked => {
-                      const value = checked === true;
-                      field.onChange(value);
-                      handleFieldChange('compress_tool_results', value);
-                    }}
-                  />
-                  <label
-                    htmlFor="compress_tool_results"
-                    className="text-sm font-medium cursor-pointer select-none"
-                  >
-                    Compress tool results
-                  </label>
-                </div>
-              )}
-            />
-          </FieldGroup>
-
-          <FieldGroup
-            label="Auto-Compaction"
-            helperText="Automatically compact older session history before a run when the context budget gets tight."
-            htmlFor="compaction_enabled"
-          >
-            <div className="space-y-3">
-              <div className="flex items-center gap-3">
-                <Checkbox
-                  id="compaction_enabled"
-                  checked={effectiveCompactionEnabled}
-                  onCheckedChange={checked => {
-                    mutateCompaction(current => ({
-                      ...(current ?? {}),
-                      enabled: checked === true,
-                    }));
-                  }}
-                />
-                <label
-                  htmlFor="compaction_enabled"
-                  className="text-sm font-medium cursor-pointer select-none"
-                >
-                  Enable auto-compaction
-                </label>
-                {compactionConfig != null && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => updateCompaction(undefined)}
-                  >
-                    Use inherited settings
-                  </Button>
-                )}
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <FieldGroup
-                  label="Threshold Tokens"
-                  helperText="Absolute token threshold that triggers compaction. Leave empty to use threshold percent or the runtime fallback."
-                  htmlFor="compaction_threshold_tokens"
-                >
-                  <Input
-                    id="compaction_threshold_tokens"
-                    type="number"
-                    min={1}
-                    value={compactionConfig?.threshold_tokens ?? ''}
-                    placeholder={
-                      defaultCompaction?.threshold_tokens != null
-                        ? `Default: ${defaultCompaction.threshold_tokens}`
-                        : 'Default: derived from context window'
-                    }
-                    onChange={e => {
-                      const value = parseOptionalInt(e.target.value);
-                      mutateCompaction(current => ({
-                        ...(current ?? {}),
-                        threshold_tokens: value ?? undefined,
-                      }));
-                    }}
-                  />
-                </FieldGroup>
-
-                <FieldGroup
-                  label="Threshold Percent"
-                  helperText="Fraction of the context window that triggers compaction, greater than 0 and less than 1."
-                  htmlFor="compaction_threshold_percent"
-                >
-                  <Input
-                    id="compaction_threshold_percent"
-                    type="number"
-                    min={0.01}
-                    max={0.99}
-                    step="0.01"
-                    value={compactionThresholdPercentInput}
-                    placeholder={
-                      defaultCompaction?.threshold_percent != null
-                        ? `Default: ${defaultCompaction.threshold_percent}`
-                        : 'Default: 0.8'
-                    }
-                    onChange={e => {
-                      const raw = e.target.value;
-                      setCompactionThresholdPercentInput(raw);
-                      const value = parseOptionalUnitFloat(raw);
-                      if (raw.trim() !== '' && value == null) {
-                        return;
-                      }
-                      mutateCompaction(current => ({
-                        ...(current ?? {}),
-                        threshold_percent: value ?? undefined,
-                      }));
-                    }}
-                    onBlur={() => {
-                      const value = parseOptionalUnitFloat(compactionThresholdPercentInput);
-                      if (compactionThresholdPercentInput.trim() !== '' && value == null) {
-                        setCompactionThresholdPercentInput(
-                          compactionConfig?.threshold_percent != null
-                            ? String(compactionConfig.threshold_percent)
-                            : ''
-                        );
-                      }
-                    }}
-                  />
-                </FieldGroup>
-
-                <FieldGroup
-                  label="Reserve Tokens"
-                  helperText="Headroom reserved for the current prompt, tools, and model output."
-                  htmlFor="compaction_reserve_tokens"
-                >
-                  <Input
-                    id="compaction_reserve_tokens"
-                    type="number"
-                    min={0}
-                    value={compactionConfig?.reserve_tokens ?? ''}
-                    placeholder={`Default: ${defaultCompaction?.reserve_tokens ?? 16384}`}
-                    onChange={e => {
-                      const value = parseOptionalInt(e.target.value);
-                      mutateCompaction(current => ({
-                        ...(current ?? {}),
-                        reserve_tokens: value ?? undefined,
-                      }));
-                    }}
-                  />
-                </FieldGroup>
-
-                <FieldGroup
-                  label="Compaction Model"
-                  helperText="Optional model config name used only for summary generation during compaction."
-                  htmlFor="compaction_model"
-                >
-                  <Input
-                    id="compaction_model"
-                    value={compactionConfig?.model ?? ''}
-                    placeholder={defaultCompaction?.model ?? 'Default: agent model'}
-                    onChange={e => {
-                      const value = e.target.value.trim();
-                      mutateCompaction(current => ({
-                        ...(current ?? {}),
-                        model: value === '' ? undefined : value,
-                      }));
-                    }}
-                  />
-                </FieldGroup>
-
-                <FieldGroup
-                  label="Notify Room"
-                  helperText={`Post a room notice after compaction completes (default: ${
-                    defaultCompaction?.notify ? 'on' : 'off'
-                  }).`}
-                  htmlFor="compaction_notify"
-                >
-                  <div className="flex items-center gap-2">
-                    <Checkbox
-                      id="compaction_notify"
-                      checked={compactionConfig?.notify ?? defaultCompaction?.notify ?? false}
-                      onCheckedChange={checked => {
-                        mutateCompaction(current => ({
-                          ...(current ?? {}),
-                          notify: checked === true,
-                        }));
-                      }}
-                    />
-                    <label
-                      htmlFor="compaction_notify"
-                      className="text-sm font-medium cursor-pointer select-none"
-                    >
-                      Send compaction notices
-                    </label>
-                  </div>
-                </FieldGroup>
-              </div>
-            </div>
-          </FieldGroup>
-        </div>
-      </div>
+      <HistoryContextSection
+        control={control}
+        resetKey={selectedAgentId}
+        defaults={config?.defaults}
+        onFieldChange={(fieldName, value) =>
+          handleFieldChange(fieldName as keyof Agent, value as Agent[keyof Agent])
+        }
+        updateCompaction={updateCompaction}
+        mutateCompaction={mutateCompaction}
+        historyRunsHelperText={`Number of prior conversation runs to include as history context. Leave empty to use default${
+          config?.defaults.num_history_runs != null
+            ? ` (${config.defaults.num_history_runs})`
+            : ' (all)'
+        }.`}
+        historyMessagesHelperText={`Max messages from history (mutually exclusive with History Runs). Leave empty to use default${
+          config?.defaults.num_history_messages != null
+            ? ` (${config.defaults.num_history_messages})`
+            : ' (all)'
+        }.`}
+        maxToolCallsHelperText={`Max tool call messages replayed from history. Leave empty to use default${
+          config?.defaults.max_tool_calls_from_history != null
+            ? ` (${config.defaults.max_tool_calls_from_history})`
+            : ' (no limit)'
+        }.`}
+        autoCompactionHelperText="Automatically compact older session history before a run when the context budget gets tight."
+        thresholdTokensHelperText="Absolute token threshold that triggers compaction. Leave empty to use threshold percent or the runtime fallback."
+        compactionModelPlaceholder={config?.defaults.compaction?.model ?? 'Default: agent model'}
+        compressToolResults={{
+          defaultValue: defaultCompressToolResults,
+          helperText: `Compress tool results in history to save context (global default: ${
+            defaultCompressToolResults ? 'on' : 'off'
+          })`,
+          onChange: value => handleFieldChange('compress_tool_results', value),
+        }}
+      />
     </EditorPanel>
   );
 }

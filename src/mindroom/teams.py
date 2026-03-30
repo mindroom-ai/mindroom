@@ -39,7 +39,7 @@ from mindroom.history import (
     compose_prompt_with_persisted_history,
     prepare_bound_agents_for_run,
 )
-from mindroom.history.runtime import load_scope_session_context, resolve_bound_history_owner
+from mindroom.history.runtime import load_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -978,14 +978,8 @@ def _collect_bound_seen_event_ids(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
 ) -> set[str]:
-    if session_id is None:
-        return set()
-    owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
-    if owner_agent is None or owner_agent_name is None:
-        return set()
-    scope_context = load_scope_session_context(
-        agent=owner_agent,
-        agent_name=owner_agent_name,
+    scope_context = load_bound_scope_session_context(
+        agents=agents,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
@@ -1005,14 +999,10 @@ def _persist_bound_seen_event_ids(
     execution_identity: ToolExecutionIdentity | None,
     event_ids: list[str],
 ) -> None:
-    if session_id is None or not event_ids:
+    if not event_ids:
         return
-    owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
-    if owner_agent is None or owner_agent_name is None:
-        return
-    scope_context = load_scope_session_context(
-        agent=owner_agent,
-        agent_name=owner_agent_name,
+    scope_context = load_bound_scope_session_context(
+        agents=agents,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
