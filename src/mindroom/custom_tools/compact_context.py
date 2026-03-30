@@ -14,7 +14,7 @@ from mindroom.compaction_runtime import (
     resolve_effective_compaction_threshold,
 )
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_current_session_id
 
 if TYPE_CHECKING:
     from mindroom.compaction import PendingCompaction
@@ -48,14 +48,12 @@ class CompactContextTools(Toolkit):
         if keep_recent_runs < 0:
             return "Error: keep_recent_runs must be >= 0."
 
-        context = get_tool_runtime_context()
-        if context is None:
-            return "Error: No runtime context available. Cannot determine session."
-
-        # Imported lazily to avoid a heavy matrix/runtime import chain during tool registration.
-        from mindroom.thread_utils import create_session_id  # noqa: PLC0415
-
-        session_id = create_session_id(context.room_id, context.resolved_thread_id)
+        session_id = resolve_current_session_id(
+            execution_identity=self._execution_identity,
+            runtime_context=get_tool_runtime_context(),
+        )
+        if session_id is None:
+            return "Error: No active session available. Cannot determine session."
         storage = create_session_storage(
             self._agent_name,
             self._config,

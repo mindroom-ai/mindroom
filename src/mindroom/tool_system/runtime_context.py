@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks.sender import HookMessageSender
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class ToolRuntimeContext:
     client: nio.AsyncClient
     config: Config
     runtime_paths: RuntimePaths
+    session_id: str | None = None
     room: nio.MatrixRoom | None = None
     reply_to_event_id: str | None = None
     storage_path: Path | None = None
@@ -54,6 +56,22 @@ _TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(
 def get_tool_runtime_context() -> ToolRuntimeContext | None:
     """Get the current shared tool runtime context."""
     return _TOOL_RUNTIME_CONTEXT.get()
+
+
+def resolve_current_session_id(
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+    runtime_context: ToolRuntimeContext | None = None,
+) -> str | None:
+    """Resolve the current session ID from explicit execution/runtime state."""
+    if execution_identity is not None and execution_identity.session_id is not None:
+        return execution_identity.session_id
+
+    resolved_runtime_context = runtime_context if runtime_context is not None else get_tool_runtime_context()
+    if resolved_runtime_context is not None and resolved_runtime_context.session_id is not None:
+        return resolved_runtime_context.session_id
+
+    return None
 
 
 def attachment_id_available_in_tool_runtime_context(

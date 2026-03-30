@@ -265,6 +265,25 @@ function normalizePrivateConfig(
   };
 }
 
+function normalizeCompactionConfig(
+  compaction: CompactionConfig | null | undefined
+): CompactionConfig | null | undefined {
+  if (compaction == null) {
+    return compaction;
+  }
+
+  const normalizedCompaction: CompactionConfig = {
+    ...compaction,
+    model: compaction.model?.trim() ? compaction.model.trim() : undefined,
+  };
+
+  if (Object.values(normalizedCompaction).every(value => value == null)) {
+    return undefined;
+  }
+
+  return normalizedCompaction;
+}
+
 export function getDefaultPrivateConfig(agent: Pick<Agent, 'private'>): AgentPrivateConfig {
   if (agent.private != null) {
     return agent.private;
@@ -277,10 +296,15 @@ export function getDefaultPrivateConfig(agent: Pick<Agent, 'private'>): AgentPri
 export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Partial<Agent> {
   const normalizedUpdates: Partial<Agent> = { ...updates };
   const nextPrivate = 'private' in updates ? updates.private : agent.private;
+  const nextCompaction = 'compaction' in updates ? updates.compaction : agent.compaction;
 
   if (nextPrivate != null) {
     normalizedUpdates.private = normalizePrivateConfig(nextPrivate);
     normalizedUpdates.worker_scope = undefined;
+  }
+
+  if ('compaction' in updates || nextCompaction != null) {
+    normalizedUpdates.compaction = normalizeCompactionConfig(nextCompaction);
   }
 
   return normalizedUpdates;

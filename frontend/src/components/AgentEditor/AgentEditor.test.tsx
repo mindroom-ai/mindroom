@@ -833,6 +833,24 @@ describe('AgentEditor', () => {
     });
   });
 
+  it('drops empty compaction overrides during normalization', () => {
+    expect(normalizeAgentUpdates(mockAgent, { compaction: {} }).compaction).toBeUndefined();
+    expect(
+      normalizeAgentUpdates(
+        { ...mockAgent, compaction: { enabled: true, threshold_tokens: 2000 } },
+        { compaction: { threshold_tokens: undefined, model: '   ' } }
+      ).compaction
+    ).toBeUndefined();
+  });
+
+  it('preserves explicit disabled compaction overrides during normalization', () => {
+    expect(normalizeAgentUpdates(mockAgent, { compaction: { enabled: false } }).compaction).toEqual(
+      {
+        enabled: false,
+      }
+    );
+  });
+
   it('uses the canonical shared context placeholder', async () => {
     const agentWithoutContextFiles: Agent = {
       ...mockAgent,

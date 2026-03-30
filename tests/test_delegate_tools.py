@@ -15,6 +15,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -362,9 +363,79 @@ class TestDelegateKnowledge:
         assert call_kwargs["agent_name"] == "worker"
         assert call_kwargs["config"] == config
         assert call_kwargs["runtime_paths"] == runtime_paths
-        assert call_kwargs["execution_identity"] is execution_identity
+        delegated_identity = call_kwargs["execution_identity"]
+        assert delegated_identity is not execution_identity
+        assert delegated_identity is not None
+        assert delegated_identity.agent_name == "worker"
+        assert delegated_identity.requester_id == "@alice:example.org"
+        assert delegated_identity.room_id == "!room:example.org"
+        assert delegated_identity.thread_id == "$thread"
+        assert delegated_identity.session_id == call_kwargs["session_id"]
+        assert delegated_identity.session_id.startswith("delegate:leader:worker:")
         assert call_kwargs["user_id"] == "@alice:example.org"
         assert call_kwargs["delegation_depth"] == 1
+
+    @pytest.mark.asyncio
+    async def test_delegation_rebinds_runtime_context_for_child_agent(self, tmp_path: Path) -> None:
+        """Nested delegated runs should not inherit the parent agent/session runtime context."""
+        config = _make_config(
+            {
+                "leader": AgentConfig(
+                    display_name="Leader",
+                    role="Lead",
+                    delegate_to=["worker"],
+                ),
+                "worker": AgentConfig(
+                    display_name="Worker",
+                    role="Work",
+                ),
+            },
+        )
+        config = _bind_runtime_paths(config, tmp_path)
+        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="leader",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+        tools = DelegateTools(
+            agent_name="leader",
+            delegate_to=["worker"],
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            delegation_depth=0,
+        )
+        runtime_context = ToolRuntimeContext(
+            agent_name="leader",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            requester_id="@alice:example.org",
+            client=MagicMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            session_id="session-1",
+        )
+
+        async def fake_ai_response(**kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            assert context.agent_name == "worker"
+            assert context.session_id == kwargs["session_id"]
+            return "done"
+
+        with (
+            tool_runtime_context(runtime_context),
+            patch("mindroom.custom_tools.delegate.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+        ):
+            result = await tools.delegate_task("worker", "do work")
+
+        assert result == "done"
 
 
 class TestDelegateToolRegistration:
