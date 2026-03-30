@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 from agno.agent import Agent
@@ -24,20 +24,28 @@ from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import CompactionState, HistoryScope
 from tests.conftest import bind_runtime_paths
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+    from pathlib import Path
+
 
 class FakeModel(Model):
     """Minimal model for tool/runtime tests."""
 
     def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        """Return one successful fake response."""
         return ModelResponse(content="ok")
 
     async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        """Return one successful fake async response."""
         return ModelResponse(content="ok")
 
-    def invoke_stream(self, *_args: object, **_kwargs: object):
+    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
+        """Yield one successful fake streaming response."""
         yield ModelResponse(content="ok")
 
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object):
+    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        """Yield one successful fake async streaming response."""
         yield ModelResponse(content="ok")
 
     def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
@@ -105,6 +113,7 @@ def _agent(*, team_id: str | None = None) -> Agent:
 
 @pytest.mark.asyncio
 async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -> None:
+    """Schedule agent-scope compaction for the next reply."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
@@ -127,6 +136,7 @@ async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Path) -> None:
+    """Only the team scope should receive the forced-compaction flag."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")])
@@ -161,6 +171,7 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_clears_forced_flag_when_no_compactable_prefix(tmp_path: Path) -> None:
+    """Forced compaction should clear itself when there is nothing old enough to compact."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
@@ -199,6 +210,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_compactable_pr
 
 @pytest.mark.asyncio
 async def test_compact_context_uses_canonical_team_owner_storage(tmp_path: Path) -> None:
+    """Team-scoped compaction should persist through the canonical owner session store."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(

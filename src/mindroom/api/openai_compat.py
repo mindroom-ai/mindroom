@@ -1177,6 +1177,8 @@ async def _non_stream_team_completion(
     logger.info("Team completion request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 
     fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
+    active_team_model_name = config.get_entity_model_name(team_name)
+    active_team_context_window = config.get_model_context_window(active_team_model_name)
 
     try:
         prepared_history = await prepare_bound_agents_for_run(
@@ -1186,6 +1188,9 @@ async def _non_stream_team_completion(
             runtime_paths=runtime_paths,
             config=config,
             execution_identity=execution_identity,
+            team_name=team_name,
+            active_model_name=active_team_model_name,
+            active_context_window=active_team_context_window,
         )
     except Exception:
         logger.exception("Team member preparation failed", team=team_name)
@@ -1247,6 +1252,8 @@ async def _stream_team_completion(
     logger.info("Team streaming request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 
     fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
+    active_team_model_name = config.get_entity_model_name(team_name)
+    active_team_context_window = config.get_model_context_window(active_team_model_name)
 
     try:
         prepared_history = await prepare_bound_agents_for_run(
@@ -1256,6 +1263,9 @@ async def _stream_team_completion(
             runtime_paths=runtime_paths,
             config=config,
             execution_identity=execution_identity,
+            team_name=team_name,
+            active_model_name=active_team_model_name,
+            active_context_window=active_team_context_window,
         )
     except Exception:
         logger.exception("Team member preparation failed", team=team_name)

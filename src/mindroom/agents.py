@@ -15,7 +15,6 @@ from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 
 import mindroom.tools  # noqa: F401

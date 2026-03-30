@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.session.agent import AgentSession
 from agno.run.base import RunStatus
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
 
 from mindroom.agents import create_agent, create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig

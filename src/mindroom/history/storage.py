@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 
 from mindroom.constants import (
@@ -17,6 +15,11 @@ from mindroom.constants import (
 )
 from mindroom.history.types import CompactionState, HistoryScope
 from mindroom.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from agno.session.agent import AgentSession
 
 logger = get_logger(__name__)
 
@@ -241,9 +244,7 @@ def _read_scope_seen_event_states(session: AgentSession) -> dict[str, set[str]]:
 def _write_scope_seen_event_states(session: AgentSession, states: dict[str, set[str]]) -> None:
     session_metadata = dict(session.metadata or {})
     serialized_states = {
-        scope_key: {"seen_event_ids": sorted(event_ids)}
-        for scope_key, event_ids in sorted(states.items())
-        if event_ids
+        scope_key: {"seen_event_ids": sorted(event_ids)} for scope_key, event_ids in sorted(states.items()) if event_ids
     }
     if serialized_states:
         session_metadata[MINDROOM_MATRIX_HISTORY_METADATA_KEY] = {

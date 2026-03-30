@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
+if TYPE_CHECKING:
+    from agno.models.message import Message
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
 
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
@@ -23,6 +24,7 @@ class HistoryScope:
 
     @property
     def key(self) -> str:
+        """Return the stable serialized storage key for this scope."""
         return f"{self.kind}:{self.scope_id}"
 
 
@@ -32,6 +34,14 @@ class HistoryPolicy:
 
     mode: _HistoryMode
     limit: int | None = None
+
+
+@dataclass(frozen=True)
+class ResolvedHistorySettings:
+    """Resolved replay policy and tool-call replay limits for one run."""
+
+    policy: HistoryPolicy
+    max_tool_calls_from_history: int | None
 
 
 @dataclass(frozen=True)
@@ -46,10 +56,12 @@ class CompactionState:
 
     @property
     def has_summary(self) -> bool:
+        """Return whether this scope currently has a non-empty summary."""
         return self.summary is not None and self.summary.strip() != ""
 
     @property
     def has_cutoff(self) -> bool:
+        """Return whether this scope has a replay cutoff run id."""
         return self.last_compacted_run_id is not None and self.last_compacted_run_id != ""
 
 
@@ -87,6 +99,7 @@ class CompactionOutcome:
     notify: bool
 
     def to_notice_metadata(self) -> dict[str, object]:
+        """Return serialized notice metadata for Matrix compaction messages."""
         return {
             "version": 1,
             "mode": self.mode,

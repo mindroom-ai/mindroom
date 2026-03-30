@@ -355,6 +355,23 @@ class TeamConfig(BaseModel):
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
     model: str | None = Field(default="default", description="Default model for this team (optional)")
     mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
+    compaction: CompactionOverrideConfig | None = Field(
+        default=None,
+        description="Per-team auto-compaction overrides",
+    )
+    num_history_runs: int | None = Field(
+        default=None,
+        description="Number of prior scoped runs to include as team history context",
+    )
+    num_history_messages: int | None = Field(
+        default=None,
+        description="Max messages from team-scoped history (mutually exclusive with num_history_runs)",
+    )
+    max_tool_calls_from_history: int | None = Field(
+        default=None,
+        ge=0,
+        description="Max tool call messages replayed from team history",
+    )
 
     @field_validator("agents")
     @classmethod
@@ -365,6 +382,14 @@ class TeamConfig(BaseModel):
             msg = f"Duplicate agents are not allowed in a team: {', '.join(duplicates)}"
             raise ValueError(msg)
         return agents
+
+    @model_validator(mode="after")
+    def validate_history_settings(self) -> Self:
+        """Ensure team history replay knobs stay unambiguous."""
+        if self.num_history_runs is not None and self.num_history_messages is not None:
+            msg = "num_history_runs and num_history_messages are mutually exclusive"
+            raise ValueError(msg)
+        return self
 
 
 class CultureConfig(BaseModel):

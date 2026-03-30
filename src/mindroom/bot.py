@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
 from html import escape as html_escape
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -524,7 +524,10 @@ class AgentBot:
 
     def _response_lifecycle_lock(self, room_id: str, thread_id: str | None) -> asyncio.Lock:
         """Return the per-thread lock that serializes one response lifecycle."""
-        return _get_or_create_lock(self._response_lifecycle_locks, (room_id, thread_id))
+        return _get_or_create_lock(
+            cast("dict[object, asyncio.Lock]", self._response_lifecycle_locks),
+            (room_id, thread_id),
+        )
 
     def _hook_base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
         """Return shared base fields for hook context construction."""
@@ -2640,6 +2643,7 @@ class AgentBot:
                             active_event_ids=self._active_response_event_ids(room_id),
                             response_sender_id=self.matrix_id.full_id,
                             compaction_outcomes_collector=compaction_outcomes,
+                            configured_team_name=self.agent_name if self.agent_name in self.config.teams else None,
                             reason_prefix=reason_prefix,
                         )
 
@@ -2746,6 +2750,7 @@ class AgentBot:
                                 active_event_ids=self._active_response_event_ids(room_id),
                                 response_sender_id=self.matrix_id.full_id,
                                 compaction_outcomes_collector=compaction_outcomes,
+                                configured_team_name=self.agent_name if self.agent_name in self.config.teams else None,
                                 reason_prefix=reason_prefix,
                             )
                 except asyncio.CancelledError:

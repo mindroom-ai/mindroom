@@ -984,7 +984,7 @@ async def _prepare_agent_and_prompt(
     return agent, full_prompt, unseen_event_ids, prepared_history
 
 
-async def ai_response(  # noqa: C901
+async def ai_response(  # noqa: C901, PLR0912
     agent_name: str,
     prompt: str,
     session_id: str,

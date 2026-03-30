@@ -36,6 +36,7 @@ from mindroom.constants import (
     runtime_matrix_homeserver,
     safe_replace,
 )
+from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     agent_username_localpart,
@@ -78,6 +79,18 @@ class ResolvedToolConfig:
 
     name: str
     tool_config_overrides: dict[str, object]
+
+
+def _history_policy_from_limits(
+    *,
+    num_history_runs: int | None,
+    num_history_messages: int | None,
+) -> HistoryPolicy:
+    if num_history_messages is not None:
+        return HistoryPolicy(mode="messages", limit=num_history_messages)
+    if num_history_runs is not None:
+        return HistoryPolicy(mode="runs", limit=num_history_runs)
+    return HistoryPolicy(mode="all")
 
 
 def _resolve_agent_thread_mode(
@@ -632,18 +645,93 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self.agents[agent_name]
 
-    def get_agent_compaction_config(self, agent_name: str) -> CompactionConfig:
-        """Return the effective automatic compaction config for one agent."""
+    def get_team(self, team_name: str) -> TeamConfig:
+        """Get a team configuration by name."""
+        if team_name not in self.teams:
+            available = ", ".join(sorted(self.teams.keys()))
+            msg = f"Unknown team: {team_name}. Available teams: {available}"
+            raise ValueError(msg)
+        return self.teams[team_name]
+
+    def get_default_history_settings(self) -> ResolvedHistorySettings:
+        """Return defaults-only replay settings for ad hoc shared team scope."""
+        return ResolvedHistorySettings(
+            policy=_history_policy_from_limits(
+                num_history_runs=self.defaults.num_history_runs,
+                num_history_messages=self.defaults.num_history_messages,
+            ),
+            max_tool_calls_from_history=self.defaults.max_tool_calls_from_history,
+        )
+
+    def get_entity_history_settings(self, entity_name: str) -> ResolvedHistorySettings:
+        """Return effective replay settings for one configured agent or team."""
+        if entity_name in self.agents:
+            entity = self.get_agent(entity_name)
+        elif entity_name in self.teams:
+            entity = self.get_team(entity_name)
+        else:
+            msg = f"Unknown entity: {entity_name}"
+            raise ValueError(msg)
+
+        num_history_runs = entity.num_history_runs
+        num_history_messages = entity.num_history_messages
+        if num_history_runs is None and num_history_messages is None:
+            num_history_runs = self.defaults.num_history_runs
+            num_history_messages = self.defaults.num_history_messages
+
+        max_tool_calls_from_history = (
+            entity.max_tool_calls_from_history
+            if entity.max_tool_calls_from_history is not None
+            else self.defaults.max_tool_calls_from_history
+        )
+        return ResolvedHistorySettings(
+            policy=_history_policy_from_limits(
+                num_history_runs=num_history_runs,
+                num_history_messages=num_history_messages,
+            ),
+            max_tool_calls_from_history=max_tool_calls_from_history,
+        )
+
+    def get_default_compaction_config(self) -> CompactionConfig:
+        """Return the effective automatic compaction config for defaults-only scope."""
         base = self.defaults.compaction
         merged = base.model_dump() if base is not None else {}
-        agent_override = self.get_agent(agent_name).compaction
-        if agent_override is not None:
-            merged.update(agent_override.model_dump(exclude_none=True))
         return CompactionConfig.model_validate(merged)
 
-    def has_authored_agent_compaction_config(self, agent_name: str) -> bool:
-        """Return whether auto-compaction was explicitly configured for one agent."""
-        return self.defaults.compaction is not None or self.get_agent(agent_name).compaction is not None
+    def has_authored_default_compaction_config(self) -> bool:
+        """Return whether defaults-only scope has authored auto-compaction config."""
+        return self.defaults.compaction is not None
+
+    def get_entity_compaction_config(self, entity_name: str) -> CompactionConfig:
+        """Return the effective automatic compaction config for one configured agent or team."""
+        base = self.defaults.compaction
+        merged = base.model_dump() if base is not None else {}
+        if entity_name in self.agents:
+            override = self.get_agent(entity_name).compaction
+        elif entity_name in self.teams:
+            override = self.get_team(entity_name).compaction
+        else:
+            msg = f"Unknown entity: {entity_name}"
+            raise ValueError(msg)
+        if override is not None:
+            merged.update(override.model_dump(exclude_none=True))
+        return CompactionConfig.model_validate(merged)
+
+    def has_authored_entity_compaction_config(self, entity_name: str) -> bool:
+        """Return whether auto-compaction was explicitly configured for one configured entity."""
+        if entity_name in self.agents:
+            override = self.get_agent(entity_name).compaction
+        elif entity_name in self.teams:
+            override = self.get_team(entity_name).compaction
+        else:
+            msg = f"Unknown entity: {entity_name}"
+            raise ValueError(msg)
+        return self.defaults.compaction is not None or override is not None
+
+    def get_model_context_window(self, model_name: str) -> int | None:
+        """Return the configured context window for one model name, when known."""
+        model_config = self.models.get(model_name)
+        return model_config.context_window if model_config and model_config.context_window else None
 
     def get_agent_worker_tools(
         self,

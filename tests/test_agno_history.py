@@ -1,4 +1,5 @@
 """Tests for MindRoom-owned history replay and compaction."""
+# ruff: noqa: D102, D103, ANN201, ARG005, TC003
 
 from __future__ import annotations
 
@@ -21,16 +22,22 @@ from agno.session.summary import SessionSummary
 
 from mindroom.agents import create_agent, create_session_storage, get_agent_session
 from mindroom.ai import _prepare_agent_and_prompt
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import CompactionOverrideConfig, DefaultsConfig, ModelConfig
+from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.history import PreparedHistory, clear_prepared_history, prepare_bound_agents_for_run, prepare_history_for_run
+from mindroom.history import (
+    PreparedHistory,
+    clear_bound_agent_history_state,
+    clear_prepared_history,
+    prepare_bound_agents_for_run,
+    prepare_history_for_run,
+)
 from mindroom.history.replay import build_replay_plan, is_replay_message
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
@@ -39,7 +46,7 @@ from mindroom.history.storage import (
     update_scope_seen_event_ids,
     write_scope_state,
 )
-from mindroom.history.types import CompactionState, HistoryScope
+from mindroom.history.types import CompactionState, HistoryPolicy, HistoryScope
 from tests.conftest import bind_runtime_paths
 
 
@@ -243,7 +250,7 @@ def test_create_agent_disables_agno_native_history_replay(tmp_path: Path) -> Non
 
 
 def test_message_limited_replay_keeps_newest_messages_from_single_run(tmp_path: Path) -> None:
-    config, _runtime_paths_value = _make_config(tmp_path, num_history_messages=2)
+    _config, _runtime_paths_value = _make_config(tmp_path, num_history_messages=2)
     session = _session(
         "session-1",
         runs=[
@@ -262,9 +269,10 @@ def test_message_limited_replay_keeps_newest_messages_from_single_run(tmp_path: 
 
     plan = build_replay_plan(
         session=session,
-        agent=agent,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         state=CompactionState(),
+        policy=HistoryPolicy(mode="messages", limit=2),
+        max_tool_calls_from_history=agent.max_tool_calls_from_history,
     )
 
     assert [message.content for message in plan.history_messages] == ["new question", "new answer"]
@@ -356,10 +364,10 @@ async def test_prepare_history_for_run_sanitizes_learning_and_persistence_inputs
 
     captured: dict[str, object] = {}
     agent = _agent(db=storage)
-    agent._start_learning_future = lambda run_messages, session, user_id, existing_future=None: captured.update(  # type: ignore[method-assign]
+    agent._start_learning_future = lambda run_messages, session, user_id, existing_future=None: captured.update(
         learning_messages=list(run_messages.messages),
     )
-    agent._cleanup_and_store = lambda run_response, session, run_context=None, user_id=None: captured.update(  # type: ignore[method-assign]
+    agent._cleanup_and_store = lambda run_response, session, run_context=None, user_id=None: captured.update(
         stored_messages=list(run_response.messages or []),
         stored_additional_input=list(run_response.additional_input or []),
     )
@@ -476,7 +484,10 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
             has_stored_replay_state=True,
         )
 
-    with patch("mindroom.history.runtime.prepare_history_for_run", new=AsyncMock(side_effect=_fake_prepare)) as mock_prepare:
+    with patch(
+        "mindroom.history.runtime.prepare_history_for_run",
+        new=AsyncMock(side_effect=_fake_prepare),
+    ) as mock_prepare:
         prepared = await prepare_bound_agents_for_run(
             agents=[peer_agent, owner_agent],
             full_prompt="Current prompt",
@@ -490,6 +501,271 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert prepared.has_stored_replay_state is True
     assert peer_agent.additional_input is not None
     assert [message.content for message in peer_agent.additional_input] == ["persisted replay"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_bound_agents_for_run_uses_named_team_policy_not_owner_member(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "alpha": AgentConfig(
+                    display_name="Alpha",
+                    num_history_messages=100,
+                ),
+                "zeta": AgentConfig(
+                    display_name="Zeta",
+                    num_history_messages=1,
+                ),
+            },
+            teams={
+                "pair": TeamConfig(
+                    display_name="Pair",
+                    role="Test team",
+                    agents=["alpha", "zeta"],
+                    num_history_messages=2,
+                    compaction=CompactionOverrideConfig(
+                        enabled=False,
+                        threshold_tokens=1_000,
+                        reserve_tokens=0,
+                    ),
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=2_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+    storage = create_session_storage("alpha", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_team_run(
+                "team-1",
+                team_id="pair",
+                messages=[
+                    Message(role="user", content="old question"),
+                    Message(role="assistant", content="old answer"),
+                    Message(role="user", content="new question"),
+                    Message(role="assistant", content="new answer"),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    owner_agent = _agent()
+    owner_agent.id = "alpha"
+    owner_agent.team_id = "pair"
+    peer_agent = _agent()
+    peer_agent.id = "zeta"
+    peer_agent.team_id = "pair"
+
+    prepared = await prepare_bound_agents_for_run(
+        agents=[peer_agent, owner_agent],
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        team_name="pair",
+        active_model_name="default",
+        active_context_window=2_000,
+    )
+
+    assert [message.content for message in prepared.history_messages] == ["new question", "new answer"]
+    assert peer_agent.additional_input is not None
+    assert [message.content for message in peer_agent.additional_input] == ["new question", "new answer"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_bound_agents_for_run_uses_defaults_for_ad_hoc_team_policy(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "alpha": AgentConfig(
+                    display_name="Alpha",
+                    num_history_messages=100,
+                ),
+                "zeta": AgentConfig(
+                    display_name="Zeta",
+                    num_history_messages=1,
+                ),
+            },
+            defaults=DefaultsConfig(
+                tools=[],
+                num_history_messages=2,
+                compaction=CompactionConfig(
+                    enabled=False,
+                    threshold_tokens=1_000,
+                    reserve_tokens=0,
+                ),
+            ),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=2_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+    storage = create_session_storage("alpha", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_team_run(
+                "team-1",
+                team_id="adhoc-team",
+                messages=[
+                    Message(role="user", content="old question"),
+                    Message(role="assistant", content="old answer"),
+                    Message(role="user", content="new question"),
+                    Message(role="assistant", content="new answer"),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    owner_agent = _agent()
+    owner_agent.id = "alpha"
+    owner_agent.team_id = "adhoc-team"
+    peer_agent = _agent()
+    peer_agent.id = "zeta"
+    peer_agent.team_id = "adhoc-team"
+
+    prepared = await prepare_bound_agents_for_run(
+        agents=[peer_agent, owner_agent],
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        active_model_name="default",
+        active_context_window=2_000,
+    )
+
+    assert [message.content for message in prepared.history_messages] == ["new question", "new answer"]
+    assert peer_agent.additional_input is not None
+    assert [message.content for message in peer_agent.additional_input] == ["new question", "new answer"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_bound_agents_for_run_budget_uses_active_run_model(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "alpha": AgentConfig(display_name="Alpha"),
+                "zeta": AgentConfig(display_name="Zeta"),
+            },
+            teams={
+                "pair": TeamConfig(
+                    display_name="Pair",
+                    role="Test team",
+                    agents=["alpha", "zeta"],
+                    compaction=CompactionOverrideConfig(
+                        enabled=False,
+                        threshold_tokens=160,
+                        reserve_tokens=0,
+                    ),
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "small": ModelConfig(
+                    provider="openai",
+                    id="small-model",
+                    context_window=60,
+                ),
+                "large": ModelConfig(
+                    provider="openai",
+                    id="large-model",
+                    context_window=400,
+                ),
+                "default": ModelConfig(
+                    provider="openai",
+                    id="default-model",
+                    context_window=400,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+    storage = create_session_storage("alpha", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_team_run(
+                "run-1",
+                team_id="pair",
+                messages=[
+                    Message(role="user", content="run-1 question " + ("a" * 160)),
+                    Message(role="assistant", content="run-1 answer " + ("b" * 160)),
+                ],
+            ),
+            _completed_team_run(
+                "run-2",
+                team_id="pair",
+                messages=[
+                    Message(role="user", content="run-2 question " + ("c" * 160)),
+                    Message(role="assistant", content="run-2 answer " + ("d" * 160)),
+                ],
+            ),
+            _completed_team_run(
+                "run-3",
+                team_id="pair",
+                messages=[
+                    Message(role="user", content="run-3 question " + ("e" * 160)),
+                    Message(role="assistant", content="run-3 answer " + ("f" * 160)),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    owner_agent = _agent()
+    owner_agent.id = "alpha"
+    owner_agent.team_id = "pair"
+    peer_agent = _agent()
+    peer_agent.id = "zeta"
+    peer_agent.team_id = "pair"
+
+    prepared_small = await prepare_bound_agents_for_run(
+        agents=[peer_agent, owner_agent],
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        team_name="pair",
+        active_model_name="small",
+        active_context_window=60,
+    )
+    clear_bound_agent_history_state([peer_agent, owner_agent])
+
+    prepared_large = await prepare_bound_agents_for_run(
+        agents=[peer_agent, owner_agent],
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        team_name="pair",
+        active_model_name="large",
+        active_context_window=400,
+    )
+
+    assert len(prepared_small.history_messages) < len(prepared_large.history_messages)
 
 
 def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:

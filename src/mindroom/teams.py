@@ -60,7 +60,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping
+    from collections.abc import AsyncIterator, Callable, Collection, Mapping
 
     import nio
     from agno.models.response import ToolExecution
@@ -1211,6 +1211,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    configured_team_name: str | None = None,
     *,
     reason_prefix: str = "Team request",
 ) -> str:
@@ -1237,7 +1238,16 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
 
     base_prompt = message
     fallback_prompt = _build_prompt_with_context(message, thread_history)
-    team = _create_team_instance(agents, team_members.requested_agent_names, mode, orchestrator, model_name)
+    resolved_team_model_name = model_name
+    if resolved_team_model_name is None and configured_team_name is not None:
+        resolved_team_model_name = orchestrator.config.get_entity_model_name(configured_team_name)
+    team = _create_team_instance(
+        agents,
+        team_members.requested_agent_names,
+        mode,
+        orchestrator,
+        resolved_team_model_name,
+    )
     seen_event_ids = _collect_bound_seen_event_ids(
         agents=agents,
         session_id=session_id,
@@ -1253,6 +1263,8 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,
     )
+    active_team_model_name = resolved_team_model_name or "default"
+    active_team_context_window = orchestrator.config.get_model_context_window(active_team_model_name)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
     media_inputs = media or MediaInputs()
@@ -1266,6 +1278,9 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             config=orchestrator.config,
             execution_identity=execution_identity,
             compaction_outcomes_collector=compaction_outcomes_collector,
+            team_name=configured_team_name,
+            active_model_name=active_team_model_name,
+            active_context_window=active_team_context_window,
         )
     except Exception as e:
         logger.exception("Error preparing team members", agents=agent_list)
@@ -1464,6 +1479,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    configured_team_name: str | None = None,
     *,
     reason_prefix: str = "Team request",
 ) -> AsyncIterator[_TeamStreamChunk]:
@@ -1498,12 +1514,15 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     display_names = team_members.display_names
     base_prompt = message
     fallback_prompt = _build_prompt_with_context(message, thread_history)
+    resolved_team_model_name = model_name
+    if resolved_team_model_name is None and configured_team_name is not None:
+        resolved_team_model_name = orchestrator.config.get_entity_model_name(configured_team_name)
     team = _create_team_instance(
         team_members.agents,
         team_members.requested_agent_names,
         mode,
         orchestrator,
-        model_name,
+        resolved_team_model_name,
     )
     seen_event_ids = _collect_bound_seen_event_ids(
         agents=team_members.agents,
@@ -1520,6 +1539,8 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,
     )
+    active_team_model_name = resolved_team_model_name or "default"
+    active_team_context_window = orchestrator.config.get_model_context_window(active_team_model_name)
     try:
         prepared_history = await prepare_bound_agents_for_run(
             agents=team_members.agents,
@@ -1529,6 +1550,9 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             config=orchestrator.config,
             execution_identity=execution_identity,
             compaction_outcomes_collector=compaction_outcomes_collector,
+            team_name=configured_team_name,
+            active_model_name=active_team_model_name,
+            active_context_window=active_team_context_window,
         )
     except Exception as e:
         logger.exception("Error preparing team members for streaming", agents=agent_names)

@@ -7,12 +7,9 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
 from html import escape
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from pydantic import BaseModel
 
@@ -26,6 +23,9 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
     from agno.models.base import Model
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
+    from agno.session.agent import AgentSession
 
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
@@ -71,10 +71,11 @@ async def compact_scope_history(
     scope: HistoryScope,
     state: CompactionState,
     visible_runs: list[RunOutput | TeamRunOutput],
-    agent: Agent,
-    agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    compaction_config: CompactionConfig,
+    active_model_name: str,
+    active_context_window: int | None,
 ) -> tuple[CompactionState, CompactionOutcome | None]:
     """Compact the oldest visible prefix for one scope in a single summary pass."""
     compactable_runs = visible_runs[:-2]
@@ -82,14 +83,12 @@ async def compact_scope_history(
     if not compactable_runs:
         return cleared_state, None
 
-    compaction_config = config.get_agent_compaction_config(agent_name)
     summary_model, compaction_model_context_window = resolve_compaction_model(
         config=config,
         runtime_paths=runtime_paths,
-        agent_name=agent_name,
         compaction_config=compaction_config,
+        active_model_name=active_model_name,
     )
-    active_context_window = _active_context_window(config, agent_name)
     effective_window = compaction_model_context_window or active_context_window or 0
     reserve_tokens = normalize_compaction_budget_tokens(
         compaction_config.reserve_tokens,
@@ -193,23 +192,16 @@ def resolve_compaction_model(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    agent_name: str,
     compaction_config: CompactionConfig,
+    active_model_name: str,
 ) -> tuple[Model, int | None]:
     """Resolve the summary model used for single-pass compaction."""
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
-    model_name = compaction_config.model or config.get_entity_model_name(agent_name)
+    model_name = compaction_config.model or active_model_name
     model = get_model_instance(config, runtime_paths, model_name)
-    model_config = config.models.get(model_name)
-    context_window = model_config.context_window if model_config and model_config.context_window else None
+    context_window = config.get_model_context_window(model_name)
     return model, context_window
-
-
-def _active_context_window(config: Config, agent_name: str) -> int | None:
-    model_name = config.get_entity_model_name(agent_name)
-    model_config = config.models.get(model_name)
-    return model_config.context_window if model_config and model_config.context_window else None
 
 
 async def _generate_compaction_summary(*, model: Model, summary_input: str) -> SessionSummary:
@@ -399,7 +391,7 @@ def _build_compaction_outcome(
     before_summary: str | None,
     after_visible_runs: Sequence[RunOutput | TeamRunOutput],
     new_summary: str,
-    mode: str,
+    mode: Literal["auto", "manual"],
     summary_model: str,
     window_tokens: int,
     threshold_tokens: int,
@@ -410,7 +402,7 @@ def _build_compaction_outcome(
     before_tokens = _estimate_runs_tokens(before_visible_runs) + estimate_text_tokens(before_summary)
     after_tokens = _estimate_runs_tokens(after_visible_runs) + estimate_text_tokens(new_summary)
     return CompactionOutcome(
-        mode=cast("str", mode),
+        mode=mode,
         summary=new_summary,
         summary_model=summary_model,
         before_tokens=before_tokens,
