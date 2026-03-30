@@ -257,7 +257,7 @@ class TestUserIdPassthrough:
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.build_prompt_with_thread_history", return_value="enhanced"),
             patch("mindroom.ai.create_agent", return_value=mock_agent) as mock_create_agent,
-            patch("mindroom.ai._apply_context_window_limit"),
+            patch("mindroom.compaction_runtime._apply_context_window_limit"),
         ):
             agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
                 agent_name="general",

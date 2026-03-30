@@ -30,7 +30,6 @@ from mindroom.agents import (
     remove_run_by_event_id,
 )
 from mindroom.ai import (
-    _apply_context_window_limit,
     _build_prompt_with_unseen,
     _get_unseen_messages,
     _prepare_agent_and_prompt,
@@ -38,6 +37,7 @@ from mindroom.ai import (
 )
 from mindroom.bot import AgentBot
 from mindroom.compaction import CompactionOutcome
+from mindroom.compaction_runtime import _apply_context_window_limit
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig, ToolConfigEntry
@@ -962,8 +962,8 @@ class TestPrepareAgentAndPrompt:
             patch("mindroom.ai.create_agent", return_value=agent),
             patch("mindroom.ai.create_session_storage", return_value=MagicMock(spec=SqliteDb)),
             patch("mindroom.ai._get_agent_session", return_value=session),
-            patch("mindroom.ai.compact_session_now", new_callable=AsyncMock) as mock_compact,
-            patch("mindroom.ai._apply_context_window_limit"),
+            patch("mindroom.compaction_runtime.compact_session_now", new_callable=AsyncMock) as mock_compact,
+            patch("mindroom.compaction_runtime._apply_context_window_limit"),
         ):
             await _prepare_agent_and_prompt(
                 "calculator",
@@ -1039,11 +1039,11 @@ class TestPrepareAgentAndPrompt:
             patch("mindroom.ai._get_agent_session", return_value=session),
             patch("mindroom.ai.get_model_instance", return_value=MagicMock(id="compact-model")),
             patch(
-                "mindroom.ai.compact_session_now",
+                "mindroom.compaction_runtime.compact_session_now",
                 new_callable=AsyncMock,
                 return_value=(compacted_session, outcome),
             ) as mock_compact,
-            patch("mindroom.ai._apply_context_window_limit") as mock_apply_limit,
+            patch("mindroom.compaction_runtime._apply_context_window_limit") as mock_apply_limit,
         ):
             await _prepare_agent_and_prompt(
                 "calculator",
@@ -1130,8 +1130,8 @@ class TestPrepareAgentAndPrompt:
             patch("mindroom.ai.create_agent", return_value=agent),
             patch("mindroom.ai.create_session_storage", return_value=MagicMock(spec=SqliteDb)),
             patch("mindroom.ai._get_agent_session", return_value=session),
-            patch("mindroom.ai.compact_session_now", new_callable=AsyncMock) as mock_compact,
-            patch("mindroom.ai._apply_context_window_limit"),
+            patch("mindroom.compaction_runtime.compact_session_now", new_callable=AsyncMock) as mock_compact,
+            patch("mindroom.compaction_runtime._apply_context_window_limit"),
         ):
             await _prepare_agent_and_prompt(
                 "calculator",
@@ -1607,8 +1607,8 @@ class TestApplyContextWindowLimit:
         config = self._make_config(context_window=100)
         agent = self._make_agent(num_history_runs=5)
         with (
-            patch("mindroom.ai.create_session_storage"),
-            patch("mindroom.ai._get_agent_session", return_value=None),
+            patch("mindroom.compaction_runtime.create_session_storage"),
+            patch("mindroom.compaction_runtime._get_agent_session", return_value=None),
         ):
             _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
         assert agent.num_history_runs == 5
@@ -1640,8 +1640,8 @@ class TestApplyContextWindowLimit:
         runtime_paths = _runtime_paths(tmp_path)
 
         with (
-            patch("mindroom.ai.create_session_storage") as mock_create_storage,
-            patch("mindroom.ai._get_agent_session", return_value=None),
+            patch("mindroom.compaction_runtime.create_session_storage") as mock_create_storage,
+            patch("mindroom.compaction_runtime._get_agent_session", return_value=None),
         ):
             _apply_context_window_limit(
                 agent,

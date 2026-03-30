@@ -25,15 +25,15 @@ from agno.team import Team
 from pydantic import BaseModel, Field
 
 from mindroom.agents import create_agent
-from mindroom.ai import (
+from mindroom.ai import get_model_instance
+from mindroom.authorization import get_available_agents_in_room
+from mindroom.compaction_runtime import (
     apply_bound_agent_compactions,
     bind_agent_compaction_state,
     clear_bound_agent_compactions,
-    get_model_instance,
     prepare_bound_agents_for_run,
     stream_with_bound_agent_compactions,
 )
-from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge

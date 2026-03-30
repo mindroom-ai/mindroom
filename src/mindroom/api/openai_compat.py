@@ -30,13 +30,15 @@ from mindroom.agents import create_agent
 from mindroom.ai import (
     AIStreamChunk,
     ai_response,
+    build_prompt_with_thread_history,
+    get_model_instance,
+    stream_agent_response,
+)
+from mindroom.compaction_runtime import (
     apply_bound_agent_compactions,
     bind_agent_compaction_state,
-    build_prompt_with_thread_history,
     clear_bound_agent_compactions,
-    get_model_instance,
     prepare_bound_agents_for_run,
-    stream_agent_response,
     stream_with_bound_agent_compactions,
 )
 from mindroom.config.main import Config, load_config
