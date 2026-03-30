@@ -285,6 +285,9 @@ defaults:
   num_history_runs: null             # Number of prior runs to include (null = all)
 ```
 
+Auto-compaction is non-destructive.
+It updates the stored session summary and replay cutoff for future prompts, but the original runs remain in the session database.
+
 2. Configure your Matrix homeserver and API keys (optional, defaults shown):
 ```bash
 export MATRIX_HOMESERVER=https://your-matrix.server

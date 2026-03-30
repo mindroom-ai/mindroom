@@ -251,7 +251,6 @@ def _make_compaction_outcome(*, mode: str = "auto", notify: bool = True) -> Comp
     return CompactionOutcome(
         mode=mode,
         summary="## Goal\nPreserve <summary> & keep context.",
-        topics=["compaction", "context"],
         summary_model="compact-model",
         before_tokens=30000,
         after_tokens=12000,

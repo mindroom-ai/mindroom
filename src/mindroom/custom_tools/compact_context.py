@@ -131,15 +131,10 @@ def _format_outcome(outcome: CompactionOutcome) -> str:
     if outcome.before_tokens > 0:
         reduction_pct = int((1 - (outcome.after_tokens / outcome.before_tokens)) * 100)
 
-    topics_line = ""
-    if outcome.topics:
-        topics_line = f"\n- Topics preserved: {', '.join(outcome.topics)}"
-
     return (
         "Compaction queued:\n"
         f"- Visible runs: {outcome.runs_before} -> {outcome.runs_after}\n"
         f"- Tokens: ~{outcome.before_tokens:,} -> ~{outcome.after_tokens:,} "
         f"({reduction_pct}% reduction)\n"
         "- Status: Will apply after this response finishes."
-        f"{topics_line}"
     )

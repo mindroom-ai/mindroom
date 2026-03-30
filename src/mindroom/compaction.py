@@ -92,7 +92,6 @@ class CompactionOutcome:
 
     mode: _CompactionMode
     summary: str
-    topics: list[str]
     summary_model: str
     before_tokens: int
     after_tokens: int
@@ -116,7 +115,6 @@ class CompactionOutcome:
         return {
             "version": _COMPACTION_NOTICE_VERSION,
             "mode": self.mode,
-            "topics": list(self.topics),
             "summary_model": self.summary_model,
             "before_tokens": self.before_tokens,
             "after_tokens": self.after_tokens,
@@ -767,7 +765,7 @@ async def _generate_compaction_summary(
     if not raw_text:
         msg = "summary generation returned no result"
         raise RuntimeError(msg)
-    return SessionSummary(summary=raw_text, topics=[], updated_at=datetime.now(UTC))
+    return SessionSummary(summary=raw_text, updated_at=datetime.now(UTC))
 
 
 def _normalize_compaction_summary_text(raw_text: str) -> str:
@@ -1029,7 +1027,6 @@ def _build_compaction_outcome(
     return CompactionOutcome(
         mode=mode,
         summary=new_summary.summary,
-        topics=list(new_summary.topics or []),
         summary_model=summary_model,
         before_tokens=before_tokens,
         after_tokens=after_tokens,

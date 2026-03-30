@@ -1065,7 +1065,6 @@ class TestPrepareAgentAndPrompt:
         outcome = CompactionOutcome(
             mode="auto",
             summary="## Goal\nCompacted",
-            topics=["compaction"],
             summary_model="compact-model",
             before_tokens=50,
             after_tokens=10,
