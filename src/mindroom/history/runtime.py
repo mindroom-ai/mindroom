@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, cast
 
 from agno.run.agent import RunOutput
 from agno.run.messages import RunMessages
-from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from pydantic import BaseModel
 
@@ -30,7 +29,7 @@ from mindroom.history.replay import (
     resolve_history_scope,
     strip_replay_messages,
 )
-from mindroom.history.storage import read_scope_seen_event_ids, read_scope_state, write_scope_state
+from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistory, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
 
@@ -295,7 +294,6 @@ def load_scope_session_context(
         session = None
 
     storage, session = _materialize_session(
-        agent=agent,
         agent_name=agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
@@ -457,7 +455,6 @@ def _scrub_replay_messages_from_run_output(run_response: RunOutput) -> None:
 
 def _materialize_session(
     *,
-    agent: Agent,
     agent_name: str,
     session_id: str,
     runtime_paths: RuntimePaths,
@@ -477,20 +474,6 @@ def _materialize_session(
         )
     if session is None:
         session = get_agent_session(storage, session_id)
-    if session is None and scope.kind == "team":
-        session = _load_legacy_team_session(
-            agent=agent,
-            agent_name=agent_name,
-            session_id=session_id,
-            scope=scope,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        )
-        if session is not None:
-            session.agent_id = _scope_session_agent_id(scope)
-            session.team_id = scope.scope_id
-            storage.upsert_session(session)
     return storage, session
 
 
@@ -536,85 +519,6 @@ def _scope_session_agent_id(scope: HistoryScope) -> str:
     if scope.kind == "agent":
         return scope.scope_id
     return _scope_session_storage_name(scope)
-
-
-def _load_legacy_team_session(
-    *,
-    agent: Agent,
-    agent_name: str,
-    session_id: str,
-    scope: HistoryScope,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-) -> AgentSession | None:
-    checked_storage_names: set[str] = set()
-    for legacy_storage_name in _legacy_team_storage_names(agent, agent_name, scope, config):
-        checked_storage_names.add(legacy_storage_name)
-        legacy_storage = create_session_storage(
-            legacy_storage_name,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        )
-        legacy_session = get_agent_session(legacy_storage, session_id)
-        if _session_matches_team_scope(legacy_session, scope):
-            return legacy_session
-
-    legacy_agents_root = runtime_paths.storage_root / "agents"
-    if not legacy_agents_root.is_dir():
-        return None
-
-    for legacy_db_file in sorted(legacy_agents_root.glob("*/sessions/*.db")):
-        legacy_storage_name = legacy_db_file.stem
-        if legacy_storage_name in checked_storage_names:
-            continue
-        legacy_storage = create_state_storage_db(
-            storage_name=legacy_storage_name,
-            state_root=legacy_db_file.parents[1],
-            subdir="sessions",
-            session_table=f"{legacy_storage_name}_sessions",
-        )
-        legacy_session = get_agent_session(legacy_storage, session_id)
-        if _session_matches_team_scope(legacy_session, scope):
-            return legacy_session
-    return None
-
-
-def _legacy_team_storage_names(
-    agent: Agent,
-    fallback_agent_name: str,
-    scope: HistoryScope,
-    config: Config,
-) -> list[str]:
-    storage_names: list[str] = []
-
-    def _append(storage_name: str | None) -> None:
-        if not isinstance(storage_name, str) or not storage_name:
-            return
-        if storage_name not in storage_names:
-            storage_names.append(storage_name)
-
-    raw_owner = agent.__dict__.get(_TEAM_SCOPE_OWNER_AGENT_ATTR)
-    _append(raw_owner if isinstance(raw_owner, str) else None)
-    _append(fallback_agent_name)
-    if scope.scope_id in config.teams:
-        for member_name in config.teams[scope.scope_id].agents:
-            _append(member_name)
-    return storage_names
-
-
-def _session_matches_team_scope(session: AgentSession | None, scope: HistoryScope) -> bool:
-    if session is None:
-        return False
-    if session.team_id == scope.scope_id:
-        return True
-    if any(isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id for run in session.runs or []):
-        return True
-    scoped_state = read_scope_state(session, scope)
-    if scoped_state.has_summary or scoped_state.has_cutoff or scoped_state.force_compact_before_next_run:
-        return True
-    return bool(read_scope_seen_event_ids(session, scope))
 
 
 def _history_settings_from_agent(agent: Agent) -> ResolvedHistorySettings:

@@ -1,27 +1,20 @@
-"""Scoped history-state persistence and legacy migration."""
+"""Scoped history-state persistence."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
 from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
-from agno.session.summary import SessionSummary
 
 from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
 from mindroom.history.types import CompactionState, HistoryScope
-from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from agno.session.agent import AgentSession
-
-logger = get_logger(__name__)
 
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
@@ -54,7 +47,7 @@ def read_scope_states(session: AgentSession) -> dict[str, CompactionState]:
             parsed[scope_key] = _parse_state(raw_state)
         return parsed
 
-    return _migrate_legacy_scope_states(session=session, legacy_metadata=raw_value)
+    return {}
 
 
 def write_scope_state(
@@ -157,61 +150,8 @@ def _state_is_empty(state: CompactionState) -> bool:
     )
 
 
-def _migrate_legacy_scope_states(
-    *,
-    session: AgentSession,
-    legacy_metadata: dict[str, Any],
-) -> dict[str, CompactionState]:
-    """Best-effort migration from the legacy session-global compaction state."""
-    summary = session.summary
-    if not isinstance(summary, SessionSummary) or not summary.summary.strip():
-        return {}
-
-    last_compacted_run_id = legacy_metadata.get("last_compacted_run_id")
-    if not isinstance(last_compacted_run_id, str) or not last_compacted_run_id:
-        return {}
-
-    inferred_scope = _infer_legacy_scope(session)
-    if inferred_scope is None:
-        logger.info(
-            "Ignoring legacy mixed-scope compaction state",
-            session_id=session.session_id,
-        )
-        return {}
-
-    compacted_at = legacy_metadata.get("compacted_at")
-    summary_model = legacy_metadata.get("summary_model")
-    migrated_state = CompactionState(
-        summary=summary.summary,
-        last_compacted_run_id=last_compacted_run_id,
-        compacted_at=compacted_at if isinstance(compacted_at, str) else None,
-        summary_model=summary_model if isinstance(summary_model, str) else None,
-        force_compact_before_next_run=False,
-    )
-    return {inferred_scope.key: migrated_state}
-
-
 def _read_preserved_scope_seen_event_ids(session: AgentSession, scope: HistoryScope) -> set[str]:
-    seen_event_ids = set(_read_scope_seen_event_states(session).get(scope.key, set()))
-    if scope.kind == "team":
-        seen_event_ids.update(_read_legacy_team_scope_seen_event_ids(session))
-    return seen_event_ids
-
-
-def _read_legacy_team_scope_seen_event_ids(session: AgentSession) -> set[str]:
-    metadata = session.metadata
-    if not isinstance(metadata, dict):
-        return set()
-
-    raw_compaction_metadata = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
-    if not isinstance(raw_compaction_metadata, dict):
-        return set()
-
-    raw_seen_ids = raw_compaction_metadata.get("seen_event_ids")
-    if not isinstance(raw_seen_ids, list):
-        return set()
-
-    return {event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id}
+    return set(_read_scope_seen_event_states(session).get(scope.key, set()))
 
 
 def _read_scope_seen_event_states(session: AgentSession) -> dict[str, set[str]]:
@@ -254,38 +194,6 @@ def _write_scope_seen_event_states(session: AgentSession, states: dict[str, set[
     else:
         session_metadata.pop(MINDROOM_MATRIX_HISTORY_METADATA_KEY, None)
     session.metadata = session_metadata
-
-
-def _infer_legacy_scope(session: AgentSession) -> HistoryScope | None:
-    completed_runs = _completed_top_level_runs(session)
-    shared_scope = _shared_scope(completed_runs)
-    if shared_scope is not None:
-        return shared_scope
-    if isinstance(session.team_id, str) and session.team_id:
-        return HistoryScope(kind="team", scope_id=session.team_id)
-    if isinstance(session.agent_id, str) and session.agent_id:
-        return HistoryScope(kind="agent", scope_id=session.agent_id)
-    return None
-
-
-def _completed_top_level_runs(session: AgentSession) -> list[RunOutput | TeamRunOutput]:
-    skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
-    return [
-        run
-        for run in session.runs or []
-        if isinstance(run, (RunOutput, TeamRunOutput)) and run.parent_run_id is None and run.status not in skip_statuses
-    ]
-
-
-def _shared_scope(runs: Sequence[RunOutput | TeamRunOutput]) -> HistoryScope | None:
-    if not runs:
-        return None
-    first_scope = _scope_for_run(runs[0])
-    if first_scope is None:
-        return None
-    if any(_scope_for_run(run) != first_scope for run in runs[1:]):
-        return None
-    return first_scope
 
 
 def _scope_for_run(run: RunOutput | TeamRunOutput) -> HistoryScope | None:

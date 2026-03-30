@@ -20,14 +20,12 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 
-from mindroom.agents import create_agent, create_session_storage, create_state_storage_db, get_agent_session
+from mindroom.agents import create_agent, create_session_storage, get_agent_session
 from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import (
-    MINDROOM_COMPACTION_METADATA_KEY,
-    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
     RuntimePaths,
     resolve_runtime_paths,
 )
@@ -43,7 +41,6 @@ from mindroom.history.runtime import load_scope_session_context
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
     read_scope_state,
-    read_scope_states,
     update_scope_seen_event_ids,
     write_scope_state,
 )
@@ -283,7 +280,19 @@ def test_message_limited_replay_keeps_newest_messages_from_single_run(tmp_path: 
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_uses_team_scope_state_for_team_member(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    agent = _agent()
+    agent.team_id = "team-123"
+    scope_context = load_scope_session_context(
+        agent=agent,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    )
+    assert scope_context is not None
+    assert scope_context.session is not None
     session = _session(
         "session-1",
         runs=[
@@ -302,10 +311,8 @@ async def test_prepare_history_for_run_uses_team_scope_state_for_team_member(tmp
         HistoryScope(kind="team", scope_id="team-123"),
         CompactionState(summary="team summary", last_compacted_run_id="team-old"),
     )
-    storage.upsert_session(session)
+    scope_context.storage.upsert_session(session)
 
-    agent = _agent(db=storage)
-    agent.team_id = "team-123"
     prepared = await prepare_history_for_run(
         agent=agent,
         agent_name="test_agent",
@@ -314,7 +321,6 @@ async def test_prepare_history_for_run_uses_team_scope_state_for_team_member(tmp
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
-        storage=storage,
         session=session,
     )
 
@@ -543,7 +549,23 @@ async def test_prepare_bound_agents_for_run_uses_named_team_policy_not_owner_mem
         ),
         runtime_paths,
     )
-    storage = create_session_storage("alpha", config, runtime_paths, execution_identity=None)
+    owner_agent = _agent()
+    owner_agent.id = "alpha"
+    owner_agent.team_id = "pair"
+    peer_agent = _agent()
+    peer_agent.id = "zeta"
+    peer_agent.team_id = "pair"
+    scope_context = load_scope_session_context(
+        agent=owner_agent,
+        agent_name="alpha",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    )
+    assert scope_context is not None
+    assert scope_context.session is not None
     session = _session(
         "session-1",
         runs=[
@@ -559,14 +581,7 @@ async def test_prepare_bound_agents_for_run_uses_named_team_policy_not_owner_mem
             ),
         ],
     )
-    storage.upsert_session(session)
-
-    owner_agent = _agent()
-    owner_agent.id = "alpha"
-    owner_agent.team_id = "pair"
-    peer_agent = _agent()
-    peer_agent.id = "zeta"
-    peer_agent.team_id = "pair"
+    scope_context.storage.upsert_session(session)
 
     prepared = await prepare_bound_agents_for_run(
         agents=[peer_agent, owner_agent],
@@ -619,7 +634,23 @@ async def test_prepare_bound_agents_for_run_uses_defaults_for_ad_hoc_team_policy
         ),
         runtime_paths,
     )
-    storage = create_session_storage("alpha", config, runtime_paths, execution_identity=None)
+    owner_agent = _agent()
+    owner_agent.id = "alpha"
+    owner_agent.team_id = "adhoc-team"
+    peer_agent = _agent()
+    peer_agent.id = "zeta"
+    peer_agent.team_id = "adhoc-team"
+    scope_context = load_scope_session_context(
+        agent=owner_agent,
+        agent_name="alpha",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    )
+    assert scope_context is not None
+    assert scope_context.session is not None
     session = _session(
         "session-1",
         runs=[
@@ -635,14 +666,7 @@ async def test_prepare_bound_agents_for_run_uses_defaults_for_ad_hoc_team_policy
             ),
         ],
     )
-    storage.upsert_session(session)
-
-    owner_agent = _agent()
-    owner_agent.id = "alpha"
-    owner_agent.team_id = "adhoc-team"
-    peer_agent = _agent()
-    peer_agent.id = "zeta"
-    peer_agent.team_id = "adhoc-team"
+    scope_context.storage.upsert_session(session)
 
     prepared = await prepare_bound_agents_for_run(
         agents=[peer_agent, owner_agent],
@@ -702,7 +726,23 @@ async def test_prepare_bound_agents_for_run_budget_uses_active_run_model(tmp_pat
         ),
         runtime_paths,
     )
-    storage = create_session_storage("alpha", config, runtime_paths, execution_identity=None)
+    owner_agent = _agent()
+    owner_agent.id = "alpha"
+    owner_agent.team_id = "pair"
+    peer_agent = _agent()
+    peer_agent.id = "zeta"
+    peer_agent.team_id = "pair"
+    scope_context = load_scope_session_context(
+        agent=owner_agent,
+        agent_name="alpha",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    )
+    assert scope_context is not None
+    assert scope_context.session is not None
     session = _session(
         "session-1",
         runs=[
@@ -732,14 +772,7 @@ async def test_prepare_bound_agents_for_run_budget_uses_active_run_model(tmp_pat
             ),
         ],
     )
-    storage.upsert_session(session)
-
-    owner_agent = _agent()
-    owner_agent.id = "alpha"
-    owner_agent.team_id = "pair"
-    peer_agent = _agent()
-    peer_agent.id = "zeta"
-    peer_agent.team_id = "pair"
+    scope_context.storage.upsert_session(session)
 
     prepared_small = await prepare_bound_agents_for_run(
         agents=[peer_agent, owner_agent],
@@ -857,101 +890,6 @@ async def test_prepare_bound_agents_for_run_counts_owner_static_prompt_tokens(tm
     assert prepared.history_messages == []
 
 
-@pytest.mark.asyncio
-async def test_prepare_bound_agents_for_run_migrates_named_team_scope_from_legacy_owner_storage(
-    tmp_path: Path,
-) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "beta": AgentConfig(display_name="Beta"),
-                "zeta": AgentConfig(display_name="Zeta"),
-            },
-            teams={
-                "pair": TeamConfig(
-                    display_name="Pair",
-                    role="Test team",
-                    agents=["beta", "zeta"],
-                    num_history_messages=2,
-                    compaction=CompactionOverrideConfig(
-                        enabled=False,
-                        threshold_tokens=1_000,
-                        reserve_tokens=0,
-                    ),
-                ),
-            },
-            defaults=DefaultsConfig(tools=[]),
-            models={
-                "default": ModelConfig(
-                    provider="openai",
-                    id="default-model",
-                    context_window=2_000,
-                ),
-            },
-        ),
-        runtime_paths,
-    )
-    team_scope = HistoryScope(kind="team", scope_id="pair")
-    legacy_storage = create_state_storage_db(
-        storage_name="alpha",
-        state_root=runtime_paths.storage_root / "agents" / "alpha",
-        subdir="sessions",
-        session_table="alpha_sessions",
-    )
-    legacy_session = _session(
-        "session-1",
-        runs=[
-            _completed_team_run("run-1", team_id="pair"),
-            _completed_team_run("run-2", team_id="pair"),
-        ],
-    )
-    legacy_session.agent_id = "alpha"
-    legacy_session.team_id = "pair"
-    write_scope_state(
-        legacy_session,
-        team_scope,
-        CompactionState(summary="legacy team summary", last_compacted_run_id="run-1"),
-    )
-    update_scope_seen_event_ids(legacy_session, team_scope, ["event-1"])
-    legacy_storage.upsert_session(legacy_session)
-
-    owner_agent = _agent()
-    owner_agent.id = "beta"
-    owner_agent.team_id = "pair"
-    peer_agent = _agent()
-    peer_agent.id = "zeta"
-    peer_agent.team_id = "pair"
-
-    prepared = await prepare_bound_agents_for_run(
-        agents=[peer_agent, owner_agent],
-        full_prompt="Current prompt",
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-        team_name="pair",
-        active_model_name="default",
-        active_context_window=2_000,
-    )
-
-    assert "legacy team summary" in prepared.summary_prompt_prefix
-
-    migrated_context = load_scope_session_context(
-        agent=owner_agent,
-        agent_name="beta",
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    )
-    assert migrated_context is not None
-    assert migrated_context.session is not None
-    assert read_scope_state(migrated_context.session, team_scope).summary == "legacy team summary"
-    assert read_scope_seen_event_ids(migrated_context.session, team_scope) == {"event-1"}
-    assert any((runtime_paths.storage_root / "teams").glob("*/sessions/*.db"))
-
-
 def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     scope = HistoryScope(kind="team", scope_id="team-123")
@@ -988,50 +926,6 @@ def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> Non
 
     assert read_scope_seen_event_ids(session, agent_scope) == {"agent-event"}
     assert read_scope_seen_event_ids(session, team_scope) == {"team-event", "preserved-team-event"}
-
-
-def test_scope_seen_event_ids_reads_legacy_team_metadata_from_previous_commit(tmp_path: Path) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    session = _session(
-        "session-1",
-        metadata={
-            MINDROOM_COMPACTION_METADATA_KEY: {
-                "seen_event_ids": ["event-1"],
-            },
-        },
-    )
-
-    assert read_scope_seen_event_ids(session, HistoryScope(kind="team", scope_id="team-123")) == {"event-1"}
-    assert read_scope_seen_event_ids(session, HistoryScope(kind="agent", scope_id="test_agent")) == set()
-
-
-def test_scope_seen_event_ids_write_preserves_legacy_team_metadata_from_previous_commit(tmp_path: Path) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    session = _session(
-        "session-1",
-        metadata={
-            MINDROOM_COMPACTION_METADATA_KEY: {
-                "seen_event_ids": ["event-1"],
-            },
-        },
-    )
-    scope = HistoryScope(kind="team", scope_id="team-123")
-
-    assert update_scope_seen_event_ids(session, scope, ["event-2"]) is True
-    assert read_scope_seen_event_ids(session, scope) == {"event-1", "event-2"}
-    assert session.metadata == {
-        MINDROOM_COMPACTION_METADATA_KEY: {
-            "seen_event_ids": ["event-1"],
-        },
-        MINDROOM_MATRIX_HISTORY_METADATA_KEY: {
-            "version": 1,
-            "states": {
-                "team:team-123": {
-                    "seen_event_ids": ["event-1", "event-2"],
-                },
-            },
-        },
-    }
 
 
 @pytest.mark.asyncio
@@ -1096,45 +990,3 @@ async def test_prepare_agent_and_prompt_orders_unseen_summary_and_current_prompt
     assert all(not is_replay_message(message) for message in latest_run.messages or [])
 
     clear_prepared_history(agent)
-
-
-def test_legacy_single_scope_state_migrates(tmp_path: Path) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    session = _session(
-        "session-1",
-        runs=[_completed_run("run-1")],
-        metadata={
-            MINDROOM_COMPACTION_METADATA_KEY: {
-                "last_compacted_run_id": "run-1",
-            },
-        },
-        summary=SessionSummary(summary="legacy summary", updated_at=datetime.now(UTC)),
-    )
-
-    states = read_scope_states(session)
-
-    assert states == {
-        "agent:test_agent": CompactionState(
-            summary="legacy summary",
-            last_compacted_run_id="run-1",
-        ),
-    }
-
-
-def test_legacy_mixed_scope_state_is_ignored(tmp_path: Path) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    session = _session(
-        "session-1",
-        runs=[
-            _completed_run("direct-run"),
-            _completed_team_run("team-run", team_id="team-123"),
-        ],
-        metadata={
-            MINDROOM_COMPACTION_METADATA_KEY: {
-                "last_compacted_run_id": "direct-run",
-            },
-        },
-        summary=SessionSummary(summary="legacy summary", updated_at=datetime.now(UTC)),
-    )
-
-    assert read_scope_states(session) == {}
