@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
+    from agno.models.base import Model
     from agno.session.agent import AgentSession
 
     from mindroom.config.main import Config
@@ -269,6 +270,22 @@ def _resolve_effective_compaction_threshold(compaction_config: CompactionConfig,
     return int(context_window * 0.8)
 
 
+def resolve_compaction_model(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    compaction_config: CompactionConfig,
+) -> tuple[Model, int | None]:
+    """Resolve the compaction model instance and its context window."""
+    from mindroom.ai import get_model_instance  # noqa: PLC0415
+
+    model_name = compaction_config.model or config.get_entity_model_name(agent_name)
+    model = get_model_instance(config, runtime_paths, model_name)
+    model_config = config.models.get(model_name)
+    context_window = model_config.context_window if model_config and model_config.context_window else None
+    return model, context_window
+
+
 async def _maybe_auto_compact_agent_history(  # noqa: PLR0911
     *,
     agent: Agent,
@@ -322,15 +339,11 @@ async def _maybe_auto_compact_agent_history(  # noqa: PLR0911
         return session
 
     try:
-        from mindroom.ai import get_model_instance  # noqa: PLC0415
-
-        summary_model_name = compaction_config.model or model_name
-        summary_model = get_model_instance(config, runtime_paths, summary_model_name)
-        summary_model_config = config.models.get(summary_model_name)
-        compaction_model_context_window = (
-            summary_model_config.context_window
-            if summary_model_config and summary_model_config.context_window
-            else None
+        summary_model, compaction_model_context_window = resolve_compaction_model(
+            config,
+            runtime_paths,
+            agent_name,
+            compaction_config,
         )
         compaction_result = await compact_session_now(
             storage=storage,

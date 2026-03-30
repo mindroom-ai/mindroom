@@ -145,6 +145,7 @@ from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import config_confirmation
 from .commands.handler import CommandEvent, CommandHandlerContext, _generate_welcome_message, handle_command
 from .commands.parsing import Command, command_parser
+from .compaction import get_or_create_lock
 from .constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -508,25 +509,7 @@ class AgentBot:
 
     def _response_lifecycle_lock(self, room_id: str, thread_id: str | None) -> asyncio.Lock:
         """Return the per-thread lock that serializes one response lifecycle."""
-        key = (room_id, thread_id)
-        lock = self._response_lifecycle_locks.get(key)
-        if lock is not None:
-            return lock
-
-        if len(self._response_lifecycle_locks) > 100:
-            unlocked_keys = [
-                existing_key
-                for existing_key, existing_lock in self._response_lifecycle_locks.items()
-                if not existing_lock.locked()
-            ]
-            for existing_key in unlocked_keys:
-                if len(self._response_lifecycle_locks) <= 100:
-                    break
-                self._response_lifecycle_locks.pop(existing_key, None)
-
-        lock = asyncio.Lock()
-        self._response_lifecycle_locks[key] = lock
-        return lock
+        return get_or_create_lock(self._response_lifecycle_locks, (room_id, thread_id))
 
     def _hook_base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
         """Return shared base fields for hook context construction."""
@@ -2816,16 +2799,14 @@ class AgentBot:
                 delivery_result.options_list,
             )
 
-        if delivery_result is not None and delivery_result.event_id is not None:
-            for outcome in compaction_outcomes:
-                if outcome.notify:
-                    await self._send_compaction_notice(
-                        room_id=room_id,
-                        reply_to_event_id=reply_to_event_id,
-                        main_response_event_id=delivery_result.event_id,
-                        thread_id=thread_id,
-                        outcome=outcome,
-                    )
+        if delivery_result is not None:
+            await self._dispatch_compaction_notices(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                main_response_event_id=delivery_result.event_id,
+                thread_id=thread_id,
+                compaction_outcomes=compaction_outcomes,
+            )
 
         if delivery_result is not None and delivery_result.event_id is not None:
             return delivery_result.event_id
@@ -2951,7 +2932,7 @@ class AgentBot:
         finally:
             self.in_flight_response_count -= 1
 
-    async def _process_and_respond(  # noqa: C901
+    async def _process_and_respond(
         self,
         room_id: str,
         prompt: str,
@@ -3101,16 +3082,13 @@ class AgentBot:
             )
             await interactive.add_reaction_buttons(self.client, room_id, delivery.event_id, delivery.options_list)
 
-        if delivery.event_id is not None:
-            for outcome in compaction_outcomes:
-                if outcome.notify:
-                    await self._send_compaction_notice(
-                        room_id=room_id,
-                        reply_to_event_id=reply_to_event_id,
-                        main_response_event_id=delivery.event_id,
-                        thread_id=thread_id,
-                        outcome=outcome,
-                    )
+        await self._dispatch_compaction_notices(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            main_response_event_id=delivery.event_id,
+            thread_id=thread_id,
+            compaction_outcomes=compaction_outcomes,
+        )
 
         return delivery
 
@@ -3419,7 +3397,7 @@ class AgentBot:
             options_list=interactive_response.options_list,
         )
 
-    async def _process_and_respond_streaming(  # noqa: C901, PLR0912, PLR0915
+    async def _process_and_respond_streaming(  # noqa: C901, PLR0915
         self,
         room_id: str,
         prompt: str,
@@ -3653,16 +3631,13 @@ class AgentBot:
                 delivery.options_list,
             )
 
-        if delivery.event_id is not None:
-            for outcome in compaction_outcomes:
-                if outcome.notify:
-                    await self._send_compaction_notice(
-                        room_id=room_id,
-                        reply_to_event_id=reply_to_event_id,
-                        main_response_event_id=delivery.event_id,
-                        thread_id=thread_id,
-                        outcome=outcome,
-                    )
+        await self._dispatch_compaction_notices(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            main_response_event_id=delivery.event_id,
+            thread_id=thread_id,
+            compaction_outcomes=compaction_outcomes,
+        )
 
         return delivery
 
@@ -4005,6 +3980,28 @@ class AgentBot:
         self.logger.error("Failed to send response to room", room_id=room_id)
         return None
 
+    async def _dispatch_compaction_notices(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        main_response_event_id: str | None,
+        thread_id: str | None,
+        compaction_outcomes: list[CompactionOutcome],
+    ) -> None:
+        """Send compaction notices for all outcomes that have notify=True."""
+        if main_response_event_id is None:
+            return
+        for outcome in compaction_outcomes:
+            if outcome.notify:
+                await self._send_compaction_notice(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    main_response_event_id=main_response_event_id,
+                    thread_id=thread_id,
+                    outcome=outcome,
+                )
+
     async def _send_compaction_notice(
         self,
         *,
@@ -4036,7 +4033,7 @@ class AgentBot:
             reply_to_event_id=main_response_event_id,
             extra_content={
                 "msgtype": "m.notice",
-                "io.mindroom.compaction": outcome.to_notice_metadata(),
+                constants.COMPACTION_NOTICE_CONTENT_KEY: outcome.to_notice_metadata(),
                 "com.mindroom.skip_mentions": True,
             },
         )

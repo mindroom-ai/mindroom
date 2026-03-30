@@ -41,7 +41,12 @@ from mindroom.compaction_runtime import _apply_context_window_limit
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig, ToolConfigEntry
-from mindroom.constants import STREAM_STATUS_STREAMING, RuntimePaths, resolve_runtime_paths
+from mindroom.constants import (
+    COMPACTION_NOTICE_CONTENT_KEY,
+    STREAM_STATUS_STREAMING,
+    RuntimePaths,
+    resolve_runtime_paths,
+)
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
@@ -580,7 +585,7 @@ class TestGetUnseenMessages:
                 "body": "Compacted",
                 "event_id": "$notice",
                 "msgtype": "m.notice",
-                "content": {"io.mindroom.compaction": {"version": 1}},
+                "content": {COMPACTION_NOTICE_CONTENT_KEY: {"version": 1}},
             },
             {"sender": "@user:example.com", "body": "Real message", "event_id": "$real"},
         ]

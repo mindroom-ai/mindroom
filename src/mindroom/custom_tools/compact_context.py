@@ -8,6 +8,7 @@ from agno.tools import Toolkit
 
 from mindroom.agents import create_session_storage, get_agent_session
 from mindroom.compaction import CompactionOutcome, get_visible_session_runs, queue_pending_compaction
+from mindroom.compaction_runtime import _resolve_effective_compaction_threshold, resolve_compaction_model
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -48,7 +49,6 @@ class CompactContextTools(Toolkit):
             return "Error: No runtime context available. Cannot determine session."
 
         # Imported lazily to avoid a heavy matrix/runtime import chain during tool registration.
-        from mindroom.ai import get_model_instance  # noqa: PLC0415
         from mindroom.thread_utils import create_session_id  # noqa: PLC0415
 
         session_id = create_session_id(context.room_id, context.resolved_thread_id)
@@ -69,29 +69,18 @@ class CompactContextTools(Toolkit):
             )
 
         compaction_config = self._config.get_agent_compaction_config(self._agent_name)
-        summary_model_name = compaction_config.model or self._config.get_entity_model_name(self._agent_name)
-        summary_model = get_model_instance(
+        summary_model, compaction_model_context_window = resolve_compaction_model(
             self._config,
             self._runtime_paths,
-            summary_model_name,
+            self._agent_name,
+            compaction_config,
         )
-        # Use compaction model's context window for budget, fall back to agent model
-        summary_model_config = self._config.models.get(summary_model_name)
         active_model_name = self._config.get_entity_model_name(self._agent_name)
         active_model_config = self._config.models.get(active_model_name)
-        compaction_model_context_window = (
-            summary_model_config.context_window
-            if summary_model_config and summary_model_config.context_window
-            else None
+        window_tokens = (
+            active_model_config.context_window if active_model_config and active_model_config.context_window else 0
         )
-        window_tokens = active_model_config.context_window if active_model_config else None
-        if window_tokens is None:
-            window_tokens = 0
-        threshold_tokens = compaction_config.threshold_tokens
-        if threshold_tokens is None and compaction_config.threshold_percent is not None and window_tokens > 0:
-            threshold_tokens = int(window_tokens * compaction_config.threshold_percent)
-        if threshold_tokens is None:
-            threshold_tokens = 0
+        threshold_tokens = _resolve_effective_compaction_threshold(compaction_config, window_tokens)
 
         try:
             outcome = await queue_pending_compaction(

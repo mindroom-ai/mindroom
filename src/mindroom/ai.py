@@ -44,6 +44,7 @@ from mindroom.compaction_runtime import (
 )
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
+    COMPACTION_NOTICE_CONTENT_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -584,7 +585,7 @@ def _get_unseen_messages(
         # Skip the current triggering message
         if current_event_id and event_id == current_event_id:
             continue
-        if isinstance(content, dict) and "io.mindroom.compaction" in content:
+        if isinstance(content, dict) and COMPACTION_NOTICE_CONTENT_KEY in content:
             continue
         if agent_sender_id and sender == agent_sender_id:
             partial_kind = _classify_partial_reply(
@@ -1006,7 +1007,6 @@ async def ai_response(  # noqa: C901
     media_inputs = media or MediaInputs()
     pending_compaction_buffer: list[PendingCompaction] = []
 
-    # Prepare agent and prompt - this can fail if agent creation fails (e.g., missing API key)
     try:
         agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
             agent_name,
@@ -1030,7 +1030,6 @@ async def ai_response(  # noqa: C901
 
     metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
-    # Execute the AI call - this can fail for network, rate limits, etc.
     response: RunOutput | None = None
     attempt_prompt = full_prompt
     attempt_media_inputs = media_inputs
@@ -1263,7 +1262,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     storage_path = runtime_paths.storage_root
     pending_compaction_buffer: list[PendingCompaction] = []
 
-    # Prepare agent and prompt - this can fail if agent creation fails
     try:
         agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
             agent_name,

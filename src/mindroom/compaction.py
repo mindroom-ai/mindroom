@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from agno.db.base import SessionType
 from agno.models.message import Message
@@ -46,6 +46,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+
+CompactionMode = Literal["auto", "manual"]
+_K = TypeVar("_K")
 
 _COMPACTION_METADATA_VERSION = 1
 _COMPACTION_NOTICE_VERSION = 1
@@ -88,7 +91,7 @@ _SESSION_COMPACTION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 class CompactionOutcome:
     """Notice-time telemetry and persisted compaction result."""
 
-    mode: str
+    mode: CompactionMode
     summary: str
     topics: list[str]
     summary_model: str
@@ -151,7 +154,7 @@ class PendingCompaction:
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
     summary: SessionSummary
-    mode: str
+    mode: CompactionMode
     summary_model: str
     last_compacted_run_id: str
     window_tokens: int
@@ -369,7 +372,7 @@ async def compact_session_now(
     session_id: str,
     agent: Agent,
     model: Model,
-    mode: str,
+    mode: CompactionMode,
     window_tokens: int,
     threshold_tokens: int,
     reserve_tokens: int,
@@ -557,17 +560,19 @@ async def queue_pending_compaction(
                 compacted_run_count=len(compacted_runs),
             )
             return None
+        kept_tokens = _estimate_runs_tokens(kept_visible_runs)
+        summary_model_id = _model_identifier(model)
         queued_outcome = _build_compaction_outcome(
             before_visible_runs=before_visible_runs,
             before_summary=previous_summary,
             after_visible_runs=after_visible_runs,
             new_summary=progress.summary,
             mode="manual",
-            summary_model=_model_identifier(model),
+            summary_model=summary_model_id,
             window_tokens=window_tokens,
             threshold_tokens=threshold_tokens,
             reserve_tokens=reserve_tokens,
-            keep_recent_tokens=_estimate_runs_tokens(kept_visible_runs),
+            keep_recent_tokens=kept_tokens,
             last_compacted_run_id=last_compacted_run_id,
             notify=notify,
             count_pending_run=True,
@@ -580,12 +585,12 @@ async def queue_pending_compaction(
             execution_identity=execution_identity,
             summary=progress.summary,
             mode="manual",
-            summary_model=_model_identifier(model),
+            summary_model=summary_model_id,
             last_compacted_run_id=last_compacted_run_id,
             window_tokens=window_tokens,
             threshold_tokens=threshold_tokens,
             reserve_tokens=reserve_tokens,
-            keep_recent_tokens=_estimate_runs_tokens(kept_visible_runs),
+            keep_recent_tokens=kept_tokens,
             notify=notify,
         )
         if pending_buffer is not None:
@@ -1019,7 +1024,7 @@ def _build_compaction_outcome(
     before_summary: SessionSummary | None,
     after_visible_runs: Sequence[RunOutput | TeamRunOutput],
     new_summary: SessionSummary,
-    mode: str,
+    mode: CompactionMode,
     summary_model: str,
     window_tokens: int,
     threshold_tokens: int,
@@ -1089,23 +1094,25 @@ def _model_identifier(model: Model) -> str:
     return model.__class__.__name__
 
 
+def get_or_create_lock(locks: dict[_K, asyncio.Lock], key: _K, *, max_entries: int = 100) -> asyncio.Lock:
+    """Return an existing lock for *key*, or create one with bounded eviction."""
+    lock = locks.get(key)
+    if lock is not None:
+        return lock
+    if len(locks) > max_entries:
+        to_remove = [k for k, v in list(locks.items()) if not v.locked()]
+        for k in to_remove:
+            if len(locks) - 1 <= max_entries:
+                break
+            locks.pop(k, None)
+    lock = asyncio.Lock()
+    locks[key] = lock
+    return lock
+
+
 def _get_session_lock(storage: SqliteDb, session_id: str) -> asyncio.Lock:
     key = (_storage_identity(storage), session_id)
-    lock = _SESSION_COMPACTION_LOCKS.get(key)
-    if lock is None:
-        if len(_SESSION_COMPACTION_LOCKS) > 100:
-            # Evict unlocked entries only — never drop a lock held by an active compaction
-            to_remove = []
-            for existing_key, existing_lock in list(_SESSION_COMPACTION_LOCKS.items()):
-                if not existing_lock.locked():
-                    to_remove.append(existing_key)
-                if len(_SESSION_COMPACTION_LOCKS) - len(to_remove) <= 100:
-                    break
-            for existing_key in to_remove:
-                _SESSION_COMPACTION_LOCKS.pop(existing_key, None)
-        lock = asyncio.Lock()
-        _SESSION_COMPACTION_LOCKS[key] = lock
-    return lock
+    return get_or_create_lock(_SESSION_COMPACTION_LOCKS, key)
 
 
 def _storage_identity(storage: SqliteDb) -> str:
