@@ -477,6 +477,10 @@ class AgentBot:
     _first_sync_done: bool = field(default=False, init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches, init=False)
+    _response_lifecycle_locks: dict[tuple[str, str | None], asyncio.Lock] = field(
+        default_factory=dict,
+        init=False,
+    )
     in_flight_response_count: int = field(default=0, init=False)
 
     @property
@@ -501,6 +505,28 @@ class AgentBot:
         if self.agent_name in self.config.teams:
             return "team"
         return "agent"
+
+    def _response_lifecycle_lock(self, room_id: str, thread_id: str | None) -> asyncio.Lock:
+        """Return the per-thread lock that serializes one response lifecycle."""
+        key = (room_id, thread_id)
+        lock = self._response_lifecycle_locks.get(key)
+        if lock is not None:
+            return lock
+
+        if len(self._response_lifecycle_locks) > 100:
+            unlocked_keys = [
+                existing_key
+                for existing_key, existing_lock in self._response_lifecycle_locks.items()
+                if not existing_lock.locked()
+            ]
+            for existing_key in unlocked_keys:
+                if len(self._response_lifecycle_locks) <= 100:
+                    break
+                self._response_lifecycle_locks.pop(existing_key, None)
+
+        lock = asyncio.Lock()
+        self._response_lifecycle_locks[key] = lock
+        return lock
 
     def _hook_base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
         """Return shared base fields for hook context construction."""
@@ -2446,7 +2472,7 @@ class AgentBot:
         )
         await emit(self.hook_registry, EVENT_MESSAGE_AFTER_RESPONSE, context)
 
-    async def _generate_team_response_helper(  # noqa: C901, PLR0915
+    async def _generate_team_response_helper(
         self,
         room_id: str,
         reply_to_event_id: str,
@@ -2467,6 +2493,42 @@ class AgentBot:
 
         Returns the initial message ID if created, None otherwise.
         """
+        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id)
+        async with lifecycle_lock:
+            return await self._generate_team_response_helper_locked(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                team_agents=team_agents,
+                team_mode=team_mode,
+                thread_history=thread_history,
+                requester_user_id=requester_user_id,
+                existing_event_id=existing_event_id,
+                payload=payload,
+                response_envelope=response_envelope,
+                enrichment_digest=enrichment_digest,
+                correlation_id=correlation_id,
+                reason_prefix=reason_prefix,
+            )
+
+    async def _generate_team_response_helper_locked(  # noqa: C901, PLR0915
+        self,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        team_agents: list[MatrixID],
+        team_mode: str,
+        thread_history: list[dict],
+        requester_user_id: str,
+        existing_event_id: str | None = None,
+        *,
+        payload: _DispatchPayload,
+        response_envelope: MessageEnvelope | None = None,
+        enrichment_digest: str | None = None,
+        correlation_id: str | None = None,
+        reason_prefix: str = "Team request",
+    ) -> str | None:
+        """Generate a team response once the per-thread lifecycle lock is held."""
         assert self.client is not None
         prompt, thread_history = self._timestamp_model_user_context(
             payload.model_prompt or payload.prompt,
@@ -3051,6 +3113,32 @@ class AgentBot:
         reply_to_event: nio.RoomMessageText | None = None,
     ) -> str | None:
         """Send a skill command response using a specific agent."""
+        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id)
+        async with lifecycle_lock:
+            return await self._send_skill_command_response_locked(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                thread_history=thread_history,
+                prompt=prompt,
+                agent_name=agent_name,
+                user_id=user_id,
+                reply_to_event=reply_to_event,
+            )
+
+    async def _send_skill_command_response_locked(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        thread_history: list[dict],
+        prompt: str,
+        agent_name: str,
+        user_id: str | None,
+        reply_to_event: nio.RoomMessageText | None = None,
+    ) -> str | None:
+        """Send a skill command response after acquiring the per-thread lock."""
         assert self.client is not None
         if not prompt.strip():
             return None
@@ -3614,6 +3702,41 @@ class AgentBot:
             Event ID of the response message, or None if failed
 
         """
+        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id)
+        async with lifecycle_lock:
+            return await self._generate_response_locked(
+                room_id=room_id,
+                prompt=prompt,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                thread_history=thread_history,
+                existing_event_id=existing_event_id,
+                user_id=user_id,
+                media=media,
+                attachment_ids=attachment_ids,
+                model_prompt=model_prompt,
+                enrichment_digest=enrichment_digest,
+                response_envelope=response_envelope,
+                correlation_id=correlation_id,
+            )
+
+    async def _generate_response_locked(
+        self,
+        room_id: str,
+        prompt: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        thread_history: list[dict],
+        existing_event_id: str | None = None,
+        user_id: str | None = None,
+        media: MediaInputs | None = None,
+        attachment_ids: list[str] | None = None,
+        model_prompt: str | None = None,
+        enrichment_digest: str | None = None,
+        response_envelope: MessageEnvelope | None = None,
+        correlation_id: str | None = None,
+    ) -> str | None:
+        """Generate one agent response after acquiring the per-thread lock."""
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             self._prepare_memory_and_model_context(

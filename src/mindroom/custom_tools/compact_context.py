@@ -134,9 +134,10 @@ def _format_outcome(outcome: CompactionOutcome) -> str:
         topics_line = f"\n- Topics preserved: {', '.join(outcome.topics)}"
 
     return (
-        "Context compacted:\n"
+        "Compaction queued:\n"
         f"- Runs: {outcome.runs_before} -> {outcome.runs_after}\n"
         f"- Tokens: ~{outcome.before_tokens:,} -> ~{outcome.after_tokens:,} "
-        f"({reduction_pct}% reduction)"
+        f"({reduction_pct}% reduction)\n"
+        "- Status: Will apply after this response finishes."
         f"{topics_line}"
     )

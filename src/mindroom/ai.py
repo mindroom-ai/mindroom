@@ -936,6 +936,7 @@ def _track_model_request_metrics(
     if state.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
         state.first_token_latency = float(event.time_to_first_token)
 
+
 def _latest_pending_compaction(
     pending_compaction_buffer: list[PendingCompaction] | None,
 ) -> PendingCompaction | None:

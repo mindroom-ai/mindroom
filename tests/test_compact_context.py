@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,6 +21,7 @@ from agno.session.summary import SessionSummary
 from agno.tools.function import Function, FunctionCall
 
 from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
+from mindroom.bot import AgentBot
 from mindroom.compaction import (
     _PENDING_COMPACTION,
     _WRAPPER_OVERHEAD_TOKENS,
@@ -32,9 +36,10 @@ from mindroom.compaction import (
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, RuntimePaths, resolve_runtime_paths
-from mindroom.custom_tools.compact_context import _format_outcome
+from mindroom.custom_tools.compact_context import CompactContextTools, _format_outcome
+from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -303,6 +308,185 @@ async def test_queue_pending_compaction_multi_pass_tracks_total_compacted_count(
 
 
 @pytest.mark.asyncio
+async def test_second_turn_waits_for_queued_compaction_to_apply(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    """The next turn in a thread should wait until queued compaction is committed."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "test_agent": AgentConfig(
+                    display_name="Test Agent",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            defaults=DefaultsConfig(
+                tools=[],
+                enable_streaming=False,
+                show_stop_button=False,
+                compaction=CompactionConfig(reserve_tokens=1024, notify=False),
+            ),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=16000,
+                ),
+            },
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    session_id = "!room:localhost:$thread-root"
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    agent = await _seed_session(storage, session_id=session_id, turn_count=3)
+
+    bot = AgentBot(
+        AgentMatrixUser(
+            agent_name="test_agent",
+            password="test-password",  # noqa: S106
+            display_name="Test Agent",
+            user_id="@mindroom_test_agent:localhost",
+        ),
+        tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=["!room:localhost"],
+        enable_streaming=False,
+    )
+    bot.client = MagicMock()
+    bot._prepare_memory_and_model_context = MagicMock(
+        side_effect=lambda prompt, thread_history, model_prompt=None: (
+            prompt,
+            thread_history,
+            model_prompt or prompt,
+            thread_history,
+        ),
+    )
+    bot._knowledge_for_agent = MagicMock(return_value=None)
+
+    async def fake_ensure_request_knowledge_managers(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {}
+
+    async def fake_send_response(*_args: object, **_kwargs: object) -> str:
+        return "$thinking"
+
+    async def fake_deliver_generated_response(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            event_id="$response",
+            suppressed=False,
+            option_map=None,
+            options_list=None,
+        )
+
+    bot._ensure_request_knowledge_managers = fake_ensure_request_knowledge_managers
+    bot._send_response = fake_send_response
+    bot._deliver_generated_response = fake_deliver_generated_response
+
+    compaction_queued = asyncio.Event()
+    allow_first_turn_to_finish = asyncio.Event()
+    second_turn_started = asyncio.Event()
+    tool_messages: list[str] = []
+    second_turn_runs: list[int] = []
+    second_turn_summaries: list[str | None] = []
+    ai_call_count = 0
+
+    @asynccontextmanager
+    async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
+        yield
+
+    def discard_background_task(coro: object, *args: object, **kwargs: object) -> None:
+        _ = (args, kwargs)
+        if asyncio.iscoroutine(coro):
+            coro.close()
+
+    async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+        nonlocal ai_call_count
+        ai_call_count += 1
+
+        resolved_session_id = kwargs["session_id"]
+        execution_identity = kwargs["execution_identity"]
+        collector = kwargs["compaction_outcomes_collector"]
+        assert isinstance(resolved_session_id, str)
+        assert isinstance(collector, list)
+
+        if ai_call_count == 1:
+            tool = CompactContextTools("test_agent", config, runtime_paths, execution_identity)
+            tool_messages.append(await tool.compact_context(keep_recent_runs=1))
+            assert _PENDING_COMPACTION.get(None) is not None
+            compaction_queued.set()
+
+            await allow_first_turn_to_finish.wait()
+
+            await agent.arun(
+                "turn-4 " * 20,
+                session_id=resolved_session_id,
+                metadata={"matrix_seen_event_ids": ["$e4"]},
+            )
+            outcome = await apply_pending_compaction()
+            assert outcome is not None
+            collector.append(outcome)
+            return "first response"
+
+        second_turn_started.set()
+        session = _get_agent_session(storage, resolved_session_id)
+        assert session is not None
+        second_turn_runs.append(len(session.runs or []))
+        second_turn_summaries.append(session.summary.summary if session.summary is not None else None)
+        return "second response"
+
+    with (
+        patch("mindroom.bot.ai_response", new=fake_ai_response),
+        patch("mindroom.bot.create_background_task", side_effect=discard_background_task),
+        patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.bot.typing_indicator", new=noop_typing_indicator),
+        patch("mindroom.ai.get_model_instance", return_value=MagicMock(id="compact-model")),
+        patch(
+            "mindroom.compaction._generate_compaction_summary",
+            new_callable=AsyncMock,
+            return_value=SessionSummary(summary="## Goal\nqueued", topics=[]),
+        ),
+    ):
+        first_turn = asyncio.create_task(
+            bot._generate_response(
+                room_id="!room:localhost",
+                prompt="first turn",
+                reply_to_event_id="$event-1",
+                thread_id="$thread-root",
+                thread_history=[],
+                user_id="@user:localhost",
+            ),
+        )
+
+        await compaction_queued.wait()
+
+        second_turn = asyncio.create_task(
+            bot._generate_response(
+                room_id="!room:localhost",
+                prompt="second turn",
+                reply_to_event_id="$event-2",
+                thread_id="$thread-root",
+                thread_history=[],
+                user_id="@user:localhost",
+            ),
+        )
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(second_turn_started.wait(), timeout=0.1)
+
+        allow_first_turn_to_finish.set()
+
+        await first_turn
+        await second_turn
+
+    assert len(tool_messages) == 1
+    assert tool_messages[0].startswith("Compaction queued:")
+    assert "Will apply after this response finishes." in tool_messages[0]
+    assert second_turn_runs == [2]
+    assert second_turn_summaries == ["## Goal\nqueued"]
+
+
+@pytest.mark.asyncio
 async def test_manual_compaction_reported_from_agno_tool_task_should_persist(tmp_path: Path) -> None:
     """Manual compaction triggered through Agno's tool-task path should persist to storage."""
     pending_buffer: list[PendingCompaction] = []
@@ -361,7 +545,8 @@ async def test_manual_compaction_reported_from_agno_tool_task_should_persist(tmp
         assert child_pending_seen == [1]
         assert len(pending_buffer) == 1
         assert isinstance(function_call.result, str)
-        assert "Context compacted:" in function_call.result
+        assert "Compaction queued:" in function_call.result
+        assert "Will apply after this response finishes." in function_call.result
         assert "- Runs: 4 -> 3" in function_call.result
 
         queued_session = _coerce_agent_session(storage.get_session("sid", SessionType.AGENT))
