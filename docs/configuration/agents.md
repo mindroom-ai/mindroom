@@ -119,7 +119,6 @@ agents:
       enabled: true
       threshold_percent: 0.8
       reserve_tokens: 16384
-      keep_recent_tokens: 20000
       notify: false
 
 ```
@@ -148,7 +147,7 @@ agents:
 | `num_history_runs` | int | `null` | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages` |
 | `num_history_messages` | int | `null` | Max messages from history. Mutually exclusive with `num_history_runs` |
 | `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `true`) |
-| `compaction` | object | `null` | Per-agent auto-compaction overrides. Auto-compaction stays disabled until `defaults.compaction` or this per-agent block is authored. Supported keys are `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `keep_recent_tokens`, `model`, and `notify`. Compaction is non-destructive: it updates the stored session summary and replay cutoff, but keeps the original runs in the session database |
+| `compaction` | object | `null` | Per-agent auto-compaction overrides. Auto-compaction stays disabled until `defaults.compaction` or this per-agent block is authored. Supported keys are `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`, and `notify`. Compaction is non-destructive: it updates the stored session summary and replay cutoff, but keeps the original runs in the session database |
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](../deployment/sandbox-proxy.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
@@ -563,7 +562,6 @@ defaults:
   #   enabled: true
   #   threshold_percent: 0.8
   #   reserve_tokens: 16384
-  #   keep_recent_tokens: 20000
   #   notify: false
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true                 # Show tool-call markers and trace metadata in message content

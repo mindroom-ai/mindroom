@@ -145,7 +145,6 @@ from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import config_confirmation
 from .commands.handler import CommandEvent, CommandHandlerContext, _generate_welcome_message, handle_command
 from .commands.parsing import Command, command_parser
-from .compaction import get_or_create_lock
 from .constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -191,8 +190,8 @@ if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
     from agno.media import Image
 
-    from mindroom.compaction import CompactionOutcome
     from mindroom.config.main import Config
+    from mindroom.history import CompactionOutcome
     from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
@@ -207,6 +206,22 @@ _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"scheduled", "hook"})
+
+
+def _get_or_create_lock(locks: dict[object, asyncio.Lock], key: object, *, max_entries: int = 100) -> asyncio.Lock:
+    """Return a cached lock for one key with bounded best-effort eviction."""
+    lock = locks.get(key)
+    if lock is not None:
+        return lock
+    if len(locks) > max_entries:
+        to_remove = [candidate for candidate, candidate_lock in list(locks.items()) if not candidate_lock.locked()]
+        for candidate in to_remove:
+            if len(locks) - 1 <= max_entries:
+                break
+            locks.pop(candidate, None)
+    lock = asyncio.Lock()
+    locks[key] = lock
+    return lock
 
 
 def _create_task_wrapper(
@@ -509,7 +524,7 @@ class AgentBot:
 
     def _response_lifecycle_lock(self, room_id: str, thread_id: str | None) -> asyncio.Lock:
         """Return the per-thread lock that serializes one response lifecycle."""
-        return get_or_create_lock(self._response_lifecycle_locks, (room_id, thread_id))
+        return _get_or_create_lock(self._response_lifecycle_locks, (room_id, thread_id))
 
     def _hook_base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
         """Return shared base fields for hook context construction."""

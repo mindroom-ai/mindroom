@@ -36,7 +36,6 @@ from mindroom.bot import (
     _ResponseAction,
     _ResponseDispatchResult,
 )
-from mindroom.compaction import CompactionOutcome
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -50,6 +49,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.history import CompactionOutcome
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -257,7 +257,6 @@ def _make_compaction_outcome(*, mode: str = "auto", notify: bool = True) -> Comp
         window_tokens=200000,
         threshold_tokens=100000,
         reserve_tokens=16384,
-        keep_recent_tokens=20000,
         runs_before=18,
         runs_after=7,
         compacted_run_count=12,

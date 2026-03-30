@@ -45,7 +45,6 @@ if TYPE_CHECKING:
     from agno.models.base import Model
     from agno.tools.toolkit import Toolkit
 
-    from mindroom.compaction import PendingCompaction
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
@@ -407,7 +406,6 @@ def build_agent_toolkit(  # noqa: PLR0911
     tool_init_context: AgentToolInitContext,
     execution_identity: ToolExecutionIdentity | None,
     delegation_depth: int = 0,
-    pending_compaction_buffer: list[PendingCompaction] | None = None,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
@@ -469,7 +467,6 @@ def build_agent_toolkit(  # noqa: PLR0911
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
-            pending_compaction_buffer=pending_compaction_buffer,
         )
 
     return _build_registered_agent_tool(
@@ -751,7 +748,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
     delegation_depth: int = 0,
-    pending_compaction_buffer: list[PendingCompaction] | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -769,9 +765,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             support Matrix reaction-based question flows.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
-        pending_compaction_buffer: Mutable per-request collector shared with
-            the compact-context tool so deferred compaction survives child-task
-            execution and can be applied after the run is saved.
 
     Returns:
         Configured Agent instance
@@ -829,7 +822,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tool_init_context=tool_init_context,
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
-                pending_compaction_buffer=pending_compaction_buffer,
             ):
                 tools.append(prepend_tool_hook_bridge(toolkit, tool_hook_bridge))
         except (ValueError, ImportError) as exc:
@@ -983,9 +975,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         if agent_config.max_tool_calls_from_history is not None
         else defaults.max_tool_calls_from_history
     )
-    compaction_config = config.get_agent_compaction_config(agent_name)
-    auto_compaction_enabled = config.has_authored_agent_compaction_config(agent_name) and compaction_config.enabled
-    add_session_summary_to_context = auto_compaction_enabled or "compact_context" in tool_names
 
     agent = Agent(
         name=agent_config.display_name,
@@ -1000,7 +989,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         search_knowledge=knowledge_enabled,
-        add_history_to_context=True,
+        add_history_to_context=False,
         num_history_runs=num_history_runs,
         num_history_messages=num_history_messages,
         store_history_messages=False,
@@ -1009,7 +998,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
         compress_tool_results=compress_tool_results,
-        add_session_summary_to_context=add_session_summary_to_context,
+        add_session_summary_to_context=False,
         max_tool_calls_from_history=max_tool_calls_from_history,
     )
     # Agno hardcodes num_history_runs=3 when both are None. Override after

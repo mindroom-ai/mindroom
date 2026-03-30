@@ -34,15 +34,13 @@ from mindroom.ai import (
     get_model_instance,
     stream_agent_response,
 )
-from mindroom.compaction_runtime import (
-    apply_bound_agent_compactions,
-    bind_agent_compaction_state,
-    clear_bound_agent_compactions,
-    prepare_bound_agents_for_run,
-    stream_with_bound_agent_compactions,
-)
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
+from mindroom.history import (
+    clear_bound_agent_history_state,
+    prepare_bound_agents_for_run,
+    stream_with_bound_agent_history,
+)
 from mindroom.knowledge.manager import initialize_shared_knowledge_managers
 from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -1110,8 +1108,7 @@ def _build_team(
     model = get_model_instance(config, runtime_paths, model_name)
 
     def _build_member(member_name: str) -> Agent:
-        pending_compaction_buffer: list = []
-        agent = create_agent(
+        return create_agent(
             member_name,
             config,
             runtime_paths,
@@ -1123,14 +1120,7 @@ def _build_team(
                 on_missing_bases=_log_missing_knowledge_bases(member_name),
             ),
             include_interactive_questions=False,
-            pending_compaction_buffer=pending_compaction_buffer,
         )
-        bind_agent_compaction_state(
-            agent,
-            agent_name=member_name,
-            pending_compaction_buffer=pending_compaction_buffer,
-        )
-        return agent
 
     team_members = materialize_exact_requested_team_members(
         team_config.agents,
@@ -1198,16 +1188,16 @@ async def _non_stream_team_completion(
         )
     except Exception:
         logger.exception("Team member preparation failed", team=team_name)
-        clear_bound_agent_compactions(agents)
+        clear_bound_agent_history_state(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
 
     try:
         response = await team.arun(team_prompt, session_id=session_id, user_id=user)
-        await apply_bound_agent_compactions(agents=agents)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
-        clear_bound_agent_compactions(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
+    finally:
+        clear_bound_agent_history_state(agents)
 
     response_text = _format_team_output(response) if isinstance(response, TeamRunOutput) else str(response)
 
@@ -1263,7 +1253,7 @@ async def _stream_team_completion(
         )
     except Exception:
         logger.exception("Team member preparation failed", team=team_name)
-        clear_bound_agent_compactions(agents)
+        clear_bound_agent_history_state(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
 
     try:
@@ -1271,13 +1261,13 @@ async def _stream_team_completion(
             raw_stream = team.arun(team_prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
             stream = cast(
                 "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None]",
-                stream_with_bound_agent_compactions(raw_stream, agents=agents),
+                stream_with_bound_agent_history(raw_stream, agents=agents),
             )
             # Peek at first event
             first_event = await anext(stream, None)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
-        clear_bound_agent_compactions(agents)
+        clear_bound_agent_history_state(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
 
     if first_event is None:

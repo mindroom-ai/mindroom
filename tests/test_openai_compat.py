@@ -1831,10 +1831,6 @@ class TestTeamCompletion:
                 "mindroom.api.openai_compat.prepare_bound_agents_for_run",
                 new_callable=AsyncMock,
             ) as mock_prepare,
-            patch(
-                "mindroom.api.openai_compat.apply_bound_agent_compactions",
-                new_callable=AsyncMock,
-            ) as mock_apply,
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -1852,8 +1848,6 @@ class TestTeamCompletion:
         assert "Team consensus result" in data["choices"][0]["message"]["content"]
         assert mock_prepare.await_count == 1
         assert mock_prepare.await_args.kwargs["agents"] == mock_agents
-        assert mock_apply.await_count == 1
-        assert mock_apply.await_args.kwargs["agents"] == mock_agents
 
     def test_team_streaming(self, team_app_client: TestClient) -> None:
         """Streaming team completion streams TeamContentEvent (leader text) directly."""
@@ -1873,9 +1867,7 @@ class TestTeamCompletion:
             raw_stream: AsyncIterator[object],
             *,
             agents: list[MagicMock],
-            compaction_outcomes_collector: list[object] | None = None,
         ) -> AsyncIterator[object]:
-            assert compaction_outcomes_collector is None
             stream_wrapper_calls.append(agents)
             async for event in raw_stream:
                 yield event
@@ -1892,7 +1884,7 @@ class TestTeamCompletion:
                 new_callable=AsyncMock,
             ) as mock_prepare,
             patch(
-                "mindroom.api.openai_compat.stream_with_bound_agent_compactions",
+                "mindroom.api.openai_compat.stream_with_bound_agent_history",
                 side_effect=passthrough_stream_wrapper,
             ),
         ):

@@ -168,7 +168,6 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
-        patch("mindroom.teams.apply_bound_agent_compactions", new_callable=AsyncMock) as mock_apply,
     ):
         response = await team_response(
             agent_names=["general"],
@@ -186,9 +185,6 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
     assert mock_prepare.await_args.kwargs["session_id"] == "session-123"
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
-    assert mock_apply.await_count == 1
-    assert mock_apply.await_args.kwargs["agents"] == [fake_agent]
-    assert mock_apply.await_args.kwargs["compaction_outcomes_collector"] is collector
 
 
 @pytest.mark.asyncio
@@ -378,6 +374,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=MagicMock()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
 
@@ -439,6 +436,7 @@ async def test_team_response_stream_emits_team_run_output_fallback() -> None:
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=MagicMock()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
         chunks = [
@@ -493,6 +491,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_output_f
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=MagicMock()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
         pytest.raises(asyncio.CancelledError),
     ):
@@ -540,6 +539,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=MagicMock()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
         patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
     ):
@@ -597,6 +597,7 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=MagicMock()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
         chunks = [
@@ -646,10 +647,9 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
     ):
         team_members = _materialize_team_members(["general"], orchestrator, None)
         raw_stream = await _team_response_stream_raw(
+            team=mock_team,
             team_members=team_members,
-            mode=TeamMode.COORDINATE,
             message="Analyze this.",
-            orchestrator=orchestrator,
             media=MediaInputs(audio=[audio_input]),
         )
         events = [event async for event in raw_stream]
@@ -694,7 +694,7 @@ async def test_team_response_rejects_missing_materialized_members() -> None:
 
 @pytest.mark.asyncio
 async def test_team_response_stream_uses_compaction_aware_member_execution() -> None:
-    """Streaming team execution should prepare members and wrap the raw stream with compaction handling."""
+    """Streaming team execution should prepare members before invoking the raw stream."""
     config = _build_test_config()
     orchestrator = MagicMock()
     orchestrator.config = config
@@ -704,17 +704,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     fake_agent = MagicMock()
     fake_agent.name = "GeneralAgent"
     collector: list[object] = []
-    stream_wrapper_calls: list[tuple[list[object], list[object]]] = []
-
-    async def passthrough_stream_wrapper(
-        raw_stream: AsyncIterator[object],
-        *,
-        agents: list[object],
-        compaction_outcomes_collector: list[object] | None = None,
-    ) -> AsyncIterator[object]:
-        stream_wrapper_calls.append((agents, compaction_outcomes_collector or []))
-        async for event in raw_stream:
-            yield event
+    mock_team = MagicMock(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:
         yield TeamRunOutput(content="Streamed team response")
@@ -722,9 +712,13 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
-        patch("mindroom.teams.stream_with_bound_agent_compactions", side_effect=passthrough_stream_wrapper),
-        patch("mindroom.teams._team_response_stream_raw", new_callable=AsyncMock, return_value=raw_stream()),
+        patch(
+            "mindroom.teams._team_response_stream_raw",
+            new_callable=AsyncMock,
+            return_value=raw_stream(),
+        ) as mock_raw,
     ):
         chunks = [
             chunk
@@ -745,7 +739,8 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
     assert mock_prepare.await_args.kwargs["session_id"] == "session-123"
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
-    assert stream_wrapper_calls == [([fake_agent], collector)]
+    assert mock_raw.await_count == 1
+    assert mock_raw.await_args.kwargs["team"] is mock_team
 
 
 @pytest.mark.asyncio

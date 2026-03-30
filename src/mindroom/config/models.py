@@ -155,11 +155,6 @@ class CompactionOverrideConfig(BaseModel):
         ge=0,
         description="Reserved headroom for output and tool definitions",
     )
-    keep_recent_tokens: int | None = Field(
-        default=None,
-        ge=0,
-        description="Amount of newest history to keep verbatim in prompt context after auto-compaction",
-    )
     model: str | None = Field(
         default=None,
         description="Optional model config name to use for summary generation",
@@ -189,11 +184,6 @@ class CompactionConfig(CompactionOverrideConfig):
         default=16384,
         ge=0,
         description="Reserved headroom for output and tool definitions",
-    )
-    keep_recent_tokens: int = Field(
-        default=20000,
-        ge=0,
-        description="Amount of newest history to keep verbatim in prompt context after auto-compaction",
     )
     notify: bool = Field(
         default=False,
