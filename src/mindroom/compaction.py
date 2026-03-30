@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _CompactionMode = Literal["auto", "manual"]
+_RunScopeKind = Literal["agent", "team"]
 _K = TypeVar("_K")
 
 _COMPACTION_METADATA_VERSION = 1
@@ -159,6 +160,8 @@ class PendingCompaction:
     reserve_tokens: int
     keep_recent_tokens: int
     notify: bool
+    scope_kind: _RunScopeKind | None = None
+    scope_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -269,6 +272,33 @@ def _get_top_level_completed_runs(session: AgentSession) -> list[RunOutput | Tea
     runs = [run for run in session.runs or [] if isinstance(run, (RunOutput, TeamRunOutput))]
     skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
     return [run for run in runs if run.parent_run_id is None and run.status not in skip_statuses]
+
+
+def _run_scope_key(run: RunOutput | TeamRunOutput) -> tuple[_RunScopeKind, str] | None:
+    """Return the compaction scope represented by one stored top-level run."""
+    if isinstance(run, TeamRunOutput):
+        team_id = run.team_id
+        if isinstance(team_id, str) and team_id:
+            return ("team", team_id)
+        return None
+    agent_id = run.agent_id
+    if isinstance(agent_id, str) and agent_id:
+        return ("agent", agent_id)
+    return None
+
+
+def _get_single_run_scope(
+    runs: Sequence[RunOutput | TeamRunOutput],
+) -> tuple[_RunScopeKind, str] | None:
+    """Return the shared scope for *runs*, or ``None`` when they are mixed/unknown."""
+    if not runs:
+        return None
+    first_scope = _run_scope_key(runs[0])
+    if first_scope is None:
+        return None
+    if any(_run_scope_key(run) != first_scope for run in runs[1:]):
+        return None
+    return first_scope
 
 
 def get_visible_session_runs(session: AgentSession) -> list[RunOutput | TeamRunOutput]:
@@ -494,6 +524,15 @@ async def queue_pending_compaction(
         before_visible_runs = get_visible_session_runs(session)
         if len(before_visible_runs) <= keep_recent_runs:
             return None
+        run_scope = _get_single_run_scope(before_visible_runs)
+        if run_scope is None:
+            msg = "Compaction is unavailable for this session because its visible history mixes multiple run scopes."
+            logger.warning(
+                "Manual compaction skipped: visible session history spans multiple scopes",
+                session_id=session_id,
+                visible_runs=len(before_visible_runs),
+            )
+            raise ValueError(msg)
 
         previous_summary = session.summary
         if keep_recent_runs == 0:
@@ -581,6 +620,8 @@ async def queue_pending_compaction(
             reserve_tokens=reserve_tokens,
             keep_recent_tokens=kept_tokens,
             notify=notify,
+            scope_kind=run_scope[0],
+            scope_id=run_scope[1],
         )
         pending_buffer.append(pending)
         return queued_outcome
@@ -611,6 +652,26 @@ async def apply_pending_compaction(
             return None
 
         before_visible_runs = get_visible_session_runs(session)
+        current_scope = _get_single_run_scope(before_visible_runs)
+        if current_scope is None:
+            logger.warning(
+                "Pending compaction skipped: visible session history spans multiple scopes",
+                agent=pending.agent_name,
+                session_id=pending.session_id,
+                visible_runs=len(before_visible_runs),
+            )
+            return None
+        if pending.scope_kind is not None and pending.scope_id is not None:
+            expected_scope = (pending.scope_kind, pending.scope_id)
+            if current_scope != expected_scope:
+                logger.warning(
+                    "Pending compaction skipped: session scope changed before apply",
+                    agent=pending.agent_name,
+                    session_id=pending.session_id,
+                    expected_scope=expected_scope,
+                    current_scope=current_scope,
+                )
+                return None
         if not any(run.run_id == pending.last_compacted_run_id for run in before_visible_runs):
             logger.warning(
                 "Pending compaction skipped: compacted cutoff run is no longer visible",

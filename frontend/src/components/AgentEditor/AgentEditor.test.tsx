@@ -851,6 +851,25 @@ describe('AgentEditor', () => {
     );
   });
 
+  it('treats authored compaction overrides as enabled in the editor', () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { threshold_tokens: 2000 },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByRole('checkbox', { name: /enable auto-compaction/i })).toBeChecked();
+  });
+
   it('uses the canonical shared context placeholder', async () => {
     const agentWithoutContextFiles: Agent = {
       ...mockAgent,

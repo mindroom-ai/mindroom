@@ -517,7 +517,9 @@ export function AgentEditor() {
 
   const defaultCompaction = config?.defaults.compaction ?? null;
   const effectiveCompactionEnabled =
-    compactionConfig?.enabled ?? defaultCompaction?.enabled ?? false;
+    compactionConfig != null
+      ? compactionConfig.enabled ?? true
+      : defaultCompaction?.enabled ?? false;
 
   return (
     <EditorPanel

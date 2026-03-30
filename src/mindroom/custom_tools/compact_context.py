@@ -105,6 +105,8 @@ class CompactContextTools(Toolkit):
                 compaction_model_context_window=compaction_model_context_window,
                 pending_buffer=self._pending_compaction_buffer,
             )
+        except ValueError as exc:
+            return str(exc)
         except Exception as exc:
             logger.exception(
                 "Failed to queue manual compaction",
@@ -115,13 +117,15 @@ class CompactContextTools(Toolkit):
             return f"Failed to compact context: {exc}"
 
         if outcome is None:
-            return (
+            message = (
                 "Compaction failed: no runs fit the compaction model's input budget. "
                 "This may happen when the previous summary is too large or all candidate "
                 "runs exceed the available budget. Consider increasing the compaction model's "
                 "context window or resetting the session."
             )
-        return _format_outcome(outcome)
+        else:
+            message = _format_outcome(outcome)
+        return message
 
 
 def _format_outcome(outcome: CompactionOutcome) -> str:

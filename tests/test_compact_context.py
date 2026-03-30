@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -120,6 +121,33 @@ def _make_storage(tmp_path: Path) -> SqliteDb:
     return SqliteDb(
         session_table="test_agent_sessions",
         db_file=str(tmp_path / "test-agent.db"),
+    )
+
+
+def _completed_run(
+    run_id: str,
+    *,
+    agent_id: str,
+    content: str,
+) -> RunOutput:
+    return RunOutput(
+        run_id=run_id,
+        agent_id=agent_id,
+        status=RunStatus.completed,
+        messages=[
+            Message(role="user", content=f"{content} question"),
+            Message(role="assistant", content=f"{content} answer"),
+        ],
+    )
+
+
+def _session_with_runs(session_id: str, runs: list[RunOutput]) -> AgentSession:
+    now = int(time.time())
+    return AgentSession(
+        session_id=session_id,
+        created_at=now,
+        updated_at=now,
+        runs=runs,
     )
 
 
@@ -416,6 +444,96 @@ async def test_queue_pending_compaction_multi_pass_tracks_cutoff_run_id(tmp_path
     assert saved_session.summary is not None
     assert saved_session.summary.summary == "## Goal\ndeferred 4"
     assert get_seen_event_ids(saved_session) == {"$e1", "$e2", "$e3", "$e4", "$e5", "$e6"}
+
+
+@pytest.mark.asyncio
+async def test_queue_pending_compaction_rejects_mixed_visible_run_scopes(tmp_path: Path) -> None:
+    """Manual compaction must not advance a single cutoff across mixed run scopes."""
+    config = _make_config(tmp_path)
+    storage = _make_storage(tmp_path)
+    storage.upsert_session(
+        _session_with_runs(
+            "sid",
+            [
+                _completed_run("r1", agent_id="agent-a", content="alpha"),
+                _completed_run("r2", agent_id="agent-b", content="beta"),
+            ],
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="visible history mixes multiple run scopes",
+    ):
+        await queue_pending_compaction(
+            storage=storage,
+            session_id="sid",
+            agent_name="test_agent",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
+            model=MagicMock(id="compact-model"),
+            keep_recent_runs=1,
+            window_tokens=16000,
+            threshold_tokens=8000,
+            reserve_tokens=1024,
+            notify=False,
+            pending_buffer=[],
+        )
+
+
+@pytest.mark.asyncio
+async def test_apply_pending_compaction_skips_when_visible_scope_changes(tmp_path: Path) -> None:
+    """Queued compaction must not apply after another scope writes into the same visible window."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    storage = _make_storage(tmp_path)
+    summary = SessionSummary(summary="## Goal\nqueued", topics=[])
+    initial_session = _session_with_runs(
+        "sid",
+        [
+            _completed_run("r1", agent_id="agent-a", content="alpha"),
+            _completed_run("r2", agent_id="agent-a", content="bravo"),
+            _completed_run("r3", agent_id="agent-a", content="charlie"),
+        ],
+    )
+    storage.upsert_session(initial_session)
+    pending = PendingCompaction(
+        session_id="sid",
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+        summary=summary,
+        mode="manual",
+        summary_model="compact-model",
+        last_compacted_run_id="r2",
+        window_tokens=16000,
+        threshold_tokens=8000,
+        reserve_tokens=1024,
+        keep_recent_tokens=1000,
+        notify=False,
+        scope_kind="agent",
+        scope_id="agent-a",
+    )
+    storage.upsert_session(
+        _session_with_runs(
+            "sid",
+            [
+                _completed_run("r1", agent_id="agent-a", content="alpha"),
+                _completed_run("r2", agent_id="agent-a", content="bravo"),
+                _completed_run("r3", agent_id="agent-a", content="charlie"),
+                _completed_run("r4", agent_id="agent-b", content="delta"),
+            ],
+        ),
+    )
+
+    with patch("mindroom.compaction.create_session_storage", return_value=storage):
+        applied = await apply_pending_compaction(pending)
+
+    assert applied is None
+    persisted_session = _coerce_agent_session(storage.get_session("sid", SessionType.AGENT))
+    assert persisted_session.summary is None
 
 
 @pytest.mark.asyncio
