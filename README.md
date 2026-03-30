@@ -279,7 +279,6 @@ defaults:
   #   enabled: true
   #   threshold_percent: 0.8
   #   reserve_tokens: 16384
-  #   keep_recent_tokens: 20000
   #   notify: false
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   num_history_runs: null             # Number of prior runs to include (null = all)
@@ -320,7 +319,6 @@ agents:
     # compaction:
     #   enabled: true
     #   threshold_tokens: 60000
-    #   keep_recent_tokens: 12000
 
 voice:
   enabled: true
