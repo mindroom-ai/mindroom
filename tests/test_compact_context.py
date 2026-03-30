@@ -29,8 +29,8 @@ from mindroom.bot import AgentBot
 from mindroom.compaction import (
     _PENDING_COMPACTION,
     _WRAPPER_OVERHEAD_TOKENS,
-    _build_summary_input,
     PendingCompaction,
+    _build_summary_input,
     _estimate_serialized_run_tokens,
     apply_pending_compaction,
     clear_pending_compaction,

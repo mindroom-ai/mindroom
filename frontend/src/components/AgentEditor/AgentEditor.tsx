@@ -1875,7 +1875,6 @@ export function AgentEditor() {
               )}
             />
           </FieldGroup>
-
         </div>
       </div>
     </EditorPanel>
