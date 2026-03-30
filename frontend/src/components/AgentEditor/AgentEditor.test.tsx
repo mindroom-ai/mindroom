@@ -851,6 +851,21 @@ describe('AgentEditor', () => {
     );
   });
 
+  it('enables authored compaction overrides and clears the inherited sibling threshold', () => {
+    expect(
+      normalizeAgentUpdates(mockAgent, {
+        compaction: {
+          threshold_percent: 0.6,
+          threshold_tokens: null,
+        },
+      }).compaction
+    ).toEqual({
+      enabled: true,
+      threshold_percent: 0.6,
+      threshold_tokens: null,
+    });
+  });
+
   it('treats authored compaction overrides as enabled in the editor', () => {
     const compactionAgent: Agent = {
       ...mockAgent,

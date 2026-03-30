@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
+    from agno.session.team import TeamSession
 
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
@@ -67,7 +68,7 @@ Write a plain-text summary in exactly this markdown structure:
 async def compact_scope_history(
     *,
     storage: SqliteDb,
-    session: AgentSession,
+    session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: CompactionState,
     visible_runs: list[RunOutput | TeamRunOutput],

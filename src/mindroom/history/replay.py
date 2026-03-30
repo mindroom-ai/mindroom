@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.models.message import Message
     from agno.session.agent import AgentSession
+    from agno.session.team import TeamSession
 
 logger = get_logger(__name__)
 
@@ -41,7 +42,7 @@ def resolve_history_scope(agent: Agent) -> HistoryScope | None:
 
 def build_replay_plan(
     *,
-    session: AgentSession,
+    session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: CompactionState,
     policy: HistoryPolicy,
@@ -166,7 +167,7 @@ def _mark_replay_message(message: Message) -> Message:
     return message
 
 
-def _completed_top_level_runs(session: AgentSession) -> list[RunOutput | TeamRunOutput]:
+def _completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
     skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
     return [
         run

@@ -39,7 +39,7 @@ from mindroom.history import (
     compose_prompt_with_persisted_history,
     prepare_bound_agents_for_run,
 )
-from mindroom.history.runtime import load_bound_scope_session_context
+from mindroom.history.runtime import load_bound_scope_session_context, resolve_bound_team_scope_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -977,6 +977,7 @@ def _collect_bound_seen_event_ids(
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
+    team_name: str | None = None,
 ) -> set[str]:
     scope_context = load_bound_scope_session_context(
         agents=agents,
@@ -984,6 +985,7 @@ def _collect_bound_seen_event_ids(
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
+        team_name=team_name,
     )
     if scope_context is None or scope_context.session is None:
         return set()
@@ -998,6 +1000,7 @@ def _persist_bound_seen_event_ids(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     event_ids: list[str],
+    team_name: str | None = None,
 ) -> None:
     if not event_ids:
         return
@@ -1007,6 +1010,7 @@ def _persist_bound_seen_event_ids(
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
+        team_name=team_name,
         create_session_if_missing=True,
     )
     if scope_context is None or scope_context.session is None:
@@ -1116,6 +1120,8 @@ def _create_team_instance(
     mode: TeamMode,
     orchestrator: MultiAgentOrchestrator,
     model_name: str | None = None,
+    configured_team_name: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Team:
     """Create a configured Team instance.
 
@@ -1125,6 +1131,8 @@ def _create_team_instance(
         mode: Team collaboration mode
         orchestrator: The orchestrator containing configuration
         model_name: Optional model name override
+        configured_team_name: Optional configured team id for stable team-scope history
+        execution_identity: Optional request execution identity for private/runtime storage resolution
 
     Returns:
         Configured Team instance
@@ -1132,11 +1140,21 @@ def _create_team_instance(
     """
     assert orchestrator.config is not None
     model = get_model_instance(orchestrator.config, orchestrator.runtime_paths, model_name or "default")
+    scope_context = resolve_bound_team_scope_context(
+        agents=agents,
+        runtime_paths=orchestrator.runtime_paths,
+        config=orchestrator.config,
+        execution_identity=execution_identity,
+        team_name=configured_team_name,
+    )
+    team_id = scope_context.scope.scope_id if scope_context is not None else f"Team-{'-'.join(agent_names)}"
 
     return Team(
         members=agents,  # type: ignore[arg-type]
+        id=team_id,
         name=f"Team-{'-'.join(agent_names)}",
         model=model,
+        db=scope_context.storage if scope_context is not None else None,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
         show_members_responses=True,
         debug_mode=False,
@@ -1237,6 +1255,8 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         mode,
         orchestrator,
         resolved_team_model_name,
+        configured_team_name,
+        execution_identity,
     )
     seen_event_ids = _collect_bound_seen_event_ids(
         agents=agents,
@@ -1244,6 +1264,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         runtime_paths=orchestrator.runtime_paths,
         config=orchestrator.config,
         execution_identity=execution_identity,
+        team_name=configured_team_name,
     )
     prompt_for_history, unseen_event_ids = build_prompt_with_unseen_thread_context(
         base_prompt,
@@ -1263,6 +1284,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         prepared_history = await prepare_bound_agents_for_run(
             agents=agents,
             full_prompt=prompt_for_history,
+            fallback_full_prompt=None if reply_to_event_id and thread_history else fallback_prompt,
             session_id=session_id,
             runtime_paths=orchestrator.runtime_paths,
             config=orchestrator.config,
@@ -1369,6 +1391,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 config=orchestrator.config,
                 execution_identity=execution_identity,
                 event_ids=[reply_to_event_id, *unseen_event_ids],
+                team_name=configured_team_name,
             )
 
         if isinstance(response, TeamRunOutput):
@@ -1513,6 +1536,8 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
         mode,
         orchestrator,
         resolved_team_model_name,
+        configured_team_name,
+        execution_identity,
     )
     seen_event_ids = _collect_bound_seen_event_ids(
         agents=team_members.agents,
@@ -1520,6 +1545,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
         runtime_paths=orchestrator.runtime_paths,
         config=orchestrator.config,
         execution_identity=execution_identity,
+        team_name=configured_team_name,
     )
     prompt_for_history, unseen_event_ids = build_prompt_with_unseen_thread_context(
         base_prompt,
@@ -1535,6 +1561,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
         prepared_history = await prepare_bound_agents_for_run(
             agents=team_members.agents,
             full_prompt=prompt_for_history,
+            fallback_full_prompt=None if reply_to_event_id and thread_history else fallback_prompt,
             session_id=session_id,
             runtime_paths=orchestrator.runtime_paths,
             config=orchestrator.config,
@@ -1739,6 +1766,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             config=orchestrator.config,
                             execution_identity=execution_identity,
                             event_ids=[reply_to_event_id, *unseen_event_ids],
+                            team_name=configured_team_name,
                         )
                     content = _get_response_content(event)
                     yield content
@@ -1774,6 +1802,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             config=orchestrator.config,
                             execution_identity=execution_identity,
                             event_ids=[reply_to_event_id, *unseen_event_ids],
+                            team_name=configured_team_name,
                         )
                     parts = format_team_response(event)
                     team_response_text = (
@@ -1890,6 +1919,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     config=orchestrator.config,
                     execution_identity=execution_identity,
                     event_ids=[reply_to_event_id, *unseen_event_ids],
+                    team_name=configured_team_name,
                 )
 
             return

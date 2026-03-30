@@ -14,17 +14,15 @@ from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
 
-from mindroom.agents import create_agent, create_session_storage
+from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history import PreparedHistory
-from mindroom.history.runtime import load_scope_session_context
+from mindroom.history.runtime import load_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
-from mindroom.history.types import HistoryScope
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
 from mindroom.team_runtime_resolution import (
@@ -231,6 +229,7 @@ async def test_team_response_prefers_persisted_replay_over_thread_context_fallba
 
     assert "Recovered team response" in response
     assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
+    assert "Old thread context" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
     prompt = mock_team.arun.await_args.args[0]
     assert prompt == f"{summary_prefix}Analyze this."
     assert "Thread Context:" not in prompt
@@ -254,11 +253,8 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_stored_
     fake_agent = MagicMock()
     fake_agent.id = "general"
     fake_agent.name = "GeneralAgent"
-    fake_agent.team_id = "team-general"
-    team_scope = HistoryScope(kind="team", scope_id="team-general")
-    scope_context = load_scope_session_context(
-        agent=fake_agent,
-        agent_name="general",
+    scope_context = load_bound_scope_session_context(
+        agents=[fake_agent],
         session_id="session-123",
         runtime_paths=runtime_paths,
         config=config,
@@ -267,7 +263,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_stored_
     )
     assert scope_context is not None
     assert scope_context.session is not None
-    update_scope_seen_event_ids(scope_context.session, team_scope, ["event-1"])
+    update_scope_seen_event_ids(scope_context.session, scope_context.scope, ["event-1"])
     scope_context.storage.upsert_session(scope_context.session)
 
     thread_history = [
@@ -321,22 +317,22 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    storage = create_session_storage("general", config, runtime_paths, execution_identity=None)
-    storage.upsert_session(
-        AgentSession(
-            session_id="session-456",
-            runs=[],
-            created_at=1,
-            updated_at=1,
-        ),
-    )
-
     mock_team = MagicMock()
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
     fake_agent = MagicMock()
     fake_agent.id = "general"
     fake_agent.name = "GeneralAgent"
-    fake_agent.team_id = "team-general"
+    scope_context = load_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-456",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    )
+    assert scope_context is not None
+    assert scope_context.session is not None
+    scope_context.storage.upsert_session(scope_context.session)
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -363,9 +359,8 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
             response_sender_id="@mindroom_team:example.org",
         )
 
-    scope_context = load_scope_session_context(
-        agent=fake_agent,
-        agent_name="general",
+    scope_context = load_bound_scope_session_context(
+        agents=[fake_agent],
         session_id="session-456",
         runtime_paths=runtime_paths,
         config=config,
@@ -373,7 +368,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
     )
     assert scope_context is not None
     assert scope_context.session is not None
-    assert read_scope_seen_event_ids(scope_context.session, HistoryScope(kind="team", scope_id="team-general")) == {
+    assert read_scope_seen_event_ids(scope_context.session, scope_context.scope) == {
         "event-1",
         "event-2",
     }
@@ -983,6 +978,7 @@ async def test_team_response_stream_prefers_persisted_replay_over_thread_context
     assert len(chunks) == 1
     assert "Streamed team response" in str(chunks[0])
     assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
+    assert "Old thread context" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
     assert mock_raw.await_args.kwargs["prompt"] == f"{summary_prefix}Analyze this."
 
 
@@ -1000,11 +996,8 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
     fake_agent = MagicMock()
     fake_agent.id = "general"
     fake_agent.name = "GeneralAgent"
-    fake_agent.team_id = "team-general"
-    team_scope = HistoryScope(kind="team", scope_id="team-general")
-    scope_context = load_scope_session_context(
-        agent=fake_agent,
-        agent_name="general",
+    scope_context = load_bound_scope_session_context(
+        agents=[fake_agent],
         session_id="session-789",
         runtime_paths=runtime_paths,
         config=config,
@@ -1013,7 +1006,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
     )
     assert scope_context is not None
     assert scope_context.session is not None
-    update_scope_seen_event_ids(scope_context.session, team_scope, ["event-1"])
+    update_scope_seen_event_ids(scope_context.session, scope_context.scope, ["event-1"])
     scope_context.storage.upsert_session(scope_context.session)
     summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
     mock_team = MagicMock(name="team")

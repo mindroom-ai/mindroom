@@ -42,6 +42,7 @@ from mindroom.history import (
     prepare_bound_agents_for_run,
     stream_with_bound_agent_history,
 )
+from mindroom.history.runtime import resolve_bound_team_scope_context
 from mindroom.knowledge.manager import initialize_shared_knowledge_managers
 from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -1140,10 +1141,19 @@ def _build_team(
     if final_resolution.outcome is not TeamOutcome.TEAM:
         raise ValueError(final_resolution.reason or f"Team '{team_name}' cannot be materialized")
 
+    scope_context = resolve_bound_team_scope_context(
+        agents=team_members.agents,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        team_name=team_name,
+    )
     team = Team(
         members=team_members.agents,  # type: ignore[arg-type]
+        id=scope_context.scope.scope_id if scope_context is not None else team_name,
         name=f"Team-{team_name}",
         model=model,
+        db=scope_context.storage if scope_context is not None else None,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
         show_members_responses=True,
         debug_mode=False,
@@ -1184,6 +1194,7 @@ async def _non_stream_team_completion(
         prepared_history = await prepare_bound_agents_for_run(
             agents=agents,
             full_prompt=prompt,
+            fallback_full_prompt=fallback_prompt,
             session_id=session_id,
             runtime_paths=runtime_paths,
             config=config,
@@ -1259,6 +1270,7 @@ async def _stream_team_completion(
         prepared_history = await prepare_bound_agents_for_run(
             agents=agents,
             full_prompt=prompt,
+            fallback_full_prompt=fallback_prompt,
             session_id=session_id,
             runtime_paths=runtime_paths,
             config=config,

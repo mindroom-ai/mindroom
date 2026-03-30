@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { TeamEditor } from './TeamEditor';
 import { useConfigStore } from '@/store/configStore';
-import { Team, Agent, AgentPoliciesByAgent, Config } from '@/types/config';
+import { Team, Agent, AgentPoliciesByAgent, Config, normalizeTeamUpdates } from '@/types/config';
 
 // Mock the store
 vi.mock('@/store/configStore');
@@ -338,6 +338,21 @@ describe('TeamEditor', () => {
       expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
         compaction: undefined,
       });
+    });
+  });
+
+  it('normalizes authored team compaction overrides as enabled', () => {
+    expect(
+      normalizeTeamUpdates(mockTeam, {
+        compaction: {
+          threshold_percent: 0.6,
+          threshold_tokens: null,
+        },
+      }).compaction
+    ).toEqual({
+      enabled: true,
+      threshold_percent: 0.6,
+      threshold_tokens: null,
     });
   });
 

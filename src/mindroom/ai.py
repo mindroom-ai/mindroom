@@ -57,6 +57,7 @@ from mindroom.history import (
     prepare_history_for_run,
 )
 from mindroom.history.replay import resolve_history_scope
+from mindroom.history.runtime import estimate_preparation_static_tokens
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
@@ -951,6 +952,14 @@ async def _prepare_agent_and_prompt(
             response_sender_id=matrix_id.full_id if matrix_id else None,
         )
 
+    fallback_prompt = (
+        None
+        if reply_to_event_id and thread_history
+        else build_prompt_with_thread_history(
+            enhanced_prompt,
+            thread_history,
+        )
+    )
     prepared_history = await prepare_history_for_run(
         agent=agent,
         agent_name=agent_name,
@@ -962,6 +971,11 @@ async def _prepare_agent_and_prompt(
         compaction_outcomes_collector=compaction_outcomes_collector,
         storage=storage,
         session=session,
+        static_prompt_tokens=estimate_preparation_static_tokens(
+            agent,
+            full_prompt=prompt_with_unseen,
+            fallback_full_prompt=fallback_prompt,
+        ),
     )
     prompt_with_summary = f"{prepared_history.summary_prompt_prefix}{enhanced_prompt}"
 

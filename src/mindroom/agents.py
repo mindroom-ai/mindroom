@@ -16,6 +16,7 @@ from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 import mindroom.tools  # noqa: F401
 from mindroom import agent_prompts, constants
@@ -621,6 +622,18 @@ def get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | None
         return raw
     if isinstance(raw, dict):
         return AgentSession.from_dict(cast("dict[str, Any]", raw))
+    return None
+
+
+def get_team_session(storage: SqliteDb, session_id: str) -> TeamSession | None:
+    """Retrieve and deserialize a TeamSession from storage."""
+    raw = storage.get_session(session_id, SessionType.TEAM)
+    if raw is None:
+        return None
+    if isinstance(raw, TeamSession):
+        return raw
+    if isinstance(raw, dict):
+        return TeamSession.from_dict(cast("dict[str, Any]", raw))
     return None
 
 

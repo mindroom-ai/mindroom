@@ -19,9 +19,10 @@ from agno.run.messages import RunMessages
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
+from agno.session.team import TeamSession
 
 from mindroom.agents import create_agent, create_session_storage, get_agent_session
-from mindroom.ai import _prepare_agent_and_prompt
+from mindroom.ai import _prepare_agent_and_prompt, build_prompt_with_thread_history
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
@@ -37,7 +38,11 @@ from mindroom.history import (
     prepare_history_for_run,
 )
 from mindroom.history.replay import build_replay_plan, is_replay_message
-from mindroom.history.runtime import load_scope_session_context
+from mindroom.history.runtime import (
+    estimate_preparation_static_tokens,
+    load_bound_scope_session_context,
+    load_scope_session_context,
+)
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
     read_scope_state,
@@ -201,6 +206,25 @@ def _session(
 ) -> AgentSession:
     return AgentSession(
         session_id=session_id,
+        runs=runs or [],
+        metadata=metadata,
+        summary=summary,
+        created_at=1,
+        updated_at=1,
+    )
+
+
+def _team_session(
+    session_id: str,
+    *,
+    team_id: str,
+    runs: list[RunOutput | TeamRunOutput] | None = None,
+    metadata: dict[str, object] | None = None,
+    summary: SessionSummary | None = None,
+) -> TeamSession:
+    return TeamSession(
+        session_id=session_id,
+        team_id=team_id,
         runs=runs or [],
         metadata=metadata,
         summary=summary,
@@ -551,23 +575,22 @@ async def test_prepare_bound_agents_for_run_uses_named_team_policy_not_owner_mem
     )
     owner_agent = _agent()
     owner_agent.id = "alpha"
-    owner_agent.team_id = "pair"
     peer_agent = _agent()
     peer_agent.id = "zeta"
-    peer_agent.team_id = "pair"
-    scope_context = load_scope_session_context(
-        agent=owner_agent,
-        agent_name="alpha",
+    scope_context = load_bound_scope_session_context(
+        agents=[peer_agent, owner_agent],
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
+        team_name="pair",
         create_session_if_missing=True,
     )
     assert scope_context is not None
     assert scope_context.session is not None
-    session = _session(
+    session = _team_session(
         "session-1",
+        team_id="pair",
         runs=[
             _completed_team_run(
                 "team-1",
@@ -636,13 +659,10 @@ async def test_prepare_bound_agents_for_run_uses_defaults_for_ad_hoc_team_policy
     )
     owner_agent = _agent()
     owner_agent.id = "alpha"
-    owner_agent.team_id = "adhoc-team"
     peer_agent = _agent()
     peer_agent.id = "zeta"
-    peer_agent.team_id = "adhoc-team"
-    scope_context = load_scope_session_context(
-        agent=owner_agent,
-        agent_name="alpha",
+    scope_context = load_bound_scope_session_context(
+        agents=[peer_agent, owner_agent],
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -651,12 +671,14 @@ async def test_prepare_bound_agents_for_run_uses_defaults_for_ad_hoc_team_policy
     )
     assert scope_context is not None
     assert scope_context.session is not None
-    session = _session(
+    assert scope_context.scope.kind == "team"
+    session = _team_session(
         "session-1",
+        team_id=scope_context.scope.scope_id,
         runs=[
             _completed_team_run(
                 "team-1",
-                team_id="adhoc-team",
+                team_id=scope_context.scope.scope_id,
                 messages=[
                     Message(role="user", content="old question"),
                     Message(role="assistant", content="old answer"),
@@ -728,23 +750,22 @@ async def test_prepare_bound_agents_for_run_budget_uses_active_run_model(tmp_pat
     )
     owner_agent = _agent()
     owner_agent.id = "alpha"
-    owner_agent.team_id = "pair"
     peer_agent = _agent()
     peer_agent.id = "zeta"
-    peer_agent.team_id = "pair"
-    scope_context = load_scope_session_context(
-        agent=owner_agent,
-        agent_name="alpha",
+    scope_context = load_bound_scope_session_context(
+        agents=[peer_agent, owner_agent],
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
+        team_name="pair",
         create_session_if_missing=True,
     )
     assert scope_context is not None
     assert scope_context.session is not None
-    session = _session(
+    session = _team_session(
         "session-1",
+        team_id="pair",
         runs=[
             _completed_team_run(
                 "run-1",
@@ -834,9 +855,26 @@ async def test_prepare_bound_agents_for_run_counts_owner_static_prompt_tokens(tm
         ),
         runtime_paths,
     )
-    storage = create_session_storage("alpha", config, runtime_paths, execution_identity=None)
-    session = _session(
+    owner_agent = _agent()
+    owner_agent.id = "alpha"
+    owner_agent.role = "Verbose owner role " + ("r" * 800)
+    owner_agent.instructions = ["Instruction " + ("i" * 800)]
+    peer_agent = _agent()
+    peer_agent.id = "zeta"
+    scope_context = load_bound_scope_session_context(
+        agents=[peer_agent, owner_agent],
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        team_name="pair",
+        create_session_if_missing=True,
+    )
+    assert scope_context is not None
+    assert scope_context.session is not None
+    session = _team_session(
         "session-1",
+        team_id="pair",
         runs=[
             _completed_team_run(
                 "run-1",
@@ -864,16 +902,7 @@ async def test_prepare_bound_agents_for_run_counts_owner_static_prompt_tokens(tm
             ),
         ],
     )
-    storage.upsert_session(session)
-
-    owner_agent = _agent()
-    owner_agent.id = "alpha"
-    owner_agent.team_id = "pair"
-    owner_agent.role = "Verbose owner role " + ("r" * 800)
-    owner_agent.instructions = ["Instruction " + ("i" * 800)]
-    peer_agent = _agent()
-    peer_agent.id = "zeta"
-    peer_agent.team_id = "pair"
+    scope_context.storage.upsert_session(session)
 
     prepared = await prepare_bound_agents_for_run(
         agents=[peer_agent, owner_agent],
@@ -888,6 +917,77 @@ async def test_prepare_bound_agents_for_run_counts_owner_static_prompt_tokens(tm
     )
 
     assert prepared.history_messages == []
+
+
+def test_entity_compaction_override_enables_and_clears_inherited_thresholds(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "alpha": AgentConfig(
+                    display_name="Alpha",
+                    compaction=CompactionOverrideConfig(
+                        threshold_percent=0.6,
+                        threshold_tokens=None,
+                    ),
+                ),
+            },
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(
+                    enabled=False,
+                    threshold_tokens=1_000,
+                    reserve_tokens=0,
+                ),
+            ),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="default-model",
+                    context_window=4_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+
+    resolved = config.get_entity_compaction_config("alpha")
+
+    assert resolved.enabled is True
+    assert resolved.threshold_tokens is None
+    assert resolved.threshold_percent == pytest.approx(0.6)
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    live_agent = _agent()
+    live_agent.role = "Verbose role " + ("r" * 200)
+    thread_history = [
+        {"sender": "alice", "body": "Earlier context"},
+        {"sender": "bob", "body": "More context"},
+    ]
+
+    with (
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch("mindroom.ai.prepare_history_for_run", new=AsyncMock(return_value=PreparedHistory())) as mock_prepare,
+    ):
+        await _prepare_agent_and_prompt(
+            "test_agent",
+            "Current prompt",
+            runtime_paths,
+            config,
+            thread_history=thread_history,
+        )
+
+    assert mock_prepare.await_args is not None
+    expected_fallback_prompt = build_prompt_with_thread_history("Current prompt", thread_history)
+    assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == estimate_preparation_static_tokens(
+        live_agent,
+        full_prompt="Current prompt",
+        fallback_full_prompt=expected_fallback_prompt,
+    )
 
 
 def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:

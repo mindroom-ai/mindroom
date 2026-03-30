@@ -316,6 +316,8 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                     mutateCompaction(current => ({
                       ...(current ?? {}),
                       threshold_tokens: value ?? undefined,
+                      threshold_percent:
+                        value != null ? null : current?.threshold_percent ?? undefined,
                     }));
                   }}
                 />
@@ -348,6 +350,8 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                     mutateCompaction(current => ({
                       ...(current ?? {}),
                       threshold_percent: value ?? undefined,
+                      threshold_tokens:
+                        value != null ? null : current?.threshold_tokens ?? undefined,
                     }));
                   }}
                   onBlur={() => {

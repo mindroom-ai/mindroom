@@ -714,7 +714,20 @@ class Config(BaseModel):
             msg = f"Unknown entity: {entity_name}"
             raise ValueError(msg)
         if override is not None:
-            merged.update(override.model_dump(exclude_none=True))
+            for field_name in override.model_fields_set:
+                field_value = getattr(override, field_name)
+                if field_value is None:
+                    if field_name == "enabled":
+                        continue
+                    merged.pop(field_name, None)
+                    continue
+                merged[field_name] = field_value
+            if "threshold_tokens" in override.model_fields_set and override.threshold_tokens is not None:
+                merged.pop("threshold_percent", None)
+            if "threshold_percent" in override.model_fields_set and override.threshold_percent is not None:
+                merged.pop("threshold_tokens", None)
+            if override.model_fields_set and "enabled" not in override.model_fields_set:
+                merged["enabled"] = True
         return CompactionConfig.model_validate(merged)
 
     def has_authored_entity_compaction_config(self, entity_name: str) -> bool:

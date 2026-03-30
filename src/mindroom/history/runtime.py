@@ -12,9 +12,10 @@ from typing import TYPE_CHECKING, cast
 from agno.run.agent import RunOutput
 from agno.run.messages import RunMessages
 from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 from pydantic import BaseModel
 
-from mindroom.agents import create_session_storage, create_state_storage_db, get_agent_session
+from mindroom.agents import create_session_storage, create_state_storage_db, get_agent_session, get_team_session
 from mindroom.history.compaction import (
     compact_scope_history,
     estimate_static_tokens,
@@ -71,7 +72,17 @@ class ScopeSessionContext:
 
     scope: HistoryScope
     storage: SqliteDb
-    session: AgentSession | None
+    session: AgentSession | TeamSession | None
+
+
+@dataclass(frozen=True)
+class BoundTeamScopeContext:
+    """Resolved stable scope/storage for one live team run."""
+
+    owner_agent: Agent
+    owner_agent_name: str
+    scope: HistoryScope
+    storage: SqliteDb
 
 
 @dataclass(frozen=True)
@@ -95,18 +106,19 @@ async def prepare_history_for_run(
     execution_identity: ToolExecutionIdentity | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     storage: SqliteDb | None = None,
-    session: AgentSession | None = None,
+    session: AgentSession | TeamSession | None = None,
     history_settings: ResolvedHistorySettings | None = None,
     compaction_config: CompactionConfig | None = None,
     has_authored_compaction_config: bool | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
     static_prompt_tokens: int | None = None,
+    scope: HistoryScope | None = None,
 ) -> PreparedHistory:
     """Prepare persisted replay state for one run and activate Agno guards."""
     clear_prepared_history(agent)
 
-    scope = resolve_history_scope(agent)
+    resolved_scope = scope or resolve_history_scope(agent)
     scope_context = load_scope_session_context(
         agent=agent,
         agent_name=agent_name,
@@ -116,11 +128,11 @@ async def prepare_history_for_run(
         execution_identity=execution_identity,
         storage=storage,
         session=session,
-        scope=scope,
+        scope=resolved_scope,
     )
     if scope_context is None or scope_context.session is None:
         return PreparedHistory()
-    scope = scope_context.scope
+    resolved_scope = scope_context.scope
     storage = scope_context.storage
     resolved_session = scope_context.session
 
@@ -141,17 +153,17 @@ async def prepare_history_for_run(
         active_context_window=resolved_inputs.active_context_window,
         static_prompt_tokens=resolved_inputs.static_prompt_tokens,
     )
-    state = read_scope_state(resolved_session, scope)
+    state = read_scope_state(resolved_session, resolved_scope)
     replay_plan = _build_scope_replay_plan(
         session=resolved_session,
-        scope=scope,
+        scope=resolved_scope,
         state=state,
         history_settings=resolved_inputs.history_settings,
     )
     state, replay_plan, compaction_outcomes = await _apply_scope_compaction_if_needed(
         storage=storage,
         session=resolved_session,
-        scope=scope,
+        scope=resolved_scope,
         state=state,
         replay_plan=replay_plan,
         config=config,
@@ -186,6 +198,7 @@ async def prepare_bound_agents_for_run(
     *,
     agents: list[Agent],
     full_prompt: str,
+    fallback_full_prompt: str | None = None,
     session_id: str | None,
     runtime_paths: RuntimePaths,
     config: Config,
@@ -197,8 +210,14 @@ async def prepare_bound_agents_for_run(
 ) -> PreparedHistory:
     """Prepare persisted history for a team's member agents."""
     clear_bound_agent_history_state(agents)
-    owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
-    if owner_agent is None or owner_agent_name is None:
+    bound_scope = resolve_bound_team_scope_context(
+        agents=agents,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        team_name=team_name,
+    )
+    if bound_scope is None:
         return PreparedHistory()
 
     if team_name is not None and team_name in config.teams:
@@ -216,22 +235,29 @@ async def prepare_bound_agents_for_run(
         resolved_active_context_window = config.get_model_context_window(resolved_active_model_name)
 
     prepared = await prepare_history_for_run(
-        agent=owner_agent,
-        agent_name=owner_agent_name,
+        agent=bound_scope.owner_agent,
+        agent_name=bound_scope.owner_agent_name,
         full_prompt=full_prompt,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
+        storage=bound_scope.storage,
         history_settings=history_settings,
         compaction_config=compaction_config,
         has_authored_compaction_config=has_authored_compaction_config,
         active_model_name=resolved_active_model_name,
         active_context_window=resolved_active_context_window,
+        static_prompt_tokens=estimate_preparation_static_tokens(
+            bound_scope.owner_agent,
+            full_prompt=full_prompt,
+            fallback_full_prompt=fallback_full_prompt,
+        ),
+        scope=bound_scope.scope,
     )
     for agent in agents:
-        if agent is owner_agent:
+        if agent is bound_scope.owner_agent:
             continue
         _activate_prepared_history(agent, prepared.history_messages)
     return prepared
@@ -271,6 +297,51 @@ def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str 
     return None, None
 
 
+def resolve_bound_team_scope_context(
+    *,
+    agents: list[Agent],
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    team_name: str | None = None,
+) -> BoundTeamScopeContext | None:
+    """Resolve the stable scope/storage backing one live team run."""
+    owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
+    if owner_agent is None or owner_agent_name is None:
+        return None
+
+    team_scope_id = team_name if team_name is not None and team_name in config.teams else _ad_hoc_team_scope_id(agents)
+    if team_scope_id is None:
+        return None
+    scope = HistoryScope(kind="team", scope_id=team_scope_id)
+    storage = _create_scope_session_storage(
+        agent_name=owner_agent_name,
+        scope=scope,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    return BoundTeamScopeContext(
+        owner_agent=owner_agent,
+        owner_agent_name=owner_agent_name,
+        scope=scope,
+        storage=storage,
+    )
+
+
+def estimate_preparation_static_tokens(
+    agent: Agent,
+    *,
+    full_prompt: str,
+    fallback_full_prompt: str | None = None,
+) -> int:
+    """Estimate static prompt tokens using the largest prompt variant this run may send."""
+    primary_tokens = estimate_static_tokens(agent, full_prompt)
+    if fallback_full_prompt is None:
+        return primary_tokens
+    return max(primary_tokens, estimate_static_tokens(agent, fallback_full_prompt))
+
+
 def load_bound_scope_session_context(
     *,
     agents: list[Agent],
@@ -278,21 +349,30 @@ def load_bound_scope_session_context(
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
+    team_name: str | None = None,
     create_session_if_missing: bool = False,
 ) -> ScopeSessionContext | None:
     """Load the canonical scope-backed session context for one bound team run."""
     if session_id is None:
         return None
-    owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
-    if owner_agent is None or owner_agent_name is None:
+    bound_scope = resolve_bound_team_scope_context(
+        agents=agents,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        team_name=team_name,
+    )
+    if bound_scope is None:
         return None
     return load_scope_session_context(
-        agent=owner_agent,
-        agent_name=owner_agent_name,
+        agent=bound_scope.owner_agent,
+        agent_name=bound_scope.owner_agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
+        storage=bound_scope.storage,
+        scope=bound_scope.scope,
         create_session_if_missing=create_session_if_missing,
     )
 
@@ -306,7 +386,7 @@ def load_scope_session_context(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     storage: SqliteDb | None = None,
-    session: AgentSession | None = None,
+    session: AgentSession | TeamSession | None = None,
     scope: HistoryScope | None = None,
     create_session_if_missing: bool = False,
 ) -> ScopeSessionContext | None:
@@ -314,10 +394,6 @@ def load_scope_session_context(
     resolved_scope = scope or resolve_history_scope(agent)
     if session_id is None or resolved_scope is None:
         return None
-
-    if resolved_scope.kind == "team":
-        storage = None
-        session = None
 
     storage, session = _materialize_session(
         agent_name=agent_name,
@@ -332,15 +408,24 @@ def load_scope_session_context(
     assert storage is not None
     if session is None and create_session_if_missing:
         created_at = int(datetime.now(UTC).timestamp())
-        session = AgentSession(
-            session_id=session_id,
-            agent_id=_scope_session_agent_id(resolved_scope),
-            team_id=resolved_scope.scope_id if resolved_scope.kind == "team" else None,
-            metadata={},
-            runs=[],
-            created_at=created_at,
-            updated_at=created_at,
-        )
+        if resolved_scope.kind == "team":
+            session = TeamSession(
+                session_id=session_id,
+                team_id=resolved_scope.scope_id,
+                metadata={},
+                runs=[],
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        else:
+            session = AgentSession(
+                session_id=session_id,
+                agent_id=_scope_session_agent_id(resolved_scope),
+                metadata={},
+                runs=[],
+                created_at=created_at,
+                updated_at=created_at,
+            )
     return ScopeSessionContext(
         scope=resolved_scope,
         storage=storage,
@@ -488,8 +573,8 @@ def _materialize_session(
     execution_identity: ToolExecutionIdentity | None,
     scope: HistoryScope,
     storage: SqliteDb | None,
-    session: AgentSession | None,
-) -> tuple[SqliteDb | None, AgentSession | None]:
+    session: AgentSession | TeamSession | None,
+) -> tuple[SqliteDb | None, AgentSession | TeamSession | None]:
     if storage is None:
         storage = _create_scope_session_storage(
             agent_name=agent_name,
@@ -499,13 +584,22 @@ def _materialize_session(
             execution_identity=execution_identity,
         )
     if session is None:
-        session = get_agent_session(storage, session_id)
+        session = (
+            get_team_session(storage, session_id) if scope.kind == "team" else get_agent_session(storage, session_id)
+        )
     return storage, session
 
 
 def _bind_team_scope_owner_agent_name(agents: list[Agent], owner_agent_name: str) -> None:
     for agent in agents:
         agent.__dict__[_TEAM_SCOPE_OWNER_AGENT_ATTR] = owner_agent_name
+
+
+def _ad_hoc_team_scope_id(agents: list[Agent]) -> str | None:
+    agent_names = [agent_id for agent in agents if isinstance((agent_id := agent.id), str) and agent_id]
+    if not agent_names:
+        return None
+    return f"team_{'+'.join(sorted(agent_names))}"
 
 
 def _create_scope_session_storage(
@@ -615,7 +709,7 @@ def _resolve_preparation_inputs(
 
 def _build_scope_replay_plan(
     *,
-    session: AgentSession,
+    session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: CompactionState,
     history_settings: ResolvedHistorySettings,
@@ -632,7 +726,7 @@ def _build_scope_replay_plan(
 async def _apply_scope_compaction_if_needed(
     *,
     storage: SqliteDb,
-    session: AgentSession,
+    session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: CompactionState,
     replay_plan: ReplayPlan,

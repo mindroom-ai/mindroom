@@ -15,17 +15,18 @@ from mindroom.history.types import CompactionState, HistoryScope
 
 if TYPE_CHECKING:
     from agno.session.agent import AgentSession
+    from agno.session.team import TeamSession
 
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
 
 
-def read_scope_state(session: AgentSession, scope: HistoryScope) -> CompactionState:
+def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -> CompactionState:
     """Return the scoped compaction state for one session and scope."""
     return read_scope_states(session).get(scope.key, CompactionState())
 
 
-def read_scope_states(session: AgentSession) -> dict[str, CompactionState]:
+def read_scope_states(session: AgentSession | TeamSession) -> dict[str, CompactionState]:
     """Return all scoped compaction states parsed from session metadata."""
     metadata = session.metadata
     if not isinstance(metadata, dict):
@@ -51,7 +52,7 @@ def read_scope_states(session: AgentSession) -> dict[str, CompactionState]:
 
 
 def write_scope_state(
-    session: AgentSession,
+    session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: CompactionState,
 ) -> None:
@@ -72,7 +73,7 @@ def write_scope_state(
     session.summary = None
 
 
-def read_scope_seen_event_ids(session: AgentSession, scope: HistoryScope) -> set[str]:
+def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:
     """Return the consumed Matrix event ids for one session scope."""
     seen_event_ids = _read_preserved_scope_seen_event_ids(session, scope)
     for run in session.runs or []:
@@ -90,7 +91,7 @@ def read_scope_seen_event_ids(session: AgentSession, scope: HistoryScope) -> set
 
 
 def update_scope_seen_event_ids(
-    session: AgentSession,
+    session: AgentSession | TeamSession,
     scope: HistoryScope,
     event_ids: list[str],
 ) -> bool:
@@ -150,11 +151,11 @@ def _state_is_empty(state: CompactionState) -> bool:
     )
 
 
-def _read_preserved_scope_seen_event_ids(session: AgentSession, scope: HistoryScope) -> set[str]:
+def _read_preserved_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:
     return set(_read_scope_seen_event_states(session).get(scope.key, set()))
 
 
-def _read_scope_seen_event_states(session: AgentSession) -> dict[str, set[str]]:
+def _read_scope_seen_event_states(session: AgentSession | TeamSession) -> dict[str, set[str]]:
     metadata = session.metadata
     if not isinstance(metadata, dict):
         return {}
@@ -181,7 +182,7 @@ def _read_scope_seen_event_states(session: AgentSession) -> dict[str, set[str]]:
     return parsed
 
 
-def _write_scope_seen_event_states(session: AgentSession, states: dict[str, set[str]]) -> None:
+def _write_scope_seen_event_states(session: AgentSession | TeamSession, states: dict[str, set[str]]) -> None:
     session_metadata = dict(session.metadata or {})
     serialized_states = {
         scope_key: {"seen_event_ids": sorted(event_ids)} for scope_key, event_ids in sorted(states.items()) if event_ids

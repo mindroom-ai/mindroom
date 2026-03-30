@@ -2477,6 +2477,8 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         assert mock_prepare.await_args.kwargs["full_prompt"] == "Follow-up"
+        assert "Start" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
+        assert "Ack" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
         prompt = mock_team.arun.call_args.args[0]
         assert prompt == f"{summary_prefix}Follow-up"
         assert "Previous conversation in this thread:" not in prompt
@@ -2527,6 +2529,8 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         assert mock_prepare.await_args.kwargs["full_prompt"] == "Follow-up"
+        assert "Start" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
+        assert "Ack" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
         prompt = mock_team.arun.call_args.args[0]
         assert prompt == f"{summary_prefix}Follow-up"
         assert "Previous conversation in this thread:" not in prompt
@@ -2591,6 +2595,36 @@ class TestTeamCompletion:
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is False
+
+    def test_build_team_uses_stable_team_scope_db(self) -> None:
+        """Configured teams should persist runs into the stable team scope store."""
+        config = Config(
+            agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+            teams={
+                "coord_team": TeamConfig(
+                    display_name="Coord Team",
+                    role="Coordinated team",
+                    agents=["general"],
+                    mode="coordinate",
+                ),
+            },
+        )
+        member = MagicMock(name="GeneralAgent")
+        member.id = "general"
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", return_value=member),
+            patch("mindroom.api.openai_compat.get_model_instance"),
+            patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
+        ):
+            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
+
+            _build_team("coord_team", config, _runtime_paths(), execution_identity=None)
+
+        assert mock_team_init.call_args.kwargs["id"] == "coord_team"
+        assert mock_team_init.call_args.kwargs["db"] is not None
 
     def test_build_team_passes_knowledge_to_member_agents(self) -> None:
         """Team member creation resolves and passes configured knowledge."""

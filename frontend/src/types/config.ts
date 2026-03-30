@@ -284,6 +284,10 @@ function normalizeCompactionConfig(
     return undefined;
   }
 
+  if (normalizedCompaction.enabled === undefined) {
+    normalizedCompaction.enabled = true;
+  }
+
   return normalizedCompaction;
 }
 
