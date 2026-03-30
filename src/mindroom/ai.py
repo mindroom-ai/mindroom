@@ -471,25 +471,37 @@ def get_model_instance(
     )
 
 
-def _format_messages_context(messages: list[dict[str, Any]], header: str, prompt: str) -> str:
-    """Format messages as context prepended to a prompt."""
-    context_lines: list[str] = []
-    for msg in messages:
-        sender = msg.get("sender")
-        body = msg.get("body")
-        if sender and body:
-            context_lines.append(f"{sender}: {body}")
-    if not context_lines:
-        return prompt
-    context = "\n".join(context_lines)
-    return f"{header}\n{context}\n\nCurrent message:\n{prompt}"
-
-
-def build_prompt_with_thread_history(prompt: str, thread_history: list[dict[str, Any]] | None = None) -> str:
+def build_prompt_with_thread_history(
+    prompt: str,
+    thread_history: list[dict[str, Any]] | None = None,
+    *,
+    header: str = "Previous conversation in this thread:",
+    prompt_intro: str = "Current message:\n",
+    max_messages: int | None = None,
+    max_message_length: int | None = None,
+    missing_sender_label: str | None = None,
+) -> str:
     """Build a prompt with thread history context when available."""
     if not thread_history:
         return prompt
-    return _format_messages_context(thread_history, "Previous conversation in this thread:", prompt)
+    messages = thread_history[-max_messages:] if max_messages is not None else thread_history
+    context_lines: list[str] = []
+    for msg in messages:
+        body = msg.get("body")
+        if not isinstance(body, str) or not body:
+            continue
+        if max_message_length is not None and len(body) >= max_message_length:
+            continue
+        sender = msg.get("sender")
+        if not isinstance(sender, str) or not sender:
+            if missing_sender_label is None:
+                continue
+            sender = missing_sender_label
+        context_lines.append(f"{sender}: {body}")
+    if not context_lines:
+        return prompt
+    context = "\n".join(context_lines)
+    return f"{header}\n{context}\n\n{prompt_intro}{prompt}"
 
 
 def _classify_partial_reply(
@@ -668,11 +680,10 @@ def _build_prompt_with_unseen(
     """Prepend unseen messages from other participants to the prompt."""
     if not unseen_messages:
         return prompt
-    header = _build_unseen_messages_header(partial_reply_kinds or set())
-    return _format_messages_context(
-        unseen_messages,
-        header,
+    return build_prompt_with_thread_history(
         prompt,
+        unseen_messages,
+        header=_build_unseen_messages_header(partial_reply_kinds or set()),
     )
 
 

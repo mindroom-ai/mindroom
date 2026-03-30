@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from mindroom.agents import create_agent
 from mindroom.ai import (
     build_matrix_run_metadata,
+    build_prompt_with_thread_history,
     build_prompt_with_unseen_thread_context,
     get_model_instance,
 )
@@ -938,38 +939,6 @@ def resolve_configured_team(
     )
 
 
-def _build_prompt_with_context(
-    message: str,
-    thread_history: list[dict] | None = None,
-) -> str:
-    """Build a prompt with thread context if available.
-
-    Args:
-        message: The user's message
-        thread_history: Optional thread history for context
-
-    Returns:
-        Formatted prompt with context
-
-    """
-    if not thread_history:
-        return message
-
-    recent_messages = thread_history[-30:]  # Last 30 messages for context
-    context_parts = []
-    for msg in recent_messages:
-        sender = msg.get("sender", "Unknown")
-        body = msg.get("body", "")
-        if body and len(body) < _MAX_CONTEXT_MESSAGE_LENGTH:
-            context_parts.append(f"{sender}: {body}")
-
-    if context_parts:
-        context = "\n".join(context_parts)
-        return f"Thread Context:\n{context}\n\nUser: {message}"
-
-    return message
-
-
 def _collect_bound_seen_event_ids(
     *,
     agents: list[Agent],
@@ -1245,7 +1214,15 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     agents = team_members.agents
 
     base_prompt = message
-    fallback_prompt = _build_prompt_with_context(message, thread_history)
+    fallback_prompt = build_prompt_with_thread_history(
+        message,
+        thread_history,
+        header="Thread Context:",
+        prompt_intro="User: ",
+        max_messages=30,
+        max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
+        missing_sender_label="Unknown",
+    )
     resolved_team_model_name = model_name
     if resolved_team_model_name is None and configured_team_name is not None:
         resolved_team_model_name = orchestrator.config.get_entity_model_name(configured_team_name)
@@ -1526,7 +1503,15 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     agent_names = team_members.display_names
     display_names = team_members.display_names
     base_prompt = message
-    fallback_prompt = _build_prompt_with_context(message, thread_history)
+    fallback_prompt = build_prompt_with_thread_history(
+        message,
+        thread_history,
+        header="Thread Context:",
+        prompt_intro="User: ",
+        max_messages=30,
+        max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
+        missing_sender_label="Unknown",
+    )
     resolved_team_model_name = model_name
     if resolved_team_model_name is None and configured_team_name is not None:
         resolved_team_model_name = orchestrator.config.get_entity_model_name(configured_team_name)
