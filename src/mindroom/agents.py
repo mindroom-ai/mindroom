@@ -615,7 +615,7 @@ def _create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
     return SqliteDb(db_file=str(culture_dir / f"{culture_name}.db"))
 
 
-def _get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | None:
+def get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | None:
     """Retrieve and deserialize an AgentSession from storage."""
     raw = storage.get_session(session_id, SessionType.AGENT)
     if raw is None:
@@ -652,7 +652,7 @@ def remove_run_by_event_id(storage: SqliteDb, session_id: str, event_id: str) ->
 
     Returns True if a run was removed.
     """
-    session = _get_agent_session(storage, session_id)
+    session = get_agent_session(storage, session_id)
     if session is None or not session.runs:
         return False
     original_len = len(session.runs)

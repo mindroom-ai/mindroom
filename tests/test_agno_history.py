@@ -25,7 +25,7 @@ from pydantic import ValidationError
 import mindroom
 import mindroom.agents
 from mindroom.agents import (
-    _get_agent_session,
+    get_agent_session,
     get_seen_event_ids,
     remove_run_by_event_id,
 )
@@ -361,18 +361,18 @@ def _make_run_output(
 
 
 class TestGetAgentSession:
-    """Test _get_agent_session helper."""
+    """Test get_agent_session helper."""
 
     def test_no_session(self) -> None:
         """Return None when session does not exist."""
         storage = MagicMock(spec=SqliteDb)
         storage.get_session.return_value = None
-        assert _get_agent_session(storage, "sid") is None
+        assert get_agent_session(storage, "sid") is None
 
     def test_empty_runs(self) -> None:
         """Return session with empty runs list."""
         storage = _make_storage_with_session("sid", runs=[])
-        session = _get_agent_session(storage, "sid")
+        session = get_agent_session(storage, "sid")
         assert session is not None
         assert not session.runs
 
@@ -380,7 +380,7 @@ class TestGetAgentSession:
         """Return session with runs."""
         run = _make_run_output()
         storage = _make_storage_with_session("sid", runs=[run])
-        session = _get_agent_session(storage, "sid")
+        session = get_agent_session(storage, "sid")
         assert session is not None
         assert len(session.runs) == 1
 
@@ -660,7 +660,7 @@ class TestPrepareAgentAndPrompt:
         with (
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=None),
+            patch("mindroom.ai.get_agent_session", return_value=None),
             patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
             patch("mindroom.ai.create_session_storage"),
         ):
@@ -692,7 +692,7 @@ class TestPrepareAgentAndPrompt:
         with (
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=self._mock_session([run])),
+            patch("mindroom.ai.get_agent_session", return_value=self._mock_session([run])),
             patch("mindroom.ai.build_prompt_with_thread_history") as mock_stuff,
             patch("mindroom.ai.create_session_storage"),
         ):
@@ -725,7 +725,7 @@ class TestPrepareAgentAndPrompt:
         with (
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=session),
+            patch("mindroom.ai.get_agent_session", return_value=session),
             patch("mindroom.ai.build_prompt_with_thread_history") as mock_stuff,
             patch("mindroom.ai.create_session_storage"),
         ):
@@ -751,7 +751,7 @@ class TestPrepareAgentAndPrompt:
         with (
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=self._mock_session([run])),
+            patch("mindroom.ai.get_agent_session", return_value=self._mock_session([run])),
             patch("mindroom.ai.build_prompt_with_thread_history") as mock_stuff,
             patch("mindroom.ai.create_session_storage"),
         ):
@@ -801,7 +801,7 @@ class TestPrepareAgentAndPrompt:
         with (
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=None),
+            patch("mindroom.ai.get_agent_session", return_value=None),
             patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
             patch("mindroom.ai.create_session_storage"),
         ):
@@ -881,7 +881,7 @@ class TestPrepareAgentAndPrompt:
         with (
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=self._mock_session([run])),
+            patch("mindroom.ai.get_agent_session", return_value=self._mock_session([run])),
             patch("mindroom.ai.build_prompt_with_thread_history") as mock_stuff,
             patch("mindroom.ai.create_session_storage"),
         ):
@@ -910,7 +910,7 @@ class TestPrepareAgentAndPrompt:
         with (
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=None),
+            patch("mindroom.ai.get_agent_session", return_value=None),
             patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
             patch("mindroom.ai.create_session_storage"),
         ):
@@ -961,7 +961,7 @@ class TestPrepareAgentAndPrompt:
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.create_agent", return_value=agent),
             patch("mindroom.ai.create_session_storage", return_value=MagicMock(spec=SqliteDb)),
-            patch("mindroom.ai._get_agent_session", return_value=session),
+            patch("mindroom.ai.get_agent_session", return_value=session),
             patch("mindroom.compaction_runtime.compact_session_now", new_callable=AsyncMock) as mock_compact,
             patch("mindroom.compaction_runtime._apply_context_window_limit"),
         ):
@@ -1036,7 +1036,7 @@ class TestPrepareAgentAndPrompt:
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.create_agent", return_value=agent),
             patch("mindroom.ai.create_session_storage", return_value=MagicMock(spec=SqliteDb)),
-            patch("mindroom.ai._get_agent_session", return_value=session),
+            patch("mindroom.ai.get_agent_session", return_value=session),
             patch("mindroom.ai.get_model_instance", return_value=MagicMock(id="compact-model")),
             patch(
                 "mindroom.compaction_runtime.compact_session_now",
@@ -1129,7 +1129,7 @@ class TestPrepareAgentAndPrompt:
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value=prompt),
             patch("mindroom.ai.create_agent", return_value=agent),
             patch("mindroom.ai.create_session_storage", return_value=MagicMock(spec=SqliteDb)),
-            patch("mindroom.ai._get_agent_session", return_value=session),
+            patch("mindroom.ai.get_agent_session", return_value=session),
             patch("mindroom.compaction_runtime.compact_session_now", new_callable=AsyncMock) as mock_compact,
             patch("mindroom.compaction_runtime._apply_context_window_limit"),
         ):
@@ -1608,7 +1608,7 @@ class TestApplyContextWindowLimit:
         agent = self._make_agent(num_history_runs=5)
         with (
             patch("mindroom.compaction_runtime.create_session_storage"),
-            patch("mindroom.compaction_runtime._get_agent_session", return_value=None),
+            patch("mindroom.compaction_runtime.get_agent_session", return_value=None),
         ):
             _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
         assert agent.num_history_runs == 5
@@ -1641,7 +1641,7 @@ class TestApplyContextWindowLimit:
 
         with (
             patch("mindroom.compaction_runtime.create_session_storage") as mock_create_storage,
-            patch("mindroom.compaction_runtime._get_agent_session", return_value=None),
+            patch("mindroom.compaction_runtime.get_agent_session", return_value=None),
         ):
             _apply_context_window_limit(
                 agent,

@@ -16,8 +16,8 @@ def estimate_text_tokens(value: str | list[str] | None) -> int:
     if isinstance(value, str):
         return len(value) // 4
     if isinstance(value, list):
-        return sum(len(_stable_serialize(part)) for part in value) // 4
-    return len(_stable_serialize(value)) // 4
+        return sum(len(stable_serialize(part)) for part in value) // 4
+    return len(stable_serialize(value)) // 4
 
 
 def compute_compaction_input_budget(
@@ -37,7 +37,8 @@ def compute_compaction_input_budget(
     return max(0, budget)
 
 
-def _stable_serialize(value: object) -> str:
+def stable_serialize(value: object) -> str:
+    """Serialize arbitrary values into a stable JSON-ish string."""
     if isinstance(value, str):
         return value
     return json.dumps(

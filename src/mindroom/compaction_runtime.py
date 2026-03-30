@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.agents import _get_agent_session, create_session_storage
+from mindroom.agents import create_session_storage, get_agent_session
 from mindroom.compaction import (
     CompactionOutcome,
     PendingCompaction,
@@ -109,7 +109,7 @@ def _apply_context_window_limit(  # noqa: C901
             runtime_paths,
             execution_identity=execution_identity,
         )
-        session = _get_agent_session(storage, session_id)
+        session = get_agent_session(storage, session_id)
     if not session or not session.runs:
         return
 
@@ -182,11 +182,12 @@ def _latest_pending_compaction(
     return None
 
 
-async def _apply_manual_compaction_if_queued(
+async def apply_manual_compaction_if_queued(
     *,
     pending_compaction_buffer: list[PendingCompaction] | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None,
 ) -> None:
+    """Apply the newest queued manual compaction and record its outcome."""
     manual_outcome = await apply_pending_compaction(
         pending_override=_latest_pending_compaction(pending_compaction_buffer),
     )
@@ -246,7 +247,7 @@ def _ensure_agent_storage_and_session(
             execution_identity=execution_identity,
         )
     if session is None:
-        session = _get_agent_session(storage, session_id)
+        session = get_agent_session(storage, session_id)
     return storage, session
 
 
@@ -443,7 +444,7 @@ async def apply_bound_agent_compactions(
         _, pending_compaction_buffer = _get_bound_agent_compaction_state(agent)
         if pending_compaction_buffer is None:
             continue
-        await _apply_manual_compaction_if_queued(
+        await apply_manual_compaction_if_queued(
             pending_compaction_buffer=pending_compaction_buffer,
             compaction_outcomes_collector=compaction_outcomes_collector,
         )

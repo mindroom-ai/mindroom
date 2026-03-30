@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
-from mindroom.agents import _get_agent_session, create_session_storage
+from mindroom.agents import create_session_storage, get_agent_session
 from mindroom.compaction import CompactionOutcome, get_visible_session_runs, queue_pending_compaction
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -58,7 +58,7 @@ class CompactContextTools(Toolkit):
             self._runtime_paths,
             execution_identity=self._execution_identity,
         )
-        session = _get_agent_session(storage, session_id)
+        session = get_agent_session(storage, session_id)
         visible_runs = get_visible_session_runs(session) if session is not None else []
         if len(visible_runs) <= keep_recent_runs:
             run_count = len(visible_runs)

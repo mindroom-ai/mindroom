@@ -24,7 +24,7 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.tools.function import Function, FunctionCall
 
-from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
+from mindroom.agents import create_agent, create_session_storage, get_agent_session, get_seen_event_ids
 from mindroom.bot import AgentBot
 from mindroom.compaction import (
     _PENDING_COMPACTION,
@@ -219,7 +219,7 @@ async def test_create_agent_does_not_store_history_messages(tmp_path: Path) -> N
     await agent.arun("second turn", session_id="sid")
 
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _get_agent_session(storage, "sid")
+    session = get_agent_session(storage, "sid")
     assert session is not None
     assert len(session.runs or []) == 2
 
@@ -484,7 +484,7 @@ async def test_second_turn_waits_for_queued_compaction_to_apply(  # noqa: PLR091
             return "first response"
 
         second_turn_started.set()
-        session = _get_agent_session(storage, resolved_session_id)
+        session = get_agent_session(storage, resolved_session_id)
         assert session is not None
         second_turn_total_runs.append(len(session.runs or []))
         second_turn_visible_runs.append(len(get_visible_session_runs(session)))

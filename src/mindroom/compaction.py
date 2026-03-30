@@ -31,10 +31,10 @@ from agno.session.summary import SessionSummary
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
-from mindroom.agents import _get_agent_session, create_session_storage
+from mindroom.agents import create_session_storage, get_agent_session
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY
 from mindroom.logging_config import get_logger
-from mindroom.token_budget import _stable_serialize, compute_compaction_input_budget, estimate_text_tokens
+from mindroom.token_budget import compute_compaction_input_budget, estimate_text_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -213,7 +213,7 @@ def _estimate_messages_tokens(messages: Sequence[Message] | None) -> int:
     for msg in messages:
         total_chars += len(_render_message_content(msg))
         if msg.tool_calls:
-            total_chars += len(_stable_serialize(msg.tool_calls))
+            total_chars += len(stable_serialize(msg.tool_calls))
         total_chars += _estimate_message_media_chars(msg)
     return total_chars // 4
 
@@ -386,7 +386,7 @@ async def compact_session_now(
     """
     lock = _get_session_lock(storage, session_id)
     async with lock:
-        session = _get_agent_session(storage, session_id)
+        session = get_agent_session(storage, session_id)
         if session is None or not session.runs:
             return None
 
@@ -493,7 +493,7 @@ async def queue_pending_compaction(
     """Queue a deferred post-run compaction for the current session."""
     lock = _get_session_lock(storage, session_id)
     async with lock:
-        session = _get_agent_session(storage, session_id)
+        session = get_agent_session(storage, session_id)
         if session is None or not session.runs:
             return None
         if keep_recent_runs < 0:
@@ -612,7 +612,7 @@ async def apply_pending_compaction(
     )
     lock = _get_session_lock(storage, pending.session_id)
     async with lock:
-        session = _get_agent_session(storage, pending.session_id)
+        session = get_agent_session(storage, pending.session_id)
         if session is None or not session.runs:
             logger.warning(
                 "Pending compaction skipped: session not found post-run",
@@ -915,7 +915,7 @@ def _serialize_run(run: RunOutput | TeamRunOutput, index: int) -> str:
         lines.extend(
             [
                 "<run_metadata>",
-                _escape_xml_content(_stable_serialize(run.metadata)),
+                _escape_xml_content(stable_serialize(run.metadata)),
                 "</run_metadata>",
             ],
         )
@@ -941,7 +941,7 @@ def _serialize_message(message: Message) -> list[str]:
         lines.extend(
             [
                 "<tool_calls>",
-                _escape_xml_content(_stable_serialize(message.tool_calls)),
+                _escape_xml_content(stable_serialize(message.tool_calls)),
                 "</tool_calls>",
             ],
         )
@@ -975,7 +975,7 @@ def _message_media_entries(message: Message) -> tuple[tuple[str, object | None],
 def _serialize_media_payload(media_value: object | None) -> str:
     if media_value is None:
         return ""
-    return _stable_serialize(_media_payload_snapshot(media_value))
+    return stable_serialize(_media_payload_snapshot(media_value))
 
 
 def _media_payload_snapshot(media_value: object) -> object:
@@ -993,10 +993,10 @@ def _render_message_content(message: Message) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "\n".join(_stable_serialize(part) for part in content)
+        return "\n".join(stable_serialize(part) for part in content)
     if content is None:
         return ""
-    return _stable_serialize(content)
+    return stable_serialize(content)
 
 
 def _unescape_xml_content(text: str) -> str:
@@ -1144,7 +1144,7 @@ def _scrub_history_messages_from_sessions(storage: SqliteDb) -> _HistoryScrubSta
         session_id = session_stub.session_id
         if not isinstance(session_id, str):
             continue
-        session = _get_agent_session(storage, session_id)
+        session = get_agent_session(storage, session_id)
         if session is None:
             continue
 

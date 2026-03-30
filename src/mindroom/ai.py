@@ -33,13 +33,13 @@ from agno.run.agent import (
 )
 from agno.run.base import RunStatus
 
-from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
+from mindroom.agents import create_agent, create_session_storage, get_agent_session, get_seen_event_ids
 from mindroom.compaction import (
     CompactionOutcome,
     clear_pending_compaction,
 )
 from mindroom.compaction_runtime import (
-    _apply_manual_compaction_if_queued,
+    apply_manual_compaction_if_queued,
     prepare_agent_history_for_run,
 )
 from mindroom.constants import (
@@ -802,7 +802,7 @@ async def _cached_agent_run(
             videos=media_inputs.videos,
             metadata=metadata,
         )
-        await _apply_manual_compaction_if_queued(
+        await apply_manual_compaction_if_queued(
             pending_compaction_buffer=pending_compaction_buffer,
             compaction_outcomes_collector=compaction_outcomes_collector,
         )
@@ -824,7 +824,7 @@ async def _cached_agent_run(
         run_id=run_id,
         metadata=metadata,
     )
-    await _apply_manual_compaction_if_queued(
+    await apply_manual_compaction_if_queued(
         pending_compaction_buffer=pending_compaction_buffer,
         compaction_outcomes_collector=compaction_outcomes_collector,
     )
@@ -882,7 +882,7 @@ async def _prepare_agent_and_prompt(
             runtime_paths,
             execution_identity=execution_identity,
         )
-        session = _get_agent_session(storage, session_id)
+        session = get_agent_session(storage, session_id)
         has_prior_runs = session is not None and (bool(session.runs) or session.summary is not None)
 
     if reply_to_event_id and thread_history:
@@ -1379,7 +1379,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         ):
             yield stream_chunk
 
-        await _apply_manual_compaction_if_queued(
+        await apply_manual_compaction_if_queued(
             pending_compaction_buffer=pending_compaction_buffer,
             compaction_outcomes_collector=compaction_outcomes_collector,
         )
