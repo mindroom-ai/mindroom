@@ -21,6 +21,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
+    EVENT_MESSAGE_RECEIVED,
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     CustomEventContext,
@@ -212,6 +213,7 @@ def test_tool_events_are_registered_with_expected_timeouts() -> None:
     assert validate_event_name(EVENT_TOOL_BEFORE_CALL) == EVENT_TOOL_BEFORE_CALL
     assert validate_event_name(EVENT_TOOL_AFTER_CALL) == EVENT_TOOL_AFTER_CALL
     assert "tool" in RESERVED_EVENT_NAMESPACES
+    assert default_timeout_ms_for_event(EVENT_MESSAGE_RECEIVED) == 15000
     assert default_timeout_ms_for_event(EVENT_TOOL_BEFORE_CALL) == 200
     assert default_timeout_ms_for_event(EVENT_TOOL_AFTER_CALL) == 300
 

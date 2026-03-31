@@ -105,6 +105,7 @@ from mindroom.teams import (
     team_response,
     team_response_stream,
 )
+from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.thread_utils import (
     check_agent_mentioned,
     create_session_id,
@@ -185,7 +186,6 @@ from .scheduling import (
     has_deferred_overdue_tasks,
     restore_scheduled_tasks,
 )
-from .thread_summary import maybe_generate_thread_summary
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -981,6 +981,7 @@ class AgentBot:
 
     async def _on_sync_error(self, _response: nio.SyncError) -> None:
         """Update the watchdog clock on sync errors so it knows the loop is alive."""
+        logger.debug("SyncError received", agent_name=self.agent_name, error=str(_response))
         self._last_sync_monotonic = time.monotonic()
 
     async def ensure_rooms(self) -> None:
@@ -1250,15 +1251,6 @@ class AgentBot:
         """Run the normal text/command dispatch pipeline for a prepared text event."""
         assert isinstance(event.body, str)
 
-        # Router handles commands exclusively
-        command = command_parser.parse(event.body)
-        if command:
-            if self.agent_name == ROUTER_AGENT_NAME:
-                # Router always handles commands, even in single-agent rooms
-                # Commands like !schedule, !help, etc. need to work regardless
-                await self._handle_command(room, event, command)
-            return
-
         dispatch = await self._prepare_dispatch(
             room,
             event,
@@ -1268,6 +1260,14 @@ class AgentBot:
         if dispatch is None:
             return
 
+        # Router handles commands exclusively
+        command = command_parser.parse(event.body)
+        if command:
+            if self.agent_name == ROUTER_AGENT_NAME:
+                # Router always handles commands, even in single-agent rooms
+                # Commands like !schedule, !help, etc. need to work regardless
+                await self._handle_command(room, event, command)
+            return
         if self._has_newer_unresponded_in_scope(event, dispatch.context):
             self.response_tracker.mark_responded(event.event_id)
             return

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import nio
 from nio.api import RelationshipType
@@ -14,7 +14,6 @@ from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     STREAM_STATUS_COMPLETED,
-    STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
@@ -34,7 +33,6 @@ from mindroom.streaming import (
     build_restart_interrupted_body,
     is_in_progress_message,
 )
-from mindroom.tool_system.events import _TOOL_TRACE_KEY
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
@@ -77,6 +75,7 @@ class _MessageState:
     """Latest visible state for one original Matrix message."""
 
     latest_body: str | None = None
+    custom_content: dict[str, Any] = field(default_factory=dict)
     latest_timestamp: int = 0
     latest_event_id: str = ""
     latest_content: dict[str, object] | None = None
@@ -272,6 +271,7 @@ async def _cleanup_one_stale_message(
         room_id=room_id,
         target_event_id=target_event_id,
         new_text=build_restart_interrupted_body(state.latest_body),
+        custom_content=state.custom_content,
         thread_id=state.thread_id,
         sender_domain=sender_domain,
         config=config,
@@ -482,8 +482,11 @@ def _merge_resolved_message_state(
             if isinstance(key, str):
                 normalized_latest_content[key] = value
 
+    custom_content = _extract_mindroom_custom_content(normalized_latest_content)
+
     state = message_states.setdefault(target_event_id, _MessageState())
     state.latest_body = body
+    state.custom_content = dict(custom_content)
     state.latest_timestamp = timestamp
     state.latest_event_id = latest_event_id
     state.latest_content = normalized_latest_content
@@ -836,12 +839,21 @@ def _record_stop_reaction(
     message_states.setdefault(target_event_id, _MessageState()).stop_reaction_event_ids.add(reaction_event_id)
 
 
+def _extract_mindroom_custom_content(content: object) -> dict[str, Any]:
+    """Return io.mindroom.* keys from the canonical content payload."""
+    if not isinstance(content, dict):
+        return {}
+
+    return {key: value for key, value in content.items() if isinstance(key, str) and key.startswith("io.mindroom.")}
+
+
 async def _edit_stale_message(
     client: nio.AsyncClient,
     *,
     room_id: str,
     target_event_id: str,
     new_text: str,
+    custom_content: dict[str, Any] | None = None,
     thread_id: str | None,
     sender_domain: str,
     config: Config,
@@ -861,7 +873,14 @@ async def _edit_stale_message(
         extra_content=_preserved_cleanup_content(preserved_content),
     )
 
-    response_event_id = await edit_message(client, room_id, target_event_id, content, new_text)
+    response_event_id = await edit_message(
+        client,
+        room_id,
+        target_event_id,
+        content,
+        new_text,
+        extra_content=custom_content or None,
+    )
     if response_event_id:
         return True
 
@@ -879,9 +898,10 @@ def _preserved_cleanup_content(content: dict[str, object] | None) -> dict[str, o
         return None
 
     preserved: dict[str, object] = {}
-    for key in (STREAM_STATUS_KEY, _TOOL_TRACE_KEY, ORIGINAL_SENDER_KEY, "m.mentions"):
-        value = content.get(key)
-        if value is not None:
+    for key, value in content.items():
+        if not isinstance(key, str):
+            continue
+        if key.startswith("io.mindroom.") or key in {ORIGINAL_SENDER_KEY, "m.mentions"}:
             preserved[key] = value
 
     return preserved or None

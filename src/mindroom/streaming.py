@@ -43,10 +43,6 @@ from mindroom.matrix.client import get_latest_thread_event_id_if_needed
 logger = get_logger(__name__)
 
 # Global constant for the in-progress marker
-# STREAM_STATUS_KEY is the durable source of truth for newly written messages.
-# We still keep the visible marker heuristic for older history that predates
-# stream-status persistence and for live filtering while our own in-flight
-# edits are arriving.
 IN_PROGRESS_MARKER = " ⋯"
 _PROGRESS_PLACEHOLDER = "Thinking..."
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER

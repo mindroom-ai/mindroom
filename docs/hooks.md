@@ -135,7 +135,7 @@ async def block_secret_reads(ctx):
 
 | Event | Mode | Context type | When it fires | Key mutable fields |
 | --- | --- | --- | --- | --- |
-| `message:received` | Observer | `MessageReceivedContext` | After authorization, dedup, and voice normalization; before routing and before image/file/video attachment registration | `suppress` |
+| `message:received` | Observer | `MessageReceivedContext` | After authorization, dedup, and voice normalization; before command parsing, routing, and image/file/video attachment registration | `suppress` |
 | `message:enrich` | Collector | `MessageEnrichContext` | After routing resolves target agent/team; before AI generation | `add_metadata()` |
 | `message:before_response` | Transformer | `BeforeResponseContext` | After AI generation; before Matrix send (streaming: after stream completes, before final edit) | `draft.response_text`, `draft.suppress` |
 | `message:after_response` | Observer | `AfterResponseContext` | After final Matrix send or edit | None (frozen) |
@@ -151,7 +151,7 @@ async def block_secret_reads(ctx):
 
 | Event | Default timeout (ms) |
 | --- | --- |
-| `message:received` | 100 |
+| `message:received` | 15000 |
 | `message:enrich` | 2000 |
 | `message:before_response` | 200 |
 | `message:after_response` | 3000 |

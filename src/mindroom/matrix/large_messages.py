@@ -21,13 +21,48 @@ logger = get_logger(__name__)
 # Conservative limits accounting for Matrix overhead
 _NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 _EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
-_PASSTHROUGH_CONTENT_KEYS = (
-    "m.mentions",
-    "com.mindroom.skip_mentions",
-    ORIGINAL_SENDER_KEY,
-    AI_RUN_METADATA_KEY,
-    STREAM_STATUS_KEY,
+_PASSTHROUGH_CONTENT_KEYS = frozenset(
+    {
+        "m.mentions",
+        "com.mindroom.skip_mentions",
+        ORIGINAL_SENDER_KEY,
+        AI_RUN_METADATA_KEY,
+        STREAM_STATUS_KEY,
+    },
 )
+_SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
+    {
+        "io.mindroom.long_text",
+        "io.mindroom.tool_trace",
+    },
+)
+
+
+def _is_passthrough_preview_key(key: object) -> bool:
+    """Return whether one source key should stay on the preview event."""
+    if not isinstance(key, str):
+        return False
+
+    return key in _PASSTHROUGH_CONTENT_KEYS or (
+        key.startswith("io.mindroom.") and key not in _SIDECAR_ONLY_MINDROOM_KEYS
+    )
+
+
+def _is_passthrough_edit_wrapper_key(key: object) -> bool:
+    """Return whether one source key should be mirrored onto the edit wrapper."""
+    return isinstance(key, str) and key.startswith("io.mindroom.") and key not in _SIDECAR_ONLY_MINDROOM_KEYS
+
+
+def _copy_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
+    """Copy metadata keys that should survive the large-message preview event."""
+    target_content.update({key: value for key, value in source_content.items() if _is_passthrough_preview_key(key)})
+
+
+def _copy_edit_wrapper_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
+    """Mirror edit metadata onto the outer replacement event for client access."""
+    target_content.update(
+        {key: value for key, value in source_content.items() if _is_passthrough_edit_wrapper_key(key)},
+    )
 
 
 def _calculate_event_size(content: dict[str, Any]) -> int:
@@ -254,9 +289,7 @@ async def prepare_large_message(
         size_limit,
     )
 
-    for key in _PASSTHROUGH_CONTENT_KEYS:
-        if key in source_content:
-            modified_content[key] = source_content[key]
+    _copy_preview_metadata(source_content, modified_content)
 
     if room_id and room_id in client.rooms and client.rooms[room_id].encrypted:
         modified_content["file"] = file_info
@@ -281,6 +314,7 @@ async def prepare_large_message(
             "m.new_content": modified_content,
             "m.relates_to": content.get("m.relates_to", {}),
         }
+        _copy_edit_wrapper_metadata(source_content, modified_content)
 
     final_size = _calculate_event_size(modified_content)
     if final_size > 64000:
