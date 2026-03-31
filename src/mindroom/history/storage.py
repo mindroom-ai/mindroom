@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from agno.run.agent import RunOutput
@@ -66,12 +67,7 @@ def clear_force_compaction_state(
     state: HistoryScopeState,
 ) -> HistoryScopeState:
     """Clear the next-run force flag in one session scope."""
-    cleared_state = HistoryScopeState(
-        last_compacted_at=state.last_compacted_at,
-        last_summary_model=state.last_summary_model,
-        last_compacted_run_count=state.last_compacted_run_count,
-        force_compact_before_next_run=False,
-    )
+    cleared_state = replace(state, force_compact_before_next_run=False)
     write_scope_state(session, scope, cleared_state)
     return cleared_state
 

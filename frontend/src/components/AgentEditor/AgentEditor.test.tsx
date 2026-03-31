@@ -374,6 +374,19 @@ describe('AgentEditor', () => {
     expect(testRoomCheckbox).toBeChecked();
   });
 
+  it('clears zero history runs instead of writing them through', async () => {
+    render(<AgentEditor />);
+
+    const historyRunsInput = screen.getByLabelText('History Runs');
+    fireEvent.change(historyRunsInput, { target: { value: '0' } });
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith('test_agent', {
+        num_history_runs: null,
+      });
+    });
+  });
+
   it('shows empty state when no agent is selected', () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,

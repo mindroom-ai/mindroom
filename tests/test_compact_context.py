@@ -214,7 +214,7 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_clears_forced_flag_when_no_compactable_prefix(tmp_path: Path) -> None:
+async def test_prepare_history_for_run_clears_forced_flag_when_no_compactable_runs(tmp_path: Path) -> None:
     """Forced compaction should clear itself when there is nothing old enough to compact."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -222,7 +222,6 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_compactable_pr
         "session-1",
         runs=[
             _completed_run("run-1", agent_id="test_agent"),
-            _completed_run("run-2", agent_id="test_agent"),
         ],
     )
     write_scope_state(

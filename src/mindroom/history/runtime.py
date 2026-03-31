@@ -148,8 +148,13 @@ async def prepare_history_for_run(
     session = scope_context.session
     state = read_scope_state(session, scope_context.scope)
     if state.force_compact_before_next_run and history_budget is None:
-        message = f"Forced compaction requires a resolved history budget for scope {scope_context.scope.key}"
-        raise RuntimeError(message)
+        state = clear_force_compaction_state(session, scope_context.scope, state)
+        scope_context.storage.upsert_session(session)
+        logger.warning(
+            "Forced compaction skipped because no history budget could be resolved",
+            session_id=session.session_id,
+            scope=scope_context.scope.key,
+        )
     compaction_outcomes: list[CompactionOutcome] = []
     auto_compaction_enabled = (
         resolved_inputs.has_authored_compaction_config and resolved_inputs.compaction_config.enabled

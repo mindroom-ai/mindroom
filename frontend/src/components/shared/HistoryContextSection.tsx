@@ -135,7 +135,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                 <Input
                   id="num_history_runs"
                   type="number"
-                  min={0}
+                  min={1}
                   value={fieldValue ?? ''}
                   placeholder={
                     defaults?.num_history_runs != null
@@ -144,7 +144,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   }
                   disabled={numHistoryMessages != null}
                   onChange={e => {
-                    const value = parseOptionalInt(e.target.value, 0);
+                    const value = parseOptionalInt(e.target.value, 1);
                     field.onChange(value);
                     onFieldChange('num_history_runs', value);
                   }}
@@ -174,7 +174,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                 <Input
                   id="num_history_messages"
                   type="number"
-                  min={0}
+                  min={1}
                   value={fieldValue ?? ''}
                   placeholder={
                     defaults?.num_history_messages != null
@@ -183,7 +183,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   }
                   disabled={numHistoryRuns != null}
                   onChange={e => {
-                    const value = parseOptionalInt(e.target.value, 0);
+                    const value = parseOptionalInt(e.target.value, 1);
                     field.onChange(value);
                     onFieldChange('num_history_messages', value);
                   }}

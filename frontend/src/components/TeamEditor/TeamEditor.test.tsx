@@ -281,6 +281,19 @@ describe('TeamEditor', () => {
     });
   });
 
+  it('clears zero history runs instead of writing them through', async () => {
+    render(<TeamEditor />);
+
+    const historyRunsInput = screen.getByLabelText('History Runs');
+    fireEvent.change(historyRunsInput, { target: { value: '0' } });
+
+    await waitFor(() => {
+      expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
+        num_history_runs: null,
+      });
+    });
+  });
+
   it('updates team history messages', async () => {
     const messageTeam: Team = {
       ...mockTeam,
@@ -317,6 +330,46 @@ describe('TeamEditor', () => {
     await waitFor(() => {
       expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
         num_history_messages: 15,
+      });
+    });
+  });
+
+  it('clears zero history messages instead of writing them through', async () => {
+    const messageTeam: Team = {
+      ...mockTeam,
+      num_history_runs: null,
+      num_history_messages: 12,
+    };
+    (useConfigStore as any).mockReturnValue({
+      teams: [messageTeam],
+      agents: mockAgents,
+      rooms: [
+        {
+          id: 'dev',
+          display_name: 'Dev',
+          description: 'Development room',
+          agents: ['code', 'shell'],
+        },
+      ],
+      selectedTeamId: 'dev_team',
+      updateTeam: mockUpdateTeam,
+      deleteTeam: mockDeleteTeam,
+      saveConfig: mockSaveConfig,
+      agentPoliciesByAgent: mockAgentPoliciesByAgent,
+      config: mockConfig,
+      isDirty: false,
+      diagnostics: [],
+      selectTeam: vi.fn(),
+    });
+
+    render(<TeamEditor />);
+
+    const historyMessagesInput = screen.getByLabelText('History Messages');
+    fireEvent.change(historyMessagesInput, { target: { value: '0' } });
+
+    await waitFor(() => {
+      expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
+        num_history_messages: null,
       });
     });
   });

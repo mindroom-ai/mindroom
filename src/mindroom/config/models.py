@@ -135,6 +135,16 @@ def validate_unique_tool_entries(
     return tools
 
 
+def _validate_compaction_threshold_choice(
+    *,
+    threshold_tokens: int | None,
+    threshold_percent: float | None,
+) -> None:
+    if threshold_tokens is not None and threshold_percent is not None:
+        msg = "threshold_tokens and threshold_percent are mutually exclusive"
+        raise ValueError(msg)
+
+
 class CompactionOverrideConfig(BaseModel):
     """Optional per-agent overrides for automatic compaction."""
 
@@ -167,13 +177,14 @@ class CompactionOverrideConfig(BaseModel):
     @model_validator(mode="after")
     def validate_threshold_choice(self) -> Self:
         """Ensure only one compaction threshold knob is authored at a time."""
-        if self.threshold_tokens is not None and self.threshold_percent is not None:
-            msg = "threshold_tokens and threshold_percent are mutually exclusive"
-            raise ValueError(msg)
+        _validate_compaction_threshold_choice(
+            threshold_tokens=self.threshold_tokens,
+            threshold_percent=self.threshold_percent,
+        )
         return self
 
 
-class CompactionConfig(CompactionOverrideConfig):
+class CompactionConfig(BaseModel):
     """Concrete automatic compaction configuration."""
 
     enabled: bool = Field(default=True, description="Whether to auto-compact before a run")
@@ -193,10 +204,23 @@ class CompactionConfig(CompactionOverrideConfig):
         ge=0,
         description="Reserved headroom for output and tool definitions",
     )
+    model: str | None = Field(
+        default=None,
+        description="Optional model config name to use for summary generation",
+    )
     notify: bool = Field(
         default=False,
         description="Whether to emit a Matrix compaction notice after compaction",
     )
+
+    @model_validator(mode="after")
+    def validate_threshold_choice(self) -> Self:
+        """Ensure only one compaction threshold knob is authored at a time."""
+        _validate_compaction_threshold_choice(
+            threshold_tokens=self.threshold_tokens,
+            threshold_percent=self.threshold_percent,
+        )
+        return self
 
 
 class DefaultsConfig(BaseModel):

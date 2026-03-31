@@ -18,7 +18,7 @@ from agno.session.team import TeamSession
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
-from mindroom.history.storage import clear_force_compaction_state, write_scope_state
+from mindroom.history.storage import clear_force_compaction_state, update_scope_seen_event_ids, write_scope_state
 from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import compute_compaction_input_budget, estimate_text_tokens, stable_serialize
@@ -186,6 +186,7 @@ async def compact_scope_history(
     )
     session.summary = working_session.summary
     session.runs = working_session.runs
+    session.metadata = working_session.metadata
     write_scope_state(session, scope, new_state)
     storage.upsert_session(session)
 
@@ -265,7 +266,10 @@ async def _rewrite_working_session_for_compaction(
         new_summary = await _generate_compaction_summary(model=summary_model, summary_input=summary_input)
         final_summary_text = new_summary.summary
         compacted_run_ids = {run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id}
+        compacted_seen_event_ids = _seen_event_ids_for_runs(included_runs)
         working_session.summary = SessionSummary(summary=new_summary.summary, updated_at=datetime.now(UTC))
+        if compacted_seen_event_ids:
+            update_scope_seen_event_ids(working_session, scope, compacted_seen_event_ids)
         working_session.runs = _remove_runs_by_id(working_session.runs or [], compacted_run_ids)
         total_compacted_run_count += len(included_runs)
 
@@ -276,11 +280,22 @@ async def _rewrite_working_session_for_compaction(
         )
         if after_tokens <= available_history_budget:
             break
-        if len(_runs_for_scope(_completed_top_level_runs(working_session), scope)) <= 1:
-            break
 
     if total_compacted_run_count == 0:
         return None
+    final_tokens = estimate_prompt_visible_history_tokens(
+        session=working_session,
+        scope=scope,
+        history_settings=history_settings,
+    )
+    if final_tokens > available_history_budget:
+        logger.warning(
+            "Compacted history still exceeds budget after falling back to summary-only replay",
+            session_id=session_id,
+            scope=scope.key,
+            final_tokens=final_tokens,
+            available_history_budget=available_history_budget,
+        )
     return _CompactionRewriteResult(
         summary_text=final_summary_text,
         compacted_run_count=total_compacted_run_count,
@@ -563,6 +578,19 @@ def _estimate_serialized_run_tokens(run: RunOutput | TeamRunOutput) -> int:
     return estimate_text_tokens(_serialize_run(run, 0))
 
 
+def _seen_event_ids_for_runs(runs: Sequence[RunOutput | TeamRunOutput]) -> list[str]:
+    seen_event_ids: set[str] = set()
+    for run in runs:
+        metadata = run.metadata
+        if not isinstance(metadata, dict):
+            continue
+        raw_seen_ids = metadata.get("matrix_seen_event_ids")
+        if not isinstance(raw_seen_ids, list):
+            continue
+        seen_event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
+    return sorted(seen_event_ids)
+
+
 def _serialize_run(run: RunOutput | TeamRunOutput, index: int) -> str:
     lines = [_run_open_tag(run, index)]
     if run.metadata:
@@ -689,11 +717,13 @@ def _select_runs_to_compact(
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
 ) -> list[RunOutput | TeamRunOutput]:
-    if len(visible_runs) <= 1:
+    run_count = len(visible_runs)
+    if run_count == 0:
         return []
 
     if state.force_compact_before_next_run:
-        return visible_runs[:-2] if len(visible_runs) > 2 else []
+        keep_count = 2 if run_count > 2 else 1 if run_count > 1 else 0
+        return visible_runs if keep_count == 0 else visible_runs[:-keep_count]
 
     current_tokens = estimate_prompt_visible_history_tokens(
         session=session,
@@ -703,36 +733,11 @@ def _select_runs_to_compact(
     if current_tokens <= available_history_budget:
         return []
 
-    if len(visible_runs) > 2:
-        keep_two = visible_runs[-2:]
-        projected_two_tokens = _project_remaining_history_tokens(
-            session=session,
-            scope=scope,
-            remaining_runs=keep_two,
-            history_settings=history_settings,
-        )
-        if projected_two_tokens <= available_history_budget:
-            return visible_runs[:-2]
-
-    return visible_runs[:-1]
-
-
-def _project_remaining_history_tokens(
-    *,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    remaining_runs: Sequence[RunOutput | TeamRunOutput],
-    history_settings: ResolvedHistorySettings,
-) -> int:
-    projected_session = replace(session, runs=list(remaining_runs))
-    history_messages = _history_messages_for_session(
-        session=projected_session,
-        scope=scope,
-        history_settings=history_settings,
-    )
-    return _estimate_session_summary_tokens(_current_summary_text(session)) + estimate_history_messages_tokens(
-        history_messages,
-    )
+    if run_count > 2:
+        return visible_runs[:-2]
+    if run_count > 1:
+        return visible_runs[:-1]
+    return visible_runs
 
 
 def _history_messages_for_session(

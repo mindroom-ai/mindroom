@@ -25,7 +25,7 @@ from mindroom.agents import create_agent, create_session_storage, get_agent_sess
 from mindroom.ai import _prepare_agent_and_prompt, build_prompt_with_thread_history
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import CompactionOverrideConfig, DefaultsConfig, ModelConfig
+from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.history import PreparedHistoryState, prepare_bound_agents_for_run, prepare_history_for_run
 from mindroom.history.compaction import (
@@ -378,6 +378,83 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_prepare_history_for_run_auto_compaction_rechecks_after_merged_summary_growth(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-3",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    summary_mock = AsyncMock(
+        side_effect=[
+            SessionSummary(summary="expanded summary " * 20, updated_at=datetime.now(UTC)),
+            SessionSummary(summary="final summary", updated_at=datetime.now(UTC)),
+        ],
+    )
+    with (
+        patch(
+            "mindroom.history.compaction.resolve_compaction_model",
+            return_value=(FakeModel(id="summary-model", provider="fake"), 64_000),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=summary_mock,
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            available_history_budget=160,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "final summary"
+    assert [run.run_id for run in persisted.runs] == ["run-3"]
+    assert summary_mock.await_count == 2
+    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_outcomes[0].runs_after == 1
+
+
+@pytest.mark.asyncio
 async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
@@ -675,6 +752,54 @@ def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None
     assert team.num_history_messages is None
 
 
+def test_get_entity_compaction_config_merges_authored_overrides(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": AgentConfig(
+                    display_name="Test Agent",
+                    compaction=CompactionOverrideConfig(
+                        threshold_percent=0.6,
+                    ),
+                ),
+            },
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(
+                    enabled=False,
+                    threshold_tokens=12_000,
+                    reserve_tokens=2_048,
+                    model="summary-model",
+                    notify=True,
+                ),
+            ),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=48_000,
+                ),
+                "summary-model": ModelConfig(
+                    provider="openai",
+                    id="summary-model-id",
+                    context_window=32_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+
+    resolved = config.get_entity_compaction_config("test_agent")
+
+    assert resolved.enabled is True
+    assert resolved.threshold_tokens is None
+    assert resolved.threshold_percent == 0.6
+    assert resolved.reserve_tokens == 2_048
+    assert resolved.model == "summary-model"
+    assert resolved.notify is True
+
+
 @pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
@@ -708,6 +833,117 @@ async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(
         full_prompt="Current prompt",
         fallback_full_prompt=expected_fallback_prompt,
     )
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_forced_compaction_without_budget_clears_flag(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=None,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
+    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert prepared.compaction_outcomes == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summary_only(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    with (
+        patch(
+            "mindroom.history.compaction.resolve_compaction_model",
+            return_value=(FakeModel(id="summary-model", provider="fake"), 64_000),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(
+                side_effect=[
+                    SessionSummary(summary="first summary", updated_at=datetime.now(UTC)),
+                    SessionSummary(summary="final summary", updated_at=datetime.now(UTC)),
+                ],
+            ),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            available_history_budget=1,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "final summary"
+    assert persisted.runs == []
+    state = read_scope_state(persisted, scope)
+    assert state.last_compacted_run_count == 2
+    assert state.force_compact_before_next_run is False
+    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_outcomes[0].runs_after == 0
+    assert prepared.compaction_outcomes[0].summary == "final summary"
 
 
 def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:
@@ -746,6 +982,82 @@ def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> Non
 
     assert read_scope_seen_event_ids(session, agent_scope) == {"agent-event"}
     assert read_scope_seen_event_ids(session, team_scope) == {"team-event", "preserved-team-event"}
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            RunOutput(
+                run_id="run-1",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={"matrix_seen_event_ids": ["event-1", "event-2"]},
+            ),
+            RunOutput(
+                run_id="run-2",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={"matrix_seen_event_ids": ["event-3"]},
+            ),
+            RunOutput(
+                run_id="run-3",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={"matrix_seen_event_ids": ["event-4"]},
+            ),
+            RunOutput(
+                run_id="run-4",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={"matrix_seen_event_ids": ["event-5"]},
+            ),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    with (
+        patch(
+            "mindroom.history.compaction.resolve_compaction_model",
+            return_value=(FakeModel(id="summary-model", provider="fake"), 64_000),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(
+                return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+            ),
+        ),
+    ):
+        await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert read_scope_seen_event_ids(persisted, scope) == {
+        "event-1",
+        "event-2",
+        "event-3",
+        "event-4",
+        "event-5",
+    }
 
 
 @pytest.mark.asyncio
