@@ -18,6 +18,7 @@ from google.auth.exceptions import DefaultCredentialsError, RefreshError
 from pydantic import ValidationError
 
 from mindroom import constants
+from mindroom.ai import _filter_model_kwargs, _known_removed_model_kwargs_for_provider
 from mindroom.constants import (
     RuntimePaths,
     env_key_for_provider,
@@ -313,7 +314,14 @@ def _validate_vertexai_claude_connection(
     extra_kwargs.setdefault("timeout", 10)
 
     try:
-        model = VertexAIClaude(id=model_config.id, **extra_kwargs)
+        model = VertexAIClaude(
+            id=model_config.id,
+            **_filter_model_kwargs(
+                VertexAIClaude,
+                extra_kwargs,
+                _known_removed_model_kwargs_for_provider("vertexai_claude"),
+            ),
+        )
         request_kwargs = model.get_request_params().copy()
         request_kwargs["model"] = model_config.id
         request_kwargs["messages"] = [{"role": "user", "content": "Reply with OK."}]

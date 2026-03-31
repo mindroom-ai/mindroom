@@ -1299,6 +1299,134 @@ class TestDoctor:
             "timeout": 10,
         }
 
+    def test_vertexai_claude_connection_ignores_removed_constructor_kwargs(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor should drop stale Vertex AI Claude kwargs before constructing the model."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n"
+            "    provider: vertexai_claude\n"
+            "    id: claude-sonnet-4-6\n"
+            "    extra_kwargs:\n"
+            "      cache_system_prompt: true\n"
+            "      cache_conversation_history: true\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    model: default\n"
+            "router:\n"
+            "  model: default\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        called: dict[str, object] = {}
+
+        class _FakeMessages:
+            def create(self, **kwargs: object) -> SimpleNamespace:
+                called["kwargs"] = kwargs
+                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
+
+        class _FakeVertexModel:
+            def __init__(
+                self,
+                *,
+                id: str,  # noqa: A002
+                project_id: str,
+                region: str,
+                timeout: int,
+                cache_system_prompt: bool = False,
+            ) -> None:
+                called["client_kwargs"] = {
+                    "id": id,
+                    "project_id": project_id,
+                    "region": region,
+                    "timeout": timeout,
+                    "cache_system_prompt": cache_system_prompt,
+                }
+                self.id = id
+
+            def get_request_params(self) -> dict[str, object]:
+                return {"timeout": 10}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=_FakeMessages())
+
+        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+        assert result.exit_code == 0
+        assert "vertexai_claude connection valid for claude-sonnet-4-6" in result.output
+        assert called["client_kwargs"] == {
+            "id": "claude-sonnet-4-6",
+            "project_id": "mindroom-test",
+            "region": "us-central1",
+            "timeout": 10,
+            "cache_system_prompt": True,
+        }
+
+    def test_vertexai_claude_connection_does_not_hide_invalid_constructor_kwargs(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor should still warn on real invalid kwargs after dropping known legacy ones."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n"
+            "    provider: vertexai_claude\n"
+            "    id: claude-sonnet-4-6\n"
+            "    extra_kwargs:\n"
+            "      cache_conversation_history: true\n"
+            "      tempertaure: 0.2\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    model: default\n"
+            "router:\n"
+            "  model: default\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        class _FakeVertexModel:
+            def __init__(
+                self,
+                *,
+                id: str,  # noqa: A002
+                project_id: str,
+                region: str,
+                timeout: int,
+            ) -> None:
+                self.id = id
+                self.project_id = project_id
+                self.region = region
+                self.timeout = timeout
+
+            def get_request_params(self) -> dict[str, object]:
+                return {"timeout": 10}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=SimpleNamespace(create=lambda **_kwargs: None))
+
+        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+        assert result.exit_code == 0
+        assert "vertexai_claude: could not validate connection" in result.output
+        assert "tempertaure" in result.output
+
     def test_vertexai_claude_connection_checks_each_configured_model(
         self,
         tmp_path: Path,

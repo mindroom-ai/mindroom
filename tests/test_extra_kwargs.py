@@ -254,6 +254,43 @@ def test_anthropic_ignores_removed_constructor_kwargs() -> None:
     assert model.cache_system_prompt is True
 
 
+def test_anthropic_invalid_constructor_kwargs_still_raise() -> None:
+    """Unknown kwargs should still fail instead of being silently ignored."""
+    os.environ["ANTHROPIC_API_KEY"] = "test-key"
+
+    config_data = {
+        "models": {
+            "anthropic_model": {
+                "provider": "anthropic",
+                "id": "claude-sonnet-4-5-20250929",
+                "extra_kwargs": {
+                    "cache_conversation_history": True,
+                    "tempertaure": 0.2,
+                },
+            },
+        },
+        "defaults": {
+            "markdown": True,
+        },
+        "router": {
+            "model": "anthropic_model",
+        },
+        "memory": {
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                },
+            },
+        },
+        "agents": {},
+    }
+
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+    with pytest.raises(TypeError, match="tempertaure"):
+        get_model_instance(config, runtime_paths, "anthropic_model")
+
+
 def test_model_without_extra_kwargs() -> None:
     """Test that models work fine without extra_kwargs."""
     os.environ["OPENAI_API_KEY"] = "test-key"

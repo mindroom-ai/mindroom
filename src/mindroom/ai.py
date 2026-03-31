@@ -101,6 +101,7 @@ _MIXED_PARTIAL_REPLY_HEADER = (
     "Other partial content was interrupted before completion and may be incomplete. "
     "Continue from where you left off if appropriate."
 )
+_KNOWN_REMOVED_CLAUDE_CONSTRUCTOR_KWARGS = frozenset({"cache_conversation_history"})
 
 
 @functools.cache
@@ -119,22 +120,34 @@ def _model_init_signature(model_class: type[Any]) -> tuple[frozenset[str], bool]
     return supported_kwargs, accepts_var_kwargs
 
 
-def _filter_model_kwargs(model_class: type[Any], extra_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Drop kwargs that the target model constructor no longer accepts."""
+<<<<<<< HEAD
+def _known_removed_model_kwargs_for_provider(canonical_provider: str) -> frozenset[str]:
+    """Return the specific legacy constructor kwargs we intentionally ignore."""
+    if canonical_provider in {"anthropic", "vertexai_claude"}:
+        return _KNOWN_REMOVED_CLAUDE_CONSTRUCTOR_KWARGS
+    return frozenset()
+
+
+def _filter_model_kwargs(
+    model_class: type[Any],
+    extra_kwargs: dict[str, Any],
+    known_removed_kwargs: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Drop only known removed constructor kwargs while preserving real config errors."""
     supported_kwargs, accepts_var_kwargs = _model_init_signature(model_class)
     if accepts_var_kwargs:
         return extra_kwargs
 
-    unsupported = sorted(key for key in extra_kwargs if key not in supported_kwargs)
-    if not unsupported:
+    removed = sorted(key for key in known_removed_kwargs if key in extra_kwargs and key not in supported_kwargs)
+    if not removed:
         return extra_kwargs
 
     logger.warning(
-        "Dropping unsupported model kwargs",
+        "Dropping known removed model kwargs",
         model_class=model_class.__name__,
-        dropped_kwargs=unsupported,
+        dropped_kwargs=removed,
     )
-    return {key: value for key, value in extra_kwargs.items() if key in supported_kwargs}
+    return {key: value for key, value in extra_kwargs.items() if key not in removed}
 
 
 _PARTIAL_REPLY_SENDER_LABELS = {
@@ -613,6 +626,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
 
     """
     canonical_provider = _canonical_provider(provider)
+    known_removed_kwargs = _known_removed_model_kwargs_for_provider(canonical_provider)
 
     if canonical_provider not in {"ollama", "vertexai_claude"} and "api_key" not in extra_kwargs:
         api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
@@ -652,7 +666,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
         # This allows per-model host configuration in config.yaml
         host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or "http://localhost:11434"
         logger.debug(f"Using Ollama host: {host}")
-        return Ollama(id=model_id, host=host, **_filter_model_kwargs(Ollama, extra_kwargs))
+        return Ollama(id=model_id, host=host, **_filter_model_kwargs(Ollama, extra_kwargs, known_removed_kwargs))
 
     # Handle OpenRouter separately due to API key capture timing issue
     if canonical_provider == "openrouter":
@@ -663,7 +677,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
             api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
-        filtered_kwargs = _filter_model_kwargs(OpenRouter, extra_kwargs)
+        filtered_kwargs = _filter_model_kwargs(OpenRouter, extra_kwargs, known_removed_kwargs)
         return OpenRouter(id=model_id, api_key=api_key, **filtered_kwargs)
 
     # Map providers to their model classes for simple instantiation
@@ -680,7 +694,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
 
     model_class = provider_map.get(canonical_provider)
     if model_class is not None:
-        filtered_kwargs = _filter_model_kwargs(model_class, extra_kwargs)
+        filtered_kwargs = _filter_model_kwargs(model_class, extra_kwargs, known_removed_kwargs)
         return model_class(id=model_id, **filtered_kwargs)
 
     msg = f"Unsupported AI provider: {provider}"
