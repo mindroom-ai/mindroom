@@ -78,7 +78,7 @@ def add_pending_force_compaction_scope(
     scope: HistoryScope,
 ) -> dict[str, object]:
     """Record a next-run compaction request inside Agno session_state."""
-    next_session_state = dict(session_state or {})
+    next_session_state = session_state if session_state is not None else {}
     raw_scope_keys = next_session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
     scope_keys = (
         [scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key]

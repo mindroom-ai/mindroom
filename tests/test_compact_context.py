@@ -301,11 +301,8 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
         runtime_paths=runtime_paths,
         execution_identity=SimpleNamespace(session_id="session-1"),
     )
-    run_context = RunContext(run_id="run-123", session_id="session-1", session_state={})
-
-    result = await tool.compact_context(agent=_agent(), run_context=run_context)
-    assert result == "Compaction scheduled for the next reply in this conversation scope."
-
+    live_session_state: dict[str, object] = {}
+    run_context = RunContext(run_id="run-123", session_id="session-1", session_state=live_session_state)
     stale_live_session = _session(
         "session-1",
         runs=[
@@ -314,7 +311,11 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
         ],
     )
     stale_live_session.metadata = {}
-    stale_live_session.session_data = {"session_state": run_context.session_state}
+    stale_live_session.session_data = {"session_state": live_session_state}
+
+    result = await tool.compact_context(agent=_agent(), run_context=run_context)
+    assert result == "Compaction scheduled for the next reply in this conversation scope."
+    assert run_context.session_state is live_session_state
     storage.upsert_session(stale_live_session)
 
     with (
