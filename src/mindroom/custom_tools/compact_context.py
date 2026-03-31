@@ -1,28 +1,29 @@
 """Agent-controlled context compaction tool."""
 
+# ruff: noqa: TC001, TC002
+
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
 
+from agno.agent import Agent
+from agno.run import RunContext
 from agno.tools import Toolkit
 
+from mindroom.config.main import Config
+from mindroom.config.models import CompactionConfig
+from mindroom.constants import RuntimePaths
 from mindroom.history.compaction import normalize_compaction_budget_tokens, resolve_compaction_runtime_settings
 from mindroom.history.runtime import ScopeSessionContext, load_scope_session_context
 from mindroom.history.storage import add_pending_force_compaction_scope, read_scope_state, write_scope_state
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import compute_compaction_input_budget
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_current_session_id
-
-if TYPE_CHECKING:
-    from agno.agent import Agent
-    from agno.run import RunContext
-
-    from mindroom.config.main import Config
-    from mindroom.config.models import CompactionConfig
-    from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    get_tool_runtime_context,
+    resolve_current_session_id,
+)
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 

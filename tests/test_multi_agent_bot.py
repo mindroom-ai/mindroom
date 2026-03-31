@@ -263,6 +263,8 @@ class _FailingStubVectorDb:
 def _make_compaction_outcome(*, mode: str = "auto", notify: bool = True) -> CompactionOutcome:
     return CompactionOutcome(
         mode=mode,
+        session_id="!test:localhost:$thread_root_id",
+        scope="agent:general",
         summary="## Goal\nPreserve <summary> & keep context.",
         summary_model="compact-model",
         before_tokens=30000,

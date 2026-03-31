@@ -596,6 +596,8 @@ def _history_settings_from_agent(agent: Agent) -> ResolvedHistorySettings:
     return ResolvedHistorySettings(
         policy=policy,
         max_tool_calls_from_history=agent.max_tool_calls_from_history,
+        system_message_role=agent.system_message_role,
+        skip_history_system_role=True,
     )
 
 
@@ -810,6 +812,8 @@ def _find_fitting_history_limit_for_budget(
             history_settings=ResolvedHistorySettings(
                 policy=HistoryPolicy(mode=limit_mode, limit=mid),
                 max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
+                system_message_role=history_settings.system_message_role,
+                skip_history_system_role=history_settings.skip_history_system_role,
             ),
         )
         if candidate_tokens <= available_history_budget:

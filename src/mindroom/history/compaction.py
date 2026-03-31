@@ -10,11 +10,14 @@ from html import escape
 from typing import TYPE_CHECKING, cast
 
 from agno.models.message import Message
+from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
+from agno.tools import Toolkit
+from agno.tools.function import Function
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
@@ -40,6 +43,7 @@ logger = get_logger(__name__)
 _WRAPPER_OVERHEAD_TOKENS = 200
 _SUMMARY_TRUNCATION_RATIO = 0.5
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
+_STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _COMPACTION_SUMMARY_PROMPT = """\
 You are updating a durable conversation handoff summary for a future model call.
 
@@ -200,6 +204,8 @@ async def compact_scope_history(
     threshold_tokens = resolve_effective_compaction_threshold(compaction_config, active_window) if active_window else 0
     outcome = CompactionOutcome(
         mode="manual" if state.force_compact_before_next_run else "auto",
+        session_id=session.session_id,
+        scope=scope.key,
         summary=rewrite_result.summary_text,
         summary_model=_model_identifier(summary_model),
         before_tokens=before_tokens,
@@ -312,19 +318,199 @@ def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
         for instruction in instructions:
             static_chars += len(str(instruction))
     static_chars += len(full_prompt)
-    return static_chars // 4
+    return (static_chars // 4) + estimate_tool_definition_tokens(agent)
+
+
+def estimate_tool_definition_tokens(agent: Agent) -> int:
+    """Estimate the model-visible JSON schema payload for the agent's tools."""
+    prepared_tools, _tool_instructions = _prepare_tools_for_estimation(agent.tools)
+    if not prepared_tools:
+        return 0
+    return _estimate_prepared_tool_definition_tokens(prepared_tools)
 
 
 def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
     """Estimate the non-history team prompt using Agno's team system-message builder."""
     static_tokens = estimate_text_tokens(full_prompt)
-    system_message = team.get_system_message(
-        session=TeamSession(session_id="history-budget", team_id=team.id),
-        add_session_state_to_context=False,
+    prepared_tools, tool_instructions = _prepare_tools_for_estimation(_team_tools_for_estimation(team))
+    previous_tool_instructions = team._tool_instructions
+    try:
+        team._tool_instructions = tool_instructions
+        system_message = team.get_system_message(
+            session=TeamSession(session_id="history-budget", team_id=team.id),
+            tools=prepared_tools or None,
+            add_session_state_to_context=False,
+        )
+    finally:
+        team._tool_instructions = previous_tool_instructions
+    if system_message is not None and system_message.content is not None:
+        static_tokens += estimate_text_tokens(str(system_message.content))
+    return static_tokens + _estimate_prepared_tool_definition_tokens(prepared_tools)
+
+
+def _estimate_prepared_tool_definition_tokens(prepared_tools: Sequence[Function | dict[str, object]]) -> int:
+    tool_definitions = _prepared_tool_definition_payloads(prepared_tools)
+    if not tool_definitions:
+        return 0
+    return len(stable_serialize(tool_definitions)) // 4
+
+
+def _prepare_tools_for_estimation(tools: object) -> tuple[list[Function | dict[str, object]], list[str]]:
+    if not isinstance(tools, Sequence):
+        return [], []
+
+    prepared_tools: list[Function | dict[str, object]] = []
+    tool_instructions: list[str] = []
+    seen_names: set[str] = set()
+    for tool in tools:
+        for prepared_tool in _prepare_tool_for_estimation(tool):
+            tool_name = _prepared_tool_name(prepared_tool)
+            if tool_name is None or tool_name in seen_names:
+                continue
+            seen_names.add(tool_name)
+            prepared_tools.append(prepared_tool)
+
+        if isinstance(tool, Toolkit) and tool.add_instructions and tool.instructions is not None:
+            tool_instructions.append(tool.instructions)
+        if isinstance(tool, Function) and tool.add_instructions and tool.instructions is not None:
+            tool_instructions.append(tool.instructions)
+    return prepared_tools, tool_instructions
+
+
+def _prepare_tool_for_estimation(tool: object) -> list[Function | dict[str, object]]:
+    if isinstance(tool, Function):
+        return [_prepare_function_for_estimation(tool)]
+    if isinstance(tool, Toolkit):
+        return [_prepare_function_for_estimation(function) for function in _toolkit_functions(tool).values()]
+    if isinstance(tool, dict):
+        return [tool] if _is_tool_definition_dict(tool) else []
+    if callable(tool):
+        return [Function.from_callable(tool)]
+    return []
+
+
+def _toolkit_functions(toolkit: Toolkit) -> dict[str, Function]:
+    functions = dict(toolkit.functions)
+    if not functions:
+        for raw_tool in toolkit.tools:
+            if isinstance(raw_tool, Function):
+                functions[raw_tool.name] = raw_tool
+    for name, function in toolkit.async_functions.items():
+        functions.setdefault(name, function)
+    return functions
+
+
+def _prepare_function_for_estimation(function: Function) -> Function:
+    prepared_function = function.model_copy(deep=True)
+    if not prepared_function.skip_entrypoint_processing and prepared_function.entrypoint is not None:
+        effective_strict = False if prepared_function.strict is None else prepared_function.strict
+        prepared_function.process_entrypoint(strict=effective_strict)
+    return prepared_function
+
+
+def _prepared_tool_definition_payloads(
+    prepared_tools: Sequence[Function | dict[str, object]],
+) -> list[dict[str, object]]:
+    payloads_by_name: dict[str, dict[str, object]] = {}
+    for tool in prepared_tools:
+        payload = _function_payload(tool) if isinstance(tool, Function) else _dict_tool_payload(tool)
+        tool_name = payload.get("name")
+        if isinstance(tool_name, str) and tool_name:
+            payloads_by_name[tool_name] = payload
+    return list(payloads_by_name.values())
+
+
+def _prepared_tool_name(tool: Function | dict[str, object]) -> str | None:
+    if isinstance(tool, Function):
+        return tool.name
+    tool_name = tool.get("name")
+    if isinstance(tool_name, str) and tool_name:
+        return tool_name
+    return None
+
+
+def _function_payload(function: Function) -> dict[str, object]:
+    return {
+        "name": function.name,
+        "description": function.description or "",
+        "parameters": function.parameters or _default_function_parameters(),
+    }
+
+
+def _is_tool_definition_dict(tool: dict[object, object]) -> bool:
+    tool_name = tool.get("name")
+    return isinstance(tool_name, str) and bool(tool_name)
+
+
+def _dict_tool_payload(tool: dict[object, object]) -> dict[str, object]:
+    parameters = tool.get("parameters")
+    return {
+        "name": str(tool["name"]),
+        "description": str(tool.get("description", "")),
+        "parameters": parameters if isinstance(parameters, dict) else _default_function_parameters(),
+    }
+
+
+def _default_function_parameters() -> dict[str, object]:
+    return {"type": "object", "properties": {}, "required": []}
+
+
+def _team_tools_for_estimation(team: Team) -> list[Toolkit | Function | dict[str, object] | object]:
+    budget_session_id = "history-budget"
+    run_response = TeamRunOutput(
+        run_id=budget_session_id,
+        team_id=team.id,
+        session_id=budget_session_id,
+        session_state={},
     )
-    if system_message is None or system_message.content is None:
-        return static_tokens
-    return static_tokens + estimate_text_tokens(str(system_message.content))
+    run_context = RunContext(
+        run_id=budget_session_id,
+        session_id=budget_session_id,
+        session_state={},
+    )
+    session = TeamSession(session_id=budget_session_id, team_id=team.id)
+    tools: list[Toolkit | Function | dict[str, object] | object] = list(team.tools or [])
+
+    if team.read_chat_history:
+        tools.append(team._get_chat_history_function(session=session, async_mode=False))
+    if team.memory_manager is not None and team.enable_agentic_memory:
+        tools.append(team._get_update_user_memory_function(async_mode=False))
+    if team.enable_agentic_state:
+        tools.append(Function(name="update_session_state", entrypoint=team._update_session_state_tool))
+    if team.search_session_history:
+        tools.append(
+            team._get_previous_sessions_messages_function(
+                num_history_sessions=team.num_history_sessions,
+                async_mode=False,
+            ),
+        )
+    if team.knowledge is not None and team.search_knowledge:
+        tools.extend(
+            team.knowledge.get_tools(
+                run_response=run_response,
+                run_context=run_context,
+                knowledge_filters=run_context.knowledge_filters,
+                async_mode=False,
+                enable_agentic_filters=team.enable_agentic_knowledge_filters,
+                agent=team,
+            ),
+        )
+    if team.knowledge is not None and team.update_knowledge:
+        tools.append(team.add_to_knowledge)
+    if not team.members:
+        return tools
+
+    tools.append(
+        team._get_delegate_task_function(
+            run_response=run_response,
+            run_context=run_context,
+            session=session,
+            team_run_context={},
+        ),
+    )
+    if team.get_member_information_tool:
+        tools.append(team.get_member_information)
+    return tools
 
 
 def resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
@@ -785,11 +971,12 @@ def _agent_session_history_messages(
     history_settings: ResolvedHistorySettings,
     limit: int | None,
 ) -> list[Message]:
+    skip_roles = _history_skip_roles(history_settings)
     if history_settings.policy.mode == "runs":
-        return session.get_messages(agent_id=scope_id, last_n_runs=limit)
+        return session.get_messages(agent_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
     if history_settings.policy.mode == "messages":
-        return session.get_messages(agent_id=scope_id, limit=limit)
-    return session.get_messages(agent_id=scope_id)
+        return session.get_messages(agent_id=scope_id, limit=limit, skip_roles=skip_roles)
+    return session.get_messages(agent_id=scope_id, skip_roles=skip_roles)
 
 
 def _team_session_history_messages(
@@ -799,11 +986,21 @@ def _team_session_history_messages(
     history_settings: ResolvedHistorySettings,
     limit: int | None,
 ) -> list[Message]:
+    skip_roles = _history_skip_roles(history_settings)
     if history_settings.policy.mode == "runs":
-        return session.get_messages(team_id=scope_id, last_n_runs=limit)
+        return session.get_messages(team_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
     if history_settings.policy.mode == "messages":
-        return session.get_messages(team_id=scope_id, limit=limit)
-    return session.get_messages(team_id=scope_id)
+        return session.get_messages(team_id=scope_id, limit=limit, skip_roles=skip_roles)
+    return session.get_messages(team_id=scope_id, skip_roles=skip_roles)
+
+
+def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str] | None:
+    """Return the effective Agno skip_roles filter for persisted history replay."""
+    if not history_settings.skip_history_system_role:
+        return None
+    if history_settings.system_message_role in _STANDARD_HISTORY_ROLES:
+        return None
+    return [history_settings.system_message_role]
 
 
 def _estimate_session_summary_tokens(summary_text: str | None) -> int:

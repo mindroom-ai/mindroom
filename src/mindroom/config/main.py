@@ -686,6 +686,8 @@ class Config(BaseModel):
                 num_history_messages=self.defaults.num_history_messages,
             ),
             max_tool_calls_from_history=self.defaults.max_tool_calls_from_history,
+            system_message_role="system",
+            skip_history_system_role=True,
         )
 
     def get_entity_history_settings(self, entity_name: str) -> ResolvedHistorySettings:
@@ -715,6 +717,8 @@ class Config(BaseModel):
                 num_history_messages=num_history_messages,
             ),
             max_tool_calls_from_history=max_tool_calls_from_history,
+            system_message_role="system",
+            skip_history_system_role=True,
         )
 
     def get_default_compaction_config(self) -> CompactionConfig:

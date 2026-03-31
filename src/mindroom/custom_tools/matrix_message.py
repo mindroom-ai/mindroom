@@ -722,6 +722,7 @@ class MatrixMessageTools(Toolkit):
             thread_id (str | None): Optional explicit thread target; `thread_id="room"` forces room-level scope instead of inheriting the current thread.
             ignore_mentions (bool): Text-send safety flag for `send`, `reply`, and `thread-reply`; default `True` writes `com.mindroom.skip_mentions=True` to suppress mention-triggered agent dispatch, while `False` keeps mentions active and also writes `com.mindroom.original_sender=<human requester id>` when the requester is not the sending bot.
             limit (int | None): Maximum messages returned for `read` or `thread-list`; defaults to 20 and is capped at 50.
+            page_token (str | None): Pagination token returned by `room-threads` for fetching the next page of thread roots.
 
         """
         context = get_tool_runtime_context()

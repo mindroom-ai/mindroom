@@ -13,6 +13,7 @@ from agno.agent import Agent
 from agno.models.base import Model
 from agno.models.message import Message
 from agno.models.response import ModelResponse
+from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
@@ -20,6 +21,8 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 from agno.team import Team
+from agno.tools import Toolkit
+from agno.tools.function import Function
 
 from mindroom.agents import create_agent, create_session_storage, get_agent_session
 from mindroom.ai import _prepare_agent_and_prompt, build_prompt_with_thread_history
@@ -32,6 +35,8 @@ from mindroom.history.compaction import (
     _build_summary_input,
     estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
+    estimate_static_tokens,
+    estimate_tool_definition_tokens,
 )
 from mindroom.history.runtime import (
     estimate_preparation_static_tokens,
@@ -46,6 +51,8 @@ from mindroom.history.storage import (
 )
 from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
 from mindroom.teams import TeamMode, _create_team_instance
+from mindroom.thread_utils import create_session_id
+from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.conftest import bind_runtime_paths
 
 
@@ -253,6 +260,98 @@ def _agent(
     )
 
 
+def test_estimate_static_tokens_includes_tool_definitions() -> None:
+    def search_docs(query: str, limit: int = 5) -> str:
+        """Search the engineering docs for a matching answer."""
+        return f"{query}:{limit}"
+
+    def export_notes(title: str, include_metadata: bool = False) -> str:
+        """Export the current working notes as markdown with full metadata attached."""
+        return f"{title}:{include_metadata}"
+
+    toolkit = Toolkit(name="docs", tools=[search_docs])
+    export_tool = Function(
+        name="export_notes",
+        entrypoint=export_notes,
+    )
+    agent_with_tools = _agent()
+    agent_with_tools.role = "Engineer"
+    agent_with_tools.instructions = ["Stay concise."]
+    agent_with_tools.tools = [toolkit, export_tool]
+
+    baseline_agent = _agent()
+    baseline_agent.role = agent_with_tools.role
+    baseline_agent.instructions = list(agent_with_tools.instructions)
+
+    expected_export_tool = export_tool.model_copy(deep=True)
+    expected_export_tool.process_entrypoint(strict=False)
+    expected_payloads = [
+        {
+            "name": "search_docs",
+            "description": "Search the engineering docs for a matching answer.",
+            "parameters": Function.from_callable(search_docs).parameters,
+        },
+        {
+            "name": "export_notes",
+            "description": "Export the current working notes as markdown with full metadata attached.",
+            "parameters": expected_export_tool.parameters,
+        },
+    ]
+    tool_tokens = estimate_tool_definition_tokens(agent_with_tools)
+    assert tool_tokens == len(stable_serialize(expected_payloads)) // 4
+    assert estimate_tool_definition_tokens(baseline_agent) == 0
+    assert estimate_static_tokens(agent_with_tools, "Current prompt") == (
+        estimate_static_tokens(baseline_agent, "Current prompt") + tool_tokens
+    )
+
+
+def test_estimate_tool_definition_tokens_processes_functions_with_custom_parameters() -> None:
+    def sync_calendar_event(title: str, include_attendees: bool = False) -> str:
+        """Sync the current event draft into the shared calendar."""
+        return f"{title}:{include_attendees}"
+
+    custom_tool = Function(
+        name="sync_calendar_event",
+        entrypoint=sync_calendar_event,
+        parameters={
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Calendar event title.",
+                },
+            },
+            "required": ["title"],
+        },
+    )
+    agent = _agent()
+    agent.tools = [custom_tool]
+
+    expected_tool = custom_tool.model_copy(deep=True)
+    expected_tool.process_entrypoint(strict=False)
+
+    assert expected_tool.description == "Sync the current event draft into the shared calendar."
+    assert expected_tool.parameters["additionalProperties"] is False
+    assert estimate_tool_definition_tokens(agent) == len(
+        stable_serialize(
+            [
+                {
+                    "name": "sync_calendar_event",
+                    "description": expected_tool.description,
+                    "parameters": expected_tool.parameters,
+                }
+            ]
+        )
+    ) // 4
+
+
+def test_estimate_tool_definition_tokens_ignores_empty_toolkit() -> None:
+    agent = _agent()
+    agent.tools = [Toolkit(name="empty")]
+
+    assert estimate_tool_definition_tokens(agent) == 0
+
+
 def test_create_agent_enables_agno_native_history_replay(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, num_history_runs=2)
 
@@ -375,6 +474,82 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     assert prepared.has_persisted_history is True
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].summary == "merged summary"
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    room_session_id = create_session_id("!room:localhost", None)
+    thread_session_id = create_session_id("!room:localhost", "$thread-1")
+    room_session = _session(
+        room_session_id,
+        runs=[
+            _completed_run("room-1"),
+            _completed_run("room-2"),
+            _completed_run("room-3"),
+        ],
+    )
+    thread_session = _session(
+        thread_session_id,
+        runs=[
+            _completed_run("thread-1"),
+            _completed_run("thread-2"),
+            _completed_run("thread-3"),
+            _completed_run("thread-4"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(thread_session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(room_session)
+    storage.upsert_session(thread_session)
+
+    with (
+        patch(
+            "mindroom.history.compaction.resolve_compaction_model",
+            return_value=(FakeModel(id="summary-model", provider="fake"), 64_000),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(
+                return_value=SessionSummary(
+                    summary="thread summary",
+                    updated_at=datetime.now(UTC),
+                ),
+            ),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id=thread_session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=thread_session,
+        )
+
+    persisted_room = get_agent_session(storage, room_session_id)
+    persisted_thread = get_agent_session(storage, thread_session_id)
+    assert persisted_room is not None
+    assert persisted_thread is not None
+    assert persisted_room.summary is None
+    assert [run.run_id for run in persisted_room.runs] == ["room-1", "room-2", "room-3"]
+    assert persisted_thread.summary is not None
+    assert persisted_thread.summary.summary == "thread summary"
+    assert [run.run_id for run in persisted_thread.runs] == ["thread-3", "thread-4"]
+    assert len(prepared.compaction_outcomes) == 1
+    outcome = prepared.compaction_outcomes[0]
+    assert outcome.session_id == thread_session_id
+    assert outcome.scope == scope.key
+    assert outcome.to_notice_metadata()["session_id"] == thread_session_id
+    assert outcome.to_notice_metadata()["scope"] == scope.key
 
 
 @pytest.mark.asyncio
@@ -507,6 +682,61 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
     assert agent.add_history_to_context is True
     assert agent.add_session_summary_to_context is True
     assert agent.num_history_runs == 2
+    assert agent.num_history_messages is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_context_window_guard_preserves_custom_system_message_role(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path, context_window=40)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="developer", content="d" * 120),
+                    Message(role="user", content="u" * 15),
+                    Message(role="assistant", content="a" * 15),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="developer", content="d" * 120),
+                    Message(role="user", content="u" * 15),
+                    Message(role="assistant", content="a" * 15),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+    agent = _agent(db=storage)
+
+    await prepare_history_for_run(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+            system_message_role="developer",
+        ),
+        static_prompt_tokens=0,
+        available_history_budget=10,
+    )
+
+    assert agent.add_history_to_context is True
+    assert agent.add_session_summary_to_context is True
+    assert agent.num_history_runs == 1
     assert agent.num_history_messages is None
 
 
@@ -666,7 +896,47 @@ def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selectio
     )
 
     expected_messages = [
-        Message(role="system", content="Persisted system"),
+        Message(role="user", content="new user"),
+        Message(role="assistant", content="new assistant"),
+    ]
+    assert estimated_tokens == estimate_history_messages_tokens(expected_messages)
+
+
+def test_estimate_prompt_visible_history_tokens_honors_custom_system_message_role() -> None:
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="developer", content="Persisted developer prompt"),
+                    Message(role="user", content="old user"),
+                    Message(role="assistant", content="old assistant"),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="new user"),
+                    Message(role="assistant", content="new assistant"),
+                ],
+            ),
+        ],
+    )
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="messages", limit=3),
+        max_tool_calls_from_history=None,
+        system_message_role="developer",
+    )
+
+    estimated_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=history_settings,
+    )
+
+    expected_messages = [
+        Message(role="assistant", content="old assistant"),
         Message(role="user", content="new user"),
         Message(role="assistant", content="new assistant"),
     ]
@@ -678,13 +948,62 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     config, runtime_paths = _make_config(tmp_path)
     owner_agent = _agent(agent_id="alpha", name="Alpha")
     peer_agent = _agent(agent_id="beta", name="Beta")
+
+    def team_lookup(topic: str, include_links: bool = False) -> str:
+        """Look up team context for a topic before delegating work."""
+        return f"{topic}:{include_links}"
+
+    toolkit = Toolkit(
+        name="team_docs",
+        tools=[team_lookup],
+        instructions="Use the team docs tool before delegating factual questions.",
+        add_instructions=True,
+    )
     team = Team(
         members=[owner_agent, peer_agent],
         model=FakeModel(id="fake-model", provider="fake"),
         id="team_alpha+beta",
         name="Pair",
         role="Verbose team role",
+        tools=[toolkit],
+        get_member_information_tool=True,
     )
+
+    prepared_tools = team._determine_tools_for_model(
+        model=team.model,
+        run_response=TeamRunOutput(
+            run_id="history-budget",
+            team_id=team.id,
+            session_id="history-budget",
+            session_state={},
+        ),
+        run_context=RunContext(run_id="history-budget", session_id="history-budget", session_state={}),
+        team_run_context={},
+        session=TeamSession(session_id="history-budget", team_id=team.id),
+        check_mcp_tools=False,
+    )
+    expected_payloads = [
+        {
+            "name": tool.name,
+            "description": tool.description or "",
+            "parameters": tool.parameters,
+        }
+        for tool in prepared_tools
+    ]
+    previous_tool_instructions = team._tool_instructions
+    try:
+        team._tool_instructions = [toolkit.instructions]
+        system_message = team.get_system_message(
+            session=TeamSession(session_id="history-budget", team_id=team.id),
+            tools=prepared_tools,
+            add_session_state_to_context=False,
+        )
+    finally:
+        team._tool_instructions = previous_tool_instructions
+    expected_static_prompt_tokens = estimate_text_tokens("Current prompt")
+    if system_message is not None and system_message.content is not None:
+        expected_static_prompt_tokens += estimate_text_tokens(str(system_message.content))
+    expected_static_prompt_tokens += len(stable_serialize(expected_payloads)) // 4
 
     with patch(
         "mindroom.history.runtime.prepare_history_for_run",
@@ -705,10 +1024,67 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert mock_prepare.await_args.kwargs["agent"] is owner_agent
     assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
     assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+beta")
-    assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == estimate_preparation_static_tokens_for_team(
-        team,
-        full_prompt="Current prompt",
+    assert estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
+    assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == expected_static_prompt_tokens
+
+
+def test_estimate_preparation_static_tokens_for_team_includes_agentic_state_tool() -> None:
+    owner_agent = _agent(agent_id="alpha", name="Alpha")
+    peer_agent = _agent(agent_id="beta", name="Beta")
+    team = Team(
+        members=[owner_agent, peer_agent],
+        model=FakeModel(id="fake-model", provider="fake"),
+        id="team_alpha+beta",
+        name="Pair",
+        role="Stateful team role",
+        enable_agentic_state=True,
     )
+    budget_session_id = "history-budget"
+    session = TeamSession(session_id=budget_session_id, team_id=team.id)
+    prepared_tools = team._determine_tools_for_model(
+        model=team.model,
+        run_response=TeamRunOutput(
+            run_id=budget_session_id,
+            team_id=team.id,
+            session_id=budget_session_id,
+            session_state={},
+        ),
+        run_context=RunContext(
+            run_id=budget_session_id,
+            session_id=budget_session_id,
+            session_state={},
+        ),
+        team_run_context={},
+        session=session,
+        check_mcp_tools=False,
+    )
+    expected_payloads = [
+        {
+            "name": tool.name,
+            "description": tool.description or "",
+            "parameters": tool.parameters,
+        }
+        for tool in prepared_tools
+    ]
+    assert any(tool["name"] == "update_session_state" for tool in expected_payloads)
+
+    previous_tool_instructions = team._tool_instructions
+    try:
+        team._tool_instructions = []
+        system_message = team.get_system_message(
+            session=session,
+            tools=prepared_tools,
+            add_session_state_to_context=False,
+        )
+    finally:
+        team._tool_instructions = previous_tool_instructions
+
+    expected_static_prompt_tokens = estimate_text_tokens("Current prompt")
+    if system_message is not None and system_message.content is not None:
+        expected_static_prompt_tokens += estimate_text_tokens(str(system_message.content))
+    expected_static_prompt_tokens += len(stable_serialize(expected_payloads)) // 4
+
+    assert estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
 
 
 def test_create_team_instance_enables_native_team_history_and_disables_members(tmp_path: Path) -> None:

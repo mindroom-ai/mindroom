@@ -37,6 +37,8 @@ class ResolvedHistorySettings:
 
     policy: HistoryPolicy
     max_tool_calls_from_history: int | None
+    system_message_role: str = "system"
+    skip_history_system_role: bool = True
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,8 @@ class CompactionOutcome:
     """Completed pre-run compaction result used for notices and tests."""
 
     mode: _CompactionMode
+    session_id: str
+    scope: str
     summary: str
     summary_model: str
     before_tokens: int
@@ -72,6 +76,8 @@ class CompactionOutcome:
         return {
             "version": 1,
             "mode": self.mode,
+            "session_id": self.session_id,
+            "scope": self.scope,
             "summary_model": self.summary_model,
             "before_tokens": self.before_tokens,
             "after_tokens": self.after_tokens,

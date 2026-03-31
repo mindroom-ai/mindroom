@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_type_hints
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,6 +16,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
+from agno.tools.function import Function
 
 from mindroom.agents import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -119,6 +120,26 @@ def _agent(*, team_id: str | None = None) -> Agent:
     agent = Agent(id="test_agent", model=FakeModel(id="fake-model", provider="fake"))
     agent.team_id = team_id
     return agent
+
+
+def test_compact_context_runtime_annotations_resolve_for_agno_registration(tmp_path: Path) -> None:
+    """Agno should be able to evaluate tool annotations at runtime."""
+    config, runtime_paths = _make_config(tmp_path)
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=SimpleNamespace(session_id="session-1"),
+    )
+
+    function = Function.from_callable(tool.compact_context)
+
+    assert function.name == "compact_context"
+    assert "agent" not in function.parameters["properties"]
+    assert "run_context" not in function.parameters["properties"]
+    get_type_hints(CompactContextTools.compact_context)
+    get_type_hints(CompactContextTools._resolve_compaction_request)
+    get_type_hints(CompactContextTools._resolve_active_compaction_settings)
 
 
 @pytest.mark.asyncio
