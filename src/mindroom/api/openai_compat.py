@@ -37,10 +37,7 @@ from mindroom.ai import (
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.history import (
-    clear_bound_agent_history_state,
-    compose_prompt_with_persisted_history,
     prepare_bound_agents_for_run,
-    stream_with_bound_agent_history,
 )
 from mindroom.history.runtime import resolve_bound_team_scope_context
 from mindroom.knowledge.manager import initialize_shared_knowledge_managers
@@ -1141,6 +1138,7 @@ def _build_team(
     if final_resolution.outcome is not TeamOutcome.TEAM:
         raise ValueError(final_resolution.reason or f"Team '{team_name}' cannot be materialized")
 
+    history_settings = config.get_entity_history_settings(team_name)
     scope_context = resolve_bound_team_scope_context(
         agents=team_members.agents,
         runtime_paths=runtime_paths,
@@ -1148,6 +1146,9 @@ def _build_team(
         execution_identity=execution_identity,
         team_name=team_name,
     )
+    for agent in team_members.agents:
+        agent.add_history_to_context = False
+        agent.add_session_summary_to_context = False
     team = Team(
         members=team_members.agents,  # type: ignore[arg-type]
         id=scope_context.scope.scope_id if scope_context is not None else team_name,
@@ -1155,6 +1156,12 @@ def _build_team(
         model=model,
         db=scope_context.storage if scope_context is not None else None,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
+        add_history_to_context=True,
+        add_session_summary_to_context=True,
+        num_history_runs=history_settings.policy.limit if history_settings.policy.mode == "runs" else None,
+        num_history_messages=history_settings.policy.limit if history_settings.policy.mode == "messages" else None,
+        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
+        store_history_messages=False,
         show_members_responses=True,
         debug_mode=False,
     )
@@ -1194,11 +1201,7 @@ async def _prepare_openai_team_prompt(
         active_model_name=active_team_model_name,
         active_context_window=active_team_context_window,
     )
-    return compose_prompt_with_persisted_history(
-        base_prompt=prompt,
-        prepared_history=prepared_history,
-        fallback_prompt=fallback_prompt,
-    )
+    return prompt if prepared_history.has_stored_replay_state else fallback_prompt
 
 
 async def _non_stream_team_completion(
@@ -1233,16 +1236,12 @@ async def _non_stream_team_completion(
         )
     except Exception:
         logger.exception("Team member preparation failed", team=team_name)
-        clear_bound_agent_history_state(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
     try:
         response = await team.arun(team_prompt, session_id=session_id, user_id=user)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
         return _error_response(500, "Team execution failed", error_type="server_error")
-    finally:
-        clear_bound_agent_history_state(agents)
-
     response_text = _format_team_output(response) if isinstance(response, TeamRunOutput) else str(response)
 
     if _is_error_response(response_text):
@@ -1297,20 +1296,15 @@ async def _stream_team_completion(
         )
     except Exception:
         logger.exception("Team member preparation failed", team=team_name)
-        clear_bound_agent_history_state(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
     try:
         with tool_execution_identity(execution_identity):
             raw_stream = team.arun(team_prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
-            stream = cast(
-                "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None]",
-                stream_with_bound_agent_history(raw_stream, agents=agents),
-            )
+            stream = cast("AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None]", raw_stream)
             # Peek at first event
             first_event = await anext(stream, None)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
-        clear_bound_agent_history_state(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
 
     if first_event is None:

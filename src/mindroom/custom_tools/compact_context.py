@@ -94,10 +94,9 @@ class CompactContextTools(Toolkit):
             )
         current_state = read_scope_state(scope_context.session, scope_context.scope)
         next_state = HistoryScopeState(
-            summary=current_state.summary,
-            last_compacted_run_id=current_state.last_compacted_run_id,
-            compacted_at=current_state.compacted_at,
-            summary_model=current_state.summary_model,
+            last_compacted_at=current_state.last_compacted_at,
+            last_summary_model=current_state.last_summary_model,
+            last_compacted_run_count=current_state.last_compacted_run_count,
             force_compact_before_next_run=True,
         )
         write_scope_state(scope_context.session, scope_context.scope, next_state)

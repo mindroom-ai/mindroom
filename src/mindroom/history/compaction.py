@@ -7,13 +7,16 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from html import escape
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 
 from agno.models.message import Message
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
+from agno.run.team import TeamRunOutput
 from agno.session.summary import SessionSummary
+from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
-from mindroom.history.replay import estimate_history_messages_tokens
 from mindroom.history.storage import write_scope_state
 from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
 from mindroom.logging_config import get_logger
@@ -23,14 +26,13 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
     from agno.models.base import Model
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
 
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.history.types import ResolvedHistorySettings
 
 logger = get_logger(__name__)
 
@@ -93,17 +95,34 @@ async def compact_scope_history(
     session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: HistoryScopeState,
-    visible_runs: list[RunOutput | TeamRunOutput],
     config: Config,
     runtime_paths: RuntimePaths,
     compaction_config: CompactionConfig,
+    history_settings: ResolvedHistorySettings,
+    available_history_budget: int | None,
     active_model_name: str,
     active_context_window: int | None,
 ) -> tuple[HistoryScopeState, CompactionOutcome | None]:
-    """Compact the oldest visible prefix for one scope in a single summary pass."""
-    compactable_runs = visible_runs[:-2]
-    cleared_state = replace(state, force_compact_before_next_run=False)
+    """Compact one scope by rewriting session.summary and session.runs."""
+    visible_runs = _runs_for_scope(_completed_top_level_runs(session), scope)
+    compactable_runs = _select_runs_to_compact(
+        visible_runs=visible_runs,
+        session=session,
+        scope=scope,
+        state=state,
+        history_settings=history_settings,
+        available_history_budget=available_history_budget,
+    )
     if not compactable_runs:
+        cleared_state = HistoryScopeState(
+            last_compacted_at=state.last_compacted_at,
+            last_summary_model=state.last_summary_model,
+            last_compacted_run_count=state.last_compacted_run_count,
+            force_compact_before_next_run=False,
+        )
+        if cleared_state != state:
+            write_scope_state(session, scope, cleared_state)
+            storage.upsert_session(session)
         return cleared_state, None
 
     summary_model, effective_window = resolve_compaction_model(
@@ -130,10 +149,10 @@ async def compact_scope_history(
             effective_window=window_tokens,
             reserve_tokens=reserve_tokens,
         )
-        return cleared_state, None
+        return _clear_force_flag(storage=storage, session=session, scope=scope, state=state), None
 
     summary_input, included_runs = _build_summary_input(
-        previous_summary=state.summary,
+        previous_summary=_current_summary_text(session),
         compacted_runs=compactable_runs,
         max_input_tokens=summary_input_budget,
     )
@@ -145,37 +164,49 @@ async def compact_scope_history(
             candidate_runs=len(compactable_runs),
             summary_input_budget=summary_input_budget,
         )
-        return cleared_state, None
+        return _clear_force_flag(storage=storage, session=session, scope=scope, state=state), None
 
     new_summary = await _generate_compaction_summary(model=summary_model, summary_input=summary_input)
     compacted_at = _iso_utc_now()
-    last_compacted_run_id = _require_last_compacted_run_id(included_runs)
-    if last_compacted_run_id is None:
-        return cleared_state, None
-
     new_state = HistoryScopeState(
-        summary=new_summary.summary,
-        last_compacted_run_id=last_compacted_run_id,
-        compacted_at=compacted_at,
-        summary_model=_model_identifier(summary_model),
+        last_compacted_at=compacted_at,
+        last_summary_model=_model_identifier(summary_model),
+        last_compacted_run_count=len(included_runs),
         force_compact_before_next_run=False,
     )
+    before_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope,
+        history_settings=history_settings,
+    )
+    before_run_count = len(visible_runs)
+    compacted_run_ids = {run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id}
+    session.summary = SessionSummary(summary=new_summary.summary, updated_at=datetime.now(UTC))
+    session.runs = _remove_runs_by_id(session.runs or [], compacted_run_ids)
     write_scope_state(session, scope, new_state)
     storage.upsert_session(session)
 
+    after_visible_runs = _runs_for_scope(_completed_top_level_runs(session), scope)
+    after_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope,
+        history_settings=history_settings,
+    )
     active_window = active_context_window or 0
     threshold_tokens = resolve_effective_compaction_threshold(compaction_config, active_window) if active_window else 0
-    outcome = _build_compaction_outcome(
-        before_visible_runs=visible_runs,
-        before_summary=state.summary,
-        after_visible_runs=_runs_after_run_id(visible_runs, last_compacted_run_id),
-        new_summary=new_summary.summary,
+    outcome = CompactionOutcome(
         mode="manual" if state.force_compact_before_next_run else "auto",
+        summary=new_summary.summary,
         summary_model=_model_identifier(summary_model),
+        before_tokens=before_tokens,
+        after_tokens=after_tokens,
         window_tokens=active_window,
         threshold_tokens=threshold_tokens,
         reserve_tokens=compaction_config.reserve_tokens,
-        last_compacted_run_id=last_compacted_run_id,
+        runs_before=before_run_count,
+        runs_after=len(after_visible_runs),
+        compacted_run_count=len(included_runs),
+        compacted_at=compacted_at,
         notify=compaction_config.notify,
     )
     return new_state, outcome
@@ -533,67 +564,261 @@ def _escape_xml_content(text: str) -> str:
     return escape(_unescape_xml_content(text), quote=False)
 
 
-def _require_last_compacted_run_id(compacted_runs: Sequence[RunOutput | TeamRunOutput]) -> str | None:
-    if not compacted_runs:
-        return None
-    last_run_id = compacted_runs[-1].run_id
-    if isinstance(last_run_id, str) and last_run_id:
-        return last_run_id
-    return None
-
-
-def _runs_after_run_id(
-    runs: Sequence[RunOutput | TeamRunOutput],
-    after_run_id: str | None,
-) -> list[RunOutput | TeamRunOutput]:
-    if after_run_id is None:
-        return list(runs)
-    after_index = next((index for index, run in enumerate(runs) if run.run_id == after_run_id), None)
-    if after_index is None:
-        return list(runs)
-    return list(runs[after_index + 1 :])
-
-
-def _estimate_runs_tokens(runs: Sequence[RunOutput | TeamRunOutput]) -> int:
-    total = 0
-    for run in runs:
-        messages = run.messages or []
-        total += estimate_history_messages_tokens([deepcopy(message) for message in messages])
-    return total
-
-
-def _build_compaction_outcome(
+def estimate_prompt_visible_history_tokens(
     *,
-    before_visible_runs: Sequence[RunOutput | TeamRunOutput],
-    before_summary: str | None,
-    after_visible_runs: Sequence[RunOutput | TeamRunOutput],
-    new_summary: str,
-    mode: Literal["auto", "manual"],
-    summary_model: str,
-    window_tokens: int,
-    threshold_tokens: int,
-    reserve_tokens: int,
-    last_compacted_run_id: str | None,
-    notify: bool,
-) -> CompactionOutcome:
-    before_tokens = _estimate_runs_tokens(before_visible_runs) + estimate_text_tokens(before_summary)
-    after_tokens = _estimate_runs_tokens(after_visible_runs) + estimate_text_tokens(new_summary)
-    return CompactionOutcome(
-        mode=mode,
-        summary=new_summary,
-        summary_model=summary_model,
-        before_tokens=before_tokens,
-        after_tokens=after_tokens,
-        window_tokens=window_tokens,
-        threshold_tokens=threshold_tokens,
-        reserve_tokens=reserve_tokens,
-        runs_before=len(before_visible_runs),
-        runs_after=len(after_visible_runs),
-        compacted_run_count=len(before_visible_runs) - len(after_visible_runs),
-        last_compacted_run_id=last_compacted_run_id,
-        compacted_at=_iso_utc_now(),
-        notify=notify,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    history_settings: ResolvedHistorySettings,
+) -> int:
+    """Estimate the persisted summary plus raw history Agno would replay for one run."""
+    summary_tokens = _estimate_session_summary_tokens(session.summary.summary if session.summary is not None else None)
+    history_messages = _history_messages_for_session(
+        session=session,
+        scope=scope,
+        history_settings=history_settings,
     )
+    return summary_tokens + estimate_history_messages_tokens(history_messages)
+
+
+def estimate_history_messages_tokens(messages: list[Message]) -> int:
+    """Estimate the token count of materialized history messages."""
+    if not messages:
+        return 0
+    total_chars = 0
+    for message in messages:
+        total_chars += len(_render_message_content(message))
+        if message.tool_calls:
+            total_chars += len(stable_serialize(message.tool_calls))
+        total_chars += _estimate_message_media_chars(message)
+    return total_chars // 4
+
+
+def _select_runs_to_compact(
+    *,
+    visible_runs: list[RunOutput | TeamRunOutput],
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    state: HistoryScopeState,
+    history_settings: ResolvedHistorySettings,
+    available_history_budget: int | None,
+) -> list[RunOutput | TeamRunOutput]:
+    if len(visible_runs) <= 1:
+        return []
+
+    if state.force_compact_before_next_run:
+        return visible_runs[:-2] if len(visible_runs) > 2 else []
+
+    if available_history_budget is None:
+        return []
+
+    current_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope,
+        history_settings=history_settings,
+    )
+    if current_tokens <= available_history_budget:
+        return []
+
+    if len(visible_runs) > 2:
+        keep_two = visible_runs[-2:]
+        projected_two_tokens = _project_remaining_history_tokens(
+            session=session,
+            scope=scope,
+            remaining_runs=keep_two,
+            history_settings=history_settings,
+        )
+        if projected_two_tokens <= available_history_budget:
+            return visible_runs[:-2]
+
+    return visible_runs[:-1]
+
+
+def _project_remaining_history_tokens(
+    *,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    remaining_runs: Sequence[RunOutput | TeamRunOutput],
+    history_settings: ResolvedHistorySettings,
+) -> int:
+    projected_session = replace(session, runs=list(remaining_runs))
+    history_messages = _history_messages_for_session(
+        session=projected_session,
+        scope=scope,
+        history_settings=history_settings,
+    )
+    return _estimate_session_summary_tokens(_current_summary_text(session)) + estimate_history_messages_tokens(
+        history_messages,
+    )
+
+
+def _history_messages_for_session(
+    *,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    history_settings: ResolvedHistorySettings,
+) -> list[Message]:
+    if history_settings.policy.limit is not None and history_settings.policy.limit <= 0:
+        return []
+    history_messages = [
+        deepcopy(message)
+        for message in _session_history_messages(
+            session=session,
+            scope=scope,
+            history_settings=history_settings,
+        )
+    ]
+    if history_settings.max_tool_calls_from_history is not None and history_messages:
+        filter_tool_calls(history_messages, history_settings.max_tool_calls_from_history)
+    return history_messages
+
+
+def _session_history_messages(
+    *,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    history_settings: ResolvedHistorySettings,
+) -> list[Message]:
+    limit = history_settings.policy.limit
+    if scope.kind == "team":
+        return _team_session_history_messages(
+            session=cast("TeamSession", session),
+            scope_id=scope.scope_id,
+            history_settings=history_settings,
+            limit=limit,
+        )
+    return _agent_session_history_messages(
+        session=cast("AgentSession", session),
+        scope_id=scope.scope_id,
+        history_settings=history_settings,
+        limit=limit,
+    )
+
+
+def _agent_session_history_messages(
+    *,
+    session: AgentSession,
+    scope_id: str,
+    history_settings: ResolvedHistorySettings,
+    limit: int | None,
+) -> list[Message]:
+    if history_settings.policy.mode == "runs":
+        return session.get_messages(agent_id=scope_id, last_n_runs=limit)
+    if history_settings.policy.mode == "messages":
+        return session.get_messages(agent_id=scope_id, limit=limit)
+    return session.get_messages(agent_id=scope_id)
+
+
+def _team_session_history_messages(
+    *,
+    session: TeamSession,
+    scope_id: str,
+    history_settings: ResolvedHistorySettings,
+    limit: int | None,
+) -> list[Message]:
+    if history_settings.policy.mode == "runs":
+        return session.get_messages(team_id=scope_id, last_n_runs=limit)
+    if history_settings.policy.mode == "messages":
+        return session.get_messages(team_id=scope_id, limit=limit)
+    return session.get_messages(team_id=scope_id)
+
+
+def _estimate_session_summary_tokens(summary_text: str | None) -> int:
+    if summary_text is None or summary_text.strip() == "":
+        return 0
+    wrapper = (
+        "Here is a brief summary of your previous interactions:\n\n"
+        "<summary_of_previous_interactions>\n"
+        f"{summary_text.strip()}\n"
+        "</summary_of_previous_interactions>\n\n"
+        "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
+    )
+    return estimate_text_tokens(wrapper)
+
+
+def _completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
+    skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
+    return [
+        run
+        for run in session.runs or []
+        if isinstance(run, (RunOutput, TeamRunOutput)) and run.parent_run_id is None and run.status not in skip_statuses
+    ]
+
+
+def _runs_for_scope(
+    runs: Sequence[RunOutput | TeamRunOutput],
+    scope: HistoryScope,
+) -> list[RunOutput | TeamRunOutput]:
+    if scope.kind == "team":
+        return [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id]
+    return [run for run in runs if isinstance(run, RunOutput) and run.agent_id == scope.scope_id]
+
+
+def _current_summary_text(session: AgentSession | TeamSession) -> str | None:
+    if session.summary is None:
+        return None
+    summary = session.summary.summary.strip()
+    return summary or None
+
+
+def _remove_runs_by_id(
+    runs: Sequence[RunOutput | TeamRunOutput],
+    compacted_run_ids: set[str],
+) -> list[RunOutput | TeamRunOutput]:
+    if not compacted_run_ids:
+        return list(runs)
+
+    remove_ids = set(compacted_run_ids)
+    changed = True
+    while changed:
+        changed = False
+        for run in runs:
+            parent_run_id = run.parent_run_id
+            run_id = run.run_id
+            if not isinstance(parent_run_id, str) or not isinstance(run_id, str):
+                continue
+            if parent_run_id in remove_ids and run_id not in remove_ids:
+                remove_ids.add(run_id)
+                changed = True
+
+    return [run for run in runs if not isinstance(run.run_id, str) or run.run_id not in remove_ids]
+
+
+def _clear_force_flag(
+    *,
+    storage: SqliteDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    state: HistoryScopeState,
+) -> HistoryScopeState:
+    if not state.force_compact_before_next_run:
+        return state
+    cleared_state = HistoryScopeState(
+        last_compacted_at=state.last_compacted_at,
+        last_summary_model=state.last_summary_model,
+        last_compacted_run_count=state.last_compacted_run_count,
+        force_compact_before_next_run=False,
+    )
+    write_scope_state(session, scope, cleared_state)
+    storage.upsert_session(session)
+    return cleared_state
+
+
+def _estimate_message_media_chars(message: Message) -> int:
+    media_chars = 0
+    for media_value in (
+        message.images,
+        message.audio,
+        message.videos,
+        message.files,
+        message.audio_output,
+        message.image_output,
+        message.video_output,
+        message.file_output,
+    ):
+        if media_value is None:
+            continue
+        media_chars += len(stable_serialize(_media_payload_snapshot(media_value)))
+    return media_chars
 
 
 def _model_identifier(model: Model) -> str:

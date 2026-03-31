@@ -982,16 +982,17 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         search_knowledge=knowledge_enabled,
-        add_history_to_context=False,
+        add_history_to_context=True,
         num_history_runs=num_history_runs,
         num_history_messages=num_history_messages,
+        # Keep persisted runs raw even though Agno replays history natively.
         store_history_messages=False,
         culture_manager=culture_manager,
         add_culture_to_context=add_culture_to_context,
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
         compress_tool_results=compress_tool_results,
-        add_session_summary_to_context=False,
+        add_session_summary_to_context=True,
         max_tool_calls_from_history=max_tool_calls_from_history,
     )
     # Agno hardcodes num_history_runs=3 when both are None. Override after

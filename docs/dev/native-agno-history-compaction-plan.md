@@ -2,7 +2,10 @@
 
 Last updated: 2026-03-30
 Owner: MindRoom backend
-Status: Proposed.
+Status: Implemented.
+
+The code now uses destructive session compaction with native Agno replay.
+The shipped implementation keeps `store_history_messages=False` so replayed raw history is not copied into newly persisted runs.
 
 ## Objective
 
@@ -225,7 +228,7 @@ For normal agents:
 
 - `add_history_to_context=True`
 - `add_session_summary_to_context=True`
-- `store_history_messages=True`
+- `store_history_messages=False`
 - `num_history_runs` or `num_history_messages` from config
 - `max_tool_calls_from_history` from config
 

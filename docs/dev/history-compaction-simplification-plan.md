@@ -2,7 +2,9 @@
 
 Last updated: 2026-03-30
 Owner: MindRoom backend
-Status: Implemented.
+Status: Superseded by `docs/dev/native-agno-history-compaction-plan.md`.
+
+This document describes the intermediate replay-injection design and is kept only for historical context.
 
 ## Objective
 

@@ -193,7 +193,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
 
 @pytest.mark.asyncio
 async def test_team_response_prefers_persisted_replay_over_thread_context_fallback() -> None:
-    """Stored team replay should inject the summary and skip thread-stuffing fallback."""
+    """Stored team history should let Agno replay natively and skip thread stuffing."""
     config = _build_test_config()
     orchestrator = MagicMock()
     orchestrator.config = config
@@ -201,7 +201,6 @@ async def test_team_response_prefers_persisted_replay_over_thread_context_fallba
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
     mock_team = MagicMock()
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
     fake_agent = MagicMock()
@@ -213,10 +212,7 @@ async def test_team_response_prefers_persisted_replay_over_thread_context_fallba
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedReplay(
-            summary_prompt_prefix=summary_prefix,
-            has_stored_replay_state=True,
-        )
+        mock_prepare.return_value = PreparedReplay(has_stored_replay_state=True)
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -231,14 +227,14 @@ async def test_team_response_prefers_persisted_replay_over_thread_context_fallba
     assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
     assert "Old thread context" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
     prompt = mock_team.arun.await_args.args[0]
-    assert prompt == f"{summary_prefix}Analyze this."
+    assert prompt == "Analyze this."
     assert "Thread Context:" not in prompt
     assert "Old thread context" not in prompt
 
 
 @pytest.mark.asyncio
 async def test_team_response_preserves_unseen_matrix_thread_context_with_stored_replay() -> None:
-    """Matrix team runs should include unseen live thread messages alongside stored replay."""
+    """Matrix team runs should include unseen live thread messages with native replay."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
@@ -247,7 +243,6 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_stored_
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
     mock_team = MagicMock()
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
     fake_agent = MagicMock()
@@ -278,10 +273,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_stored_
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedReplay(
-            summary_prompt_prefix=summary_prefix,
-            has_stored_replay_state=True,
-        )
+        mock_prepare.return_value = PreparedReplay(has_stored_replay_state=True)
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -300,7 +292,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_stored_
     assert "Already seen" not in budget_prompt
     assert "Current message body" not in budget_prompt
     prompt = mock_team.arun.await_args.args[0]
-    assert summary_prefix in prompt
+    assert "Analyze this." in prompt
     assert "Fresh follow-up" in prompt
     assert "Already seen" not in prompt
     assert "Thread Context:" not in prompt
@@ -340,10 +332,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedReplay(
-            summary_prompt_prefix="<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n",
-            has_stored_replay_state=True,
-        )
+        mock_prepare.return_value = PreparedReplay(has_stored_replay_state=True)
         await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -933,7 +922,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
 
 @pytest.mark.asyncio
 async def test_team_response_stream_prefers_persisted_replay_over_thread_context_fallback() -> None:
-    """Streaming team execution should pass the persisted-summary prompt to the raw stream."""
+    """Streaming team execution should use the plain prompt and native Agno replay."""
     config = _build_test_config()
     orchestrator = MagicMock()
     orchestrator.config = config
@@ -942,7 +931,6 @@ async def test_team_response_stream_prefers_persisted_replay_over_thread_context
     orchestrator.agent_bots = {"general": MagicMock(running=True)}
     fake_agent = MagicMock()
     fake_agent.name = "GeneralAgent"
-    summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
     mock_team = MagicMock(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:
@@ -959,10 +947,7 @@ async def test_team_response_stream_prefers_persisted_replay_over_thread_context
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedReplay(
-            summary_prompt_prefix=summary_prefix,
-            has_stored_replay_state=True,
-        )
+        mock_prepare.return_value = PreparedReplay(has_stored_replay_state=True)
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -979,12 +964,12 @@ async def test_team_response_stream_prefers_persisted_replay_over_thread_context
     assert "Streamed team response" in str(chunks[0])
     assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
     assert "Old thread context" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
-    assert mock_raw.await_args.kwargs["prompt"] == f"{summary_prefix}Analyze this."
+    assert mock_raw.await_args.kwargs["prompt"] == "Analyze this."
 
 
 @pytest.mark.asyncio
 async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_stored_replay() -> None:
-    """Streaming Matrix team runs should include unseen live thread messages alongside stored replay."""
+    """Streaming Matrix team runs should include unseen live thread messages with native replay."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
@@ -1008,7 +993,6 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
     assert scope_context.session is not None
     update_scope_seen_event_ids(scope_context.session, scope_context.scope, ["event-1"])
     scope_context.storage.upsert_session(scope_context.session)
-    summary_prefix = "<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n"
     mock_team = MagicMock(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:
@@ -1025,10 +1009,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedReplay(
-            summary_prompt_prefix=summary_prefix,
-            has_stored_replay_state=True,
-        )
+        mock_prepare.return_value = PreparedReplay(has_stored_replay_state=True)
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -1052,7 +1033,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
     assert "Fresh follow-up" in budget_prompt
     assert "Already seen" not in budget_prompt
     prompt = mock_raw.await_args.kwargs["prompt"]
-    assert summary_prefix in prompt
+    assert "Analyze this." in prompt
     assert "Fresh follow-up" in prompt
     assert "Already seen" not in prompt
 

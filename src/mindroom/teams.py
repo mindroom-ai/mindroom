@@ -36,8 +36,6 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.history import (
     CompactionOutcome,
-    clear_bound_agent_history_state,
-    compose_prompt_with_persisted_history,
     prepare_bound_agents_for_run,
 )
 from mindroom.history.runtime import load_bound_scope_session_context, resolve_bound_team_scope_context
@@ -1119,6 +1117,10 @@ def _create_team_instance(
     """
     assert orchestrator.config is not None
     model = get_model_instance(orchestrator.config, orchestrator.runtime_paths, model_name or "default")
+    if configured_team_name is not None and configured_team_name in orchestrator.config.teams:
+        history_settings = orchestrator.config.get_entity_history_settings(configured_team_name)
+    else:
+        history_settings = orchestrator.config.get_default_history_settings()
     scope_context = resolve_bound_team_scope_context(
         agents=agents,
         runtime_paths=orchestrator.runtime_paths,
@@ -1128,6 +1130,12 @@ def _create_team_instance(
     )
     team_id = scope_context.scope.scope_id if scope_context is not None else f"Team-{'-'.join(agent_names)}"
 
+    for agent in agents:
+        # Team-owned replay should come from the shared TeamSession, not from
+        # each member independently replaying their own session state.
+        agent.add_history_to_context = False
+        agent.add_session_summary_to_context = False
+
     return Team(
         members=agents,  # type: ignore[arg-type]
         id=team_id,
@@ -1135,6 +1143,12 @@ def _create_team_instance(
         model=model,
         db=scope_context.storage if scope_context is not None else None,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
+        add_history_to_context=True,
+        add_session_summary_to_context=True,
+        num_history_runs=history_settings.policy.limit if history_settings.policy.mode == "runs" else None,
+        num_history_messages=history_settings.policy.limit if history_settings.policy.mode == "messages" else None,
+        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
+        store_history_messages=False,
         show_members_responses=True,
         debug_mode=False,
         # Agno will automatically list members with their names, roles, and tools
@@ -1246,22 +1260,19 @@ async def _prepare_materialized_team_execution(
         active_model_name=active_team_model_name,
         active_context_window=active_team_context_window,
     )
-    summary_prompt = f"{prepared_history.summary_prompt_prefix}{message}"
     if reply_to_event_id and thread_history:
         prepared_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
-            summary_prompt,
+            message,
             thread_history,
             seen_event_ids=seen_event_ids,
             current_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
         )
+    elif prepared_history.has_stored_replay_state:
+        prepared_prompt = message
     else:
-        prepared_prompt = compose_prompt_with_persisted_history(
-            base_prompt=message,
-            prepared_history=prepared_history,
-            fallback_prompt=fallback_prompt,
-        )
+        prepared_prompt = fallback_prompt
     run_metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
     return _PreparedMaterializedTeamExecution(
         team=team,
@@ -1335,7 +1346,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         )
     except Exception as e:
         logger.exception("Error preparing team members", agents=agent_list)
-        clear_bound_agent_history_state(agents)
         return get_user_friendly_error_message(e, team_name)
     team = prepared_execution.team
     prompt = prepared_execution.prepared_prompt
@@ -1438,7 +1448,8 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         team_header = _format_team_header(team_members.display_names)
         return team_header + team_response_text
     finally:
-        clear_bound_agent_history_state(agents)
+        # Native Agno replay no longer binds transient per-member history state.
+        pass
 
 
 async def _team_response_stream_raw(
@@ -1568,7 +1579,6 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
         )
     except Exception as e:
         logger.exception("Error preparing team members for streaming", agents=agent_names)
-        clear_bound_agent_history_state(team_members.agents)
         yield get_user_friendly_error_message(e, f"Team ({', '.join(agent_names)})")
         return
     team = prepared_execution.team
@@ -1905,4 +1915,5 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
             return
     finally:
-        clear_bound_agent_history_state(team_members.agents)
+        # Native Agno replay no longer binds transient per-member history state.
+        pass

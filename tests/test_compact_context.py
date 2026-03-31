@@ -170,18 +170,7 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
     """Only the team scope should receive the forced-compaction flag."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")])
-    write_scope_state(
-        session,
-        HistoryScope(kind="agent", scope_id="test_agent"),
-        HistoryScopeState(summary="direct summary"),
-    )
-    write_scope_state(
-        session,
-        HistoryScope(kind="team", scope_id="team-123"),
-        HistoryScopeState(summary="team summary"),
-    )
-    storage.upsert_session(session)
+    storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
 
     tool = CompactContextTools(
         agent_name="test_agent",
@@ -191,11 +180,6 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
     )
 
     team_agent = _agent(team_id="team-123")
-    await tool.compact_context(agent=team_agent)
-
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    direct_state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     team_context = load_scope_session_context(
         agent=team_agent,
         agent_name="test_agent",
@@ -203,10 +187,27 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
+        create_session_if_missing=True,
     )
     assert team_context is not None
     assert team_context.session is not None
-    team_state = read_scope_state(team_context.session, HistoryScope(kind="team", scope_id="team-123"))
+    team_context.storage.upsert_session(team_context.session)
+    await tool.compact_context(agent=team_agent)
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    direct_state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    reloaded_team_context = load_scope_session_context(
+        agent=team_agent,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
+    assert reloaded_team_context is not None
+    assert reloaded_team_context.session is not None
+    team_state = read_scope_state(reloaded_team_context.session, HistoryScope(kind="team", scope_id="team-123"))
     assert direct_state.force_compact_before_next_run is False
     assert team_state.force_compact_before_next_run is True
 

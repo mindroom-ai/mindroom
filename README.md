@@ -284,8 +284,8 @@ defaults:
   num_history_runs: null             # Number of prior runs to include (null = all)
 ```
 
-Auto-compaction is non-destructive.
-It updates the stored session summary and replay cutoff for future prompts, but the original runs remain in the session database.
+Auto-compaction is destructive inside the active session.
+It rewrites the stored session summary and removes the compacted raw runs from the live session so Agno replays only the merged summary plus the remaining recent runs.
 
 2. Configure your Matrix homeserver and API keys (optional, defaults shown):
 ```bash

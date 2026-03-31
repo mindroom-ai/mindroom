@@ -53,11 +53,9 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.history import (
     CompactionOutcome,
     PreparedReplay,
-    clear_prepared_history,
     prepare_history_for_run,
 )
-from mindroom.history.replay import resolve_history_scope
-from mindroom.history.runtime import estimate_preparation_static_tokens
+from mindroom.history.runtime import estimate_preparation_static_tokens, resolve_history_scope
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
@@ -704,15 +702,12 @@ def _build_cache_key(
     *,
     show_tool_calls: bool | None = None,
     enrichment_digest: str | None = None,
-    replay_cache_key_fragment: str | None = None,
 ) -> str:
     model = agent.model
     assert model is not None
     key = f"{agent.name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
     if enrichment_digest is not None:
         key = f"{key}:enrichment={enrichment_digest}"
-    if replay_cache_key_fragment is not None:
-        key = f"{key}:history={replay_cache_key_fragment}"
     if show_tool_calls is None:
         return key
     visibility = "show" if show_tool_calls else "hide"
@@ -840,11 +835,7 @@ async def _cached_agent_run(
     """Cached wrapper for agent.arun() calls."""
     media_inputs = media or MediaInputs()
     storage_path = runtime_paths.storage_root
-    history_state_requires_bypass = (
-        prepared_history is not None
-        and prepared_history.has_stored_replay_state
-        and prepared_history.cache_key_fragment is None
-    )
+    history_state_requires_bypass = prepared_history is not None and prepared_history.has_stored_replay_state
     cache = (
         None
         if media_inputs.has_any() or history_state_requires_bypass
@@ -871,7 +862,6 @@ async def _cached_agent_run(
         full_prompt,
         session_id,
         enrichment_digest=enrichment_digest,
-        replay_cache_key_fragment=prepared_history.cache_key_fragment if prepared_history is not None else None,
     )
     cached_result = cache.get(cache_key)
     if cached_result is not None:
@@ -988,12 +978,10 @@ async def _prepare_agent_and_prompt(
             fallback_full_prompt=fallback_prompt,
         ),
     )
-    prompt_with_summary = f"{prepared_history.summary_prompt_prefix}{enhanced_prompt}"
-
     if reply_to_event_id and thread_history:
         matrix_id = config.get_ids(runtime_paths).get(agent_name)
         full_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
-            prompt_with_summary,
+            enhanced_prompt,
             thread_history,
             seen_event_ids=seen_ids,
             current_event_id=reply_to_event_id,
@@ -1001,15 +989,15 @@ async def _prepare_agent_and_prompt(
             response_sender_id=matrix_id.full_id if matrix_id else None,
         )
     elif prepared_history.has_stored_replay_state:
-        full_prompt = prompt_with_summary
+        full_prompt = enhanced_prompt
     else:
-        full_prompt = build_prompt_with_thread_history(prompt_with_summary, thread_history)
+        full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
 
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
     return agent, full_prompt, unseen_event_ids, prepared_history
 
 
-async def ai_response(  # noqa: C901, PLR0912
+async def ai_response(  # noqa: C901
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -1186,8 +1174,8 @@ async def ai_response(  # noqa: C901, PLR0912
 
         return _extract_response_content(response, show_tool_calls=show_tool_calls)
     finally:
-        if agent is not None:
-            clear_prepared_history(agent)
+        # Native Agno replay no longer binds transient per-run history state.
+        pass
 
 
 async def _process_stream_events(  # noqa: C901
@@ -1363,9 +1351,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     try:
         metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
 
-        history_state_requires_bypass = (
-            prepared_history.has_stored_replay_state and prepared_history.cache_key_fragment is None
-        )
+        history_state_requires_bypass = prepared_history.has_stored_replay_state
         cache = (
             None
             if media_inputs.has_any() or history_state_requires_bypass
@@ -1380,7 +1366,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 session_id,
                 show_tool_calls=show_tool_calls,
                 enrichment_digest=enrichment_digest,
-                replay_cache_key_fragment=prepared_history.cache_key_fragment,
             )
             cached_result = cache.get(cache_key)
             if cached_result is not None:
@@ -1526,5 +1511,5 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             cache.set(cache_key, cached_response)
             logger.info("Response cached", agent=agent_name)
     finally:
-        if agent is not None:
-            clear_prepared_history(agent)
+        # Native Agno replay no longer binds transient per-run history state.
+        pass

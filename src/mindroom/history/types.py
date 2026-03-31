@@ -1,14 +1,9 @@
-"""History replay and compaction types."""
+"""History compaction types."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
-
-if TYPE_CHECKING:
-    from agno.models.message import Message
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
+from typing import Literal
 
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
@@ -46,37 +41,12 @@ class ResolvedHistorySettings:
 
 @dataclass(frozen=True)
 class HistoryScopeState:
-    """Persisted scoped compaction state stored in session metadata."""
+    """Persisted compaction control/audit state stored in session metadata."""
 
-    summary: str | None = None
-    last_compacted_run_id: str | None = None
-    compacted_at: str | None = None
-    summary_model: str | None = None
+    last_compacted_at: str | None = None
+    last_summary_model: str | None = None
+    last_compacted_run_count: int | None = None
     force_compact_before_next_run: bool = False
-
-    @property
-    def has_summary(self) -> bool:
-        """Return whether this scope currently has a non-empty summary."""
-        return self.summary is not None and self.summary.strip() != ""
-
-    @property
-    def has_cutoff(self) -> bool:
-        """Return whether this scope has a replay cutoff run id."""
-        return self.last_compacted_run_id is not None and self.last_compacted_run_id != ""
-
-
-@dataclass(frozen=True)
-class ResolvedReplay:
-    """Resolved persisted replay state for the current run before live-thread glue."""
-
-    scope: HistoryScope
-    state: HistoryScopeState
-    visible_runs: list[RunOutput | TeamRunOutput]
-    summary_prompt_prefix: str
-    history_message_groups: list[list[Message]]
-    history_messages: list[Message]
-    replay_tokens: int
-    has_stored_replay_state: bool
 
 
 @dataclass(frozen=True)
@@ -94,7 +64,6 @@ class CompactionOutcome:
     runs_before: int
     runs_after: int
     compacted_run_count: int
-    last_compacted_run_id: str | None
     compacted_at: str
     notify: bool
 
@@ -116,10 +85,7 @@ class CompactionOutcome:
 
 @dataclass(frozen=True)
 class PreparedReplay:
-    """Prepared persisted replay payload for one run."""
+    """Prepared persisted-history state for one run."""
 
-    summary_prompt_prefix: str = ""
-    history_messages: list[Message] = field(default_factory=list)
-    cache_key_fragment: str | None = None
     compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
     has_stored_replay_state: bool = False
