@@ -372,6 +372,29 @@ describe('Integrations', () => {
     });
   });
 
+  it('uses wrapping layout classes for narrow viewports', async () => {
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Tools')).toBeInTheDocument();
+    });
+
+    const headerRow = screen.getByText('Tools').parentElement;
+    expect(headerRow).toHaveClass('flex-wrap');
+
+    const scopeSelector = screen.getByRole('combobox');
+    expect(scopeSelector).toHaveClass('w-full', 'sm:w-72');
+
+    const controlsRow = scopeSelector.parentElement;
+    expect(controlsRow).toHaveClass('flex-wrap', 'w-full');
+
+    const searchInput = screen.getByPlaceholderText('Search tools...');
+    expect(searchInput).toHaveClass('w-full', 'sm:w-64');
+
+    const tabList = screen.getByRole('tablist');
+    expect(tabList).toHaveClass('flex-wrap', 'h-auto', 'overflow-visible');
+  });
+
   it.skip('should filter by category when tab is clicked', async () => {
     // TODO: Fix tab panel visibility testing
     render(<Integrations />);

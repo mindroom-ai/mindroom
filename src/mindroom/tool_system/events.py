@@ -75,9 +75,7 @@ def _parse_structured_result(value: object) -> dict[str, object] | None:
     if not isinstance(threads, list) or not threads:
         return None
     if not all(
-        isinstance(item, dict)
-        and isinstance(item.get("thread_id"), str)
-        and isinstance(item.get("body_preview"), str)
+        isinstance(item, dict) and isinstance(item.get("thread_id"), str) and isinstance(item.get("body_preview"), str)
         for item in threads
     ):
         return None
@@ -203,7 +201,7 @@ def _shrink_last_structured_result_item(
     return False
 
 
-def _format_structured_result_preview(result: object) -> tuple[str, bool] | None:
+def _format_structured_result_preview(result: object) -> tuple[str, bool] | None:  # noqa: C901, PLR0912
     structured_result = _parse_structured_result(result)
     if structured_result is None:
         return None
@@ -216,10 +214,7 @@ def _format_structured_result_preview(result: object) -> tuple[str, bool] | None
     if not list_keys:
         return None
 
-    preview_payload = {
-        key: ([] if isinstance(value, list) else value)
-        for key, value in structured_result.items()
-    }
+    preview_payload = {key: ([] if isinstance(value, list) else value) for key, value in structured_result.items()}
     truncated = False
     dropped_entries = False
 
