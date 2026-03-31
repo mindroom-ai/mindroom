@@ -425,19 +425,57 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot.response_tracker.mark_responded = MagicMock()
+    bot._resolve_dispatch_action = AsyncMock(return_value=None)
 
-    dispatch = await bot._prepare_dispatch(
+    await bot._dispatch_text_message(
         room,
         event,
         requester_user_id="@user:localhost",
-        event_label="message",
     )
 
-    assert dispatch is not None
     assert hook_calls == ["called"]
+    bot._resolve_dispatch_action.assert_awaited_once()
+    dispatch = bot._resolve_dispatch_action.await_args.args[2]
     assert dispatch.envelope.source_kind == "message"
-    bot.response_tracker.mark_responded.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_text_message_runs_message_received_before_command_parsing(tmp_path: Path) -> None:
+    """Router command handling must still allow message:received hooks to suppress first."""
+    bot = _agent_bot(tmp_path, agent_name="router")
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$hooked-command",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "!help",
+            },
+        },
+    )
+    hook_calls: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def received(ctx: MessageReceivedContext) -> None:
+        hook_calls.append("called")
+        ctx.suppress = True
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._handle_command = AsyncMock()
+    bot.response_tracker.mark_responded = MagicMock()
+
+    await bot._dispatch_text_message(
+        room,
+        event,
+        requester_user_id="@user:localhost",
+    )
+
+    assert hook_calls == ["called"]
+    bot._handle_command.assert_not_awaited()
+    bot.response_tracker.mark_responded.assert_called_once_with(event.event_id)
 
 
 @pytest.mark.asyncio

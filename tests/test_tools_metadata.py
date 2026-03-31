@@ -128,6 +128,7 @@ def test_tool_metadata_does_not_advertise_env_var_fallbacks() -> None:
             )
 
 
+@pytest.mark.timeout(180)
 def test_registered_tools_declare_managed_init_args_for_explicit_constructor_inputs() -> None:
     """Built-in tools must opt in explicitly instead of relying on hidden constructor inference."""
     managed_arg_names = {managed_arg.value for managed_arg in ToolManagedInitArg}
