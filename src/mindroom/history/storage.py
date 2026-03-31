@@ -60,6 +60,22 @@ def write_scope_state(
     session.metadata = session_metadata
 
 
+def clear_force_compaction_state(
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    state: HistoryScopeState,
+) -> HistoryScopeState:
+    """Clear the next-run force flag in one session scope."""
+    cleared_state = HistoryScopeState(
+        last_compacted_at=state.last_compacted_at,
+        last_summary_model=state.last_summary_model,
+        last_compacted_run_count=state.last_compacted_run_count,
+        force_compact_before_next_run=False,
+    )
+    write_scope_state(session, scope, cleared_state)
+    return cleared_state
+
+
 def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:
     """Return the consumed Matrix event ids for one session scope."""
     seen_event_ids = _read_preserved_scope_seen_event_ids(session, scope)

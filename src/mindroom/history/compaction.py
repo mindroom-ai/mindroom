@@ -18,7 +18,7 @@ from agno.session.team import TeamSession
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
-from mindroom.history.storage import write_scope_state
+from mindroom.history.storage import clear_force_compaction_state, write_scope_state
 from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import compute_compaction_input_budget, estimate_text_tokens, stable_serialize
@@ -106,7 +106,7 @@ async def compact_scope_history(
     runtime_paths: RuntimePaths,
     compaction_config: CompactionConfig,
     history_settings: ResolvedHistorySettings,
-    available_history_budget: int | None,
+    available_history_budget: int,
     active_model_name: str,
     active_context_window: int | None,
 ) -> tuple[HistoryScopeState, CompactionOutcome | None]:
@@ -151,7 +151,9 @@ async def compact_scope_history(
             effective_window=window_tokens,
             reserve_tokens=reserve_tokens,
         )
-        return _clear_force_flag(storage=storage, session=session, scope=scope, state=state), None
+        cleared_state = clear_force_compaction_state(session, scope, state)
+        storage.upsert_session(session)
+        return cleared_state, None
 
     before_tokens = estimate_prompt_visible_history_tokens(
         session=session,
@@ -171,7 +173,9 @@ async def compact_scope_history(
         summary_input_budget=summary_input_budget,
     )
     if rewrite_result is None:
-        return _clear_force_flag(storage=storage, session=session, scope=scope, state=state), None
+        cleared_state = clear_force_compaction_state(session, scope, state)
+        storage.upsert_session(session)
+        return cleared_state, None
 
     compacted_at = _iso_utc_now()
     new_state = HistoryScopeState(
@@ -219,7 +223,7 @@ async def _rewrite_working_session_for_compaction(
     scope: HistoryScope,
     state: HistoryScopeState,
     history_settings: ResolvedHistorySettings,
-    available_history_budget: int | None,
+    available_history_budget: int,
     summary_input_budget: int,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
@@ -264,9 +268,6 @@ async def _rewrite_working_session_for_compaction(
         working_session.summary = SessionSummary(summary=new_summary.summary, updated_at=datetime.now(UTC))
         working_session.runs = _remove_runs_by_id(working_session.runs or [], compacted_run_ids)
         total_compacted_run_count += len(included_runs)
-
-        if available_history_budget is None:
-            break
 
         after_tokens = estimate_prompt_visible_history_tokens(
             session=working_session,
@@ -686,16 +687,13 @@ def _select_runs_to_compact(
     scope: HistoryScope,
     state: HistoryScopeState,
     history_settings: ResolvedHistorySettings,
-    available_history_budget: int | None,
+    available_history_budget: int,
 ) -> list[RunOutput | TeamRunOutput]:
     if len(visible_runs) <= 1:
         return []
 
     if state.force_compact_before_next_run:
         return visible_runs[:-2] if len(visible_runs) > 2 else []
-
-    if available_history_budget is None:
-        return []
 
     current_tokens = estimate_prompt_visible_history_tokens(
         session=session,
@@ -865,21 +863,6 @@ def _remove_runs_by_id(
                 changed = True
 
     return [run for run in runs if not isinstance(run.run_id, str) or run.run_id not in remove_ids]
-
-
-def _clear_force_flag(
-    *,
-    storage: SqliteDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-) -> HistoryScopeState:
-    if not state.force_compact_before_next_run:
-        return state
-    cleared_state = replace(state, force_compact_before_next_run=False)
-    write_scope_state(session, scope, cleared_state)
-    storage.upsert_session(session)
-    return cleared_state
 
 
 def _estimate_message_media_chars(message: Message) -> int:

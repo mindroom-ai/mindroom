@@ -24,7 +24,7 @@ from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team
 from pydantic import BaseModel, Field
 
-from mindroom.agents import create_agent
+from mindroom.agents import create_agent, enable_all_history_replay
 from mindroom.ai import (
     build_matrix_run_metadata,
     build_prompt_with_thread_history,
@@ -1154,9 +1154,7 @@ def _create_team_instance(
         # Agno will automatically list members with their names, roles, and tools
     )
     if history_settings.policy.mode == "all":
-        # Agno hardcodes num_history_runs=3 when both are None. Override after
-        # construction so team sessions can replay their full stored history.
-        team.num_history_runs = None
+        enable_all_history_replay(team)
     return team
 
 

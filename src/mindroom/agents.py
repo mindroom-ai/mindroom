@@ -44,6 +44,7 @@ from mindroom.workspaces import ensure_workspace_template
 if TYPE_CHECKING:
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
+    from agno.team import Team
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
@@ -582,6 +583,11 @@ def create_state_storage_db(
     return SqliteDb(session_table=session_table, db_file=str(db_dir / f"{storage_name}.db"))
 
 
+def enable_all_history_replay(entity: Agent | Team) -> None:
+    """Undo Agno's default three-run history fallback."""
+    entity.num_history_runs = None
+
+
 def _create_agent_state_db(
     agent_name: str,
     config: Config,
@@ -995,10 +1001,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         add_session_summary_to_context=True,
         max_tool_calls_from_history=max_tool_calls_from_history,
     )
-    # Agno hardcodes num_history_runs=3 when both are None. Override after
-    # construction so get_messages receives None and returns all runs.
     if include_all_history:
-        agent.num_history_runs = None
+        enable_all_history_replay(agent)
 
     logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
 

@@ -26,7 +26,7 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from mindroom.agents import create_agent
+from mindroom.agents import create_agent, enable_all_history_replay
 from mindroom.ai import (
     AIStreamChunk,
     ai_response,
@@ -1166,9 +1166,7 @@ def _build_team(
         debug_mode=False,
     )
     if history_settings.policy.mode == "all":
-        # Agno hardcodes num_history_runs=3 when both are None. Override after
-        # construction so team sessions can replay their full stored history.
-        team.num_history_runs = None
+        enable_all_history_replay(team)
     return team_members.agents, team, mode
 
 

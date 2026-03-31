@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -24,7 +24,7 @@ from mindroom.history.compaction import (
     resolve_compaction_runtime_settings,
     resolve_effective_compaction_threshold,
 )
-from mindroom.history.storage import read_scope_state, write_scope_state
+from mindroom.history.storage import clear_force_compaction_state, read_scope_state
 from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_text_tokens
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.history.types import CompactionOutcome, HistoryScopeState
+    from mindroom.history.types import CompactionOutcome
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -147,6 +147,9 @@ async def prepare_history_for_run(
 
     session = scope_context.session
     state = read_scope_state(session, scope_context.scope)
+    if state.force_compact_before_next_run and history_budget is None:
+        message = f"Forced compaction requires a resolved history budget for scope {scope_context.scope.key}"
+        raise RuntimeError(message)
     compaction_outcomes: list[CompactionOutcome] = []
     auto_compaction_enabled = (
         resolved_inputs.has_authored_compaction_config and resolved_inputs.compaction_config.enabled
@@ -160,7 +163,7 @@ async def prepare_history_for_run(
         if history_budget is not None
         else None
     )
-    should_attempt_compaction = state.force_compact_before_next_run or (
+    should_attempt_compaction = (state.force_compact_before_next_run and history_budget is not None) or (
         auto_compaction_enabled
         and history_budget is not None
         and current_history_tokens is not None
@@ -168,6 +171,8 @@ async def prepare_history_for_run(
     )
 
     if should_attempt_compaction:
+        compaction_budget = history_budget
+        assert compaction_budget is not None
         try:
             _next_state, outcome = await compact_scope_history(
                 storage=scope_context.storage,
@@ -178,17 +183,13 @@ async def prepare_history_for_run(
                 runtime_paths=runtime_paths,
                 compaction_config=resolved_inputs.compaction_config,
                 history_settings=resolved_inputs.history_settings,
-                available_history_budget=history_budget,
+                available_history_budget=compaction_budget,
                 active_model_name=resolved_inputs.active_model_name,
                 active_context_window=resolved_inputs.active_context_window,
             )
         except Exception:
-            _clear_forced_compaction_state(
-                storage=scope_context.storage,
-                session=session,
-                scope=scope_context.scope,
-                state=state,
-            )
+            clear_force_compaction_state(session, scope_context.scope, state)
+            scope_context.storage.upsert_session(session)
             logger.exception(
                 "Compaction failed; continuing without compaction",
                 session_id=session.session_id,
@@ -634,20 +635,6 @@ def _resolve_available_history_budget(
         ceiling = min(ceiling, max(0, active_context_window - reserve_tokens))
 
     return max(0, ceiling - static_prompt_tokens)
-
-
-def _clear_forced_compaction_state(
-    *,
-    storage: SqliteDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-) -> None:
-    if not state.force_compact_before_next_run:
-        return
-    cleared_state = replace(state, force_compact_before_next_run=False)
-    write_scope_state(session, scope, cleared_state)
-    storage.upsert_session(session)
 
 
 def _has_persisted_history(session: AgentSession | TeamSession, scope: HistoryScope) -> bool:
