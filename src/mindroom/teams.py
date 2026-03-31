@@ -90,6 +90,16 @@ class TeamMode(str, Enum):
     COLLABORATE = "collaborate"  # All members work on same task in parallel
 
 
+@dataclass(frozen=True)
+class _PreparedMaterializedTeamExecution:
+    """Shared prepared team execution state used by stream and non-stream paths."""
+
+    team: Team
+    prepared_prompt: str
+    run_metadata: dict[str, Any] | None
+    unseen_event_ids: list[str]
+
+
 def _next_retry_run_id(run_id: str | None) -> str | None:
     """Return a fresh Agno run identifier for a retry attempt."""
     if run_id is None:
@@ -1171,6 +1181,102 @@ def select_model_for_team(
     return "default"
 
 
+async def _prepare_materialized_team_execution(
+    *,
+    team_members: ResolvedExactTeamMembers,
+    mode: TeamMode,
+    message: str,
+    orchestrator: MultiAgentOrchestrator,
+    execution_identity: ToolExecutionIdentity | None,
+    thread_history: list[dict] | None,
+    model_name: str | None,
+    session_id: str | None,
+    reply_to_event_id: str | None,
+    active_event_ids: Collection[str],
+    response_sender_id: str | None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None,
+    configured_team_name: str | None,
+) -> _PreparedMaterializedTeamExecution:
+    """Prepare one materialized team for execution."""
+    assert orchestrator.config is not None
+
+    fallback_prompt = build_prompt_with_thread_history(
+        message,
+        thread_history,
+        header="Thread Context:",
+        prompt_intro="User: ",
+        max_messages=30,
+        max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
+        missing_sender_label="Unknown",
+    )
+    resolved_team_model_name = model_name
+    if resolved_team_model_name is None and configured_team_name is not None:
+        resolved_team_model_name = orchestrator.config.get_entity_model_name(configured_team_name)
+    team = _create_team_instance(
+        team_members.agents,
+        team_members.requested_agent_names,
+        mode,
+        orchestrator,
+        resolved_team_model_name,
+        configured_team_name,
+        execution_identity,
+    )
+    seen_event_ids = _collect_bound_seen_event_ids(
+        agents=team_members.agents,
+        session_id=session_id,
+        runtime_paths=orchestrator.runtime_paths,
+        config=orchestrator.config,
+        execution_identity=execution_identity,
+        team_name=configured_team_name,
+    )
+    prompt_for_history, unseen_event_ids = build_prompt_with_unseen_thread_context(
+        message,
+        thread_history,
+        seen_event_ids=seen_event_ids,
+        current_event_id=reply_to_event_id,
+        active_event_ids=active_event_ids,
+        response_sender_id=response_sender_id,
+    )
+    active_team_model_name = resolved_team_model_name or "default"
+    active_team_context_window = orchestrator.config.get_model_context_window(active_team_model_name)
+    prepared_history = await prepare_bound_agents_for_run(
+        agents=team_members.agents,
+        full_prompt=prompt_for_history,
+        fallback_full_prompt=None if reply_to_event_id and thread_history else fallback_prompt,
+        session_id=session_id,
+        runtime_paths=orchestrator.runtime_paths,
+        config=orchestrator.config,
+        execution_identity=execution_identity,
+        compaction_outcomes_collector=compaction_outcomes_collector,
+        team_name=configured_team_name,
+        active_model_name=active_team_model_name,
+        active_context_window=active_team_context_window,
+    )
+    summary_prompt = f"{prepared_history.summary_prompt_prefix}{message}"
+    if reply_to_event_id and thread_history:
+        prepared_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
+            summary_prompt,
+            thread_history,
+            seen_event_ids=seen_event_ids,
+            current_event_id=reply_to_event_id,
+            active_event_ids=active_event_ids,
+            response_sender_id=response_sender_id,
+        )
+    else:
+        prepared_prompt = compose_prompt_with_persisted_history(
+            base_prompt=message,
+            prepared_history=prepared_history,
+            fallback_prompt=fallback_prompt,
+        )
+    run_metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
+    return _PreparedMaterializedTeamExecution(
+        team=team,
+        prepared_prompt=prepared_prompt,
+        run_metadata=run_metadata,
+        unseen_event_ids=unseen_event_ids,
+    )
+
+
 async def team_response(  # noqa: C901, PLR0912, PLR0915
     agent_names: list[str],
     mode: TeamMode,
@@ -1213,86 +1319,34 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         return str(exc)
     agents = team_members.agents
 
-    base_prompt = message
-    fallback_prompt = build_prompt_with_thread_history(
-        message,
-        thread_history,
-        header="Thread Context:",
-        prompt_intro="User: ",
-        max_messages=30,
-        max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
-        missing_sender_label="Unknown",
-    )
-    resolved_team_model_name = model_name
-    if resolved_team_model_name is None and configured_team_name is not None:
-        resolved_team_model_name = orchestrator.config.get_entity_model_name(configured_team_name)
-    team = _create_team_instance(
-        agents,
-        team_members.requested_agent_names,
-        mode,
-        orchestrator,
-        resolved_team_model_name,
-        configured_team_name,
-        execution_identity,
-    )
-    seen_event_ids = _collect_bound_seen_event_ids(
-        agents=agents,
-        session_id=session_id,
-        runtime_paths=orchestrator.runtime_paths,
-        config=orchestrator.config,
-        execution_identity=execution_identity,
-        team_name=configured_team_name,
-    )
-    prompt_for_history, unseen_event_ids = build_prompt_with_unseen_thread_context(
-        base_prompt,
-        thread_history,
-        seen_event_ids=seen_event_ids,
-        current_event_id=reply_to_event_id,
-        active_event_ids=active_event_ids,
-        response_sender_id=response_sender_id,
-    )
-    active_team_model_name = resolved_team_model_name or "default"
-    active_team_context_window = orchestrator.config.get_model_context_window(active_team_model_name)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
     media_inputs = media or MediaInputs()
 
     try:
-        prepared_history = await prepare_bound_agents_for_run(
-            agents=agents,
-            full_prompt=prompt_for_history,
-            fallback_full_prompt=None if reply_to_event_id and thread_history else fallback_prompt,
-            session_id=session_id,
-            runtime_paths=orchestrator.runtime_paths,
-            config=orchestrator.config,
+        prepared_execution = await _prepare_materialized_team_execution(
+            team_members=team_members,
+            mode=mode,
+            message=message,
+            orchestrator=orchestrator,
             execution_identity=execution_identity,
+            thread_history=thread_history,
+            model_name=model_name,
+            session_id=session_id,
+            reply_to_event_id=reply_to_event_id,
+            active_event_ids=active_event_ids,
+            response_sender_id=response_sender_id,
             compaction_outcomes_collector=compaction_outcomes_collector,
-            team_name=configured_team_name,
-            active_model_name=active_team_model_name,
-            active_context_window=active_team_context_window,
+            configured_team_name=configured_team_name,
         )
     except Exception as e:
         logger.exception("Error preparing team members", agents=agent_list)
         clear_bound_agent_history_state(agents)
         return get_user_friendly_error_message(e, team_name)
-
-    summary_prompt = f"{prepared_history.summary_prompt_prefix}{base_prompt}"
-    if reply_to_event_id and thread_history:
-        prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
-            summary_prompt,
-            thread_history,
-            seen_event_ids=seen_event_ids,
-            current_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
-            response_sender_id=response_sender_id,
-        )
-    else:
-        prompt = compose_prompt_with_persisted_history(
-            base_prompt=base_prompt,
-            prepared_history=prepared_history,
-            fallback_prompt=fallback_prompt,
-        )
-    run_metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
+    team = prepared_execution.team
+    prompt = prepared_execution.prepared_prompt
+    unseen_event_ids = prepared_execution.unseen_event_ids
+    run_metadata = prepared_execution.run_metadata
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
     logger.info(f"TEAM PROMPT: {prompt[:500]}")
 
@@ -1502,83 +1556,31 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return
     agent_names = team_members.display_names
     display_names = team_members.display_names
-    base_prompt = message
-    fallback_prompt = build_prompt_with_thread_history(
-        message,
-        thread_history,
-        header="Thread Context:",
-        prompt_intro="User: ",
-        max_messages=30,
-        max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
-        missing_sender_label="Unknown",
-    )
-    resolved_team_model_name = model_name
-    if resolved_team_model_name is None and configured_team_name is not None:
-        resolved_team_model_name = orchestrator.config.get_entity_model_name(configured_team_name)
-    team = _create_team_instance(
-        team_members.agents,
-        team_members.requested_agent_names,
-        mode,
-        orchestrator,
-        resolved_team_model_name,
-        configured_team_name,
-        execution_identity,
-    )
-    seen_event_ids = _collect_bound_seen_event_ids(
-        agents=team_members.agents,
-        session_id=session_id,
-        runtime_paths=orchestrator.runtime_paths,
-        config=orchestrator.config,
-        execution_identity=execution_identity,
-        team_name=configured_team_name,
-    )
-    prompt_for_history, unseen_event_ids = build_prompt_with_unseen_thread_context(
-        base_prompt,
-        thread_history,
-        seen_event_ids=seen_event_ids,
-        current_event_id=reply_to_event_id,
-        active_event_ids=active_event_ids,
-        response_sender_id=response_sender_id,
-    )
-    active_team_model_name = resolved_team_model_name or "default"
-    active_team_context_window = orchestrator.config.get_model_context_window(active_team_model_name)
     try:
-        prepared_history = await prepare_bound_agents_for_run(
-            agents=team_members.agents,
-            full_prompt=prompt_for_history,
-            fallback_full_prompt=None if reply_to_event_id and thread_history else fallback_prompt,
-            session_id=session_id,
-            runtime_paths=orchestrator.runtime_paths,
-            config=orchestrator.config,
+        prepared_execution = await _prepare_materialized_team_execution(
+            team_members=team_members,
+            mode=mode,
+            message=message,
+            orchestrator=orchestrator,
             execution_identity=execution_identity,
+            thread_history=thread_history,
+            model_name=model_name,
+            session_id=session_id,
+            reply_to_event_id=reply_to_event_id,
+            active_event_ids=active_event_ids,
+            response_sender_id=response_sender_id,
             compaction_outcomes_collector=compaction_outcomes_collector,
-            team_name=configured_team_name,
-            active_model_name=active_team_model_name,
-            active_context_window=active_team_context_window,
+            configured_team_name=configured_team_name,
         )
     except Exception as e:
         logger.exception("Error preparing team members for streaming", agents=agent_names)
         clear_bound_agent_history_state(team_members.agents)
         yield get_user_friendly_error_message(e, f"Team ({', '.join(agent_names)})")
         return
-
-    summary_prompt = f"{prepared_history.summary_prompt_prefix}{base_prompt}"
-    if reply_to_event_id and thread_history:
-        prepared_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
-            summary_prompt,
-            thread_history,
-            seen_event_ids=seen_event_ids,
-            current_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
-            response_sender_id=response_sender_id,
-        )
-    else:
-        prepared_prompt = compose_prompt_with_persisted_history(
-            base_prompt=base_prompt,
-            prepared_history=prepared_history,
-            fallback_prompt=fallback_prompt,
-        )
-    run_metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
+    team = prepared_execution.team
+    prepared_prompt = prepared_execution.prepared_prompt
+    unseen_event_ids = prepared_execution.unseen_event_ids
+    run_metadata = prepared_execution.run_metadata
     logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
     media_inputs = media or MediaInputs()
     attempt_prompt = prepared_prompt
