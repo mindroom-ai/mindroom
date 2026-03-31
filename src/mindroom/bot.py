@@ -941,9 +941,7 @@ class AgentBot:
         if self._sync_shutting_down:
             return
 
-        if first_sync_response:
-            self._maybe_start_deferred_overdue_task_drain()
-        elif has_deferred_overdue_tasks():
+        if first_sync_response or has_deferred_overdue_tasks():
             self._maybe_start_deferred_overdue_task_drain()
 
     async def _on_sync_error(self, _response: nio.SyncError) -> None:
