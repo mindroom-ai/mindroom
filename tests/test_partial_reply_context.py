@@ -30,6 +30,7 @@ from mindroom.matrix.client import _stream_status_from_content, fetch_thread_his
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
+    _RESTART_INTERRUPTED_RESPONSE_NOTE,
     StreamingResponse,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -173,13 +174,14 @@ class TestClassifyPartialReply:
         "body",
         [
             f"Legacy partial\n\n{_CANCELLED_RESPONSE_NOTE}",
+            f"Legacy partial\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}",
             "Legacy partial\n\n**[Response interrupted by an error: boom]**",
             "Legacy partial [cancelled]",
             "Legacy partial [error]",
         ],
     )
     def test_legacy_interrupted_markers_without_metadata_are_interrupted(self, body: str) -> None:
-        """Fallback to interrupted classification for legacy cancelled/error bodies."""
+        """Fallback to interrupted classification for legacy cancelled/error/restart bodies."""
         assert (
             _classify_partial_reply(
                 {"body": body},
@@ -218,6 +220,7 @@ class TestCleanPartialReplyBody:
             ("Hello world ⋯", "Hello world"),
             ("Hello world ⋯..", "Hello world"),
             (f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}", "Partial answer"),
+            (f"Partial answer\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}", "Partial answer"),
             ("Partial answer [cancelled]", "Partial answer"),
             ("Partial answer [error]", "Partial answer"),
             ("Partial answer\n\n**[Response interrupted by an error: boom]**", "Partial answer"),
@@ -364,7 +367,7 @@ class TestUnseenMessagesPartialReplies:
                 {
                     "event_id": "e1",
                     "sender": agent_id,
-                    "body": "Partial reply ⋯",
+                    "body": f"Partial reply\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}",
                     "stream_status": STREAM_STATUS_STREAMING,
                     "timestamp": 599_000,
                     "content": {STREAM_STATUS_KEY: STREAM_STATUS_STREAMING},
@@ -381,6 +384,7 @@ class TestUnseenMessagesPartialReplies:
 
         assert partial_reply_kinds == {PartialReplyKind.INTERRUPTED}
         assert unseen[0]["partial_reply_kind"] is PartialReplyKind.INTERRUPTED
+        assert unseen[0]["body"] == "Partial reply"
 
     def test_placeholder_only_self_reply_is_not_injected(self) -> None:
         """Do not inject placeholder-only self replies as meaningful unseen context."""
