@@ -16,6 +16,7 @@ from mindroom.custom_tools.coding import (
     _truncate_head,
     _truncate_line,
 )
+from mindroom.tools.file import file_tools
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -922,6 +923,26 @@ class TestFindFiles:
         assert "secret.txt" not in result
         assert "No files matching" in result
 
+    def test_find_follows_symlink_inside_base_when_restricted(self, tmp_path: Path) -> None:
+        """Restricted find_files should allow symlinks whose targets stay inside base_dir."""
+        base_dir = tmp_path / "base"
+        src_dir = base_dir / "src"
+        target_dir = base_dir / "shared"
+        base_dir.mkdir()
+        src_dir.mkdir()
+        target_dir.mkdir()
+        (target_dir / "match.txt").write_text("visible")
+        try:
+            (src_dir / "link").symlink_to(target_dir, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            pytest.skip("Symlinks not supported on this platform")
+
+        tools = CodingTools(base_dir=str(base_dir))
+        result = tools.find_files("link/*.txt", path="src")
+
+        assert "src/link/match.txt" in result
+        assert "No files matching" not in result
+
 
 class TestLs:
     """Tests for CodingTools.ls."""
@@ -1005,6 +1026,345 @@ class TestPathTraversal:
         assert "Error" in result
 
 
+class TestRestrictToBaseDir:
+    """Tests for the restrict_to_base_dir toggle."""
+
+    def test_restrict_to_base_dir_default_true(self, tmp_path: Path) -> None:
+        """Default behavior should still block outside-base paths."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("secret\n")
+
+        tools = CodingTools(base_dir=str(base_dir))
+        result = tools.read_file(str(outside_dir / "secret.txt"))
+
+        assert "Error" in result
+        assert "outside base_dir" in result
+        assert "restrict_to_base_dir=false" in result
+
+    def test_restrict_to_base_dir_false_allows_outside(self, tmp_path: Path) -> None:
+        """Disabling the restriction should allow absolute paths outside base_dir."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+
+        tools = CodingTools(base_dir=str(base_dir), restrict_to_base_dir=False)
+        write_result = tools.write_file(str(outside_file), "outside\n")
+        read_result = tools.read_file(str(outside_file))
+
+        assert "Wrote" in write_result
+        assert outside_file.read_text() == "outside\n"
+        assert "outside" in read_result
+
+    def test_restrict_to_base_dir_false_relative_paths_still_work(self, tmp_path: Path) -> None:
+        """Relative paths should still resolve from base_dir when unrestricted."""
+        base_dir = tmp_path / "base"
+        base_dir.mkdir()
+
+        tools = CodingTools(base_dir=str(base_dir), restrict_to_base_dir=False)
+        write_result = tools.write_file("nested/file.txt", "workspace\n")
+        read_result = tools.read_file("nested/file.txt")
+
+        assert "Wrote" in write_result
+        assert (base_dir / "nested" / "file.txt").read_text() == "workspace\n"
+        assert "workspace" in read_result
+
+    def test_restrict_to_base_dir_default_true_blocks_edit_outside(self, tmp_path: Path) -> None:
+        """Restricted edit_file should reject files outside base_dir."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("hello\n")
+
+        tools = CodingTools(base_dir=str(base_dir))
+        result = tools.edit_file(str(outside_file), "hello", "goodbye")
+
+        assert "Error" in result
+        assert "outside base_dir" in result
+        assert outside_file.read_text() == "hello\n"
+
+    def test_restrict_to_base_dir_false_allows_edit_outside(self, tmp_path: Path) -> None:
+        """Unrestricted edit_file should work on files outside base_dir."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("hello\n")
+
+        tools = CodingTools(base_dir=str(base_dir), restrict_to_base_dir=False)
+        result = tools.edit_file(str(outside_file), "hello", "goodbye")
+
+        assert "Applied edit" in result
+        assert outside_file.read_text() == "goodbye\n"
+
+    def test_restrict_to_base_dir_false_finds_files_outside(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """find_files and grep should work outside base_dir when unrestricted."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "match.txt"
+        outside_file.write_text("needle\n")
+
+        tools = CodingTools(base_dir=str(base_dir), restrict_to_base_dir=False)
+        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+
+        find_result = tools.find_files("*.txt", path=str(outside_dir))
+        grep_result = tools.grep("needle", path=str(outside_dir), glob="*.txt")
+
+        assert str(outside_file) in find_result
+        assert f"{outside_file}:1:needle" in grep_result
+
+    def test_restrict_to_base_dir_false_supports_parent_traversal_patterns(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unrestricted grep and find should honor ../ patterns relative to base_dir."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "match.txt"
+        outside_file.write_text("needle\n")
+
+        tools = CodingTools(base_dir=str(base_dir), restrict_to_base_dir=False)
+        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+
+        find_result = tools.find_files("../outside/*.txt")
+        grep_result = tools.grep("needle", glob="../outside/*.txt")
+
+        assert str(outside_file) in find_result
+        assert f"{outside_file}:1:needle" in grep_result
+
+
+class TestFileToolRestrictToBaseDir:
+    """Tests for the file tool restrict_to_base_dir toggle."""
+
+    def test_file_tool_default_restrict_to_base_dir_true_blocks_outside(self, tmp_path: Path) -> None:
+        """File tools should still block outside-base reads by default."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("secret\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+        result = tool.read_file(str(outside_file))
+
+        assert "outside base_dir" in result
+        assert "restrict_to_base_dir=false" in result
+
+    def test_file_tool_search_files_blocks_parent_traversal_when_restricted(self, tmp_path: Path) -> None:
+        """Restricted search_files should block ../ traversal before globbing."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("secret\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+        result = tool.search_files("../outside/*.txt")
+
+        assert "outside base_dir" in result
+        assert "searching files" in result
+
+    def test_file_tool_search_files_blocks_symlink_escape_when_restricted(self, tmp_path: Path) -> None:
+        """Restricted search_files should reject symlinked directories escaping base_dir."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("secret\n")
+        try:
+            (base_dir / "link").symlink_to(outside_dir, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            pytest.skip("Symlinks not supported on this platform")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+        result = tool.search_files("link/*.txt")
+
+        assert "outside base_dir" in result
+        assert "searching files" in result
+
+    def test_file_tool_restrict_to_base_dir_false_allows_outside_and_relative_paths(self, tmp_path: Path) -> None:
+        """File tools should allow outside absolute paths while keeping relative paths anchored."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir, restrict_to_base_dir=False)
+
+        outside_write = tool.save_file("outside\n", str(outside_file))
+        relative_write = tool.save_file("workspace\n", "note.txt")
+
+        assert outside_write == str(outside_file)
+        assert outside_file.read_text() == "outside\n"
+        assert relative_write == "note.txt"
+        assert (base_dir / "note.txt").read_text() == "workspace\n"
+
+    def test_file_tool_delete_file_blocked_when_restricted(self, tmp_path: Path) -> None:
+        """Restricted delete_file should reject outside-base paths."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("secret\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+        result = tool.delete_file(str(outside_file))
+
+        assert "outside base_dir" in result
+        assert outside_file.exists()
+
+    def test_file_tool_delete_file_allowed_when_unrestricted(self, tmp_path: Path) -> None:
+        """Unrestricted delete_file should allow outside-base paths."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("secret\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir, restrict_to_base_dir=False)
+        result = tool.delete_file(str(outside_file))
+
+        assert result == ""
+        assert not outside_file.exists()
+
+    def test_file_tool_read_file_chunk_blocked_when_restricted(self, tmp_path: Path) -> None:
+        """Restricted read_file_chunk should reject outside-base paths."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("alpha\nbeta\ngamma\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+        result = tool.read_file_chunk(str(outside_file), 0, 1)
+
+        assert "outside base_dir" in result
+        assert "reading file" in result
+
+    def test_file_tool_read_file_chunk_allowed_when_unrestricted(self, tmp_path: Path) -> None:
+        """Unrestricted read_file_chunk should allow outside-base paths."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("alpha\nbeta\ngamma\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir, restrict_to_base_dir=False)
+        result = tool.read_file_chunk(str(outside_file), 1, 2)
+
+        assert result == "beta\ngamma"
+
+    def test_file_tool_replace_file_chunk_blocked_when_restricted(self, tmp_path: Path) -> None:
+        """Restricted replace_file_chunk should use the correct blocked-path message."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("alpha\nbeta\ngamma\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+        result = tool.replace_file_chunk(str(outside_file), 1, 1, "updated")
+
+        assert "outside base_dir" in result
+        assert "replacing file chunk" in result
+        assert outside_file.read_text() == "alpha\nbeta\ngamma\n"
+
+    def test_file_tool_replace_file_chunk_allowed_when_unrestricted(self, tmp_path: Path) -> None:
+        """Unrestricted replace_file_chunk should allow outside-base paths."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("alpha\nbeta\ngamma\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir, restrict_to_base_dir=False)
+        result = tool.replace_file_chunk(str(outside_file), 1, 1, "updated")
+
+        assert result == str(outside_file)
+        assert outside_file.read_text() == "alpha\nupdated\ngamma\n"
+
+    def test_file_tool_list_files_outside_base_dir_formats_absolute_paths(self, tmp_path: Path) -> None:
+        """Listing an outside directory should return absolute paths instead of crashing."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("secret\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir, restrict_to_base_dir=False)
+        result = tool.list_files(directory=str(outside_dir))
+
+        assert json.loads(result) == [str(outside_file)]
+
+    def test_file_tool_search_files_supports_absolute_patterns_when_unrestricted(self, tmp_path: Path) -> None:
+        """Absolute search patterns should work when the restriction is disabled."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("secret\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir, restrict_to_base_dir=False)
+        result = json.loads(tool.search_files(str(outside_dir / "*.txt")))
+
+        assert result["files"] == [str(outside_file)]
+        assert result["matches_found"] == 1
+
+    def test_file_tool_search_files_supports_parent_traversal_when_unrestricted(self, tmp_path: Path) -> None:
+        """Relative ../ search patterns should work when the restriction is disabled."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("secret\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir, restrict_to_base_dir=False)
+        result = json.loads(tool.search_files("../outside/*.txt"))
+
+        assert result["files"] == [str(outside_file)]
+        assert result["matches_found"] == 1
+
+
 class TestRegistration:
     """Tests for tool registration."""
 
@@ -1013,6 +1373,25 @@ class TestRegistration:
         from mindroom.tool_system.metadata import TOOL_METADATA  # noqa: PLC0415
 
         assert "coding" in TOOL_METADATA
+
+    def test_config_field_registered(self) -> None:
+        """Coding and file tools should expose restrict_to_base_dir in metadata."""
+        from mindroom.tool_system.metadata import TOOL_METADATA  # noqa: PLC0415
+
+        coding_field = next(
+            field for field in TOOL_METADATA["coding"].config_fields if field.name == "restrict_to_base_dir"
+        )
+        file_field = next(
+            field for field in TOOL_METADATA["file"].config_fields if field.name == "restrict_to_base_dir"
+        )
+        description = "Whether file access must stay under base_dir. Relative paths still resolve from base_dir."
+
+        assert coding_field.type == "boolean"
+        assert coding_field.default is True
+        assert coding_field.description == description
+        assert file_field.type == "boolean"
+        assert file_field.default is True
+        assert file_field.description == description
 
     def test_coding_tool_factory(self) -> None:
         """Factory returns the CodingTools class."""
