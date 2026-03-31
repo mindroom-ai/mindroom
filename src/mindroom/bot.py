@@ -37,6 +37,7 @@ from mindroom.hooks.sender import HookMessageSender, send_hook_message
 from mindroom.hooks.types import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
+    EVENT_BOT_READY,
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
     EVENT_MESSAGE_ENRICH,
@@ -1008,12 +1009,16 @@ class AgentBot:
     async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
-        self._first_sync_done = True
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
         self._last_sync_monotonic = time.monotonic()
 
         if self._sync_shutting_down:
             return
+
+        self._first_sync_done = True
+
+        if first_sync_response:
+            await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
 
         if first_sync_response or has_deferred_overdue_tasks():
             self._maybe_start_deferred_overdue_task_drain()
