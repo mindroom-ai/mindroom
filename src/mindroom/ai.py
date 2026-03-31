@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import importlib
+import inspect
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
@@ -110,7 +111,6 @@ def _model_init_signature(model_class: type[Any]) -> tuple[frozenset[str], bool]
     MindRoom stores provider kwargs in runtime config, so we need to ignore
     stale keys rather than crash the whole service on startup.
     """
-
     signature = inspect.signature(model_class.__init__)
     accepts_var_kwargs = any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
@@ -121,7 +121,6 @@ def _model_init_signature(model_class: type[Any]) -> tuple[frozenset[str], bool]
 
 def _filter_model_kwargs(model_class: type[Any], extra_kwargs: dict[str, Any]) -> dict[str, Any]:
     """Drop kwargs that the target model constructor no longer accepts."""
-
     supported_kwargs, accepts_var_kwargs = _model_init_signature(model_class)
     if accepts_var_kwargs:
         return extra_kwargs
@@ -136,6 +135,8 @@ def _filter_model_kwargs(model_class: type[Any], extra_kwargs: dict[str, Any]) -
         dropped_kwargs=unsupported,
     )
     return {key: value for key, value in extra_kwargs.items() if key in supported_kwargs}
+
+
 _PARTIAL_REPLY_SENDER_LABELS = {
     "interrupted": "You (interrupted reply draft)",
     "in_progress": "You (reply still streaming)",
