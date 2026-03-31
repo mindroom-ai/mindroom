@@ -1167,6 +1167,40 @@ def _format_team_output(response: TeamRunOutput | RunOutput) -> str:
     return "\n\n".join(parts) if parts else str(response.content or "")
 
 
+async def _prepare_openai_team_prompt(
+    *,
+    team_name: str,
+    agents: list[Agent],
+    prompt: str,
+    session_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    thread_history: list[dict[str, Any]] | None,
+    execution_identity: ToolExecutionIdentity | None,
+) -> str:
+    """Prepare the final prompt for one OpenAI-compatible team run."""
+    fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
+    active_team_model_name = config.get_entity_model_name(team_name)
+    active_team_context_window = config.get_model_context_window(active_team_model_name)
+    prepared_history = await prepare_bound_agents_for_run(
+        agents=agents,
+        full_prompt=prompt,
+        fallback_full_prompt=fallback_prompt,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        team_name=team_name,
+        active_model_name=active_team_model_name,
+        active_context_window=active_team_context_window,
+    )
+    return compose_prompt_with_persisted_history(
+        base_prompt=prompt,
+        prepared_history=prepared_history,
+        fallback_prompt=fallback_prompt,
+    )
+
+
 async def _non_stream_team_completion(
     team_name: str,
     model_id: str,
@@ -1186,33 +1220,21 @@ async def _non_stream_team_completion(
 
     logger.info("Team completion request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 
-    fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
-    active_team_model_name = config.get_entity_model_name(team_name)
-    active_team_context_window = config.get_model_context_window(active_team_model_name)
-
     try:
-        prepared_history = await prepare_bound_agents_for_run(
-            agents=agents,
-            full_prompt=prompt,
-            fallback_full_prompt=fallback_prompt,
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
+        team_prompt = await _prepare_openai_team_prompt(
             team_name=team_name,
-            active_model_name=active_team_model_name,
-            active_context_window=active_team_context_window,
+            agents=agents,
+            prompt=prompt,
+            session_id=session_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            thread_history=thread_history,
+            execution_identity=execution_identity,
         )
     except Exception:
         logger.exception("Team member preparation failed", team=team_name)
         clear_bound_agent_history_state(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
-
-    team_prompt = compose_prompt_with_persisted_history(
-        base_prompt=prompt,
-        prepared_history=prepared_history,
-        fallback_prompt=fallback_prompt,
-    )
     try:
         response = await team.arun(team_prompt, session_id=session_id, user_id=user)
     except Exception:
@@ -1262,33 +1284,21 @@ async def _stream_team_completion(
 
     logger.info("Team streaming request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 
-    fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
-    active_team_model_name = config.get_entity_model_name(team_name)
-    active_team_context_window = config.get_model_context_window(active_team_model_name)
-
     try:
-        prepared_history = await prepare_bound_agents_for_run(
-            agents=agents,
-            full_prompt=prompt,
-            fallback_full_prompt=fallback_prompt,
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
+        team_prompt = await _prepare_openai_team_prompt(
             team_name=team_name,
-            active_model_name=active_team_model_name,
-            active_context_window=active_team_context_window,
+            agents=agents,
+            prompt=prompt,
+            session_id=session_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            thread_history=thread_history,
+            execution_identity=execution_identity,
         )
     except Exception:
         logger.exception("Team member preparation failed", team=team_name)
         clear_bound_agent_history_state(agents)
         return _error_response(500, "Team execution failed", error_type="server_error")
-
-    team_prompt = compose_prompt_with_persisted_history(
-        base_prompt=prompt,
-        prepared_history=prepared_history,
-        fallback_prompt=fallback_prompt,
-    )
     try:
         with tool_execution_identity(execution_identity):
             raw_stream = team.arun(team_prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
