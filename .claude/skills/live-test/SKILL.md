@@ -7,6 +7,26 @@ description: Run live end-to-end checks for this repository. Use when booting th
 
 Run the real product and collect runtime evidence.
 
+## ⚠️ NixOS Environment
+
+On NixOS hosts, run commands inside the repo dev shell so `libstdc++.so.6` is available.
+Without it, numpy fails to import and you get `AttributeError: module 'mindroom' has no attribute 'bot'`.
+
+```bash
+nix-shell shell.nix
+# then run normally inside the shell:
+uv run pytest ...
+uv run mindroom run
+```
+
+If `nix-shell shell.nix` cannot resolve `<nixpkgs>`, use:
+
+```bash
+nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix
+```
+
+See `references/core-mindroom.md` for details.
+
 ## Workflow
 
 1. Choose the surface you need to test.
