@@ -183,6 +183,15 @@ async def prepare_history_for_run(
         and current_history_tokens is not None
         and current_history_tokens > history_budget
     )
+    logger.info(
+        "Compaction check",
+        agent=agent_name,
+        auto_enabled=auto_compaction_enabled,
+        budget=history_budget,
+        current_tokens=current_history_tokens,
+        force=state.force_compact_before_next_run,
+        will_compact=should_attempt_compaction,
+    )
 
     if should_attempt_compaction:
         compaction_budget = history_budget
@@ -213,6 +222,14 @@ async def prepare_history_for_run(
         else:
             if outcome is not None:
                 compaction_outcomes.append(outcome)
+                logger.info(
+                    "Compaction completed",
+                    agent=agent_name,
+                    outcome_mode=outcome.mode,
+                    before_tokens=outcome.before_tokens,
+                    after_tokens=outcome.after_tokens,
+                    runs_compacted=outcome.compacted_run_count,
+                )
 
     if not resolved_inputs.has_authored_compaction_config and history_budget is not None:
         _apply_implicit_context_window_guard(
@@ -670,6 +687,10 @@ def _resolve_available_history_budget(
     static_prompt_tokens: int,
 ) -> int | None:
     if compaction_context_window is None:
+        logger.warning(
+            "Compaction budget unavailable: no context_window configured for compaction model",
+            compaction_model=compaction_config.model,
+        )
         return None
     threshold_tokens = compaction_config.threshold_tokens
     if threshold_tokens is None:

@@ -193,6 +193,13 @@ async def compact_scope_history(
     session.metadata = working_session.metadata
     write_scope_state(session, scope, new_state)
     storage.upsert_session(session)
+    logger.info(
+        "Compaction summary generated",
+        session_id=session.session_id,
+        scope=scope.key,
+        compacted_runs=rewrite_result.compacted_run_count,
+        model=_model_identifier(summary_model),
+    )
 
     after_visible_runs = _runs_for_scope(_completed_top_level_runs(session), scope)
     after_tokens = estimate_prompt_visible_history_tokens(

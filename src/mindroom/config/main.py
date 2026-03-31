@@ -338,6 +338,35 @@ class Config(BaseModel):
         if invalid_references:
             msg = "Compaction model references unknown models: " + ", ".join(sorted(invalid_references))
             raise ValueError(msg)
+
+        # Warn when compaction is enabled but the resolved model lacks context_window
+        compaction_models: set[str] = set()
+        if self.defaults.compaction is not None:
+            compaction_models.add(self.defaults.compaction.model or "default")
+        for agent_name, agent_config in self.agents.items():
+            if agent_config.compaction is not None or self.defaults.compaction is not None:
+                model = (
+                    (agent_config.compaction.model if agent_config.compaction else None)
+                    or (self.defaults.compaction.model if self.defaults.compaction else None)
+                    or agent_config.model
+                )
+                compaction_models.add(model)
+        for team_name, team_config in self.teams.items():
+            if team_config.compaction is not None or self.defaults.compaction is not None:
+                model = (
+                    (team_config.compaction.model if team_config.compaction else None)
+                    or (self.defaults.compaction.model if self.defaults.compaction else None)
+                    or team_config.model
+                    or "default"
+                )
+                compaction_models.add(model)
+        for model_name in sorted(compaction_models):
+            if self.get_model_context_window(model_name) is None:
+                logger.warning(
+                    "Compaction enabled but model has no context_window configured; auto-compaction will not trigger",
+                    model=model_name,
+                )
+
         return self
 
     @model_validator(mode="after")

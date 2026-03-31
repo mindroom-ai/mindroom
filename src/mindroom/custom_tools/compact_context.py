@@ -82,9 +82,8 @@ class CompactContextTools(Toolkit):
                 request.scope_context.scope,
             )
         logger.info(
-            "Scheduled scoped compaction for next run",
+            "Manual compaction scheduled",
             agent=self._agent_name,
-            session_id=request.session_id,
             scope=request.scope_context.scope.key,
         )
         return "Compaction scheduled for the next reply in this conversation scope."
