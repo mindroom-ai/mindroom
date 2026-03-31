@@ -164,6 +164,14 @@ class CompactionOverrideConfig(BaseModel):
         description="Whether to emit a Matrix compaction notice after compaction",
     )
 
+    @model_validator(mode="after")
+    def validate_threshold_choice(self) -> Self:
+        """Ensure only one compaction threshold knob is authored at a time."""
+        if self.threshold_tokens is not None and self.threshold_percent is not None:
+            msg = "threshold_tokens and threshold_percent are mutually exclusive"
+            raise ValueError(msg)
+        return self
+
 
 class CompactionConfig(CompactionOverrideConfig):
     """Concrete automatic compaction configuration."""

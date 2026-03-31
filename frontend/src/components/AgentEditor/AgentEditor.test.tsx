@@ -885,6 +885,34 @@ describe('AgentEditor', () => {
     expect(screen.getByRole('checkbox', { name: /enable auto-compaction/i })).toBeChecked();
   });
 
+  it('clears invalid compaction integer input instead of writing NaN', async () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { enabled: true, threshold_tokens: 2000 },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    fireEvent.change(screen.getByLabelText('Threshold Tokens'), { target: { value: 'abc' } });
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith(
+        'test_agent',
+        expect.objectContaining({
+          compaction: { enabled: true },
+        })
+      );
+    });
+  });
+
   it('uses the canonical shared context placeholder', async () => {
     const agentWithoutContextFiles: Agent = {
       ...mockAgent,

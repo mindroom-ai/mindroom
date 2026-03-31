@@ -42,12 +42,19 @@ interface HistoryContextSectionProps<T extends HistoryContextFormValues> {
   };
 }
 
-function parseOptionalInt(raw: string): number | null {
+function parseOptionalInt(raw: string, min: number): number | null {
   const trimmed = raw.trim();
   if (trimmed === '') {
     return null;
   }
-  return Number.parseInt(trimmed, 10);
+  if (!/^-?\d+$/.test(trimmed)) {
+    return null;
+  }
+  const value = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(value) || value < min) {
+    return null;
+  }
+  return value;
 }
 
 function parseOptionalUnitFloat(raw: string): number | null {
@@ -137,7 +144,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   }
                   disabled={numHistoryMessages != null}
                   onChange={e => {
-                    const value = parseOptionalInt(e.target.value);
+                    const value = parseOptionalInt(e.target.value, 0);
                     field.onChange(value);
                     onFieldChange('num_history_runs', value);
                   }}
@@ -176,7 +183,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   }
                   disabled={numHistoryRuns != null}
                   onChange={e => {
-                    const value = parseOptionalInt(e.target.value);
+                    const value = parseOptionalInt(e.target.value, 0);
                     field.onChange(value);
                     onFieldChange('num_history_messages', value);
                   }}
@@ -214,7 +221,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                       : 'Default: no limit'
                   }
                   onChange={e => {
-                    const value = parseOptionalInt(e.target.value);
+                    const value = parseOptionalInt(e.target.value, 0);
                     field.onChange(value);
                     onFieldChange('max_tool_calls_from_history', value);
                   }}
@@ -312,7 +319,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                       : 'Default: derived from context window'
                   }
                   onChange={e => {
-                    const value = parseOptionalInt(e.target.value);
+                    const value = parseOptionalInt(e.target.value, 1);
                     mutateCompaction(current => ({
                       ...(current ?? {}),
                       threshold_tokens: value ?? undefined,
@@ -379,7 +386,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   value={compactionConfig?.reserve_tokens ?? ''}
                   placeholder={`Default: ${defaultCompaction?.reserve_tokens ?? 16384}`}
                   onChange={e => {
-                    const value = parseOptionalInt(e.target.value);
+                    const value = parseOptionalInt(e.target.value, 0);
                     mutateCompaction(current => ({
                       ...(current ?? {}),
                       reserve_tokens: value ?? undefined,

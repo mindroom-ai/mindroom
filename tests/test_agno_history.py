@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -37,6 +38,7 @@ from mindroom.history import (
     prepare_bound_agents_for_run,
     prepare_history_for_run,
 )
+from mindroom.history.compaction import _build_summary_input
 from mindroom.history.replay import build_replay_plan, is_replay_message
 from mindroom.history.runtime import (
     estimate_preparation_static_tokens,
@@ -493,6 +495,27 @@ async def test_prepare_history_for_run_forced_compaction_updates_scope_state(tmp
     assert state.force_compact_before_next_run is False
     assert "merged summary" in prepared.summary_prompt_prefix
     assert len(prepared.compaction_outcomes) == 1
+
+
+def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
+    big_run = _completed_run(
+        "run-big",
+        messages=[
+            Message(role="user", content="u" * 800),
+            Message(role="assistant", content="a" * 800),
+        ],
+    )
+    small_run = _completed_run("run-small")
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[big_run, small_run],
+        max_input_tokens=100,
+    )
+
+    assert [run.run_id for run in included_runs] == ["run-big"]
+    assert "Run truncated to fit compaction budget." in summary_input
+    assert 'run_id="run-big"' in summary_input
 
 
 @pytest.mark.asyncio
@@ -995,6 +1018,18 @@ def test_entity_compaction_override_enabled_null_still_enables_override(tmp_path
     assert resolved.enabled is True
     assert resolved.threshold_tokens is None
     assert resolved.threshold_percent == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize(
+    ("builder", "kwargs"),
+    [
+        (CompactionConfig, {"enabled": True, "threshold_tokens": 100, "threshold_percent": 0.6}),
+        (CompactionOverrideConfig, {"threshold_tokens": 100, "threshold_percent": 0.6}),
+    ],
+)
+def test_compaction_thresholds_are_mutually_exclusive(builder: object, kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="threshold_tokens and threshold_percent are mutually exclusive"):
+        cast("type[CompactionConfig | CompactionOverrideConfig]", builder)(**kwargs)
 
 
 @pytest.mark.asyncio

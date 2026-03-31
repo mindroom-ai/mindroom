@@ -268,6 +268,19 @@ describe('TeamEditor', () => {
     });
   });
 
+  it('clears invalid negative history runs instead of writing them through', async () => {
+    render(<TeamEditor />);
+
+    const historyRunsInput = screen.getByLabelText('History Runs');
+    fireEvent.change(historyRunsInput, { target: { value: '-1' } });
+
+    await waitFor(() => {
+      expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
+        num_history_runs: null,
+      });
+    });
+  });
+
   it('updates team history messages', async () => {
     const messageTeam: Team = {
       ...mockTeam,

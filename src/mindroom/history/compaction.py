@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from html import escape
 from typing import TYPE_CHECKING, Literal, cast
@@ -36,6 +36,7 @@ logger = get_logger(__name__)
 
 _WRAPPER_OVERHEAD_TOKENS = 200
 _SUMMARY_TRUNCATION_RATIO = 0.5
+_OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
 _COMPACTION_SUMMARY_PROMPT = """\
 You are updating a durable conversation handoff summary for a future model call.
 
@@ -63,6 +64,19 @@ Write a plain-text summary in exactly this markdown structure:
 ## Next Steps
 ## Critical Context
 """
+
+
+@dataclass(frozen=True)
+class _ExcerptBlock:
+    open_tag: str
+    content: str
+    close_tag: str
+
+    def render(self, *, max_chars: int | None = None) -> str | None:
+        snippet = self.content if max_chars is None else _truncate_excerpt(self.content, max_chars)
+        if not snippet:
+            return None
+        return "\n".join([self.open_tag, _escape_xml_content(snippet), self.close_tag])
 
 
 async def compact_scope_history(
@@ -252,12 +266,22 @@ def _build_summary_input(
         remaining = max_input_tokens - estimate_text_tokens(summary_block) - _WRAPPER_OVERHEAD_TOKENS
 
     if remaining <= 0:
-        return summary_block, []
+        return _build_oversized_summary_input(
+            summary_block=summary_block,
+            compacted_runs=compacted_runs,
+            max_input_tokens=max_input_tokens,
+        )
 
     included_runs: list[RunOutput | TeamRunOutput] = []
     for run in compacted_runs:
         run_tokens = _estimate_serialized_run_tokens(run)
         if run_tokens > remaining:
+            if not included_runs:
+                return _build_oversized_summary_input(
+                    summary_block=summary_block,
+                    compacted_runs=[run],
+                    max_input_tokens=max_input_tokens,
+                )
             break
         included_runs.append(run)
         remaining -= run_tokens
@@ -266,11 +290,125 @@ def _build_summary_input(
         return summary_block, []
 
     serialized_runs = "\n\n".join(_serialize_run(run, index) for index, run in enumerate(included_runs))
+    return _compose_summary_input(summary_block, serialized_runs), included_runs
+
+
+def _build_oversized_summary_input(
+    *,
+    summary_block: str,
+    compacted_runs: Sequence[RunOutput | TeamRunOutput],
+    max_input_tokens: int,
+) -> tuple[str, list[RunOutput | TeamRunOutput]]:
+    if not compacted_runs:
+        return summary_block, []
+    first_run = compacted_runs[0]
+    oversized_excerpt = _serialize_oversized_run_excerpt(
+        first_run,
+        index=0,
+        max_tokens=_remaining_excerpt_budget(max_input_tokens, summary_block),
+    )
+    if oversized_excerpt is None and summary_block:
+        summary_block = ""
+        oversized_excerpt = _serialize_oversized_run_excerpt(
+            first_run,
+            index=0,
+            max_tokens=_remaining_excerpt_budget(max_input_tokens, summary_block),
+        )
+    if oversized_excerpt is None:
+        return summary_block, []
+    return _compose_summary_input(summary_block, oversized_excerpt), [first_run]
+
+
+def _serialize_oversized_run_excerpt(
+    run: RunOutput | TeamRunOutput,
+    *,
+    index: int,
+    max_tokens: int,
+) -> str | None:
+    if max_tokens <= 0:
+        return None
+
+    full_run = _serialize_run(run, index)
+    if estimate_text_tokens(full_run) <= max_tokens:
+        return full_run
+
+    blocks = _excerpt_blocks(run)
+    budget_chars = max_tokens * 4
+    while budget_chars > 0:
+        excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=budget_chars)
+        if estimate_text_tokens(excerpt) <= max_tokens:
+            return excerpt
+        budget_chars //= 2
+
+    minimal_excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=0)
+    if estimate_text_tokens(minimal_excerpt) <= max_tokens:
+        return minimal_excerpt
+    return None
+
+
+def _serialize_run_excerpt(
+    run: RunOutput | TeamRunOutput,
+    *,
+    index: int,
+    blocks: Sequence[_ExcerptBlock],
+    content_budget_chars: int,
+) -> str:
+    lines = [_run_open_tag(run, index), f"<note>{_OVERSIZED_RUN_NOTE}</note>"]
+    remaining_chars = content_budget_chars
+    for block in blocks:
+        if remaining_chars <= 0:
+            break
+        rendered = block.render(max_chars=remaining_chars)
+        if rendered is None:
+            continue
+        lines.append(rendered)
+        if len(block.content) <= remaining_chars:
+            remaining_chars -= len(block.content)
+        else:
+            break
+
+    lines.append("</run>")
+    return "\n".join(lines)
+
+
+def _excerpt_blocks(run: RunOutput | TeamRunOutput) -> list[_ExcerptBlock]:
+    blocks: list[_ExcerptBlock] = []
+    if run.metadata:
+        blocks.append(_ExcerptBlock("<run_metadata>", stable_serialize(run.metadata), "</run_metadata>"))
+    for message in run.messages or []:
+        content = _render_message_content(message)
+        if not content:
+            continue
+        blocks.append(_ExcerptBlock(_message_open_tag(message), content, "</message>"))
+    return blocks
+
+
+def _truncate_excerpt(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    if max_chars == 1:
+        return "…"
+    return f"{text[: max_chars - 1].rstrip()}…"
+
+
+def _remaining_excerpt_budget(max_input_tokens: int, summary_block: str) -> int:
+    return (
+        max_input_tokens
+        - estimate_text_tokens(summary_block)
+        - estimate_text_tokens(
+            "<new_conversation>\n\n</new_conversation>",
+        )
+    )
+
+
+def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
     parts: list[str] = []
     if summary_block:
         parts.append(summary_block)
     parts.append(f"<new_conversation>\n{serialized_runs}\n</new_conversation>")
-    return "\n\n".join(parts), included_runs
+    return "\n\n".join(parts)
 
 
 def _estimate_serialized_run_tokens(run: RunOutput | TeamRunOutput) -> int:
@@ -278,12 +416,7 @@ def _estimate_serialized_run_tokens(run: RunOutput | TeamRunOutput) -> int:
 
 
 def _serialize_run(run: RunOutput | TeamRunOutput, index: int) -> str:
-    attrs = [f'index="{index}"']
-    if run.run_id:
-        attrs.append(f'run_id="{escape(str(run.run_id), quote=True)}"')
-    if run.status is not None:
-        attrs.append(f'status="{escape(str(run.status), quote=True)}"')
-    lines = [f"<run {' '.join(attrs)}>"]
+    lines = [_run_open_tag(run, index)]
     if run.metadata:
         lines.extend(["<run_metadata>", _escape_xml_content(stable_serialize(run.metadata)), "</run_metadata>"])
     for message in run.messages or []:
@@ -293,12 +426,7 @@ def _serialize_run(run: RunOutput | TeamRunOutput, index: int) -> str:
 
 
 def _serialize_message(message: Message) -> list[str]:
-    attrs = [f'role="{escape(message.role, quote=True)}"']
-    if message.name:
-        attrs.append(f'name="{escape(message.name, quote=True)}"')
-    if message.tool_call_id:
-        attrs.append(f'tool_call_id="{escape(message.tool_call_id, quote=True)}"')
-    lines = [f"<message {' '.join(attrs)}>", _escape_xml_content(_render_message_content(message)), "</message>"]
+    lines = [_message_open_tag(message), _escape_xml_content(_render_message_content(message)), "</message>"]
     if message.tool_calls:
         lines.extend(["<tool_calls>", _escape_xml_content(stable_serialize(message.tool_calls)), "</tool_calls>"])
     for tag, media_value in _message_media_entries(message):
@@ -307,6 +435,24 @@ def _serialize_message(message: Message) -> list[str]:
             continue
         lines.extend([f"<{tag}>", _escape_xml_content(serialized), f"</{tag}>"])
     return lines
+
+
+def _run_open_tag(run: RunOutput | TeamRunOutput, index: int) -> str:
+    attrs = [f'index="{index}"']
+    if run.run_id:
+        attrs.append(f'run_id="{escape(str(run.run_id), quote=True)}"')
+    if run.status is not None:
+        attrs.append(f'status="{escape(str(run.status), quote=True)}"')
+    return f"<run {' '.join(attrs)}>"
+
+
+def _message_open_tag(message: Message) -> str:
+    attrs = [f'role="{escape(message.role, quote=True)}"']
+    if message.name:
+        attrs.append(f'name="{escape(message.name, quote=True)}"')
+    if message.tool_call_id:
+        attrs.append(f'tool_call_id="{escape(message.tool_call_id, quote=True)}"')
+    return f"<message {' '.join(attrs)}>"
 
 
 def _message_media_entries(message: Message) -> tuple[tuple[str, object | None], ...]:
