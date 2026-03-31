@@ -20,7 +20,7 @@ from agno.session.summary import SessionSummary
 from mindroom.agents import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.history import prepare_history_for_run
@@ -194,6 +194,78 @@ async def test_compact_context_requires_positive_summary_input_budget(tmp_path: 
         "Error: Compaction is unavailable for this scope because the active compaction model leaves no "
         "usable summary input budget after reserve and prompt overhead."
     )
+
+
+@pytest.mark.asyncio
+async def test_compact_context_can_use_compaction_model_window_when_active_model_has_none(tmp_path: Path) -> None:
+    """Manual compaction should work when only the selected compaction model declares a context window."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(model="summary-model"),
+            ),
+            models={
+                "default": ModelConfig(provider="openai", id="test-model", context_window=None),
+                "summary-model": ModelConfig(provider="openai", id="summary-model", context_window=32_000),
+            },
+        ),
+        runtime_paths,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1", agent_id="test_agent"),
+            _completed_run("run-2", agent_id="test_agent"),
+            _completed_run("run-3", agent_id="test_agent"),
+            _completed_run("run-4", agent_id="test_agent"),
+        ],
+    )
+    storage.upsert_session(session)
+
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=SimpleNamespace(session_id="session-1"),
+    )
+
+    result = await tool.compact_context(agent=_agent())
+    assert result == "Compaction scheduled for the next reply in this conversation scope."
+
+    with (
+        patch(
+            "mindroom.history.compaction.resolve_compaction_model",
+            return_value=(FakeModel(id="summary-model", provider="fake"), 32_000),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(
+                return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+            ),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(),
+            agent_name="test_agent",
+            full_prompt="Current question",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "merged summary"
+    state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    assert state.force_compact_before_next_run is False
+    assert len(prepared.compaction_outcomes) == 1
 
 
 @pytest.mark.asyncio

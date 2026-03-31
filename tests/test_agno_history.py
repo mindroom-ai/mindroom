@@ -455,6 +455,62 @@ async def test_prepare_history_for_run_auto_compaction_rechecks_after_merged_sum
 
 
 @pytest.mark.asyncio
+async def test_prepare_history_for_run_uses_context_window_guard_without_authored_compaction(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path, context_window=600)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+            _completed_run(
+                "run-3",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+    agent = _agent(db=storage)
+    prepared = await prepare_history_for_run(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
+    assert prepared.compaction_outcomes == []
+    assert agent.add_history_to_context is True
+    assert agent.add_session_summary_to_context is True
+    assert agent.num_history_runs == 2
+    assert agent.num_history_messages is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(
         tmp_path,

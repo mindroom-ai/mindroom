@@ -6,7 +6,7 @@ import hashlib
 import re
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -30,7 +30,13 @@ from mindroom.history.storage import (
     read_scope_state,
     write_scope_state,
 )
-from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState, ResolvedHistorySettings
+from mindroom.history.types import (
+    HistoryPolicy,
+    HistoryScope,
+    HistoryScopeState,
+    PreparedHistoryState,
+    ResolvedHistorySettings,
+)
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_text_tokens
 
@@ -145,25 +151,19 @@ async def prepare_history_for_run(
     if history_budget is None:
         history_budget = _resolve_available_history_budget(
             compaction_config=resolved_inputs.compaction_config,
+            has_authored_compaction_config=resolved_inputs.has_authored_compaction_config,
             active_context_window=resolved_inputs.active_context_window,
             compaction_context_window=resolved_inputs.compaction_context_window,
             static_prompt_tokens=resolved_inputs.static_prompt_tokens,
         )
 
     session = scope_context.session
-    state = read_scope_state(session, scope_context.scope)
-    if consume_pending_force_compaction_scope(session, scope_context.scope):
-        state = replace(state, force_compact_before_next_run=True)
-        write_scope_state(session, scope_context.scope, state)
-        scope_context.storage.upsert_session(session)
-    if state.force_compact_before_next_run and history_budget is None:
-        state = clear_force_compaction_state(session, scope_context.scope, state)
-        scope_context.storage.upsert_session(session)
-        logger.warning(
-            "Forced compaction skipped because no history budget could be resolved",
-            session_id=session.session_id,
-            scope=scope_context.scope.key,
-        )
+    state = _prepare_scope_state_for_run(
+        storage=scope_context.storage,
+        session=session,
+        scope=scope_context.scope,
+        history_budget=history_budget,
+    )
     compaction_outcomes: list[CompactionOutcome] = []
     auto_compaction_enabled = (
         resolved_inputs.has_authored_compaction_config and resolved_inputs.compaction_config.enabled
@@ -213,6 +213,15 @@ async def prepare_history_for_run(
         else:
             if outcome is not None:
                 compaction_outcomes.append(outcome)
+
+    if not resolved_inputs.has_authored_compaction_config and history_budget is not None:
+        _apply_implicit_context_window_guard(
+            target=agent,
+            session=session,
+            scope=scope_context.scope,
+            history_settings=resolved_inputs.history_settings,
+            available_history_budget=history_budget,
+        )
 
     prepared = PreparedHistoryState(
         compaction_outcomes=compaction_outcomes,
@@ -283,12 +292,13 @@ async def prepare_bound_agents_for_run(
     )
     available_history_budget = _resolve_available_history_budget(
         compaction_config=compaction_config,
+        has_authored_compaction_config=has_authored_compaction_config,
         active_context_window=resolved_active_context_window,
         compaction_context_window=resolved_compaction_context_window,
         static_prompt_tokens=static_prompt_tokens,
     )
 
-    return await prepare_history_for_run(
+    prepared = await prepare_history_for_run(
         agent=bound_scope.owner_agent,
         agent_name=bound_scope.owner_agent_name,
         full_prompt=full_prompt,
@@ -307,6 +317,26 @@ async def prepare_bound_agents_for_run(
         available_history_budget=available_history_budget,
         scope=bound_scope.scope,
     )
+    if team is not None and not has_authored_compaction_config and available_history_budget is not None:
+        scope_context = load_scope_session_context(
+            agent=bound_scope.owner_agent,
+            agent_name=bound_scope.owner_agent_name,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            storage=bound_scope.storage,
+            scope=bound_scope.scope,
+        )
+        if scope_context is not None and scope_context.session is not None:
+            _apply_implicit_context_window_guard(
+                target=team,
+                session=scope_context.session,
+                scope=bound_scope.scope,
+                history_settings=history_settings,
+                available_history_budget=available_history_budget,
+            )
+    return prepared
 
 
 def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str | None]:
@@ -632,6 +662,7 @@ def _resolve_preparation_inputs(
 def _resolve_available_history_budget(
     *,
     compaction_config: CompactionConfig,
+    has_authored_compaction_config: bool,
     active_context_window: int | None,
     compaction_context_window: int | None,
     static_prompt_tokens: int,
@@ -640,16 +671,177 @@ def _resolve_available_history_budget(
         return None
     threshold_tokens = compaction_config.threshold_tokens
     if threshold_tokens is None:
-        if active_context_window is None:
-            return None
-        threshold_tokens = resolve_effective_compaction_threshold(compaction_config, active_context_window)
+        threshold_window = active_context_window
+        if threshold_window is None:
+            if not has_authored_compaction_config:
+                return None
+            threshold_window = compaction_context_window
+        threshold_tokens = resolve_effective_compaction_threshold(compaction_config, threshold_window)
 
     ceiling = threshold_tokens
-    if active_context_window is not None:
-        reserve_tokens = normalize_compaction_budget_tokens(compaction_config.reserve_tokens, active_context_window)
-        ceiling = min(ceiling, max(0, active_context_window - reserve_tokens))
+    if has_authored_compaction_config:
+        ceiling_window = active_context_window if active_context_window is not None else compaction_context_window
+        reserve_tokens = normalize_compaction_budget_tokens(compaction_config.reserve_tokens, ceiling_window)
+        ceiling = min(ceiling, max(0, ceiling_window - reserve_tokens))
 
     return max(0, ceiling - static_prompt_tokens)
+
+
+def _prepare_scope_state_for_run(
+    *,
+    storage: SqliteDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    history_budget: int | None,
+) -> HistoryScopeState:
+    state = read_scope_state(session, scope)
+    if consume_pending_force_compaction_scope(session, scope):
+        state = replace(state, force_compact_before_next_run=True)
+        write_scope_state(session, scope, state)
+        storage.upsert_session(session)
+    if state.force_compact_before_next_run and history_budget is None:
+        state = clear_force_compaction_state(session, scope, state)
+        storage.upsert_session(session)
+        logger.warning(
+            "Forced compaction skipped because no history budget could be resolved",
+            session_id=session.session_id,
+            scope=scope.key,
+        )
+    return state
+
+
+def _apply_implicit_context_window_guard(
+    *,
+    target: Agent | Team,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    history_settings: ResolvedHistorySettings,
+    available_history_budget: int,
+) -> None:
+    current_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope,
+        history_settings=history_settings,
+    )
+    if current_tokens <= available_history_budget:
+        return
+
+    limit_mode, max_limit = _context_window_guard_limit_bounds(
+        session=session,
+        scope=scope,
+        history_settings=history_settings,
+    )
+    fitting_limit = _find_fitting_history_limit_for_budget(
+        session=session,
+        scope=scope,
+        history_settings=history_settings,
+        available_history_budget=available_history_budget,
+        limit_mode=limit_mode,
+        max_limit=max_limit,
+    )
+    if fitting_limit > 0:
+        target.add_history_to_context = True
+        target.add_session_summary_to_context = True
+        if limit_mode == "messages":
+            target.num_history_runs = None
+            target.num_history_messages = fitting_limit
+        else:
+            target.num_history_runs = fitting_limit
+            target.num_history_messages = None
+        logger.warning(
+            "Context window guard reduced replay for this run",
+            scope=scope.key,
+            limit_mode=limit_mode,
+            new_limit=fitting_limit,
+            estimated_tokens=current_tokens,
+            available_history_budget=available_history_budget,
+        )
+        return
+
+    target.add_history_to_context = False
+    target.num_history_runs = None
+    target.num_history_messages = None
+    summary_tokens = _estimate_summary_tokens(session)
+    target.add_session_summary_to_context = 0 < summary_tokens <= available_history_budget
+    logger.warning(
+        "Context window guard disabled persisted replay for this run",
+        scope=scope.key,
+        keep_summary_only=target.add_session_summary_to_context,
+        estimated_tokens=current_tokens,
+        available_history_budget=available_history_budget,
+    )
+
+
+def _context_window_guard_limit_bounds(
+    *,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    history_settings: ResolvedHistorySettings,
+) -> tuple[Literal["runs", "messages"], int]:
+    if history_settings.policy.mode == "messages":
+        return "messages", history_settings.policy.limit or 0
+
+    visible_run_count = len(_scope_completed_top_level_runs(session, scope))
+    if history_settings.policy.mode == "all":
+        return "runs", visible_run_count
+    return "runs", min(history_settings.policy.limit or 0, visible_run_count)
+
+
+def _find_fitting_history_limit_for_budget(
+    *,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    history_settings: ResolvedHistorySettings,
+    available_history_budget: int,
+    limit_mode: Literal["runs", "messages"],
+    max_limit: int,
+) -> int:
+    if max_limit <= 0 or available_history_budget <= 0:
+        return 0
+
+    low = 1
+    high = max_limit
+    best = 0
+    while low <= high:
+        mid = (low + high) // 2
+        candidate_tokens = estimate_prompt_visible_history_tokens(
+            session=session,
+            scope=scope,
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode=limit_mode, limit=mid),
+                max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
+            ),
+        )
+        if candidate_tokens <= available_history_budget:
+            best = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best
+
+
+def _scope_completed_top_level_runs(
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+) -> list[RunOutput | TeamRunOutput]:
+    skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
+    runs = [
+        run
+        for run in session.runs or []
+        if isinstance(run, (RunOutput, TeamRunOutput)) and run.parent_run_id is None and run.status not in skip_statuses
+    ]
+    if scope.kind == "team":
+        return [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id]
+    return [run for run in runs if isinstance(run, RunOutput) and run.agent_id == scope.scope_id]
+
+
+def _estimate_summary_tokens(session: AgentSession | TeamSession) -> int:
+    if session.summary is None:
+        return 0
+    summary_text = session.summary.summary
+    if not isinstance(summary_text, str):
+        return 0
+    return estimate_text_tokens(summary_text.strip())
 
 
 def _has_persisted_history(session: AgentSession | TeamSession, scope: HistoryScope) -> bool:
