@@ -215,8 +215,8 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         # Setup mocks
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
-            is_thread=False,
-            thread_id=None,
+            is_thread=True,
+            thread_id="$original:example.com",
             thread_history=[],
             mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
         )
@@ -237,7 +237,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
             room.room_id,
             response_event_id,
             "The answer is 6",
-            None,  # thread_id
+            "$original:example.com",  # canonical thread root
             tool_trace=[],
             extra_content=None,
         )
