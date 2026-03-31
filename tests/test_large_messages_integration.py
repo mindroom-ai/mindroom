@@ -146,6 +146,39 @@ async def test_edit_message_with_lower_threshold() -> None:
     assert len(sent_content["m.new_content"]["body"]) < len(text)
 
 
+@pytest.mark.asyncio
+async def test_large_edit_preserves_mindroom_metadata_in_both_payload_layers() -> None:
+    """Large edit previews should keep io.mindroom.* metadata on both edit payload layers."""
+    client = MockClient()
+    text = "z" * 30000
+    extra_content = {
+        AI_RUN_METADATA_KEY: {"version": 1, "usage": {"total_tokens": 10}},
+        "io.mindroom.compaction": {"version": 1, "compacted": False},
+    }
+    content = {"body": text, "msgtype": "m.text", "formatted_body": f"<p>{text}</p>"}
+
+    await edit_message(
+        client,
+        "!room:server",
+        "$original",
+        content,
+        text,
+        extra_content=extra_content,
+    )
+
+    assert len(client.messages_sent) == 1
+    sent_content = client.messages_sent[0][2]
+    assert "m.new_content" in sent_content
+    assert sent_content["m.new_content"]["msgtype"] == "m.file"
+    for key, value in extra_content.items():
+        assert sent_content[key] == value
+        assert sent_content["m.new_content"][key] == value
+
+    uploaded_payload = json.loads(client.uploads[0]["data"].read().decode("utf-8"))
+    for key, value in extra_content.items():
+        assert uploaded_payload["m.new_content"][key] == value
+
+
 # ============================================================================
 # Streaming Tests
 # ============================================================================
