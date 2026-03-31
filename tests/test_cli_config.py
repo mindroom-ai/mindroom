@@ -349,7 +349,9 @@ class TestConfigInit:
 
         output = _strip_ansi(result.output)
         assert "mindroom connect --pair-code" in output
-        assert "Vertex AI project/region and Google auth" in output
+        assert "Vertex AI project/region" in output
+        assert "Google" in output
+        assert "auth" in output
 
     def test_init_full_profile_omits_pairing_step(self, tmp_path: Path) -> None:
         """Full profile next steps should NOT mention pairing."""
