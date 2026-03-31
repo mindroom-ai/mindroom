@@ -841,10 +841,12 @@ class TestAgentBot:
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
+    @patch("mindroom.bot.interactive.init_persistence")
     @patch("mindroom.config.main.Config.from_yaml")
     async def test_agent_bot_start(
         self,
         mock_load_config: MagicMock,
+        mock_init_persistence: MagicMock,
         mock_ensure_user: AsyncMock,
         mock_login: AsyncMock,
         mock_agent_user: AgentMatrixUser,
@@ -868,6 +870,7 @@ class TestAgentBot:
         # The bot calls ensure_setup which calls ensure_user_account
         # and then login with whatever user account was ensured
         assert mock_login.called
+        mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         assert (
             mock_client.add_event_callback.call_count == 11
         )  # invite, message, reaction, audio, image/file/video callbacks
@@ -2296,6 +2299,56 @@ class TestAgentBot:
         assert content["m.relates_to"]["event_id"] == "$canonical_thread:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply_plain:localhost"
         assert bot._edit_message.await_args.args[3] == "$canonical_thread:localhost"
+
+    @pytest.mark.asyncio
+    async def test_generate_team_response_helper_registers_interactive_questions_with_bot_agent_name(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Team interactive questions should be owned by the real bot agent name."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot._send_response = AsyncMock(return_value="$team")
+        bot._edit_message = AsyncMock(return_value=True)
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        matrix_ids = config.get_ids(runtime_paths_for(config))
+        interactive_response = """```interactive
+{"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```"""
+
+        with (
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.team_response", new_callable=AsyncMock, return_value=interactive_response),
+            patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
+            patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock) as mock_add_buttons,
+        ):
+            event_id = await bot._generate_team_response_helper(
+                room_id="!test:localhost",
+                reply_to_event_id="$team-root",
+                thread_id=None,
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+                thread_history=[],
+                requester_user_id="@user:localhost",
+                payload=_DispatchPayload(prompt="team prompt"),
+            )
+
+        assert event_id == "$team"
+        mock_register.assert_called_once()
+        assert mock_register.call_args.args[0] == "$team"
+        assert mock_register.call_args.args[1] == "!test:localhost"
+        assert mock_register.call_args.args[2] == "$team-root"
+        assert mock_register.call_args.args[4] == bot.agent_name
+        assert mock_register.call_args.args[4] != "team"
+        mock_add_buttons.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_reaction_hooks_run_after_built_in_handlers_decline(

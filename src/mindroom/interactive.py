@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import re
+import threading
+import time
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
+from dataclasses import asdict, dataclass, field
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
 import nio
 
@@ -14,6 +18,8 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import is_agent_id
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -28,13 +34,15 @@ class TextResponseEvent(Protocol):
     source: dict[str, Any]
 
 
-class _InteractiveQuestion(NamedTuple):
+@dataclass(slots=True)
+class _InteractiveQuestion:
     """Represents an active interactive question."""
 
     room_id: str
     thread_id: str | None
     options: dict[str, str]  # emoji/number -> value mapping
     creator_agent: str
+    created_at: float = field(default_factory=time.time)
 
 
 class _InteractiveResponse(NamedTuple):
@@ -47,6 +55,8 @@ class _InteractiveResponse(NamedTuple):
 
 # Track active interactive questions by event_id
 _active_questions: dict[str, _InteractiveQuestion] = {}
+_persistence_file: Path | None = None
+_thread_lock = threading.RLock()
 
 # Constants
 # Match interactive code blocks
@@ -54,6 +64,119 @@ _INTERACTIVE_PATTERN = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```
 _MAX_OPTIONS = 5
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
+_INTERACTIVE_TTL_SECONDS = 24 * 60 * 60
+
+
+def _serialize_active_questions() -> dict[str, dict[str, object]]:
+    """Return the JSON-serializable persistence payload."""
+    return {event_id: asdict(question) for event_id, question in _active_questions.items()}
+
+
+def _load_active_questions(payload: object) -> dict[str, _InteractiveQuestion]:
+    """Deserialize persisted questions."""
+    if not isinstance(payload, dict):
+        msg = "Interactive question persistence payload must be an object"
+        raise TypeError(msg)
+
+    payload_dict = cast("dict[str, object]", payload)
+    questions: dict[str, _InteractiveQuestion] = {}
+    for event_id, raw_question in payload_dict.items():
+        if not isinstance(event_id, str) or not isinstance(raw_question, dict):
+            msg = "Interactive question record is invalid"
+            raise TypeError(msg)
+        question_data = cast("dict[str, object]", raw_question)
+        raw_options = question_data["options"]
+        if not isinstance(raw_options, dict):
+            msg = "Interactive question options must be an object"
+            raise TypeError(msg)
+        raw_thread_id = question_data.get("thread_id")
+        raw_created_at = question_data["created_at"]
+        if not isinstance(raw_created_at, int | float | str):
+            msg = "Interactive question timestamp is invalid"
+            raise TypeError(msg)
+        questions[event_id] = _InteractiveQuestion(
+            room_id=str(question_data["room_id"]),
+            thread_id=None if raw_thread_id is None else str(raw_thread_id),
+            options={str(key): str(value) for key, value in cast("dict[object, object]", raw_options).items()},
+            creator_agent=str(question_data["creator_agent"]),
+            created_at=float(raw_created_at),
+        )
+    return questions
+
+
+def _prune_expired_questions(questions: dict[str, _InteractiveQuestion]) -> dict[str, _InteractiveQuestion]:
+    """Drop questions older than the persistence TTL."""
+    current_time = time.time()
+    return {
+        event_id: question
+        for event_id, question in questions.items()
+        if current_time - question.created_at < _INTERACTIVE_TTL_SECONDS
+    }
+
+
+def _question_has_expired(question: _InteractiveQuestion) -> bool:
+    """Return whether a question is older than the interactive TTL."""
+    return time.time() - question.created_at >= _INTERACTIVE_TTL_SECONDS
+
+
+def _save_active_questions_locked() -> None:
+    """Persist active questions when persistence is enabled.
+
+    This method must be called while holding ``_thread_lock``.
+    """
+    global _active_questions
+    if _persistence_file is None:
+        return
+
+    try:
+        _persistence_file.parent.mkdir(parents=True, exist_ok=True)
+        _active_questions = _prune_expired_questions(_active_questions)
+        with _persistence_file.open("a+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                f.truncate()
+                json.dump(_serialize_active_questions(), f, indent=2)
+                f.flush()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception as exc:
+        logger.warning(
+            "Failed to persist interactive questions; continuing in-memory",
+            path=str(_persistence_file),
+            error=str(exc),
+        )
+
+
+def init_persistence(storage_root: Path) -> None:
+    """Initialize interactive question persistence from disk."""
+    global _active_questions, _persistence_file
+    persistence_file = storage_root / "tracking" / "interactive_questions.json"
+
+    with _thread_lock:
+        _persistence_file = persistence_file
+        try:
+            persistence_file.parent.mkdir(parents=True, exist_ok=True)
+            with persistence_file.open("a+") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.seek(0)
+                    raw_payload = f.read().strip()
+                    loaded_questions = _load_active_questions(json.loads(raw_payload) if raw_payload else {})
+                    _active_questions = _prune_expired_questions(loaded_questions)
+                    f.seek(0)
+                    f.truncate()
+                    json.dump(_serialize_active_questions(), f, indent=2)
+                    f.flush()
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception as exc:
+            _active_questions = {}
+            logger.warning(
+                "Failed to initialize interactive question persistence; continuing in-memory",
+                path=str(persistence_file),
+                error=str(exc),
+            )
 
 
 def should_create_interactive_question(response_text: str) -> bool:
@@ -89,58 +212,57 @@ async def handle_reaction(
         Tuple of (selected_value, thread_id) if this was a valid response, None otherwise
 
     """
-    question = _active_questions.get(event.reacts_to)
-    if not question:
-        logger.debug(
-            "Reaction to unknown message",
-            reacts_to=event.reacts_to,
-            sender=event.sender,
-            reaction=event.key,
-            active_questions=list(_active_questions.keys()),
+    with _thread_lock:
+        question = _active_questions.get(event.reacts_to)
+        if not question:
+            logger.debug(
+                "Reaction to unknown message",
+                reacts_to=event.reacts_to,
+                sender=event.sender,
+                reaction=event.key,
+                active_questions=list(_active_questions.keys()),
+            )
+            return None
+
+        if _question_has_expired(question):
+            del _active_questions[event.reacts_to]
+            _save_active_questions_locked()
+            return None
+
+        # Only the agent who created the question should respond to reactions
+        if agent_name != question.creator_agent:
+            logger.debug(
+                "Ignoring reaction to question created by another agent",
+                reacting_agent=agent_name,
+                question_creator=question.creator_agent,
+                reaction=event.key,
+            )
+            return None
+
+        reaction_key = event.key
+        if reaction_key not in question.options or event.sender == client.user_id:
+            return None
+
+        # Ignore reactions from other agents
+        if is_agent_id(event.sender, config, runtime_paths):
+            logger.debug("Ignoring reaction from agent", sender=event.sender, reaction=reaction_key)
+            return None
+
+        selected_value = question.options[reaction_key]
+
+        logger.info(
+            "Received answer via reaction",
+            user=event.sender,
+            reaction=reaction_key,
+            value=selected_value,
         )
-        return None
 
-    # Only the agent who created the question should respond to reactions
-    if agent_name != question.creator_agent:
-        logger.debug(
-            "Ignoring reaction to question created by another agent",
-            reacting_agent=agent_name,
-            question_creator=question.creator_agent,
-            reaction=event.key,
-        )
-        return None
+        # The emoji reaction itself is the user's response, so just consume the question.
+        with suppress(KeyError):
+            del _active_questions[event.reacts_to]
+        _save_active_questions_locked()
 
-    reaction_key = event.key
-    if reaction_key not in question.options:
-        return None
-
-    # Don't process our own reactions
-    if event.sender == client.user_id:
-        return None
-
-    # Ignore reactions from other agents
-    if is_agent_id(event.sender, config, runtime_paths):
-        logger.debug("Ignoring reaction from agent", sender=event.sender, reaction=reaction_key)
-        return None
-
-    selected_value = question.options[reaction_key]
-
-    logger.info(
-        "Received answer via reaction",
-        user=event.sender,
-        reaction=reaction_key,
-        value=selected_value,
-    )
-
-    # Store the response for the agent to process
-    # The agent will continue the conversation based on this selection
-    # No confirmation message needed - the emoji reaction itself is the user's response
-
-    with suppress(KeyError):
-        del _active_questions[event.reacts_to]
-
-    # Return the selected value and thread_id so the agent can respond
-    return (selected_value, question.thread_id)
+        return (selected_value, question.thread_id)
 
 
 async def handle_text_response(
@@ -171,32 +293,37 @@ async def handle_text_response(
     thread_id = thread_info.thread_id
 
     # Find matching active questions in this room/thread
-    for question_event_id, question in _active_questions.items():
-        if question.room_id != room.room_id:
-            continue
-        if question.thread_id != thread_id:
-            continue
-        if message_text not in question.options:
-            continue
-        if event.sender == client.user_id:
-            continue
-        # Only respond if this agent created the question
-        if agent_name != question.creator_agent:
-            continue
+    with _thread_lock:
+        for question_event_id, question in list(_active_questions.items()):
+            if question.room_id != room.room_id:
+                continue
+            if question.thread_id != thread_id:
+                continue
+            if _question_has_expired(question):
+                del _active_questions[question_event_id]
+                _save_active_questions_locked()
+                continue
+            if message_text not in question.options:
+                continue
+            if event.sender == client.user_id:
+                continue
+            # Only respond if this agent created the question
+            if agent_name != question.creator_agent:
+                continue
 
-        # Found a matching question
-        selected_value = question.options[message_text]
+            selected_value = question.options[message_text]
 
-        logger.info(
-            "Received answer via text",
-            user=event.sender,
-            text=message_text,
-            value=selected_value,
-        )
+            logger.info(
+                "Received answer via text",
+                user=event.sender,
+                text=message_text,
+                value=selected_value,
+            )
 
-        del _active_questions[question_event_id]
+            del _active_questions[question_event_id]
+            _save_active_questions_locked()
 
-        return (selected_value, question.thread_id)
+            return (selected_value, question.thread_id)
 
     return None
 
@@ -278,12 +405,14 @@ def register_interactive_question(
         agent_name: The agent that created the question
 
     """
-    _active_questions[event_id] = _InteractiveQuestion(
-        room_id=room_id,
-        thread_id=thread_id,
-        options=option_map,
-        creator_agent=agent_name,
-    )
+    with _thread_lock:
+        _active_questions[event_id] = _InteractiveQuestion(
+            room_id=room_id,
+            thread_id=thread_id,
+            options=option_map,
+            creator_agent=agent_name,
+        )
+        _save_active_questions_locked()
     logger.info("Registered interactive question", event_id=event_id, options=len(option_map))
 
 
@@ -327,4 +456,7 @@ async def add_reaction_buttons(
 
 def _cleanup() -> None:
     """Clean up when shutting down."""
-    _active_questions.clear()
+    global _persistence_file
+    with _thread_lock:
+        _active_questions.clear()
+        _persistence_file = None
