@@ -52,7 +52,7 @@ from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.history import (
     CompactionOutcome,
-    PreparedReplay,
+    PreparedHistoryState,
     prepare_history_for_run,
 )
 from mindroom.history.runtime import estimate_preparation_static_tokens, resolve_history_scope
@@ -829,13 +829,13 @@ async def _cached_agent_run(
     run_id_callback: Callable[[str], None] | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
-    prepared_history: PreparedReplay | None = None,
+    prepared_history: PreparedHistoryState | None = None,
     enrichment_digest: str | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
     media_inputs = media or MediaInputs()
     storage_path = runtime_paths.storage_root
-    history_state_requires_bypass = prepared_history is not None and prepared_history.has_stored_replay_state
+    history_state_requires_bypass = prepared_history is not None and prepared_history.has_persisted_history
     cache = (
         None
         if media_inputs.has_any() or history_state_requires_bypass
@@ -898,7 +898,7 @@ async def _prepare_agent_and_prompt(
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
-) -> tuple[Agent, str, list[str], PreparedReplay]:
+) -> tuple[Agent, str, list[str], PreparedHistoryState]:
     """Prepare agent and full prompt for AI processing.
 
     Returns:
@@ -988,7 +988,7 @@ async def _prepare_agent_and_prompt(
             active_event_ids=active_event_ids,
             response_sender_id=matrix_id.full_id if matrix_id else None,
         )
-    elif prepared_history.has_stored_replay_state:
+    elif prepared_history.has_persisted_history:
         full_prompt = enhanced_prompt
     else:
         full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
@@ -1064,7 +1064,7 @@ async def ai_response(  # noqa: C901
     logger.info("AI request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
-    prepared_history = PreparedReplay()
+    prepared_history = PreparedHistoryState()
 
     try:
         agent, full_prompt, unseen_event_ids, prepared_history = await _prepare_agent_and_prompt(
@@ -1325,7 +1325,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     storage_path = runtime_paths.storage_root
     agent: Agent | None = None
-    prepared_history = PreparedReplay()
+    prepared_history = PreparedHistoryState()
 
     try:
         agent, full_prompt, unseen_event_ids, prepared_history = await _prepare_agent_and_prompt(
@@ -1351,7 +1351,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     try:
         metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
 
-        history_state_requires_bypass = prepared_history.has_stored_replay_state
+        history_state_requires_bypass = prepared_history.has_persisted_history
         cache = (
             None
             if media_inputs.has_any() or history_state_requires_bypass

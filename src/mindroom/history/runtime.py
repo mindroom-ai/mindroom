@@ -24,7 +24,7 @@ from mindroom.history.compaction import (
     resolve_effective_compaction_threshold,
 )
 from mindroom.history.storage import read_scope_state, write_scope_state
-from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedReplay, ResolvedHistorySettings
+from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_text_tokens
 
@@ -105,7 +105,7 @@ async def prepare_history_for_run(
     static_prompt_tokens: int | None = None,
     available_history_budget: int | None = None,
     scope: HistoryScope | None = None,
-) -> PreparedReplay:
+) -> PreparedHistoryState:
     """Prepare one scope by compacting its persisted session before the run."""
     resolved_scope = scope or resolve_history_scope(agent)
     scope_context = load_scope_session_context(
@@ -120,7 +120,7 @@ async def prepare_history_for_run(
         scope=resolved_scope,
     )
     if scope_context is None or scope_context.session is None:
-        return PreparedReplay()
+        return PreparedHistoryState()
 
     resolved_inputs = _resolve_preparation_inputs(
         agent=agent,
@@ -197,9 +197,9 @@ async def prepare_history_for_run(
             if outcome is not None:
                 compaction_outcomes.append(outcome)
 
-    prepared = PreparedReplay(
+    prepared = PreparedHistoryState(
         compaction_outcomes=compaction_outcomes,
-        has_stored_replay_state=_has_persisted_history(session, scope_context.scope),
+        has_persisted_history=_has_persisted_history(session, scope_context.scope),
     )
     if compaction_outcomes_collector is not None:
         compaction_outcomes_collector.extend(compaction_outcomes)
@@ -219,7 +219,7 @@ async def prepare_bound_agents_for_run(
     team_name: str | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
-) -> PreparedReplay:
+) -> PreparedHistoryState:
     """Prepare one team-owned scope by compacting its persisted session before the run."""
     bound_scope = resolve_bound_team_scope_context(
         agents=agents,
@@ -229,7 +229,7 @@ async def prepare_bound_agents_for_run(
         team_name=team_name,
     )
     if bound_scope is None:
-        return PreparedReplay()
+        return PreparedHistoryState()
 
     if team_name is not None and team_name in config.teams:
         history_settings = config.get_entity_history_settings(team_name)

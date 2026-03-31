@@ -28,7 +28,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.history import PreparedReplay
+from mindroom.history import PreparedHistoryState
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -1833,7 +1833,7 @@ class TestTeamCompletion:
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedReplay()
+            mock_prepare.return_value = PreparedHistoryState()
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -1876,7 +1876,7 @@ class TestTeamCompletion:
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedReplay()
+            mock_prepare.return_value = PreparedHistoryState()
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -2424,8 +2424,11 @@ class TestTeamCompletion:
         assert "assistant: Ack" in prompt
         assert "Current message:\nFollow-up" in prompt
 
-    def test_team_non_streaming_prefers_stored_replay_over_thread_history(self, team_app_client: TestClient) -> None:
-        """Stored team history should suppress request-history stuffing and rely on Agno replay."""
+    def test_team_non_streaming_prefers_persisted_history_over_thread_history(
+        self,
+        team_app_client: TestClient,
+    ) -> None:
+        """Persisted team history should suppress request-history stuffing and rely on Agno replay."""
         from agno.run.team import TeamRunOutput  # noqa: PLC0415
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
@@ -2444,7 +2447,7 @@ class TestTeamCompletion:
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedReplay(has_stored_replay_state=True)
+            mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -2467,8 +2470,8 @@ class TestTeamCompletion:
         assert "user: Start" not in prompt
         assert "assistant: Ack" not in prompt
 
-    def test_team_streaming_prefers_stored_replay_over_thread_history(self, team_app_client: TestClient) -> None:
-        """Stored team history should suppress request-history stuffing in the streaming path too."""
+    def test_team_streaming_prefers_persisted_history_over_thread_history(self, team_app_client: TestClient) -> None:
+        """Persisted team history should suppress request-history stuffing in the streaming path too."""
         from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
@@ -2491,7 +2494,7 @@ class TestTeamCompletion:
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedReplay(has_stored_replay_state=True)
+            mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={

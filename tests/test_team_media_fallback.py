@@ -20,7 +20,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.history import PreparedReplay
+from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import load_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.matrix.identity import MatrixID
@@ -172,7 +172,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedReplay()
+        mock_prepare.return_value = PreparedHistoryState()
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -192,8 +192,8 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
 
 
 @pytest.mark.asyncio
-async def test_team_response_prefers_persisted_replay_over_thread_context_fallback() -> None:
-    """Stored team history should let Agno replay natively and skip thread stuffing."""
+async def test_team_response_prefers_persisted_history_over_thread_context_fallback() -> None:
+    """Persisted team history should let Agno replay natively and skip thread stuffing."""
     config = _build_test_config()
     orchestrator = MagicMock()
     orchestrator.config = config
@@ -212,7 +212,7 @@ async def test_team_response_prefers_persisted_replay_over_thread_context_fallba
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedReplay(has_stored_replay_state=True)
+        mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -233,7 +233,7 @@ async def test_team_response_prefers_persisted_replay_over_thread_context_fallba
 
 
 @pytest.mark.asyncio
-async def test_team_response_preserves_unseen_matrix_thread_context_with_stored_replay() -> None:
+async def test_team_response_preserves_unseen_matrix_thread_context_with_persisted_history() -> None:
     """Matrix team runs should include unseen live thread messages with native replay."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
@@ -273,7 +273,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_stored_
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedReplay(has_stored_replay_state=True)
+        mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -332,7 +332,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedReplay(has_stored_replay_state=True)
+        mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
         await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -896,7 +896,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedReplay()
+        mock_prepare.return_value = PreparedHistoryState()
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -921,7 +921,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_prefers_persisted_replay_over_thread_context_fallback() -> None:
+async def test_team_response_stream_prefers_persisted_history_over_thread_context_fallback() -> None:
     """Streaming team execution should use the plain prompt and native Agno replay."""
     config = _build_test_config()
     orchestrator = MagicMock()
@@ -947,7 +947,7 @@ async def test_team_response_stream_prefers_persisted_replay_over_thread_context
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedReplay(has_stored_replay_state=True)
+        mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -968,7 +968,7 @@ async def test_team_response_stream_prefers_persisted_replay_over_thread_context
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_stored_replay() -> None:
+async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_persisted_history() -> None:
     """Streaming Matrix team runs should include unseen live thread messages with native replay."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
@@ -1009,7 +1009,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedReplay(has_stored_replay_state=True)
+        mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
         chunks = [
             chunk
             async for chunk in team_response_stream(

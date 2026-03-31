@@ -6,6 +6,7 @@ Status: Implemented.
 
 The code now uses destructive session compaction with native Agno replay.
 The shipped implementation keeps `store_history_messages=False` so replayed raw history is not copied into newly persisted runs.
+Compaction triggering still budgets against an Agno-compatible persisted-history estimate built from `session.get_messages(...)` plus the session-summary wrapper because Agno does not expose a public prompt-sizing API.
 
 ## Objective
 
@@ -70,7 +71,7 @@ This removes the entire raw replay injection layer.
 - No monkey-patching.
 - No subclassing Agno just to intercept private lifecycle methods.
 - No replay-message scrubbing from persistence or learning.
-- No separate replay state, prepared replay state, and replay digest layer.
+- No separate replay state, replay payload envelope, and replay digest layer.
 - No need to keep Agno and MindRoom replay behavior in sync.
 - Team and agent runs use the same public history semantics.
 
@@ -90,7 +91,7 @@ Recent turns stay raw.
 - `src/mindroom/history/` owns compaction decisions only.
 - Agno owns history replay.
 - `create_agent()` and `Team(...)` setup enables Agno history and session-summary replay using public configuration.
-- `prepare_history_for_run(...)` becomes a pre-run compaction hook instead of a replay-preparation hook.
+- `prepare_history_for_run(...)` becomes a pre-run compaction hook instead of a replay-payload preparation hook.
 - There is no replay binding and no replay cleanup lifecycle.
 - `src/mindroom/history/replay.py` is deleted.
 - Most of the method-patching code in `src/mindroom/history/runtime.py` is deleted.
@@ -111,7 +112,9 @@ Agno becomes the source of truth for:
 - trimming replay to `num_history_runs` or `num_history_messages`
 - limiting tool calls from replayed history
 
-MindRoom should not second-guess Agno once compaction is done.
+MindRoom still estimates whether persisted history fits before a run by using Agno's public session selection API plus an Agno-compatible summary-wrapper estimate.
+That estimate exists only because Agno does not expose a public sizing API.
+MindRoom should not inject, mutate, or own replay semantics beyond that budgeting estimate.
 
 ## Data Model
 
@@ -195,7 +198,15 @@ The exact replay that the model sees after that is Agno's responsibility.
 
 ## Budgeting Rule
 
-MindRoom should budget compaction against the actual prompt consumer before the run.
+MindRoom should budget compaction against the closest public approximation of the actual prompt consumer before the run.
+
+Today that means:
+
+- use Agno's `session.get_messages(...)` behavior for selecting persisted raw history
+- estimate tokens for that selected history inside MindRoom
+- estimate tokens for the persisted session-summary wrapper inside MindRoom
+
+If Agno later exposes a public prompt-sizing API for history replay, MindRoom should switch to that and delete the local estimate.
 
 If a usable `context_window` cannot be resolved from the active model or the configured compaction model:
 
@@ -268,7 +279,7 @@ The redesign should delete or heavily simplify:
 
 - `src/mindroom/history/replay.py`
 - replay digest and replay cache-key fragments
-- `PreparedReplay.history_messages`
+- the old structured history payload on the pre-run result envelope from the replay-injection design
 - replay lifecycle cleanup code
 - replay-message persistence scrubbing
 - replay-message learning scrubbing

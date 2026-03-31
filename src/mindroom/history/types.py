@@ -12,7 +12,7 @@ _CompactionMode = Literal["auto", "manual"]
 
 @dataclass(frozen=True)
 class HistoryScope:
-    """One logical replay scope inside a stored Agno session."""
+    """One logical persisted-history scope inside a stored Agno session."""
 
     kind: _ScopeKind
     scope_id: str
@@ -25,7 +25,7 @@ class HistoryScope:
 
 @dataclass(frozen=True)
 class HistoryPolicy:
-    """Authored raw-history replay policy for one run."""
+    """Authored raw-history selection policy for one run."""
 
     mode: _HistoryMode
     limit: int | None = None
@@ -33,7 +33,7 @@ class HistoryPolicy:
 
 @dataclass(frozen=True)
 class ResolvedHistorySettings:
-    """Resolved replay policy and tool-call replay limits for one run."""
+    """Resolved history selection policy and tool-call limits for one run."""
 
     policy: HistoryPolicy
     max_tool_calls_from_history: int | None
@@ -84,8 +84,8 @@ class CompactionOutcome:
 
 
 @dataclass(frozen=True)
-class PreparedReplay:
+class PreparedHistoryState:
     """Prepared persisted-history state for one run."""
 
     compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
-    has_stored_replay_state: bool = False
+    has_persisted_history: bool = False

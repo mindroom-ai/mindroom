@@ -31,7 +31,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.history import PreparedReplay
+from mindroom.history import PreparedHistoryState
 from mindroom.media_inputs import MediaInputs
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from tests.conftest import bind_runtime_paths
@@ -59,8 +59,8 @@ def _prepared_prompt_result(
     agent: object,
     *,
     prompt: str = "test prompt",
-) -> tuple[object, str, list[str], PreparedReplay]:
-    return agent, prompt, [], PreparedReplay()
+) -> tuple[object, str, list[str], PreparedHistoryState]:
+    return agent, prompt, [], PreparedHistoryState()
 
 
 class TestUserIdPassthrough:
@@ -277,7 +277,7 @@ class TestUserIdPassthrough:
         assert agent is mock_agent
         assert full_prompt == "enhanced"
         assert unseen_event_ids == []
-        assert prepared_history == PreparedReplay()
+        assert prepared_history == PreparedHistoryState()
         assert "runtime_paths" not in mock_create_agent.call_args.kwargs
 
     @pytest.mark.asyncio

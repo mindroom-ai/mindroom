@@ -1201,7 +1201,7 @@ async def _prepare_openai_team_prompt(
         active_model_name=active_team_model_name,
         active_context_window=active_team_context_window,
     )
-    return prompt if prepared_history.has_stored_replay_state else fallback_prompt
+    return prompt if prepared_history.has_persisted_history else fallback_prompt
 
 
 async def _non_stream_team_completion(

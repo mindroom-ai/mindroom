@@ -26,7 +26,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.history import PreparedReplay, prepare_bound_agents_for_run, prepare_history_for_run
+from mindroom.history import PreparedHistoryState, prepare_bound_agents_for_run, prepare_history_for_run
 from mindroom.history.compaction import (
     _build_summary_input,
     estimate_history_messages_tokens,
@@ -306,7 +306,7 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
         session=session,
     )
 
-    assert prepared.has_stored_replay_state is True
+    assert prepared.has_persisted_history is True
     assert prepared.compaction_outcomes == []
 
 
@@ -370,7 +370,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     assert state.force_compact_before_next_run is False
     assert state.last_compacted_at is not None
 
-    assert prepared.has_stored_replay_state is True
+    assert prepared.has_persisted_history is True
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].summary == "merged summary"
 
@@ -429,7 +429,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
     assert state.last_compacted_run_count is None
 
     assert prepared.compaction_outcomes == []
-    assert prepared.has_stored_replay_state is True
+    assert prepared.has_persisted_history is True
 
 
 @pytest.mark.asyncio
@@ -467,7 +467,7 @@ async def test_prepare_history_for_run_without_context_window_skips_auto_compact
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
     assert prepared.compaction_outcomes == []
-    assert prepared.has_stored_replay_state is True
+    assert prepared.has_persisted_history is True
 
 
 def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
@@ -546,7 +546,7 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
 
     with patch(
         "mindroom.history.runtime.prepare_history_for_run",
-        new=AsyncMock(return_value=PreparedReplay(has_stored_replay_state=True)),
+        new=AsyncMock(return_value=PreparedHistoryState(has_persisted_history=True)),
     ) as mock_prepare:
         prepared = await prepare_bound_agents_for_run(
             agents=[peer_agent, owner_agent],
@@ -557,7 +557,7 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
             execution_identity=None,
         )
 
-    assert prepared.has_stored_replay_state is True
+    assert prepared.has_persisted_history is True
     assert mock_prepare.await_count == 1
     assert mock_prepare.await_args.kwargs["agent"] is owner_agent
     assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
@@ -629,7 +629,10 @@ async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(
     with (
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
-        patch("mindroom.ai.prepare_history_for_run", new=AsyncMock(return_value=PreparedReplay())) as mock_prepare,
+        patch(
+            "mindroom.ai.prepare_history_for_run",
+            new=AsyncMock(return_value=PreparedHistoryState()),
+        ) as mock_prepare,
     ):
         await _prepare_agent_and_prompt(
             "test_agent",
@@ -769,7 +772,7 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
         )
 
     assert unseen_event_ids == ["event-2"]
-    assert prepared.has_stored_replay_state is True
+    assert prepared.has_persisted_history is True
     assert "Fresh follow-up" in full_prompt
     assert "Already seen" not in full_prompt
     assert "stored summary" not in full_prompt
