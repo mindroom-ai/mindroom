@@ -178,7 +178,6 @@ from .scheduling import (
     cancel_all_running_scheduled_tasks,
     restore_scheduled_tasks,
 )
-from .thread_summary import maybe_generate_thread_summary
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -1135,7 +1134,7 @@ class AgentBot:
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
         await self._dispatch_text_message(room, event, requester_user_id)
 
-    async def _dispatch_text_message(
+    async def _dispatch_text_message(  # noqa: C901
         self,
         room: nio.MatrixRoom,
         event: _TextDispatchEvent,
@@ -1175,6 +1174,7 @@ class AgentBot:
             event,
             requester_user_id=requester_user_id,
             event_label="message",
+            emit_message_received_hooks=False,
         )
         if dispatch is None:
             return
@@ -1796,6 +1796,7 @@ class AgentBot:
         *,
         requester_user_id: str | None = None,
         event_label: str,
+        emit_message_received_hooks: bool = True,
     ) -> _PreparedDispatch | None:
         """Run common precheck/context/sender-gating for dispatch handlers."""
         effective_requester_user_id = requester_user_id or self._precheck_event(room, event)
@@ -1810,7 +1811,7 @@ class AgentBot:
             requester_user_id=effective_requester_user_id,
             context=context,
         )
-        if await self._emit_message_received_hooks(
+        if emit_message_received_hooks and await self._emit_message_received_hooks(
             envelope=envelope,
             correlation_id=correlation_id,
         ):
@@ -2474,9 +2475,9 @@ class AgentBot:
         existing_event_id: str | None = None,
         *,
         payload: _DispatchPayload,
-        response_envelope: MessageEnvelope,
-        enrichment_digest: str | None,  # noqa: ARG002
-        correlation_id: str,
+        response_envelope: MessageEnvelope | None = None,
+        enrichment_digest: str | None = None,
+        correlation_id: str | None = None,
         reason_prefix: str = "Team request",
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot).
@@ -3566,7 +3567,7 @@ class AgentBot:
             return existing_event_id
         return tracked_event_id or existing_event_id
 
-    async def _generate_response(  # noqa: C901
+    async def _generate_response(
         self,
         room_id: str,
         prompt: str,
