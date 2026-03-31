@@ -1134,7 +1134,7 @@ class AgentBot:
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
         await self._dispatch_text_message(room, event, requester_user_id)
 
-    async def _dispatch_text_message(  # noqa: C901
+    async def _dispatch_text_message(
         self,
         room: nio.MatrixRoom,
         event: _TextDispatchEvent,
@@ -1143,21 +1143,13 @@ class AgentBot:
         """Run the normal text/command dispatch pipeline for a prepared text event."""
         assert isinstance(event.body, str)
 
-        # Emit message:received hooks BEFORE command parsing
-        # so hooks can intercept !-prefixed messages (e.g., !ping-hook)
-        context = await self._extract_message_context(room, event)
-        correlation_id = event.event_id
-        envelope = self._build_message_envelope(
-            room_id=room.room_id,
-            event=event,
+        dispatch = await self._prepare_dispatch(
+            room,
+            event,
             requester_user_id=requester_user_id,
-            context=context,
+            event_label="message",
         )
-        if await self._emit_message_received_hooks(
-            envelope=envelope,
-            correlation_id=correlation_id,
-        ):
-            self.response_tracker.mark_responded(event.event_id)
+        if dispatch is None:
             return
 
         # Router handles commands exclusively
@@ -1168,17 +1160,6 @@ class AgentBot:
                 # Commands like !schedule, !help, etc. need to work regardless
                 await self._handle_command(room, event, command)
             return
-
-        dispatch = await self._prepare_dispatch(
-            room,
-            event,
-            requester_user_id=requester_user_id,
-            event_label="message",
-            emit_message_received_hooks=False,
-        )
-        if dispatch is None:
-            return
-
         if self._has_newer_unresponded_in_scope(event, dispatch.context):
             self.response_tracker.mark_responded(event.event_id)
             return
@@ -1796,7 +1777,6 @@ class AgentBot:
         *,
         requester_user_id: str | None = None,
         event_label: str,
-        emit_message_received_hooks: bool = True,
     ) -> _PreparedDispatch | None:
         """Run common precheck/context/sender-gating for dispatch handlers."""
         effective_requester_user_id = requester_user_id or self._precheck_event(room, event)
@@ -1811,7 +1791,7 @@ class AgentBot:
             requester_user_id=effective_requester_user_id,
             context=context,
         )
-        if emit_message_received_hooks and await self._emit_message_received_hooks(
+        if await self._emit_message_received_hooks(
             envelope=envelope,
             correlation_id=correlation_id,
         ):
