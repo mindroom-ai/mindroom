@@ -6,6 +6,7 @@ import asyncio
 import json
 import typing
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, NamedTuple
@@ -57,8 +58,13 @@ _TASK_STATE_POLL_INTERVAL_SECONDS = 30
 # Tasks older than this are marked as failed instead of executed.
 _MISSED_TASK_MAX_AGE_SECONDS = 86400  # 24 hours
 
+# Small pause between draining overdue one-time tasks after sync is ready.
+_DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS = 0.25
+
 # Global task storage for running asyncio tasks
 _running_tasks: dict[str, asyncio.Task] = {}
+_deferred_overdue_tasks: deque[_DeferredOverdueTaskStart] = deque()
+_deferred_overdue_task_ids: set[str] = set()
 _ACTIVE_HOOK_REGISTRY: HookRegistry = HookRegistry.empty()
 
 
@@ -137,6 +143,14 @@ class ScheduledTaskRecord:
     room_id: str
     status: str
     created_at: datetime | None
+    workflow: ScheduledWorkflow
+
+
+@dataclass
+class _DeferredOverdueTaskStart:
+    """A one-time scheduled task that should start after Matrix sync is live."""
+
+    task_id: str
     workflow: ScheduledWorkflow
 
 
@@ -287,6 +301,65 @@ def _start_scheduled_task(
         )
     _running_tasks[task_id] = task
     return True
+
+
+def _queue_deferred_overdue_task(task_id: str, workflow: ScheduledWorkflow) -> bool:
+    """Queue one missed one-time task to be started after Matrix sync is ready."""
+    existing_task = _running_tasks.get(task_id)
+    if existing_task is not None and not existing_task.done():
+        logger.debug("Scheduled task already running; skipping deferred queue", task_id=task_id)
+        return False
+
+    if task_id in _deferred_overdue_task_ids:
+        logger.debug("Scheduled task already queued for deferred start", task_id=task_id)
+        return False
+
+    _deferred_overdue_tasks.append(_DeferredOverdueTaskStart(task_id=task_id, workflow=workflow))
+    _deferred_overdue_task_ids.add(task_id)
+    return True
+
+
+async def drain_deferred_overdue_tasks(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> int:
+    """Start queued overdue one-time tasks after Matrix sync is ready."""
+    drained_count = 0
+
+    while _deferred_overdue_tasks:
+        queued_task = _deferred_overdue_tasks.popleft()
+        _deferred_overdue_task_ids.discard(queued_task.task_id)
+
+        try:
+            if _start_scheduled_task(client, queued_task.task_id, queued_task.workflow, config, runtime_paths):
+                drained_count += 1
+        except Exception:
+            logger.exception(
+                "Failed to start deferred overdue scheduled task",
+                task_id=queued_task.task_id,
+            )
+
+        if _deferred_overdue_tasks:
+            await asyncio.sleep(_DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS)
+
+    if drained_count > 0:
+        logger.info("Drained deferred overdue scheduled tasks", drained_count=drained_count)
+
+    return drained_count
+
+
+def clear_deferred_overdue_tasks() -> int:
+    """Clear queued overdue one-time tasks that have not started yet."""
+    queued_count = len(_deferred_overdue_tasks)
+    _deferred_overdue_tasks.clear()
+    _deferred_overdue_task_ids.clear()
+    return queued_count
+
+
+def has_deferred_overdue_tasks() -> bool:
+    """Return whether any overdue one-time tasks are still queued."""
+    return bool(_deferred_overdue_tasks)
 
 
 def _cancel_running_task(task_id: str) -> None:
@@ -1399,11 +1472,14 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
                         except Exception:
                             logger.exception("Failed to mark ancient task as failed", task_id=task_id)
                         continue
-                    logger.warning(
-                        "Executing missed one-time task",
-                        task_id=task_id,
-                        missed_by_seconds=missed_by,
-                    )
+                    if _queue_deferred_overdue_task(task_id, workflow):
+                        logger.warning(
+                            "Queued missed one-time task until sync is ready",
+                            task_id=task_id,
+                            missed_by_seconds=missed_by,
+                        )
+                        restored_count += 1
+                    continue
             elif workflow.schedule_type == "cron":
                 if not workflow.cron_schedule:
                     logger.warning(f"Skipping recurring task {task_id} without cron schedule")

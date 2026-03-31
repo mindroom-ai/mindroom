@@ -175,6 +175,9 @@ from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
+    clear_deferred_overdue_tasks,
+    drain_deferred_overdue_tasks,
+    has_deferred_overdue_tasks,
     restore_scheduled_tasks,
 )
 from .thread_summary import maybe_generate_thread_summary
@@ -472,9 +475,11 @@ class AgentBot:
     last_sync_time: datetime | None = field(default=None, init=False)
     _last_sync_monotonic: float | None = field(default=None, init=False)
     _first_sync_done: bool = field(default=False, init=False)
+    _sync_shutting_down: bool = field(default=False, init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches, init=False)
     in_flight_response_count: int = field(default=0, init=False)
+    _deferred_overdue_task_drain_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     @property
     def agent_name(self) -> str:
@@ -838,6 +843,9 @@ class AgentBot:
 
         await self._send_welcome_message_if_empty(room_id)
 
+        if self._first_sync_done:
+            self._maybe_start_deferred_overdue_task_drain()
+
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
         assert self.client is not None
@@ -904,7 +912,13 @@ class AgentBot:
         await set_presence_status(self.client, status_msg)
 
     def mark_sync_loop_started(self) -> None:
-        """Record that a sync loop iteration is starting."""
+        """Record that a sync loop iteration is starting.
+
+        Does NOT arm the monotonic watchdog clock — that only starts when the
+        first ``SyncResponse`` or ``SyncError`` arrives.  The watchdog has its
+        own startup timeout for the pre-first-response window.
+        """
+        self._sync_shutting_down = False
         mark_matrix_sync_loop_started(self.agent_name)
 
     def reset_watchdog_clock(self) -> None:
@@ -919,9 +933,18 @@ class AgentBot:
 
     async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
+        first_sync_response = not self._first_sync_done
         self._first_sync_done = True
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
         self._last_sync_monotonic = time.monotonic()
+
+        if self._sync_shutting_down:
+            return
+
+        if first_sync_response:
+            self._maybe_start_deferred_overdue_task_drain()
+        elif has_deferred_overdue_tasks():
+            self._maybe_start_deferred_overdue_task_drain()
 
     async def _on_sync_error(self, _response: nio.SyncError) -> None:
         """Update the watchdog clock on sync errors so it knows the loop is alive."""
@@ -1034,6 +1057,8 @@ class AgentBot:
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=reason)
 
+        await self.prepare_for_sync_shutdown()
+
         # Wait for any pending background tasks (like memory saves) to complete
         try:
             await wait_for_background_tasks(timeout=5.0)  # 5 second timeout
@@ -1042,6 +1067,9 @@ class AgentBot:
             self.logger.warning(f"Some background tasks did not complete: {e}")
 
         if self.agent_name == ROUTER_AGENT_NAME:
+            cleared_queued_tasks = clear_deferred_overdue_tasks()
+            if cleared_queued_tasks > 0:
+                self.logger.info("Cleared queued overdue scheduled tasks", count=cleared_queued_tasks)
             cancelled_tasks = await cancel_all_running_scheduled_tasks()
             if cancelled_tasks > 0:
                 self.logger.info("Cancelled running scheduled tasks", count=cancelled_tasks)
@@ -1097,6 +1125,53 @@ class AgentBot:
                 return
             # Otherwise, room has a different message, don't send welcome
         # Room has other messages, don't send welcome
+
+    def _maybe_start_deferred_overdue_task_drain(self) -> None:
+        """Start draining queued overdue tasks once Matrix sync is ready."""
+        if self.agent_name != ROUTER_AGENT_NAME or self.client is None or self._sync_shutting_down:
+            return
+
+        existing_task = self._deferred_overdue_task_drain_task
+        if existing_task is not None and not existing_task.done():
+            return
+
+        self._deferred_overdue_task_drain_task = asyncio.create_task(
+            self._drain_deferred_overdue_task_queue(),
+            name=f"deferred_overdue_task_drain_{self.agent_name}",
+        )
+
+    async def _drain_deferred_overdue_task_queue(self) -> None:
+        """Drain queued overdue tasks without blocking sync callbacks."""
+        assert self.client is not None
+
+        try:
+            drained_count = await drain_deferred_overdue_tasks(self.client, self.config, self.runtime_paths)
+            if drained_count > 0:
+                self.logger.info("Started deferred overdue scheduled tasks", count=drained_count)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger.exception("Failed to drain deferred overdue scheduled tasks")
+
+    async def _cancel_deferred_overdue_task_drain(self) -> None:
+        """Cancel the background overdue-task drain task if one exists."""
+        drain_task = self._deferred_overdue_task_drain_task
+        self._deferred_overdue_task_drain_task = None
+        if drain_task is None:
+            return
+
+        if not drain_task.done():
+            drain_task.cancel()
+
+        await asyncio.gather(drain_task, return_exceptions=True)
+
+    async def prepare_for_sync_shutdown(self) -> None:
+        """Cancel work that must not outlive the Matrix sync loop."""
+        self._sync_shutting_down = True
+        if self.agent_name != ROUTER_AGENT_NAME:
+            return
+
+        await self._cancel_deferred_overdue_task_drain()
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""

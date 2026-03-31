@@ -388,7 +388,13 @@ async def stop_entities(
     sync_tasks: dict[str, asyncio.Task],
 ) -> None:
     """Stop a set of entities and remove them from runtime maps."""
-    # Cancel sync tasks first so restarted entities do not accumulate duplicate loops.
+    # Cancel teardown-sensitive background work before stopping sync loops.
+    for entity_name in entities_to_restart:
+        bot = agent_bots.get(entity_name)
+        if bot is not None:
+            await bot.prepare_for_sync_shutdown()
+
+    # Cancel sync tasks next so restarted entities do not accumulate duplicate loops.
     for entity_name in entities_to_restart:
         await cancel_sync_task(entity_name, sync_tasks)
 
@@ -427,6 +433,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             logger.exception(f"Sync loop failed for {bot.agent_name} (retry {retry_count})")
         finally:
             if iteration is not None:
+                await bot.prepare_for_sync_shutdown()
                 await iteration.cancel()
 
         if not bot.running or (max_retries >= 0 and retry_count >= max_retries):
