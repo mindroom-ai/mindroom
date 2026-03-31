@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -19,6 +19,7 @@ from mindroom.history.compaction import (
     compact_scope_history,
     estimate_prompt_visible_history_tokens,
     estimate_static_tokens,
+    estimate_team_static_tokens,
     normalize_compaction_budget_tokens,
     resolve_compaction_runtime_settings,
     resolve_effective_compaction_threshold,
@@ -31,6 +32,7 @@ from mindroom.token_budget import estimate_text_tokens
 if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
+    from agno.team import Team
 
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
@@ -209,6 +211,7 @@ async def prepare_history_for_run(
 async def prepare_bound_agents_for_run(
     *,
     agents: list[Agent],
+    team: Team | None = None,
     full_prompt: str,
     fallback_full_prompt: str | None = None,
     session_id: str | None,
@@ -251,14 +254,23 @@ async def prepare_bound_agents_for_run(
         active_model_name=resolved_active_model_name,
         active_context_window=resolved_active_context_window,
     ).context_window
+    static_prompt_tokens = (
+        estimate_preparation_static_tokens_for_team(
+            team,
+            full_prompt=full_prompt,
+            fallback_full_prompt=fallback_full_prompt,
+        )
+        if team is not None
+        else estimate_preparation_prompt_tokens(
+            full_prompt=full_prompt,
+            fallback_full_prompt=fallback_full_prompt,
+        )
+    )
     available_history_budget = _resolve_available_history_budget(
         compaction_config=compaction_config,
         active_context_window=resolved_active_context_window,
         compaction_context_window=resolved_compaction_context_window,
-        static_prompt_tokens=estimate_preparation_prompt_tokens(
-            full_prompt=full_prompt,
-            fallback_full_prompt=fallback_full_prompt,
-        ),
+        static_prompt_tokens=static_prompt_tokens,
     )
 
     return await prepare_history_for_run(
@@ -276,10 +288,7 @@ async def prepare_bound_agents_for_run(
         has_authored_compaction_config=has_authored_compaction_config,
         active_model_name=resolved_active_model_name,
         active_context_window=resolved_active_context_window,
-        static_prompt_tokens=estimate_preparation_prompt_tokens(
-            full_prompt=full_prompt,
-            fallback_full_prompt=fallback_full_prompt,
-        ),
+        static_prompt_tokens=static_prompt_tokens,
         available_history_budget=available_history_budget,
         scope=bound_scope.scope,
     )
@@ -353,6 +362,19 @@ def estimate_preparation_prompt_tokens(
     if fallback_full_prompt is None:
         return primary_tokens
     return max(primary_tokens, estimate_text_tokens(fallback_full_prompt))
+
+
+def estimate_preparation_static_tokens_for_team(
+    team: Team,
+    *,
+    full_prompt: str,
+    fallback_full_prompt: str | None = None,
+) -> int:
+    """Estimate team static tokens using the largest prompt variant this run may send."""
+    primary_tokens = estimate_team_static_tokens(team, full_prompt)
+    if fallback_full_prompt is None:
+        return primary_tokens
+    return max(primary_tokens, estimate_team_static_tokens(team, fallback_full_prompt))
 
 
 def load_bound_scope_session_context(
@@ -623,12 +645,7 @@ def _clear_forced_compaction_state(
 ) -> None:
     if not state.force_compact_before_next_run:
         return
-    cleared_state = type(state)(
-        last_compacted_at=state.last_compacted_at,
-        last_summary_model=state.last_summary_model,
-        last_compacted_run_count=state.last_compacted_run_count,
-        force_compact_before_next_run=False,
-    )
+    cleared_state = replace(state, force_compact_before_next_run=False)
     write_scope_state(session, scope, cleared_state)
     storage.upsert_session(session)
 

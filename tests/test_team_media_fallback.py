@@ -186,6 +186,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     assert "Recovered team response" in response
     assert mock_prepare.await_count == 1
     assert mock_prepare.await_args.kwargs["agents"] == [fake_agent]
+    assert mock_prepare.await_args.kwargs["team"] is mock_team
     assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
     assert mock_prepare.await_args.kwargs["session_id"] == "session-123"
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
@@ -224,6 +225,7 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
         )
 
     assert "Recovered team response" in response
+    assert mock_prepare.await_args.kwargs["team"] is mock_team
     assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
     assert "Old thread context" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
     prompt = mock_team.arun.await_args.args[0]
@@ -288,6 +290,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
 
     assert "Recovered team response" in response
     budget_prompt = mock_prepare.await_args.kwargs["full_prompt"]
+    assert mock_prepare.await_args.kwargs["team"] is mock_team
     assert "Fresh follow-up" in budget_prompt
     assert "Already seen" not in budget_prompt
     assert "Current message body" not in budget_prompt
@@ -913,6 +916,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     assert "Streamed team response" in str(chunks[0])
     assert mock_prepare.await_count == 1
     assert mock_prepare.await_args.kwargs["agents"] == [fake_agent]
+    assert mock_prepare.await_args.kwargs["team"] is mock_team
     assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
     assert mock_prepare.await_args.kwargs["session_id"] == "session-123"
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
@@ -962,6 +966,7 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
 
     assert len(chunks) == 1
     assert "Streamed team response" in str(chunks[0])
+    assert mock_prepare.await_args.kwargs["team"] is mock_team
     assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
     assert "Old thread context" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
     assert mock_raw.await_args.kwargs["prompt"] == "Analyze this."
@@ -1030,6 +1035,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
 
     assert len(chunks) == 1
     budget_prompt = mock_prepare.await_args.kwargs["full_prompt"]
+    assert mock_prepare.await_args.kwargs["team"] is mock_team
     assert "Fresh follow-up" in budget_prompt
     assert "Already seen" not in budget_prompt
     prompt = mock_raw.await_args.kwargs["prompt"]

@@ -19,6 +19,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
+from agno.team import Team
 
 from mindroom.agents import create_agent, create_session_storage, get_agent_session
 from mindroom.ai import _prepare_agent_and_prompt, build_prompt_with_thread_history
@@ -34,6 +35,7 @@ from mindroom.history.compaction import (
 )
 from mindroom.history.runtime import (
     estimate_preparation_static_tokens,
+    estimate_preparation_static_tokens_for_team,
     load_scope_session_context,
 )
 from mindroom.history.storage import (
@@ -543,6 +545,13 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     config, runtime_paths = _make_config(tmp_path)
     owner_agent = _agent(agent_id="alpha", name="Alpha")
     peer_agent = _agent(agent_id="beta", name="Beta")
+    team = Team(
+        members=[owner_agent, peer_agent],
+        model=FakeModel(id="fake-model", provider="fake"),
+        id="team_alpha+beta",
+        name="Pair",
+        role="Verbose team role",
+    )
 
     with patch(
         "mindroom.history.runtime.prepare_history_for_run",
@@ -550,6 +559,7 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     ) as mock_prepare:
         prepared = await prepare_bound_agents_for_run(
             agents=[peer_agent, owner_agent],
+            team=team,
             full_prompt="Current prompt",
             session_id="session-1",
             runtime_paths=runtime_paths,
@@ -562,6 +572,10 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert mock_prepare.await_args.kwargs["agent"] is owner_agent
     assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
     assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+beta")
+    assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == estimate_preparation_static_tokens_for_team(
+        team,
+        full_prompt="Current prompt",
+    )
 
 
 def test_create_team_instance_enables_native_team_history_and_disables_members(tmp_path: Path) -> None:
@@ -614,6 +628,51 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
     assert team.add_session_summary_to_context is True
     assert team.num_history_messages == 2
     assert team.store_history_messages is False
+
+
+def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "alpha": AgentConfig(display_name="Alpha"),
+                "zeta": AgentConfig(display_name="Zeta"),
+            },
+            teams={
+                "pair": TeamConfig(
+                    display_name="Pair",
+                    role="Test team",
+                    agents=["alpha", "zeta"],
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=2_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    alpha = _agent(agent_id="alpha", name="Alpha")
+    zeta = _agent(agent_id="zeta", name="Zeta")
+
+    with patch("mindroom.teams.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+        team = _create_team_instance(
+            [alpha, zeta],
+            ["alpha", "zeta"],
+            TeamMode.COORDINATE,
+            orchestrator,
+            configured_team_name="pair",
+        )
+
+    assert team.num_history_runs is None
+    assert team.num_history_messages is None
 
 
 @pytest.mark.asyncio

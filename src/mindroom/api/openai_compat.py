@@ -1165,6 +1165,10 @@ def _build_team(
         show_members_responses=True,
         debug_mode=False,
     )
+    if history_settings.policy.mode == "all":
+        # Agno hardcodes num_history_runs=3 when both are None. Override after
+        # construction so team sessions can replay their full stored history.
+        team.num_history_runs = None
     return team_members.agents, team, mode
 
 
@@ -1178,6 +1182,7 @@ async def _prepare_openai_team_prompt(
     *,
     team_name: str,
     agents: list[Agent],
+    team: Team,
     prompt: str,
     session_id: str,
     config: Config,
@@ -1191,6 +1196,7 @@ async def _prepare_openai_team_prompt(
     active_team_context_window = config.get_model_context_window(active_team_model_name)
     prepared_history = await prepare_bound_agents_for_run(
         agents=agents,
+        team=team,
         full_prompt=prompt,
         fallback_full_prompt=fallback_prompt,
         session_id=session_id,
@@ -1227,6 +1233,7 @@ async def _non_stream_team_completion(
         team_prompt = await _prepare_openai_team_prompt(
             team_name=team_name,
             agents=agents,
+            team=team,
             prompt=prompt,
             session_id=session_id,
             config=config,
@@ -1287,6 +1294,7 @@ async def _stream_team_completion(
         team_prompt = await _prepare_openai_team_prompt(
             team_name=team_name,
             agents=agents,
+            team=team,
             prompt=prompt,
             session_id=session_id,
             config=config,

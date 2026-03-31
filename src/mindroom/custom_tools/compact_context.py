@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -9,7 +10,6 @@ from agno.tools import Toolkit
 from mindroom.history.compaction import resolve_compaction_runtime_settings
 from mindroom.history.runtime import load_scope_session_context
 from mindroom.history.storage import read_scope_state, write_scope_state
-from mindroom.history.types import HistoryScopeState
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_current_session_id
 
@@ -42,7 +42,7 @@ class CompactContextTools(Toolkit):
     async def compact_context(self, agent: Agent | None = None) -> str:
         """Request compaction before the next run in the current scope."""
         if agent is None:
-            return "Error: No active agent available. Cannot determine replay scope."
+            return "Error: No active agent available. Cannot determine history scope."
 
         session_id = resolve_current_session_id(
             execution_identity=self._execution_identity,
@@ -61,24 +61,26 @@ class CompactContextTools(Toolkit):
             create_session_if_missing=True,
         )
         if scope_context is None:
-            return "Error: Current agent has no replay scope. Cannot compact context."
+            return "Error: Current agent has no history scope. Cannot compact context."
         if scope_context.session is None:
             return "Error: No stored session available. Cannot compact context."
         runtime_context = get_tool_runtime_context()
+        active_model_name = runtime_context.active_model_name if runtime_context is not None else None
         if agent.team_id is not None:
             if agent.team_id in self._config.teams:
-                room_id = runtime_context.room_id if runtime_context is not None else None
-                active_model_name = self._config.get_effective_team_model_name(
-                    agent.team_id,
-                    room_id,
-                    self._runtime_paths,
-                )
+                if active_model_name is None:
+                    room_id = runtime_context.room_id if runtime_context is not None else None
+                    active_model_name = self._config.get_effective_team_model_name(
+                        agent.team_id,
+                        room_id,
+                        self._runtime_paths,
+                    )
                 compaction_config = self._config.get_entity_compaction_config(agent.team_id)
             else:
-                active_model_name = "default"
+                active_model_name = active_model_name or "default"
                 compaction_config = self._config.get_default_compaction_config()
         else:
-            active_model_name = self._config.get_entity_model_name(self._agent_name)
+            active_model_name = active_model_name or self._config.get_entity_model_name(self._agent_name)
             compaction_config = self._config.get_entity_compaction_config(self._agent_name)
         active_context_window = self._config.get_model_context_window(active_model_name)
         compaction_runtime = resolve_compaction_runtime_settings(
@@ -93,12 +95,7 @@ class CompactContextTools(Toolkit):
                 "active model or the selected compaction model."
             )
         current_state = read_scope_state(scope_context.session, scope_context.scope)
-        next_state = HistoryScopeState(
-            last_compacted_at=current_state.last_compacted_at,
-            last_summary_model=current_state.last_summary_model,
-            last_compacted_run_count=current_state.last_compacted_run_count,
-            force_compact_before_next_run=True,
-        )
+        next_state = replace(current_state, force_compact_before_next_run=True)
         write_scope_state(scope_context.session, scope_context.scope, next_state)
         scope_context.storage.upsert_session(scope_context.session)
         logger.info(

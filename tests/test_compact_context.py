@@ -14,7 +14,7 @@ from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
 from mindroom.agents import create_session_storage, get_agent_session
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -23,6 +23,7 @@ from mindroom.history import prepare_history_for_run
 from mindroom.history.runtime import load_scope_session_context
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
@@ -292,5 +293,79 @@ async def test_compact_context_uses_stable_team_scope_storage(tmp_path: Path) ->
     assert team_context is not None
     assert team_context.session is not None
     team_state = read_scope_state(team_context.session, HistoryScope(kind="team", scope_id="team-123"))
+    assert team_state.force_compact_before_next_run is True
+    assert result == "Compaction scheduled for the next reply in this conversation scope."
+
+
+@pytest.mark.asyncio
+async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_path: Path) -> None:
+    """Team-scoped compaction should honor the actual per-run model override."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            teams={
+                "team_123": TeamConfig(
+                    display_name="Test Team",
+                    role="Coordinate work",
+                    agents=["test_agent"],
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(provider="openai", id="default-model", context_window=None),
+                "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
+            },
+        ),
+        runtime_paths,
+    )
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=SimpleNamespace(session_id="session-1"),
+    )
+    team_agent = _agent(team_id="team_123")
+    team_context = load_scope_session_context(
+        agent=team_agent,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    )
+    assert team_context is not None
+    assert team_context.session is not None
+    team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
+    team_context.storage.upsert_session(team_context.session)
+
+    runtime_context = ToolRuntimeContext(
+        agent_name="test_agent",
+        room_id="!room:localhost",
+        thread_id="thread-1",
+        resolved_thread_id="thread-1",
+        requester_id="@alice:localhost",
+        client=SimpleNamespace(),
+        config=config,
+        runtime_paths=runtime_paths,
+        active_model_name="large",
+        session_id="session-1",
+    )
+
+    with tool_runtime_context(runtime_context):
+        result = await tool.compact_context(agent=team_agent)
+
+    reloaded_team_context = load_scope_session_context(
+        agent=team_agent,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
+    assert reloaded_team_context is not None
+    assert reloaded_team_context.session is not None
+    team_state = read_scope_state(reloaded_team_context.session, HistoryScope(kind="team", scope_id="team_123"))
     assert team_state.force_compact_before_next_run is True
     assert result == "Compaction scheduled for the next reply in this conversation scope."

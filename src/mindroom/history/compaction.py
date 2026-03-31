@@ -1,4 +1,4 @@
-"""Single-pass scoped compaction."""
+"""Scoped compaction."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.summary import SessionSummary
+from agno.session.team import TeamSession
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
     from agno.db.sqlite import SqliteDb
     from agno.models.base import Model
     from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
+    from agno.team import Team
 
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
@@ -89,6 +90,12 @@ class ResolvedCompactionRuntime:
     context_window: int | None
 
 
+@dataclass(frozen=True)
+class _CompactionRewriteResult:
+    summary_text: str
+    compacted_run_count: int
+
+
 async def compact_scope_history(
     *,
     storage: SqliteDb,
@@ -114,12 +121,7 @@ async def compact_scope_history(
         available_history_budget=available_history_budget,
     )
     if not compactable_runs:
-        cleared_state = HistoryScopeState(
-            last_compacted_at=state.last_compacted_at,
-            last_summary_model=state.last_summary_model,
-            last_compacted_run_count=state.last_compacted_run_count,
-            force_compact_before_next_run=False,
-        )
+        cleared_state = replace(state, force_compact_before_next_run=False)
         if cleared_state != state:
             write_scope_state(session, scope, cleared_state)
             storage.upsert_session(session)
@@ -151,38 +153,35 @@ async def compact_scope_history(
         )
         return _clear_force_flag(storage=storage, session=session, scope=scope, state=state), None
 
-    summary_input, included_runs = _build_summary_input(
-        previous_summary=_current_summary_text(session),
-        compacted_runs=compactable_runs,
-        max_input_tokens=summary_input_budget,
-    )
-    if not included_runs:
-        logger.warning(
-            "Compaction skipped because no run fit the single-pass summary budget",
-            session_id=session.session_id,
-            scope=scope.key,
-            candidate_runs=len(compactable_runs),
-            summary_input_budget=summary_input_budget,
-        )
-        return _clear_force_flag(storage=storage, session=session, scope=scope, state=state), None
-
-    new_summary = await _generate_compaction_summary(model=summary_model, summary_input=summary_input)
-    compacted_at = _iso_utc_now()
-    new_state = HistoryScopeState(
-        last_compacted_at=compacted_at,
-        last_summary_model=_model_identifier(summary_model),
-        last_compacted_run_count=len(included_runs),
-        force_compact_before_next_run=False,
-    )
     before_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         scope=scope,
         history_settings=history_settings,
     )
     before_run_count = len(visible_runs)
-    compacted_run_ids = {run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id}
-    session.summary = SessionSummary(summary=new_summary.summary, updated_at=datetime.now(UTC))
-    session.runs = _remove_runs_by_id(session.runs or [], compacted_run_ids)
+    working_session = deepcopy(session)
+    rewrite_result = await _rewrite_working_session_for_compaction(
+        working_session=working_session,
+        summary_model=summary_model,
+        session_id=session.session_id,
+        scope=scope,
+        state=state,
+        history_settings=history_settings,
+        available_history_budget=available_history_budget,
+        summary_input_budget=summary_input_budget,
+    )
+    if rewrite_result is None:
+        return _clear_force_flag(storage=storage, session=session, scope=scope, state=state), None
+
+    compacted_at = _iso_utc_now()
+    new_state = HistoryScopeState(
+        last_compacted_at=compacted_at,
+        last_summary_model=_model_identifier(summary_model),
+        last_compacted_run_count=rewrite_result.compacted_run_count,
+        force_compact_before_next_run=False,
+    )
+    session.summary = working_session.summary
+    session.runs = working_session.runs
     write_scope_state(session, scope, new_state)
     storage.upsert_session(session)
 
@@ -196,7 +195,7 @@ async def compact_scope_history(
     threshold_tokens = resolve_effective_compaction_threshold(compaction_config, active_window) if active_window else 0
     outcome = CompactionOutcome(
         mode="manual" if state.force_compact_before_next_run else "auto",
-        summary=new_summary.summary,
+        summary=rewrite_result.summary_text,
         summary_model=_model_identifier(summary_model),
         before_tokens=before_tokens,
         after_tokens=after_tokens,
@@ -205,11 +204,86 @@ async def compact_scope_history(
         reserve_tokens=compaction_config.reserve_tokens,
         runs_before=before_run_count,
         runs_after=len(after_visible_runs),
-        compacted_run_count=len(included_runs),
+        compacted_run_count=rewrite_result.compacted_run_count,
         compacted_at=compacted_at,
         notify=compaction_config.notify,
     )
     return new_state, outcome
+
+
+async def _rewrite_working_session_for_compaction(
+    *,
+    working_session: AgentSession | TeamSession,
+    summary_model: Model,
+    session_id: str,
+    scope: HistoryScope,
+    state: HistoryScopeState,
+    history_settings: ResolvedHistorySettings,
+    available_history_budget: int | None,
+    summary_input_budget: int,
+) -> _CompactionRewriteResult | None:
+    final_summary_text = _current_summary_text(working_session) or ""
+    total_compacted_run_count = 0
+
+    while True:
+        working_visible_runs = _runs_for_scope(_completed_top_level_runs(working_session), scope)
+        selection_state = (
+            state if total_compacted_run_count == 0 else replace(state, force_compact_before_next_run=False)
+        )
+        compactable_runs = _select_runs_to_compact(
+            visible_runs=working_visible_runs,
+            session=working_session,
+            scope=scope,
+            state=selection_state,
+            history_settings=history_settings,
+            available_history_budget=available_history_budget,
+        )
+        if not compactable_runs:
+            break
+
+        summary_input, included_runs = _build_summary_input(
+            previous_summary=_current_summary_text(working_session),
+            compacted_runs=compactable_runs,
+            max_input_tokens=summary_input_budget,
+        )
+        if not included_runs:
+            logger.warning(
+                "Compaction skipped because no run fit the single-pass summary budget",
+                session_id=session_id,
+                scope=scope.key,
+                candidate_runs=len(compactable_runs),
+                summary_input_budget=summary_input_budget,
+            )
+            if total_compacted_run_count == 0:
+                return None
+            break
+
+        new_summary = await _generate_compaction_summary(model=summary_model, summary_input=summary_input)
+        final_summary_text = new_summary.summary
+        compacted_run_ids = {run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id}
+        working_session.summary = SessionSummary(summary=new_summary.summary, updated_at=datetime.now(UTC))
+        working_session.runs = _remove_runs_by_id(working_session.runs or [], compacted_run_ids)
+        total_compacted_run_count += len(included_runs)
+
+        if available_history_budget is None:
+            break
+
+        after_tokens = estimate_prompt_visible_history_tokens(
+            session=working_session,
+            scope=scope,
+            history_settings=history_settings,
+        )
+        if after_tokens <= available_history_budget:
+            break
+        if len(_runs_for_scope(_completed_top_level_runs(working_session), scope)) <= 1:
+            break
+
+    if total_compacted_run_count == 0:
+        return None
+    return _CompactionRewriteResult(
+        summary_text=final_summary_text,
+        compacted_run_count=total_compacted_run_count,
+    )
 
 
 def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
@@ -223,6 +297,18 @@ def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
             static_chars += len(str(instruction))
     static_chars += len(full_prompt)
     return static_chars // 4
+
+
+def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
+    """Estimate the non-history team prompt using Agno's team system-message builder."""
+    static_tokens = estimate_text_tokens(full_prompt)
+    system_message = team.get_system_message(
+        session=TeamSession(session_id="history-budget", team_id=team.id),
+        add_session_state_to_context=False,
+    )
+    if system_message is None or system_message.content is None:
+        return static_tokens
+    return static_tokens + estimate_text_tokens(str(system_message.content))
 
 
 def resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
@@ -657,8 +743,6 @@ def _history_messages_for_session(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    if history_settings.policy.limit is not None and history_settings.policy.limit <= 0:
-        return []
     history_messages = [
         deepcopy(message)
         for message in _session_history_messages(
@@ -792,12 +876,7 @@ def _clear_force_flag(
 ) -> HistoryScopeState:
     if not state.force_compact_before_next_run:
         return state
-    cleared_state = HistoryScopeState(
-        last_compacted_at=state.last_compacted_at,
-        last_summary_model=state.last_summary_model,
-        last_compacted_run_count=state.last_compacted_run_count,
-        force_compact_before_next_run=False,
-    )
+    cleared_state = replace(state, force_compact_before_next_run=False)
     write_scope_state(session, scope, cleared_state)
     storage.upsert_session(session)
     return cleared_state

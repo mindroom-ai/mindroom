@@ -226,10 +226,12 @@ class DefaultsConfig(BaseModel):
     )
     num_history_runs: int | None = Field(
         default=None,
+        ge=1,
         description="Default number of prior Agno runs to include as history context (None = all)",
     )
     num_history_messages: int | None = Field(
         default=None,
+        ge=1,
         description="Default max messages from history (mutually exclusive with num_history_runs)",
     )
     compress_tool_results: bool = Field(

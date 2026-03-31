@@ -1136,7 +1136,7 @@ def _create_team_instance(
         agent.add_history_to_context = False
         agent.add_session_summary_to_context = False
 
-    return Team(
+    team = Team(
         members=agents,  # type: ignore[arg-type]
         id=team_id,
         name=f"Team-{'-'.join(agent_names)}",
@@ -1153,6 +1153,11 @@ def _create_team_instance(
         debug_mode=False,
         # Agno will automatically list members with their names, roles, and tools
     )
+    if history_settings.policy.mode == "all":
+        # Agno hardcodes num_history_runs=3 when both are None. Override after
+        # construction so team sessions can replay their full stored history.
+        team.num_history_runs = None
+    return team
 
 
 def select_model_for_team(
@@ -1249,6 +1254,7 @@ async def _prepare_materialized_team_execution(
     active_team_context_window = orchestrator.config.get_model_context_window(active_team_model_name)
     prepared_history = await prepare_bound_agents_for_run(
         agents=team_members.agents,
+        team=team,
         full_prompt=prompt_for_history,
         fallback_full_prompt=None if reply_to_event_id and thread_history else fallback_prompt,
         session_id=session_id,

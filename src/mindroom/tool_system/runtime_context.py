@@ -36,6 +36,7 @@ class ToolRuntimeContext:
     client: nio.AsyncClient
     config: Config
     runtime_paths: RuntimePaths
+    active_model_name: str | None = None
     session_id: str | None = None
     room: nio.MatrixRoom | None = None
     reply_to_event_id: str | None = None

@@ -2239,6 +2239,7 @@ class AgentBot:
         session_id: str | None = None,
         *,
         agent_name: str | None = None,
+        active_model_name: str | None = None,
         attachment_ids: list[str] | None = None,
         correlation_id: str | None = None,
     ) -> ToolRuntimeContext | None:
@@ -2254,6 +2255,7 @@ class AgentBot:
             client=self.client,
             config=self.config,
             runtime_paths=self.runtime_paths,
+            active_model_name=active_model_name,
             session_id=session_id,
             room=self._cached_room(room_id),
             reply_to_event_id=reply_to_event_id,
@@ -2591,6 +2593,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
+            active_model_name=model_name,
             session_id=session_id,
             attachment_ids=payload.attachment_ids,
             correlation_id=resolved_correlation_id,

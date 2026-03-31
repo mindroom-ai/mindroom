@@ -215,6 +215,39 @@ def test_hidden_tool_calls_prompt_is_injected(mock_storage: MagicMock) -> None: 
     assert agent_prompts.HIDDEN_TOOL_CALLS_PROMPT in agent.instructions
 
 
+@pytest.mark.parametrize(
+    ("factory", "field_name"),
+    [
+        (lambda: DefaultsConfig(num_history_runs=0), "num_history_runs"),
+        (lambda: DefaultsConfig(num_history_messages=0), "num_history_messages"),
+        (lambda: AgentConfig(display_name="Agent", num_history_runs=0), "num_history_runs"),
+        (lambda: AgentConfig(display_name="Agent", num_history_messages=0), "num_history_messages"),
+        (
+            lambda: TeamConfig(
+                display_name="Team",
+                role="Coordinate work",
+                agents=["general"],
+                num_history_runs=0,
+            ),
+            "num_history_runs",
+        ),
+        (
+            lambda: TeamConfig(
+                display_name="Team",
+                role="Coordinate work",
+                agents=["general"],
+                num_history_messages=0,
+            ),
+            "num_history_messages",
+        ),
+    ],
+)
+def test_history_limits_require_positive_values(factory: Callable[[], object], field_name: str) -> None:
+    """Zero history limits are rejected so they cannot diverge from Agno semantics."""
+    with pytest.raises(ValidationError, match=field_name):
+        factory()
+
+
 @patch("mindroom.agents.SqliteDb")
 def test_scheduler_tool_enabled_by_default(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """All agents should get the scheduler tool even when not explicitly configured."""

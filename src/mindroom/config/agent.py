@@ -219,10 +219,12 @@ class AgentConfig(BaseModel):
     )
     num_history_runs: int | None = Field(
         default=None,
+        ge=1,
         description="Number of prior Agno runs to include as history context (per-agent override)",
     )
     num_history_messages: int | None = Field(
         default=None,
+        ge=1,
         description="Max messages from history (mutually exclusive with num_history_runs)",
     )
     compress_tool_results: bool | None = Field(
@@ -361,10 +363,12 @@ class TeamConfig(BaseModel):
     )
     num_history_runs: int | None = Field(
         default=None,
+        ge=1,
         description="Number of prior scoped runs to include as team history context",
     )
     num_history_messages: int | None = Field(
         default=None,
+        ge=1,
         description="Max messages from team-scoped history (mutually exclusive with num_history_runs)",
     )
     max_tool_calls_from_history: int | None = Field(

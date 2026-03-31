@@ -1850,6 +1850,7 @@ class TestTeamCompletion:
         assert "Team consensus result" in data["choices"][0]["message"]["content"]
         assert mock_prepare.await_count == 1
         assert mock_prepare.await_args.kwargs["agents"] == mock_agents
+        assert mock_prepare.await_args.kwargs["team"] is mock_team
 
     def test_team_streaming(self, team_app_client: TestClient) -> None:
         """Streaming team completion streams TeamContentEvent (leader text) directly."""
@@ -1911,6 +1912,7 @@ class TestTeamCompletion:
         assert "world!" in content_parts
         assert mock_prepare.await_count == 1
         assert mock_prepare.await_args.kwargs["agents"] == mock_agents
+        assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert mock_team.arun.call_args.args[0] == "Build it"
 
     def test_team_streaming_keeps_execution_identity_for_full_stream(self, team_app_client: TestClient) -> None:
@@ -2462,6 +2464,7 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         assert mock_prepare.await_args.kwargs["full_prompt"] == "Follow-up"
+        assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert "Start" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
         assert "Ack" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
         prompt = mock_team.arun.call_args.args[0]
@@ -2510,6 +2513,7 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         assert mock_prepare.await_args.kwargs["full_prompt"] == "Follow-up"
+        assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert "Start" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
         assert "Ack" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
         prompt = mock_team.arun.call_args.args[0]
@@ -2606,6 +2610,35 @@ class TestTeamCompletion:
 
         assert mock_team_init.call_args.kwargs["id"] == "coord_team"
         assert mock_team_init.call_args.kwargs["db"] is not None
+
+    def test_build_team_preserves_all_history_mode(self) -> None:
+        """Configured teams without explicit limits should keep native all-history mode."""
+        config = Config(
+            agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            router=RouterConfig(model="default"),
+            teams={
+                "coord_team": TeamConfig(
+                    display_name="Coord Team",
+                    role="Coordinated team",
+                    agents=["general"],
+                    mode="coordinate",
+                ),
+            },
+        )
+        member = MagicMock(name="GeneralAgent")
+        member.id = "general"
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", return_value=member),
+            patch("mindroom.api.openai_compat.get_model_instance", return_value="openai:test-model"),
+        ):
+            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
+
+            _agents, team, _mode = _build_team("coord_team", config, _runtime_paths(), execution_identity=None)
+
+        assert team.num_history_runs is None
+        assert team.num_history_messages is None
 
     def test_build_team_passes_knowledge_to_member_agents(self) -> None:
         """Team member creation resolves and passes configured knowledge."""
