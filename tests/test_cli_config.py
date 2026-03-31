@@ -347,7 +347,7 @@ class TestConfigInit:
         assert "\nOPENAI_API_KEY=" not in env_content
         assert "\nOPENROUTER_API_KEY=" not in env_content
 
-        output = _strip_ansi(result.output)
+        output = _unwrap_console_output(result.output)
         assert "mindroom connect --pair-code" in output
         assert "Vertex AI project/region" in output
         assert "Google" in output

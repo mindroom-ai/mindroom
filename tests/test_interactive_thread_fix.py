@@ -301,3 +301,60 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
             "When not in a thread, thread_id should not be None. "
             "It should be the agent's message ID for proper thread creation."
         )
+
+
+@pytest.mark.asyncio
+async def test_interactive_question_stays_room_scoped_in_room_mode(tmp_path: Path) -> None:
+    """Room-mode agents must keep standalone interactive questions in room scope."""
+    with (
+        patch("mindroom.bot.ai_response") as mock_ai_response,
+        patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
+        patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
+        patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock),
+    ):
+        mock_ai_response.return_value = "Test interactive response"
+
+        mock_response_with_interactive = MagicMock()
+        mock_response_with_interactive.formatted_text = "Test interactive question"
+        mock_response_with_interactive.option_map = {"1": "option1"}
+        mock_response_with_interactive.options_list = [{"emoji": "1", "label": "Option 1"}]
+        mock_parse.return_value = mock_response_with_interactive
+
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General", thread_mode="room")}),
+            test_runtime_paths(tmp_path),
+        )
+        agent_user = AgentMatrixUser(
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="GeneralAgent",
+            password="test_password",  # noqa: S106
+        )
+
+        bot = AgentBot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:localhost"],
+        )
+
+        client = AsyncMock()
+        client.user_id = "@mindroom_general:localhost"
+        mock_send_response = MagicMock(spec=nio.RoomSendResponse)
+        mock_send_response.event_id = "$room_mode_message"
+        client.room_send.return_value = mock_send_response
+        bot.client = client
+
+        await bot._process_and_respond(
+            room_id="!test:localhost",
+            prompt="Test prompt",
+            reply_to_event_id="$user_message",
+            thread_id=None,
+            thread_history=[],
+        )
+
+        mock_register.assert_called_once()
+        call_args = mock_register.call_args[0]
+        assert call_args[0] == "$room_mode_message"
+        assert call_args[2] is None

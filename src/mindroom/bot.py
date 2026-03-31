@@ -784,9 +784,16 @@ class AgentBot:
             return None
         return self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id)
 
-    @staticmethod
-    def _interactive_registration_thread_root(event_id: str, thread_root: str | None) -> str:
-        """Use the delivered event as the thread root when no existing thread is available."""
+    def _interactive_registration_thread_root(
+        self,
+        event_id: str,
+        thread_root: str | None,
+        *,
+        room_id: str,
+    ) -> str | None:
+        """Return the stored thread root for interactive follow-up handling."""
+        if self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room_id) == "room":
+            return None
         return thread_root or event_id
 
     @property
@@ -3012,7 +3019,11 @@ class AgentBot:
             interactive.register_interactive_question(
                 delivery_result.event_id,
                 room_id,
-                self._interactive_registration_thread_root(delivery_result.event_id, resolved_thread_id),
+                self._interactive_registration_thread_root(
+                    delivery_result.event_id,
+                    resolved_thread_id,
+                    room_id=room_id,
+                ),
                 delivery_result.option_map,
                 "team",
             )
@@ -3314,7 +3325,11 @@ class AgentBot:
             interactive.register_interactive_question(
                 delivery.event_id,
                 room_id,
-                self._interactive_registration_thread_root(delivery.event_id, response_thread_id),
+                self._interactive_registration_thread_root(
+                    delivery.event_id,
+                    response_thread_id,
+                    room_id=room_id,
+                ),
                 delivery.option_map,
                 self.agent_name,
             )
@@ -3465,7 +3480,11 @@ class AgentBot:
             interactive.register_interactive_question(
                 event_id,
                 room_id,
-                self._interactive_registration_thread_root(event_id, thread_root_for_registration),
+                self._interactive_registration_thread_root(
+                    event_id,
+                    thread_root_for_registration,
+                    room_id=room_id,
+                ),
                 response.option_map,
                 agent_name,
             )
@@ -3539,7 +3558,11 @@ class AgentBot:
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
-                    self._interactive_registration_thread_root(event_id, thread_root_for_registration),
+                    self._interactive_registration_thread_root(
+                        event_id,
+                        thread_root_for_registration,
+                        room_id=room_id,
+                    ),
                     response.option_map,
                     agent_name or self.agent_name,
                 )
@@ -3789,7 +3812,11 @@ class AgentBot:
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
-                    self._interactive_registration_thread_root(event_id, response_thread_id),
+                    self._interactive_registration_thread_root(
+                        event_id,
+                        response_thread_id,
+                        room_id=room_id,
+                    ),
                     interactive_response.option_map,
                     self.agent_name,
                 )
@@ -3869,7 +3896,11 @@ class AgentBot:
             interactive.register_interactive_question(
                 delivery.event_id,
                 room_id,
-                self._interactive_registration_thread_root(delivery.event_id, response_thread_id),
+                self._interactive_registration_thread_root(
+                    delivery.event_id,
+                    response_thread_id,
+                    room_id=room_id,
+                ),
                 delivery.option_map,
                 self.agent_name,
             )
