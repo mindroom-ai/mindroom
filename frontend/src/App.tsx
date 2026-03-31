@@ -531,8 +531,8 @@ function AppContent() {
               </div>
             </TabsContent>
 
-            <TabsContent value="integrations" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
-              <div className="h-full overflow-hidden">
+            <TabsContent value="integrations" className="flex-1 p-2 sm:p-4 overflow-auto min-h-0">
+              <div className="h-full overflow-auto">
                 <Integrations />
               </div>
             </TabsContent>
