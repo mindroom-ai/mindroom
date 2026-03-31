@@ -73,6 +73,10 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 
 def _make_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
+    return _make_config_with_context_window(tmp_path, context_window=48_000)
+
+
+def _make_config_with_context_window(tmp_path: Path, *, context_window: int | None) -> tuple[Config, RuntimePaths]:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -82,7 +86,7 @@ def _make_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
-            models={"default": ModelConfig(provider="openai", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=context_window)},
         ),
         runtime_paths,
     )
@@ -133,6 +137,32 @@ async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is True
     assert result == "Compaction scheduled for the next reply in this conversation scope."
+
+
+@pytest.mark.asyncio
+async def test_compact_context_requires_compaction_window(tmp_path: Path) -> None:
+    """Manual compaction should fail fast when no usable model window is configured."""
+    config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=None)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
+
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=SimpleNamespace(session_id="session-1"),
+    )
+
+    result = await tool.compact_context(agent=_agent())
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    assert state.force_compact_before_next_run is False
+    assert result == (
+        "Error: Compaction is unavailable for this scope because no context_window is configured on the "
+        "active model or the selected compaction model."
+    )
 
 
 @pytest.mark.asyncio
@@ -231,7 +261,7 @@ async def test_compact_context_uses_stable_team_scope_storage(tmp_path: Path) ->
                 "beta": AgentConfig(display_name="Beta"),
             },
             defaults=DefaultsConfig(tools=[]),
-            models={"default": ModelConfig(provider="openai", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=48_000)},
         ),
         runtime_paths,
     )

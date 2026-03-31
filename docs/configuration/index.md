@@ -189,7 +189,7 @@ models:
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
-    context_window: null           # Optional: Context window in tokens (used for replay budgeting and auto-compaction)
+    context_window: null           # Optional: Needed on the active model or compaction.model for replay budgeting and compaction
 
 # Team configurations (optional)
 teams:

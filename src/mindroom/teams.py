@@ -1164,21 +1164,15 @@ def select_model_for_team(
         Model name to use
 
     """
+    model_name = config.get_effective_team_model_name(team_name, room_id, runtime_paths)
     room_alias = get_room_alias_from_id(room_id, runtime_paths)
-
     if room_alias and room_alias in config.room_models:
-        model = config.room_models[room_alias]
-        logger.info(f"Using room-specific model for {team_name} in {room_alias}: {model}")
-        return model
-
-    if team_name in config.teams:
-        team_config = config.teams[team_name]
-        if team_config.model:
-            logger.info(f"Using team-specific model for {team_name}: {team_config.model}")
-            return team_config.model
-
-    logger.info(f"Using default model for {team_name}")
-    return "default"
+        logger.info(f"Using room-specific model for {team_name} in {room_alias}: {model_name}")
+    elif team_name in config.teams and config.teams[team_name].model:
+        logger.info(f"Using team-specific model for {team_name}: {model_name}")
+    else:
+        logger.info(f"Using default model for {team_name}")
+    return model_name
 
 
 async def _prepare_materialized_team_execution(

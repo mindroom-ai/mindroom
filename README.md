@@ -318,7 +318,7 @@ agents:
     # num_history_runs: 10
     # compaction:
     #   enabled: true
-    #   threshold_tokens: 60000
+    #   threshold_tokens: 60000  # Requires context_window on the active model or compaction.model
 
 voice:
   enabled: true

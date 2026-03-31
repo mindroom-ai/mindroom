@@ -316,6 +316,31 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_compaction_model_references(self) -> Config:
+        """Ensure compaction.model references a configured model name."""
+        invalid_references: list[str] = []
+        if (
+            self.defaults.compaction is not None
+            and self.defaults.compaction.model is not None
+            and self.defaults.compaction.model not in self.models
+        ):
+            invalid_references.append(f"defaults.compaction.model -> {self.defaults.compaction.model}")
+        for agent_name, agent_config in self.agents.items():
+            if agent_config.compaction is None or agent_config.compaction.model is None:
+                continue
+            if agent_config.compaction.model not in self.models:
+                invalid_references.append(f"agents.{agent_name}.compaction.model -> {agent_config.compaction.model}")
+        for team_name, team_config in self.teams.items():
+            if team_config.compaction is None or team_config.compaction.model is None:
+                continue
+            if team_config.compaction.model not in self.models:
+                invalid_references.append(f"teams.{team_name}.compaction.model -> {team_config.compaction.model}")
+        if invalid_references:
+            msg = "Compaction model references unknown models: " + ", ".join(sorted(invalid_references))
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_shared_only_integration_assignments(self) -> Config:
         """Reject shared-only integrations on isolating worker scopes at config-validation time."""
         invalid_assignments: list[str] = []
@@ -1189,6 +1214,24 @@ class Config(BaseModel):
         available = sorted(set(self.agents.keys()) | set(self.teams.keys()) | {ROUTER_AGENT_NAME})
         msg = f"Unknown entity: {entity_name}. Available entities: {', '.join(available)}"
         raise ValueError(msg)
+
+    def get_effective_team_model_name(
+        self,
+        team_name: str,
+        room_id: str | None,
+        runtime_paths: RuntimePaths,
+    ) -> str:
+        """Return the effective team model for one room context."""
+        if team_name not in self.teams:
+            return "default"
+        if room_id is not None:
+            from mindroom.matrix.rooms import get_room_alias_from_id  # noqa: PLC0415
+
+            room_alias = get_room_alias_from_id(room_id, runtime_paths)
+            if room_alias and room_alias in self.room_models:
+                return self.room_models[room_alias]
+        team_model = self.teams[team_name].model
+        return team_model or "default"
 
     def get_configured_bots_for_room(
         self,

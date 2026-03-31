@@ -79,6 +79,14 @@ class _ExcerptBlock:
         return "\n".join([self.open_tag, _escape_xml_content(snippet), self.close_tag])
 
 
+@dataclass(frozen=True)
+class ResolvedCompactionRuntime:
+    """Resolved model/window inputs needed for one compaction attempt."""
+
+    model_name: str
+    context_window: int | None
+
+
 async def compact_scope_history(
     *,
     storage: SqliteDb,
@@ -98,19 +106,20 @@ async def compact_scope_history(
     if not compactable_runs:
         return cleared_state, None
 
-    summary_model, compaction_model_context_window = resolve_compaction_model(
+    summary_model, effective_window = resolve_compaction_model(
         config=config,
         runtime_paths=runtime_paths,
         compaction_config=compaction_config,
         active_model_name=active_model_name,
+        active_context_window=active_context_window,
     )
-    effective_window = compaction_model_context_window or active_context_window or 0
+    window_tokens = effective_window or 0
     reserve_tokens = normalize_compaction_budget_tokens(
         compaction_config.reserve_tokens,
-        effective_window or None,
+        window_tokens or None,
     )
     summary_input_budget = compute_compaction_input_budget(
-        effective_window,
+        window_tokens,
         reserve_tokens=reserve_tokens,
     )
     if summary_input_budget <= 0:
@@ -118,7 +127,7 @@ async def compact_scope_history(
             "Compaction budget is non-positive; skipping compaction",
             session_id=session.session_id,
             scope=scope.key,
-            effective_window=effective_window,
+            effective_window=window_tokens,
             reserve_tokens=reserve_tokens,
         )
         return cleared_state, None
@@ -209,14 +218,35 @@ def resolve_compaction_model(
     runtime_paths: RuntimePaths,
     compaction_config: CompactionConfig,
     active_model_name: str,
+    active_context_window: int | None,
 ) -> tuple[Model, int | None]:
     """Resolve the summary model used for single-pass compaction."""
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
+    runtime = resolve_compaction_runtime_settings(
+        config=config,
+        compaction_config=compaction_config,
+        active_model_name=active_model_name,
+        active_context_window=active_context_window,
+    )
+    model = get_model_instance(config, runtime_paths, runtime.model_name)
+    return model, runtime.context_window
+
+
+def resolve_compaction_runtime_settings(
+    *,
+    config: Config,
+    compaction_config: CompactionConfig,
+    active_model_name: str,
+    active_context_window: int | None,
+) -> ResolvedCompactionRuntime:
+    """Resolve the effective compaction model name and usable window for one run."""
     model_name = compaction_config.model or active_model_name
-    model = get_model_instance(config, runtime_paths, model_name)
-    context_window = config.get_model_context_window(model_name)
-    return model, context_window
+    model_context_window = config.get_model_context_window(model_name)
+    return ResolvedCompactionRuntime(
+        model_name=model_name,
+        context_window=model_context_window or active_context_window,
+    )
 
 
 async def _generate_compaction_summary(*, model: Model, summary_input: str) -> SessionSummary:

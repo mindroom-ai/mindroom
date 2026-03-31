@@ -18,14 +18,14 @@ Models define the AI providers and model IDs used by agents.
 
 Each model configuration supports the following fields:
 
-| Field            | Required | Default | Description                                                                                                   |
-| ---------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------- |
-| `provider`       | Yes      | -       | The AI provider (see supported providers above)                                                               |
-| `id`             | Yes      | -       | Model ID specific to the provider                                                                             |
-| `host`           | No       | `null`  | Host URL for self-hosted models (e.g., Ollama)                                                                |
-| `api_key`        | No       | `null`  | API key (usually read from environment variables)                                                             |
-| `extra_kwargs`   | No       | `null`  | Additional provider-specific parameters                                                                       |
-| `context_window` | No       | `null`  | Context window size in tokens; when set, MindRoom uses it for replay budgeting and auto-compaction heuristics |
+| Field            | Required | Default | Description                                                                                                                                              |
+| ---------------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provider`       | Yes      | -       | The AI provider (see supported providers above)                                                                                                          |
+| `id`             | Yes      | -       | Model ID specific to the provider                                                                                                                        |
+| `host`           | No       | `null`  | Host URL for self-hosted models (e.g., Ollama)                                                                                                           |
+| `api_key`        | No       | `null`  | API key (usually read from environment variables)                                                                                                        |
+| `extra_kwargs`   | No       | `null`  | Additional provider-specific parameters                                                                                                                  |
+| `context_window` | No       | `null`  | Context window size in tokens. MindRoom needs it on the active model, or on an explicit `compaction.model`, to enforce replay budgets and run compaction |
 
 ## Configuration Examples
 
@@ -96,7 +96,7 @@ models:
 
 ## Context Window
 
-When `context_window` is set, MindRoom uses it to budget persisted replay and auto-compaction before each run. The budget uses a chars/4 approximation and reserves headroom for the current prompt and output. MindRoom does not mutate configured `num_history_runs` to fit the window. Instead, it prepares scoped replay, optionally compacts older runs when auto-compaction is enabled, and then drops the oldest remaining persisted replay if the prepared payload still exceeds budget.
+When `context_window` is set, MindRoom uses it to budget persisted replay and auto-compaction before each run. Manual `compact_context`, `threshold_tokens`, and `threshold_percent` only take effect when MindRoom can resolve a usable context window from the active model or an explicit `compaction.model`. The budget uses a chars/4 approximation and reserves headroom for the current prompt and output. MindRoom does not mutate configured `num_history_runs` to fit the window. Instead, it prepares scoped replay, optionally compacts older runs when auto-compaction is enabled, and then drops the oldest remaining persisted replay if the prepared payload still exceeds budget.
 
 ```
 models:

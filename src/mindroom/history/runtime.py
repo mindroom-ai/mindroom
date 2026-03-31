@@ -20,6 +20,7 @@ from mindroom.history.compaction import (
     compact_scope_history,
     estimate_static_tokens,
     normalize_compaction_budget_tokens,
+    resolve_compaction_runtime_settings,
     resolve_effective_compaction_threshold,
 )
 from mindroom.history.replay import (
@@ -93,6 +94,7 @@ class _ResolvedPreparationInputs:
     has_authored_compaction_config: bool
     active_model_name: str
     active_context_window: int | None
+    compaction_context_window: int | None
     static_prompt_tokens: int
 
 
@@ -155,6 +157,7 @@ async def prepare_history_for_run(
         resolved_available_history_budget = _resolve_available_history_budget(
             compaction_config=resolved_inputs.compaction_config,
             active_context_window=resolved_inputs.active_context_window,
+            compaction_context_window=resolved_inputs.compaction_context_window,
             static_prompt_tokens=resolved_inputs.static_prompt_tokens,
         )
     state = read_scope_state(resolved_session, resolved_scope)
@@ -237,12 +240,19 @@ async def prepare_bound_agents_for_run(
     resolved_active_context_window = active_context_window
     if resolved_active_context_window is None:
         resolved_active_context_window = config.get_model_context_window(resolved_active_model_name)
+    resolved_compaction_context_window = resolve_compaction_runtime_settings(
+        config=config,
+        compaction_config=compaction_config,
+        active_model_name=resolved_active_model_name,
+        active_context_window=resolved_active_context_window,
+    ).context_window
     resolved_available_history_budget = _resolve_bound_available_history_budget(
         agents=agents,
         full_prompt=full_prompt,
         fallback_full_prompt=fallback_full_prompt,
         config=config,
         compaction_config=compaction_config,
+        compaction_context_window=resolved_compaction_context_window,
         team_active_context_window=resolved_active_context_window,
     )
 
@@ -717,6 +727,12 @@ def _resolve_preparation_inputs(
     resolved_active_context_window = active_context_window
     if resolved_active_context_window is None:
         resolved_active_context_window = config.get_model_context_window(resolved_active_model_name)
+    resolved_compaction_context_window = resolve_compaction_runtime_settings(
+        config=config,
+        compaction_config=resolved_compaction_config,
+        active_model_name=resolved_active_model_name,
+        active_context_window=resolved_active_context_window,
+    ).context_window
 
     resolved_static_prompt_tokens = static_prompt_tokens
     if resolved_static_prompt_tokens is None:
@@ -728,6 +744,7 @@ def _resolve_preparation_inputs(
         has_authored_compaction_config=resolved_has_authored_compaction_config,
         active_model_name=resolved_active_model_name,
         active_context_window=resolved_active_context_window,
+        compaction_context_window=resolved_compaction_context_window,
         static_prompt_tokens=resolved_static_prompt_tokens,
     )
 
@@ -854,8 +871,11 @@ def _resolve_available_history_budget(
     *,
     compaction_config: CompactionConfig,
     active_context_window: int | None,
+    compaction_context_window: int | None,
     static_prompt_tokens: int,
 ) -> int | None:
+    if compaction_context_window is None:
+        return None
     threshold_tokens = compaction_config.threshold_tokens
     if threshold_tokens is None:
         if active_context_window is None:
@@ -877,12 +897,14 @@ def _resolve_bound_available_history_budget(
     fallback_full_prompt: str | None,
     config: Config,
     compaction_config: CompactionConfig,
+    compaction_context_window: int | None,
     team_active_context_window: int | None,
 ) -> int | None:
     budgets: list[int] = []
     team_prompt_budget = _resolve_available_history_budget(
         compaction_config=compaction_config,
         active_context_window=team_active_context_window,
+        compaction_context_window=compaction_context_window,
         static_prompt_tokens=estimate_preparation_prompt_tokens(
             full_prompt=full_prompt,
             fallback_full_prompt=fallback_full_prompt,
@@ -896,6 +918,7 @@ def _resolve_bound_available_history_budget(
         member_budget = _resolve_available_history_budget(
             compaction_config=compaction_config,
             active_context_window=member_context_window,
+            compaction_context_window=compaction_context_window,
             static_prompt_tokens=estimate_preparation_static_tokens(
                 agent,
                 full_prompt=full_prompt,

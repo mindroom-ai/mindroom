@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
+from mindroom.history.compaction import resolve_compaction_runtime_settings
 from mindroom.history.runtime import load_scope_session_context
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import HistoryScopeState
@@ -63,6 +64,34 @@ class CompactContextTools(Toolkit):
             return "Error: Current agent has no replay scope. Cannot compact context."
         if scope_context.session is None:
             return "Error: No stored session available. Cannot compact context."
+        runtime_context = get_tool_runtime_context()
+        if agent.team_id is not None:
+            if agent.team_id in self._config.teams:
+                room_id = runtime_context.room_id if runtime_context is not None else None
+                active_model_name = self._config.get_effective_team_model_name(
+                    agent.team_id,
+                    room_id,
+                    self._runtime_paths,
+                )
+                compaction_config = self._config.get_entity_compaction_config(agent.team_id)
+            else:
+                active_model_name = "default"
+                compaction_config = self._config.get_default_compaction_config()
+        else:
+            active_model_name = self._config.get_entity_model_name(self._agent_name)
+            compaction_config = self._config.get_entity_compaction_config(self._agent_name)
+        active_context_window = self._config.get_model_context_window(active_model_name)
+        compaction_runtime = resolve_compaction_runtime_settings(
+            config=self._config,
+            compaction_config=compaction_config,
+            active_model_name=active_model_name,
+            active_context_window=active_context_window,
+        )
+        if compaction_runtime.context_window is None:
+            return (
+                "Error: Compaction is unavailable for this scope because no context_window is configured on the "
+                "active model or the selected compaction model."
+            )
         current_state = read_scope_state(scope_context.session, scope_context.scope)
         next_state = HistoryScopeState(
             summary=current_state.summary,

@@ -136,7 +136,7 @@ def _make_config(
     num_history_runs: int | None = None,
     num_history_messages: int | None = None,
     compaction: CompactionOverrideConfig | None = None,
-    context_window: int = 48_000,
+    context_window: int | None = 48_000,
 ) -> tuple[Config, RuntimePaths]:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -544,6 +544,46 @@ async def test_prepare_history_for_run_compaction_failure_falls_back_and_clears_
     assert persisted is not None
     state = read_scope_state(persisted, scope)
     assert state.force_compact_before_next_run is False
+    assert state.summary is None
+    assert prepared.compaction_outcomes == []
+    assert prepared.history_messages != []
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_threshold_tokens_without_context_window_keeps_replay(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=None,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+            _completed_run("run-3"),
+            _completed_run("run-4"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    state = read_scope_state(persisted, scope)
     assert state.summary is None
     assert prepared.compaction_outcomes == []
     assert prepared.history_messages != []
@@ -1180,6 +1220,30 @@ def test_entity_compaction_override_enabled_null_still_enables_override(tmp_path
 def test_compaction_thresholds_are_mutually_exclusive(builder: object, kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="threshold_tokens and threshold_percent are mutually exclusive"):
         cast("type[CompactionConfig | CompactionOverrideConfig]", builder)(**kwargs)
+
+
+def test_compaction_model_reference_must_exist(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    with pytest.raises(ValueError, match="agents.alpha.compaction.model -> missing-model"):
+        bind_runtime_paths(
+            Config(
+                agents={
+                    "alpha": AgentConfig(
+                        display_name="Alpha",
+                        compaction=CompactionOverrideConfig(model="missing-model"),
+                    ),
+                },
+                defaults=DefaultsConfig(tools=[]),
+                models={
+                    "default": ModelConfig(
+                        provider="openai",
+                        id="default-model",
+                        context_window=4_000,
+                    ),
+                },
+            ),
+            runtime_paths,
+        )
 
 
 @pytest.mark.asyncio
