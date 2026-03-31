@@ -778,11 +778,16 @@ class AgentBot:
         response_envelope: MessageEnvelope | None = None,
     ) -> str | None:
         """Return the canonical thread root for outbound response delivery."""
-        if response_envelope is not None and response_envelope.thread_id is not None:
+        if response_envelope is not None:
             return response_envelope.resolved_thread_id
         if thread_id is None:
             return None
         return self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id)
+
+    @staticmethod
+    def _interactive_registration_thread_root(event_id: str, thread_root: str | None) -> str:
+        """Use the delivered event as the thread root when no existing thread is available."""
+        return thread_root or event_id
 
     @property
     def show_tool_calls(self) -> bool:
@@ -3007,7 +3012,7 @@ class AgentBot:
             interactive.register_interactive_question(
                 delivery_result.event_id,
                 room_id,
-                resolved_thread_id,
+                self._interactive_registration_thread_root(delivery_result.event_id, resolved_thread_id),
                 delivery_result.option_map,
                 "team",
             )
@@ -3309,7 +3314,7 @@ class AgentBot:
             interactive.register_interactive_question(
                 delivery.event_id,
                 room_id,
-                response_thread_id,
+                self._interactive_registration_thread_root(delivery.event_id, response_thread_id),
                 delivery.option_map,
                 self.agent_name,
             )
@@ -3460,7 +3465,7 @@ class AgentBot:
             interactive.register_interactive_question(
                 event_id,
                 room_id,
-                thread_root_for_registration,
+                self._interactive_registration_thread_root(event_id, thread_root_for_registration),
                 response.option_map,
                 agent_name,
             )
@@ -3534,7 +3539,7 @@ class AgentBot:
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
-                    thread_root_for_registration,
+                    self._interactive_registration_thread_root(event_id, thread_root_for_registration),
                     response.option_map,
                     agent_name or self.agent_name,
                 )
@@ -3784,7 +3789,7 @@ class AgentBot:
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
-                    response_thread_id,
+                    self._interactive_registration_thread_root(event_id, response_thread_id),
                     interactive_response.option_map,
                     self.agent_name,
                 )
@@ -3864,7 +3869,7 @@ class AgentBot:
             interactive.register_interactive_question(
                 delivery.event_id,
                 room_id,
-                response_thread_id,
+                self._interactive_registration_thread_root(delivery.event_id, response_thread_id),
                 delivery.option_map,
                 self.agent_name,
             )
