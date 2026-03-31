@@ -778,8 +778,10 @@ class AgentBot:
         response_envelope: MessageEnvelope | None = None,
     ) -> str | None:
         """Return the canonical thread root for outbound response delivery."""
-        if response_envelope is not None:
+        if response_envelope is not None and response_envelope.thread_id is not None:
             return response_envelope.resolved_thread_id
+        if thread_id is None:
+            return None
         return self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id)
 
     @property
