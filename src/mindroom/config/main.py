@@ -315,52 +315,69 @@ class Config(BaseModel):
             self.assert_team_agents_supported(team_config.agents, team_name=team_name)
         return self
 
+    def _invalid_compaction_model_references(self) -> list[str]:
+        """Return any compaction.model references that point at unknown models."""
+        invalid_references: list[str] = []
+        defaults_compaction = self.defaults.compaction
+        if (
+            defaults_compaction is not None
+            and defaults_compaction.model is not None
+            and defaults_compaction.model not in self.models
+        ):
+            invalid_references.append(f"defaults.compaction.model -> {defaults_compaction.model}")
+
+        for agent_name, agent_config in self.agents.items():
+            model_name = agent_config.compaction.model if agent_config.compaction is not None else None
+            if model_name is not None and model_name not in self.models:
+                invalid_references.append(f"agents.{agent_name}.compaction.model -> {model_name}")
+
+        for team_name, team_config in self.teams.items():
+            model_name = team_config.compaction.model if team_config.compaction is not None else None
+            if model_name is not None and model_name not in self.models:
+                invalid_references.append(f"teams.{team_name}.compaction.model -> {model_name}")
+
+        return invalid_references
+
+    def _compaction_enabled_model_names(self) -> set[str]:
+        """Return the effective models used when compaction is enabled anywhere."""
+        compaction_models: set[str] = set()
+        defaults_compaction = self.defaults.compaction
+        if defaults_compaction is not None:
+            compaction_models.add(defaults_compaction.model or "default")
+
+        for agent_config in self.agents.values():
+            if agent_config.compaction is None and defaults_compaction is None:
+                continue
+            model_name = (
+                (agent_config.compaction.model if agent_config.compaction else None)
+                or (defaults_compaction.model if defaults_compaction else None)
+                or agent_config.model
+            )
+            compaction_models.add(model_name)
+
+        for team_config in self.teams.values():
+            if team_config.compaction is None and defaults_compaction is None:
+                continue
+            model_name = (
+                (team_config.compaction.model if team_config.compaction else None)
+                or (defaults_compaction.model if defaults_compaction else None)
+                or team_config.model
+                or "default"
+            )
+            compaction_models.add(model_name)
+
+        return compaction_models
+
     @model_validator(mode="after")
     def validate_compaction_model_references(self) -> Config:
         """Ensure compaction.model references a configured model name."""
-        invalid_references: list[str] = []
-        if (
-            self.defaults.compaction is not None
-            and self.defaults.compaction.model is not None
-            and self.defaults.compaction.model not in self.models
-        ):
-            invalid_references.append(f"defaults.compaction.model -> {self.defaults.compaction.model}")
-        for agent_name, agent_config in self.agents.items():
-            if agent_config.compaction is None or agent_config.compaction.model is None:
-                continue
-            if agent_config.compaction.model not in self.models:
-                invalid_references.append(f"agents.{agent_name}.compaction.model -> {agent_config.compaction.model}")
-        for team_name, team_config in self.teams.items():
-            if team_config.compaction is None or team_config.compaction.model is None:
-                continue
-            if team_config.compaction.model not in self.models:
-                invalid_references.append(f"teams.{team_name}.compaction.model -> {team_config.compaction.model}")
+        invalid_references = self._invalid_compaction_model_references()
         if invalid_references:
             msg = "Compaction model references unknown models: " + ", ".join(sorted(invalid_references))
             raise ValueError(msg)
 
         # Warn when compaction is enabled but the resolved model lacks context_window
-        compaction_models: set[str] = set()
-        if self.defaults.compaction is not None:
-            compaction_models.add(self.defaults.compaction.model or "default")
-        for agent_name, agent_config in self.agents.items():
-            if agent_config.compaction is not None or self.defaults.compaction is not None:
-                model = (
-                    (agent_config.compaction.model if agent_config.compaction else None)
-                    or (self.defaults.compaction.model if self.defaults.compaction else None)
-                    or agent_config.model
-                )
-                compaction_models.add(model)
-        for team_name, team_config in self.teams.items():
-            if team_config.compaction is not None or self.defaults.compaction is not None:
-                model = (
-                    (team_config.compaction.model if team_config.compaction else None)
-                    or (self.defaults.compaction.model if self.defaults.compaction else None)
-                    or team_config.model
-                    or "default"
-                )
-                compaction_models.add(model)
-        for model_name in sorted(compaction_models):
+        for model_name in sorted(self._compaction_enabled_model_names()):
             if self.get_model_context_window(model_name) is None:
                 logger.warning(
                     "Compaction enabled but model has no context_window configured; auto-compaction will not trigger",

@@ -7,7 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from html import escape
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeGuard, cast
 
 from agno.models.message import Message
 from agno.run import RunContext
@@ -44,6 +44,7 @@ _WRAPPER_OVERHEAD_TOKENS = 200
 _SUMMARY_TRUNCATION_RATIO = 0.5
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
+type _ToolDefinition = dict[str, object]
 _COMPACTION_SUMMARY_PROMPT = """\
 You are updating a durable conversation handoff summary for a future model call.
 
@@ -362,11 +363,11 @@ def _estimate_prepared_tool_definition_tokens(prepared_tools: Sequence[Function 
     return len(stable_serialize(tool_definitions)) // 4
 
 
-def _prepare_tools_for_estimation(tools: object) -> tuple[list[Function | dict[str, object]], list[str]]:
+def _prepare_tools_for_estimation(tools: object) -> tuple[list[Function | _ToolDefinition], list[str]]:
     if not isinstance(tools, Sequence):
         return [], []
 
-    prepared_tools: list[Function | dict[str, object]] = []
+    prepared_tools: list[Function | _ToolDefinition] = []
     tool_instructions: list[str] = []
     seen_names: set[str] = set()
     for tool in tools:
@@ -384,13 +385,13 @@ def _prepare_tools_for_estimation(tools: object) -> tuple[list[Function | dict[s
     return prepared_tools, tool_instructions
 
 
-def _prepare_tool_for_estimation(tool: object) -> list[Function | dict[str, object]]:
+def _prepare_tool_for_estimation(tool: object) -> list[Function | _ToolDefinition]:
     if isinstance(tool, Function):
         return [_prepare_function_for_estimation(tool)]
     if isinstance(tool, Toolkit):
         return [_prepare_function_for_estimation(function) for function in _toolkit_functions(tool).values()]
-    if isinstance(tool, dict):
-        return [tool] if _is_tool_definition_dict(tool) else []
+    if _is_tool_definition_dict(tool):
+        return [tool]
     if callable(tool):
         return [Function.from_callable(tool)]
     return []
@@ -416,7 +417,7 @@ def _prepare_function_for_estimation(function: Function) -> Function:
 
 
 def _prepared_tool_definition_payloads(
-    prepared_tools: Sequence[Function | dict[str, object]],
+    prepared_tools: Sequence[Function | _ToolDefinition],
 ) -> list[dict[str, object]]:
     payloads_by_name: dict[str, dict[str, object]] = {}
     for tool in prepared_tools:
@@ -427,7 +428,7 @@ def _prepared_tool_definition_payloads(
     return list(payloads_by_name.values())
 
 
-def _prepared_tool_name(tool: Function | dict[str, object]) -> str | None:
+def _prepared_tool_name(tool: Function | _ToolDefinition) -> str | None:
     if isinstance(tool, Function):
         return tool.name
     tool_name = tool.get("name")
@@ -444,12 +445,15 @@ def _function_payload(function: Function) -> dict[str, object]:
     }
 
 
-def _is_tool_definition_dict(tool: dict[object, object]) -> bool:
-    tool_name = tool.get("name")
+def _is_tool_definition_dict(tool: object) -> TypeGuard[_ToolDefinition]:
+    if not isinstance(tool, dict):
+        return False
+    candidate_tool = cast("_ToolDefinition", tool)
+    tool_name = candidate_tool.get("name")
     return isinstance(tool_name, str) and bool(tool_name)
 
 
-def _dict_tool_payload(tool: dict[object, object]) -> dict[str, object]:
+def _dict_tool_payload(tool: _ToolDefinition) -> dict[str, object]:
     parameters = tool.get("parameters")
     return {
         "name": str(tool["name"]),
