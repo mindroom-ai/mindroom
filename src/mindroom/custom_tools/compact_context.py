@@ -8,7 +8,7 @@ from agno.tools import Toolkit
 
 from mindroom.history.runtime import load_scope_session_context
 from mindroom.history.storage import read_scope_state, write_scope_state
-from mindroom.history.types import CompactionState
+from mindroom.history.types import HistoryScopeState
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_current_session_id
 
@@ -64,7 +64,7 @@ class CompactContextTools(Toolkit):
         if scope_context.session is None:
             return "Error: No stored session available. Cannot compact context."
         current_state = read_scope_state(scope_context.session, scope_context.scope)
-        next_state = CompactionState(
+        next_state = HistoryScopeState(
             summary=current_state.summary,
             last_compacted_run_id=current_state.last_compacted_run_id,
             compacted_at=current_state.compacted_at,

@@ -31,7 +31,7 @@ from mindroom.history.replay import (
     strip_replay_messages,
 )
 from mindroom.history.storage import read_scope_state, write_scope_state
-from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistory, ResolvedHistorySettings
+from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedReplay, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_text_tokens
 
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.history.types import CompactionOutcome, CompactionState, ReplayPlan
+    from mindroom.history.types import CompactionOutcome, HistoryScopeState, ResolvedReplay
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -116,7 +116,7 @@ async def prepare_history_for_run(
     static_prompt_tokens: int | None = None,
     available_history_budget: int | None = None,
     scope: HistoryScope | None = None,
-) -> PreparedHistory:
+) -> PreparedReplay:
     """Prepare persisted replay state for one run and activate Agno guards."""
     clear_prepared_history(agent)
 
@@ -133,7 +133,7 @@ async def prepare_history_for_run(
         scope=resolved_scope,
     )
     if scope_context is None or scope_context.session is None:
-        return PreparedHistory()
+        return PreparedReplay()
     resolved_scope = scope_context.scope
     storage = scope_context.storage
     resolved_session = scope_context.session
@@ -182,7 +182,7 @@ async def prepare_history_for_run(
         max_tool_calls_from_history=resolved_inputs.history_settings.max_tool_calls_from_history,
     )
 
-    prepared = PreparedHistory(
+    prepared = PreparedReplay(
         summary_prompt_prefix=replay_plan.summary_prompt_prefix,
         history_messages=replay_plan.history_messages,
         cache_key_fragment=digest_prepared_replay(
@@ -211,7 +211,7 @@ async def prepare_bound_agents_for_run(
     team_name: str | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
-) -> PreparedHistory:
+) -> PreparedReplay:
     """Prepare persisted history for a team's member agents."""
     clear_bound_agent_history_state(agents)
     bound_scope = resolve_bound_team_scope_context(
@@ -222,7 +222,7 @@ async def prepare_bound_agents_for_run(
         team_name=team_name,
     )
     if bound_scope is None:
-        return PreparedHistory()
+        return PreparedReplay()
 
     if team_name is not None and team_name in config.teams:
         history_settings = config.get_entity_history_settings(team_name)
@@ -475,7 +475,7 @@ def clear_prepared_history(agent: Agent) -> None:
 def compose_prompt_with_persisted_history(
     *,
     base_prompt: str,
-    prepared_history: PreparedHistory,
+    prepared_history: PreparedReplay,
     fallback_prompt: str | None = None,
 ) -> str:
     """Compose the final prompt from persisted replay state and an optional fallback."""
@@ -736,9 +736,9 @@ def _build_scope_replay_plan(
     *,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
-    state: CompactionState,
+    state: HistoryScopeState,
     history_settings: ResolvedHistorySettings,
-) -> ReplayPlan:
+) -> ResolvedReplay:
     return build_replay_plan(
         session=session,
         scope=scope,
@@ -753,13 +753,13 @@ async def _apply_scope_compaction_if_needed(
     storage: SqliteDb,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
-    state: CompactionState,
-    replay_plan: ReplayPlan,
+    state: HistoryScopeState,
+    replay_plan: ResolvedReplay,
     config: Config,
     runtime_paths: RuntimePaths,
     available_history_budget: int | None,
     resolved_inputs: _ResolvedPreparationInputs,
-) -> tuple[CompactionState, ReplayPlan, list[CompactionOutcome]]:
+) -> tuple[HistoryScopeState, ResolvedReplay, list[CompactionOutcome]]:
     compaction_outcomes: list[CompactionOutcome] = []
     auto_compaction_enabled = (
         resolved_inputs.has_authored_compaction_config and resolved_inputs.compaction_config.enabled
@@ -840,8 +840,8 @@ def _clear_forced_compaction_state(
     storage: SqliteDb,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
-    state: CompactionState,
-) -> CompactionState:
+    state: HistoryScopeState,
+) -> HistoryScopeState:
     if not state.force_compact_before_next_run:
         return state
     cleared_state = replace(state, force_compact_before_next_run=False)

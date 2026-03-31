@@ -45,7 +45,7 @@ class ResolvedHistorySettings:
 
 
 @dataclass(frozen=True)
-class CompactionState:
+class HistoryScopeState:
     """Persisted scoped compaction state stored in session metadata."""
 
     summary: str | None = None
@@ -66,11 +66,11 @@ class CompactionState:
 
 
 @dataclass(frozen=True)
-class ReplayPlan:
+class ResolvedReplay:
     """Resolved persisted replay state for the current run before live-thread glue."""
 
     scope: HistoryScope
-    state: CompactionState
+    state: HistoryScopeState
     visible_runs: list[RunOutput | TeamRunOutput]
     summary_prompt_prefix: str
     history_message_groups: list[list[Message]]
@@ -115,7 +115,7 @@ class CompactionOutcome:
 
 
 @dataclass(frozen=True)
-class PreparedHistory:
+class PreparedReplay:
     """Prepared persisted replay payload for one run."""
 
     summary_prompt_prefix: str = ""

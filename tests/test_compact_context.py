@@ -22,7 +22,7 @@ from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.history import prepare_history_for_run
 from mindroom.history.runtime import load_scope_session_context
 from mindroom.history.storage import read_scope_state, write_scope_state
-from mindroom.history.types import CompactionState, HistoryScope
+from mindroom.history.types import HistoryScope, HistoryScopeState
 from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
@@ -144,12 +144,12 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
     write_scope_state(
         session,
         HistoryScope(kind="agent", scope_id="test_agent"),
-        CompactionState(summary="direct summary"),
+        HistoryScopeState(summary="direct summary"),
     )
     write_scope_state(
         session,
         HistoryScope(kind="team", scope_id="team-123"),
-        CompactionState(summary="team summary"),
+        HistoryScopeState(summary="team summary"),
     )
     storage.upsert_session(session)
 
@@ -196,7 +196,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_compactable_pr
     write_scope_state(
         session,
         HistoryScope(kind="agent", scope_id="test_agent"),
-        CompactionState(force_compact_before_next_run=True),
+        HistoryScopeState(force_compact_before_next_run=True),
     )
     storage.upsert_session(session)
 

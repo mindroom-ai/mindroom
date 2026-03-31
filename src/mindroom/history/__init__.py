@@ -8,14 +8,14 @@ from mindroom.history.runtime import (
     prepare_history_for_run,
     stream_with_bound_agent_history,
 )
-from mindroom.history.types import CompactionOutcome, CompactionState, HistoryPolicy, HistoryScope, PreparedHistory
+from mindroom.history.types import CompactionOutcome, HistoryPolicy, HistoryScope, HistoryScopeState, PreparedReplay
 
 __all__ = [
     "CompactionOutcome",
-    "CompactionState",
     "HistoryPolicy",
     "HistoryScope",
-    "PreparedHistory",
+    "HistoryScopeState",
+    "PreparedReplay",
     "clear_bound_agent_history_state",
     "clear_prepared_history",
     "compose_prompt_with_persisted_history",

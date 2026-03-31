@@ -32,7 +32,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.history import (
-    PreparedHistory,
+    PreparedReplay,
     clear_bound_agent_history_state,
     clear_prepared_history,
     prepare_bound_agents_for_run,
@@ -51,7 +51,7 @@ from mindroom.history.storage import (
     update_scope_seen_event_ids,
     write_scope_state,
 )
-from mindroom.history.types import CompactionState, HistoryPolicy, HistoryScope
+from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState
 from tests.conftest import bind_runtime_paths
 
 
@@ -294,7 +294,7 @@ def test_message_limited_replay_keeps_newest_messages_from_single_run(tmp_path: 
     plan = build_replay_plan(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        state=CompactionState(),
+        state=HistoryScopeState(),
         policy=HistoryPolicy(mode="messages", limit=2),
         max_tool_calls_from_history=agent.max_tool_calls_from_history,
     )
@@ -330,12 +330,12 @@ async def test_prepare_history_for_run_uses_team_scope_state_for_team_member(tmp
     write_scope_state(
         session,
         HistoryScope(kind="agent", scope_id="test_agent"),
-        CompactionState(summary="direct summary", last_compacted_run_id="direct-run"),
+        HistoryScopeState(summary="direct summary", last_compacted_run_id="direct-run"),
     )
     write_scope_state(
         session,
         HistoryScope(kind="team", scope_id="team-123"),
-        CompactionState(summary="team summary", last_compacted_run_id="team-old"),
+        HistoryScopeState(summary="team summary", last_compacted_run_id="team-old"),
     )
     scope_context.storage.upsert_session(session)
 
@@ -456,7 +456,7 @@ async def test_prepare_history_for_run_forced_compaction_updates_scope_state(tmp
     write_scope_state(
         session,
         HistoryScope(kind="agent", scope_id="test_agent"),
-        CompactionState(force_compact_before_next_run=True),
+        HistoryScopeState(force_compact_before_next_run=True),
     )
     storage.upsert_session(session)
 
@@ -515,7 +515,7 @@ async def test_prepare_history_for_run_compaction_failure_falls_back_and_clears_
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(session, scope, CompactionState(force_compact_before_next_run=True))
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
     storage.upsert_session(session)
 
     with (
@@ -581,10 +581,10 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     peer_agent.team_id = "team-123"
     replay_message = Message(role="assistant", content="persisted replay")
 
-    async def _fake_prepare(**kwargs: object) -> PreparedHistory:
+    async def _fake_prepare(**kwargs: object) -> PreparedReplay:
         assert kwargs["agent"] is owner_agent
         owner_agent.additional_input = [replay_message]
-        return PreparedHistory(
+        return PreparedReplay(
             summary_prompt_prefix="<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n",
             history_messages=[replay_message],
             has_stored_replay_state=True,
@@ -1195,7 +1195,7 @@ async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(
     with (
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
-        patch("mindroom.ai.prepare_history_for_run", new=AsyncMock(return_value=PreparedHistory())) as mock_prepare,
+        patch("mindroom.ai.prepare_history_for_run", new=AsyncMock(return_value=PreparedReplay())) as mock_prepare,
     ):
         await _prepare_agent_and_prompt(
             "test_agent",
@@ -1220,7 +1220,7 @@ def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None
     session = _session("session-1")
 
     assert update_scope_seen_event_ids(session, scope, ["event-1"]) is True
-    write_scope_state(session, scope, CompactionState(force_compact_before_next_run=True))
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
 
     assert read_scope_seen_event_ids(session, scope) == {"event-1"}
 
@@ -1260,7 +1260,7 @@ async def test_prepare_agent_and_prompt_orders_unseen_summary_and_current_prompt
     write_scope_state(
         session,
         HistoryScope(kind="agent", scope_id="test_agent"),
-        CompactionState(summary="stored summary", last_compacted_run_id="run-1"),
+        HistoryScopeState(summary="stored summary", last_compacted_run_id="run-1"),
     )
     storage.upsert_session(session)
 

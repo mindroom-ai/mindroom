@@ -62,9 +62,9 @@ The existing config fields `num_history_runs` and `num_history_messages` remain 
 - `src/mindroom/history/types.py`
   - `HistoryScope`
   - `HistoryPolicy`
-  - `CompactionState`
-  - `ReplayPlan`
-  - `PreparedHistory`
+  - `HistoryScopeState`
+  - `ResolvedReplay`
+  - `PreparedReplay`
   - `CompactionOutcome`
 - `src/mindroom/history/storage.py`
   - Read and write scoped compaction state in session metadata.
@@ -80,7 +80,7 @@ The existing config fields `num_history_runs` and `num_history_messages` remain 
   - Persist the new summary and cutoff.
 - `src/mindroom/history/runtime.py`
   - Public pre-run entrypoint used by `ai.py`, `teams.py`, and `api/openai_compat.py`.
-  - Return `PreparedHistory` with the summary prompt prefix, structured replay messages, a cache key fragment, and any compaction outcomes.
+  - Return `PreparedReplay` with the summary prompt prefix, structured replay messages, a cache key fragment, and any compaction outcomes.
 
 ## State Model
 
@@ -213,7 +213,7 @@ This avoids duplication because the history module never re-renders live `thread
 
 ## Replay Message Lifecycle
 
-`PreparedHistory.history_messages` are ephemeral per-run inputs.
+`PreparedReplay.history_messages` are ephemeral per-run inputs.
 They are never persisted as MindRoom compaction state and never reused across requests.
 They must not be persisted into the current run's stored session history.
 They must not be included in learning extraction input.
@@ -250,8 +250,8 @@ The intended core-runtime diff should stay small.
 - `src/mindroom/ai.py`
   - Replace the current prepare and post-run compaction plumbing with one pre-run `prepare_history_for_run(...)` call.
   - Stop using `session.summary` or Agno history flags as proxies for prior replay state.
-  - Switch cache decisions from `agent.add_history_to_context` and `agent.add_session_summary_to_context` to `PreparedHistory.cache_key_fragment` or an equivalent history-owned cache policy.
-  - Pass `PreparedHistory.history_messages` through Agno `additional_input`.
+  - Switch cache decisions from `agent.add_history_to_context` and `agent.add_session_summary_to_context` to `PreparedReplay.cache_key_fragment` or an equivalent history-owned cache policy.
+  - Pass `PreparedReplay.history_messages` through Agno `additional_input`.
   - Clear `agent.additional_input` after every run in a `finally` block or equivalent lifecycle guard.
   - Keep `_build_prompt_with_unseen(...)` and `build_prompt_with_thread_history(...)`, but compose them after the history module returns its summary prefix.
 - `src/mindroom/history/runtime.py`
@@ -286,7 +286,7 @@ The plan is not complete unless these existing heuristics are removed or replace
 ## Cache Contract
 
 No cached run may ignore replay state.
-`PreparedHistory.cache_key_fragment` is required whenever the history module returns replay-affecting state that is not already present in the final user prompt string.
+`PreparedReplay.cache_key_fragment` is required whenever the history module returns replay-affecting state that is not already present in the final user prompt string.
 At minimum, that fragment must cover the structured replay messages digest and the scoped persisted replay summary state or an equivalent canonical digest of the whole replay plan.
 If the history module cannot produce a stable replay-aware cache fragment for a run, the caller must bypass cache for that run.
 Cache correctness may not depend on `agent.add_history_to_context`, `agent.add_session_summary_to_context`, or `session.summary`.

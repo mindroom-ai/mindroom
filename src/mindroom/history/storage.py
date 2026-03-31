@@ -11,7 +11,7 @@ from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
-from mindroom.history.types import CompactionState, HistoryScope
+from mindroom.history.types import HistoryScope, HistoryScopeState
 
 if TYPE_CHECKING:
     from agno.session.agent import AgentSession
@@ -21,12 +21,12 @@ _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
 
 
-def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -> CompactionState:
+def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -> HistoryScopeState:
     """Return the scoped compaction state for one session and scope."""
-    return read_scope_states(session).get(scope.key, CompactionState())
+    return read_scope_states(session).get(scope.key, HistoryScopeState())
 
 
-def read_scope_states(session: AgentSession | TeamSession) -> dict[str, CompactionState]:
+def read_scope_states(session: AgentSession | TeamSession) -> dict[str, HistoryScopeState]:
     """Return all scoped compaction states parsed from session metadata."""
     metadata = session.metadata
     if not isinstance(metadata, dict):
@@ -41,7 +41,7 @@ def read_scope_states(session: AgentSession | TeamSession) -> dict[str, Compacti
         raw_states = raw_value.get("states")
         if not isinstance(raw_states, dict):
             return {}
-        parsed: dict[str, CompactionState] = {}
+        parsed: dict[str, HistoryScopeState] = {}
         for scope_key, raw_state in raw_states.items():
             if not isinstance(scope_key, str) or not isinstance(raw_state, dict):
                 continue
@@ -54,7 +54,7 @@ def read_scope_states(session: AgentSession | TeamSession) -> dict[str, Compacti
 def write_scope_state(
     session: AgentSession | TeamSession,
     scope: HistoryScope,
-    state: CompactionState,
+    state: HistoryScopeState,
 ) -> None:
     """Persist one scoped compaction state back into session metadata."""
     states = read_scope_states(session)
@@ -111,13 +111,13 @@ def update_scope_seen_event_ids(
     return True
 
 
-def _parse_state(raw_state: dict[str, Any]) -> CompactionState:
+def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
     summary = raw_state.get("summary")
     last_compacted_run_id = raw_state.get("last_compacted_run_id")
     compacted_at = raw_state.get("compacted_at")
     summary_model = raw_state.get("summary_model")
     force_flag = raw_state.get("force_compact_before_next_run")
-    return CompactionState(
+    return HistoryScopeState(
         summary=summary if isinstance(summary, str) and summary.strip() else None,
         last_compacted_run_id=last_compacted_run_id if isinstance(last_compacted_run_id, str) else None,
         compacted_at=compacted_at if isinstance(compacted_at, str) else None,
@@ -126,7 +126,7 @@ def _parse_state(raw_state: dict[str, Any]) -> CompactionState:
     )
 
 
-def _state_to_metadata(state: CompactionState) -> dict[str, object]:
+def _state_to_metadata(state: HistoryScopeState) -> dict[str, object]:
     payload: dict[str, object] = {
         "force_compact_before_next_run": state.force_compact_before_next_run,
     }
@@ -141,7 +141,7 @@ def _state_to_metadata(state: CompactionState) -> dict[str, object]:
     return payload
 
 
-def _state_is_empty(state: CompactionState) -> bool:
+def _state_is_empty(state: HistoryScopeState) -> bool:
     return (
         state.summary is None
         and state.last_compacted_run_id is None

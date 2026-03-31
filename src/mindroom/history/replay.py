@@ -13,7 +13,7 @@ from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
-from mindroom.history.types import CompactionState, HistoryPolicy, HistoryScope, ReplayPlan
+from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedReplay
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 
@@ -44,10 +44,10 @@ def build_replay_plan(
     *,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
-    state: CompactionState,
+    state: HistoryScopeState,
     policy: HistoryPolicy,
     max_tool_calls_from_history: int | None,
-) -> ReplayPlan:
+) -> ResolvedReplay:
     """Build the persisted replay plan for one session scope."""
     scoped_runs = _runs_for_scope(_completed_top_level_runs(session), scope)
     visible_runs, effective_state = _apply_cutoff(scoped_runs, state, session_id=session.session_id, scope=scope)
@@ -61,7 +61,7 @@ def build_replay_plan(
         max_tool_calls_from_history=max_tool_calls_from_history,
     )
     replay_tokens = estimate_text_tokens(summary_prompt_prefix) + estimate_history_messages_tokens(history_messages)
-    return ReplayPlan(
+    return ResolvedReplay(
         scope=scope,
         state=effective_state,
         visible_runs=visible_runs,
@@ -74,11 +74,11 @@ def build_replay_plan(
 
 
 def apply_oldest_first_drop_policy(
-    plan: ReplayPlan,
+    plan: ResolvedReplay,
     *,
     budget_tokens: int | None,
     max_tool_calls_from_history: int | None,
-) -> ReplayPlan:
+) -> ResolvedReplay:
     """Apply the deterministic fallback chain when replay exceeds the budget."""
     if budget_tokens is None:
         return plan
@@ -187,13 +187,13 @@ def _runs_for_scope(
 
 def _apply_cutoff(
     runs: list[RunOutput | TeamRunOutput],
-    state: CompactionState,
+    state: HistoryScopeState,
     *,
     session_id: str,
     scope: HistoryScope,
-) -> tuple[list[RunOutput | TeamRunOutput], CompactionState]:
+) -> tuple[list[RunOutput | TeamRunOutput], HistoryScopeState]:
     if not state.has_summary or not state.has_cutoff:
-        return runs, CompactionState(force_compact_before_next_run=state.force_compact_before_next_run)
+        return runs, HistoryScopeState(force_compact_before_next_run=state.force_compact_before_next_run)
     cutoff_index = next((index for index, run in enumerate(runs) if run.run_id == state.last_compacted_run_id), None)
     if cutoff_index is None:
         logger.warning(
@@ -202,7 +202,7 @@ def _apply_cutoff(
             scope=scope.key,
             last_compacted_run_id=state.last_compacted_run_id,
         )
-        return runs, CompactionState(force_compact_before_next_run=state.force_compact_before_next_run)
+        return runs, HistoryScopeState(force_compact_before_next_run=state.force_compact_before_next_run)
     return runs[cutoff_index + 1 :], state
 
 
@@ -226,7 +226,7 @@ def _message_groups_for_policy(
     return run_groups
 
 
-def _drop_summary_if_needed(plan: ReplayPlan, budget_tokens: int) -> ReplayPlan:
+def _drop_summary_if_needed(plan: ResolvedReplay, budget_tokens: int) -> ResolvedReplay:
     summary_prompt_prefix = plan.summary_prompt_prefix
     if summary_prompt_prefix:
         summary_tokens = estimate_text_tokens(summary_prompt_prefix)
@@ -246,7 +246,7 @@ def _drop_summary_if_needed(plan: ReplayPlan, budget_tokens: int) -> ReplayPlan:
     return _empty_replay_plan(plan)
 
 
-def _empty_replay_plan(plan: ReplayPlan) -> ReplayPlan:
+def _empty_replay_plan(plan: ResolvedReplay) -> ResolvedReplay:
     return replace(
         plan,
         summary_prompt_prefix="",

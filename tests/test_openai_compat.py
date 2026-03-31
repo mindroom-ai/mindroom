@@ -28,7 +28,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.history import PreparedHistory
+from mindroom.history import PreparedReplay
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -1833,7 +1833,7 @@ class TestTeamCompletion:
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedHistory()
+            mock_prepare.return_value = PreparedReplay()
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -1890,7 +1890,7 @@ class TestTeamCompletion:
                 side_effect=passthrough_stream_wrapper,
             ),
         ):
-            mock_prepare.return_value = PreparedHistory()
+            mock_prepare.return_value = PreparedReplay()
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -2459,7 +2459,7 @@ class TestTeamCompletion:
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedHistory(
+            mock_prepare.return_value = PreparedReplay(
                 summary_prompt_prefix=summary_prefix,
                 has_stored_replay_state=True,
             )
@@ -2510,7 +2510,7 @@ class TestTeamCompletion:
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedHistory(
+            mock_prepare.return_value = PreparedReplay(
                 summary_prompt_prefix=summary_prefix,
                 has_stored_replay_state=True,
             )

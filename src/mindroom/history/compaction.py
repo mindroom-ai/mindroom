@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from mindroom.history.replay import estimate_history_messages_tokens
 from mindroom.history.storage import write_scope_state
-from mindroom.history.types import CompactionOutcome, CompactionState, HistoryScope
+from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import compute_compaction_input_budget, estimate_text_tokens, stable_serialize
 
@@ -84,14 +84,14 @@ async def compact_scope_history(
     storage: SqliteDb,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
-    state: CompactionState,
+    state: HistoryScopeState,
     visible_runs: list[RunOutput | TeamRunOutput],
     config: Config,
     runtime_paths: RuntimePaths,
     compaction_config: CompactionConfig,
     active_model_name: str,
     active_context_window: int | None,
-) -> tuple[CompactionState, CompactionOutcome | None]:
+) -> tuple[HistoryScopeState, CompactionOutcome | None]:
     """Compact the oldest visible prefix for one scope in a single summary pass."""
     compactable_runs = visible_runs[:-2]
     cleared_state = replace(state, force_compact_before_next_run=False)
@@ -144,7 +144,7 @@ async def compact_scope_history(
     if last_compacted_run_id is None:
         return cleared_state, None
 
-    new_state = CompactionState(
+    new_state = HistoryScopeState(
         summary=new_summary.summary,
         last_compacted_run_id=last_compacted_run_id,
         compacted_at=compacted_at,

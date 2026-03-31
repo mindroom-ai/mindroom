@@ -52,7 +52,7 @@ from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.history import (
     CompactionOutcome,
-    PreparedHistory,
+    PreparedReplay,
     clear_prepared_history,
     prepare_history_for_run,
 )
@@ -834,7 +834,7 @@ async def _cached_agent_run(
     run_id_callback: Callable[[str], None] | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
-    prepared_history: PreparedHistory | None = None,
+    prepared_history: PreparedReplay | None = None,
     enrichment_digest: str | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
@@ -908,7 +908,7 @@ async def _prepare_agent_and_prompt(
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
-) -> tuple[Agent, str, list[str], PreparedHistory]:
+) -> tuple[Agent, str, list[str], PreparedReplay]:
     """Prepare agent and full prompt for AI processing.
 
     Returns:
@@ -1076,7 +1076,7 @@ async def ai_response(  # noqa: C901, PLR0912
     logger.info("AI request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
-    prepared_history = PreparedHistory()
+    prepared_history = PreparedReplay()
 
     try:
         agent, full_prompt, unseen_event_ids, prepared_history = await _prepare_agent_and_prompt(
@@ -1337,7 +1337,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     storage_path = runtime_paths.storage_root
     agent: Agent | None = None
-    prepared_history = PreparedHistory()
+    prepared_history = PreparedReplay()
 
     try:
         agent, full_prompt, unseen_event_ids, prepared_history = await _prepare_agent_and_prompt(

@@ -20,7 +20,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.history import PreparedHistory
+from mindroom.history import PreparedReplay
 from mindroom.history.runtime import load_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.matrix.identity import MatrixID
@@ -172,7 +172,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedHistory()
+        mock_prepare.return_value = PreparedReplay()
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -213,7 +213,7 @@ async def test_team_response_prefers_persisted_replay_over_thread_context_fallba
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedHistory(
+        mock_prepare.return_value = PreparedReplay(
             summary_prompt_prefix=summary_prefix,
             has_stored_replay_state=True,
         )
@@ -278,7 +278,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_stored_
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedHistory(
+        mock_prepare.return_value = PreparedReplay(
             summary_prompt_prefix=summary_prefix,
             has_stored_replay_state=True,
         )
@@ -340,7 +340,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedHistory(
+        mock_prepare.return_value = PreparedReplay(
             summary_prompt_prefix="<history_context>\n<summary>\nTeam summary\n</summary>\n</history_context>\n\n",
             has_stored_replay_state=True,
         )
@@ -907,7 +907,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedHistory()
+        mock_prepare.return_value = PreparedReplay()
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -959,7 +959,7 @@ async def test_team_response_stream_prefers_persisted_replay_over_thread_context
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedHistory(
+        mock_prepare.return_value = PreparedReplay(
             summary_prompt_prefix=summary_prefix,
             has_stored_replay_state=True,
         )
@@ -1025,7 +1025,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedHistory(
+        mock_prepare.return_value = PreparedReplay(
             summary_prompt_prefix=summary_prefix,
             has_stored_replay_state=True,
         )
