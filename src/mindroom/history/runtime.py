@@ -33,6 +33,7 @@ from mindroom.history.replay import (
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistory, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
+from mindroom.token_budget import estimate_text_tokens
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
@@ -113,6 +114,7 @@ async def prepare_history_for_run(
     active_model_name: str | None = None,
     active_context_window: int | None = None,
     static_prompt_tokens: int | None = None,
+    available_history_budget: int | None = None,
     scope: HistoryScope | None = None,
 ) -> PreparedHistory:
     """Prepare persisted replay state for one run and activate Agno guards."""
@@ -148,11 +150,13 @@ async def prepare_history_for_run(
         active_context_window=active_context_window,
         static_prompt_tokens=static_prompt_tokens,
     )
-    available_history_budget = _resolve_available_history_budget(
-        compaction_config=resolved_inputs.compaction_config,
-        active_context_window=resolved_inputs.active_context_window,
-        static_prompt_tokens=resolved_inputs.static_prompt_tokens,
-    )
+    resolved_available_history_budget = available_history_budget
+    if resolved_available_history_budget is None:
+        resolved_available_history_budget = _resolve_available_history_budget(
+            compaction_config=resolved_inputs.compaction_config,
+            active_context_window=resolved_inputs.active_context_window,
+            static_prompt_tokens=resolved_inputs.static_prompt_tokens,
+        )
     state = read_scope_state(resolved_session, resolved_scope)
     replay_plan = _build_scope_replay_plan(
         session=resolved_session,
@@ -168,13 +172,13 @@ async def prepare_history_for_run(
         replay_plan=replay_plan,
         config=config,
         runtime_paths=runtime_paths,
-        available_history_budget=available_history_budget,
+        available_history_budget=resolved_available_history_budget,
         resolved_inputs=resolved_inputs,
     )
 
     replay_plan = apply_oldest_first_drop_policy(
         replay_plan,
-        budget_tokens=available_history_budget,
+        budget_tokens=resolved_available_history_budget,
         max_tool_calls_from_history=resolved_inputs.history_settings.max_tool_calls_from_history,
     )
 
@@ -233,6 +237,14 @@ async def prepare_bound_agents_for_run(
     resolved_active_context_window = active_context_window
     if resolved_active_context_window is None:
         resolved_active_context_window = config.get_model_context_window(resolved_active_model_name)
+    resolved_available_history_budget = _resolve_bound_available_history_budget(
+        agents=agents,
+        full_prompt=full_prompt,
+        fallback_full_prompt=fallback_full_prompt,
+        config=config,
+        compaction_config=compaction_config,
+        team_active_context_window=resolved_active_context_window,
+    )
 
     prepared = await prepare_history_for_run(
         agent=bound_scope.owner_agent,
@@ -254,6 +266,7 @@ async def prepare_bound_agents_for_run(
             full_prompt=full_prompt,
             fallback_full_prompt=fallback_full_prompt,
         ),
+        available_history_budget=resolved_available_history_budget,
         scope=bound_scope.scope,
     )
     for agent in agents:
@@ -340,6 +353,18 @@ def estimate_preparation_static_tokens(
     if fallback_full_prompt is None:
         return primary_tokens
     return max(primary_tokens, estimate_static_tokens(agent, fallback_full_prompt))
+
+
+def estimate_preparation_prompt_tokens(
+    *,
+    full_prompt: str,
+    fallback_full_prompt: str | None = None,
+) -> int:
+    """Estimate prompt-only tokens using the largest prompt variant this run may send."""
+    primary_tokens = estimate_text_tokens(full_prompt)
+    if fallback_full_prompt is None:
+        return primary_tokens
+    return max(primary_tokens, estimate_text_tokens(fallback_full_prompt))
 
 
 def load_bound_scope_session_context(
@@ -748,18 +773,39 @@ async def _apply_scope_compaction_if_needed(
         return state, replay_plan, compaction_outcomes
 
     if len(replay_plan.visible_runs) > 2:
-        next_state, outcome = await compact_scope_history(
-            storage=storage,
-            session=session,
-            scope=scope,
-            state=state,
-            visible_runs=replay_plan.visible_runs,
-            config=config,
-            runtime_paths=runtime_paths,
-            compaction_config=resolved_inputs.compaction_config,
-            active_model_name=resolved_inputs.active_model_name,
-            active_context_window=resolved_inputs.active_context_window,
-        )
+        try:
+            next_state, outcome = await compact_scope_history(
+                storage=storage,
+                session=session,
+                scope=scope,
+                state=state,
+                visible_runs=replay_plan.visible_runs,
+                config=config,
+                runtime_paths=runtime_paths,
+                compaction_config=resolved_inputs.compaction_config,
+                active_model_name=resolved_inputs.active_model_name,
+                active_context_window=resolved_inputs.active_context_window,
+            )
+        except Exception:
+            next_state = _clear_forced_compaction_state(
+                storage=storage,
+                session=session,
+                scope=scope,
+                state=state,
+            )
+            logger.exception(
+                "Compaction failed; continuing without compaction",
+                session_id=session.session_id,
+                scope=scope.key,
+                force_compact_before_next_run=state.force_compact_before_next_run,
+            )
+            replay_plan = _build_scope_replay_plan(
+                session=session,
+                scope=scope,
+                state=next_state,
+                history_settings=resolved_inputs.history_settings,
+            )
+            return next_state, replay_plan, compaction_outcomes
         if next_state != state and outcome is None:
             write_scope_state(session, scope, next_state)
             storage.upsert_session(session)
@@ -789,6 +835,21 @@ async def _apply_scope_compaction_if_needed(
     return state, replay_plan, compaction_outcomes
 
 
+def _clear_forced_compaction_state(
+    *,
+    storage: SqliteDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    state: CompactionState,
+) -> CompactionState:
+    if not state.force_compact_before_next_run:
+        return state
+    cleared_state = replace(state, force_compact_before_next_run=False)
+    write_scope_state(session, scope, cleared_state)
+    storage.upsert_session(session)
+    return cleared_state
+
+
 def _resolve_available_history_budget(
     *,
     compaction_config: CompactionConfig,
@@ -807,3 +868,56 @@ def _resolve_available_history_budget(
         ceiling = min(ceiling, max(0, active_context_window - reserve_tokens))
 
     return max(0, ceiling - static_prompt_tokens)
+
+
+def _resolve_bound_available_history_budget(
+    *,
+    agents: list[Agent],
+    full_prompt: str,
+    fallback_full_prompt: str | None,
+    config: Config,
+    compaction_config: CompactionConfig,
+    team_active_context_window: int | None,
+) -> int | None:
+    budgets: list[int] = []
+    team_prompt_budget = _resolve_available_history_budget(
+        compaction_config=compaction_config,
+        active_context_window=team_active_context_window,
+        static_prompt_tokens=estimate_preparation_prompt_tokens(
+            full_prompt=full_prompt,
+            fallback_full_prompt=fallback_full_prompt,
+        ),
+    )
+    if team_prompt_budget is not None:
+        budgets.append(team_prompt_budget)
+
+    for agent in agents:
+        member_context_window = _resolve_bound_member_context_window(agent, config, fallback=team_active_context_window)
+        member_budget = _resolve_available_history_budget(
+            compaction_config=compaction_config,
+            active_context_window=member_context_window,
+            static_prompt_tokens=estimate_preparation_static_tokens(
+                agent,
+                full_prompt=full_prompt,
+                fallback_full_prompt=fallback_full_prompt,
+            ),
+        )
+        if member_budget is not None:
+            budgets.append(member_budget)
+
+    if not budgets:
+        return None
+    return min(budgets)
+
+
+def _resolve_bound_member_context_window(
+    agent: Agent,
+    config: Config,
+    *,
+    fallback: int | None,
+) -> int | None:
+    agent_id = agent.id
+    if isinstance(agent_id, str) and agent_id in config.agents:
+        model_name = config.get_entity_model_name(agent_id)
+        return config.get_model_context_window(model_name)
+    return fallback

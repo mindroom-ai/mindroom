@@ -29,7 +29,7 @@ Each model configuration supports the following fields:
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
 | `api_key` | No | `null` | API key (usually read from environment variables) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
-| `context_window` | No | `null` | Context window size in tokens; when set, history is dynamically trimmed to stay within 80% of this limit |
+| `context_window` | No | `null` | Context window size in tokens; when set, MindRoom uses it for replay budgeting and auto-compaction heuristics |
 
 ## Configuration Examples
 
@@ -100,9 +100,10 @@ models:
 
 ## Context Window
 
-When `context_window` is set, MindRoom estimates the total context size before each model call (system prompt + conversation history + current message) using a chars/4 token approximation. If the estimate exceeds 80% of the context window, the number of history runs replayed is automatically reduced to fit within budget. If even a single history run exceeds the remaining budget, history is disabled entirely for that call.
-
-A warning is logged whenever history is trimmed, including the original and reduced run counts.
+When `context_window` is set, MindRoom uses it to budget persisted replay and auto-compaction before each run.
+The budget uses a chars/4 approximation and reserves headroom for the current prompt and output.
+MindRoom does not mutate configured `num_history_runs` to fit the window.
+Instead, it prepares scoped replay, optionally compacts older runs when auto-compaction is enabled, and then drops the oldest remaining persisted replay if the prepared payload still exceeds budget.
 
 ```yaml
 models:
@@ -112,7 +113,7 @@ models:
     context_window: 200000  # 200K tokens
 ```
 
-This is useful for models with smaller context windows or agents with long-running conversations that accumulate large histories.
+This is useful for models with smaller context windows or long-running conversations that accumulate persisted history.
 
 ## Extra Kwargs
 

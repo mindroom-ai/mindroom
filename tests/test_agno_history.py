@@ -497,6 +497,58 @@ async def test_prepare_history_for_run_forced_compaction_updates_scope_state(tmp
     assert len(prepared.compaction_outcomes) == 1
 
 
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_compaction_failure_falls_back_and_clears_force_flag(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+            _completed_run("run-3"),
+            _completed_run("run-4"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, CompactionState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    with (
+        patch(
+            "mindroom.history.compaction.resolve_compaction_model",
+            return_value=(FakeModel(id="summary-model", provider="fake"), 64_000),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(side_effect=RuntimeError("summary failed")),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    state = read_scope_state(persisted, scope)
+    assert state.force_compact_before_next_run is False
+    assert state.summary is None
+    assert prepared.compaction_outcomes == []
+    assert prepared.history_messages != []
+
+
 def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
     big_run = _completed_run(
         "run-big",
@@ -884,6 +936,104 @@ async def test_prepare_bound_agents_for_run_counts_owner_static_prompt_tokens(tm
     owner_agent.instructions = ["Instruction " + ("i" * 800)]
     peer_agent = _agent()
     peer_agent.id = "zeta"
+    scope_context = load_bound_scope_session_context(
+        agents=[peer_agent, owner_agent],
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        team_name="pair",
+        create_session_if_missing=True,
+    )
+    assert scope_context is not None
+    assert scope_context.session is not None
+    session = _team_session(
+        "session-1",
+        team_id="pair",
+        runs=[
+            _completed_team_run(
+                "run-1",
+                team_id="pair",
+                messages=[
+                    Message(role="user", content="run-1 question " + ("a" * 160)),
+                    Message(role="assistant", content="run-1 answer " + ("b" * 160)),
+                ],
+            ),
+            _completed_team_run(
+                "run-2",
+                team_id="pair",
+                messages=[
+                    Message(role="user", content="run-2 question " + ("c" * 160)),
+                    Message(role="assistant", content="run-2 answer " + ("d" * 160)),
+                ],
+            ),
+            _completed_team_run(
+                "run-3",
+                team_id="pair",
+                messages=[
+                    Message(role="user", content="run-3 question " + ("e" * 160)),
+                    Message(role="assistant", content="run-3 answer " + ("f" * 160)),
+                ],
+            ),
+        ],
+    )
+    scope_context.storage.upsert_session(session)
+
+    prepared = await prepare_bound_agents_for_run(
+        agents=[peer_agent, owner_agent],
+        full_prompt="Now?",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        team_name="pair",
+        active_model_name="default",
+        active_context_window=400,
+    )
+
+    assert prepared.history_messages == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_bound_agents_for_run_counts_most_constrained_member_static_prompt_tokens(
+    tmp_path: Path,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "alpha": AgentConfig(display_name="Alpha"),
+                "zeta": AgentConfig(display_name="Zeta"),
+            },
+            teams={
+                "pair": TeamConfig(
+                    display_name="Pair",
+                    role="Test team",
+                    agents=["alpha", "zeta"],
+                    compaction=CompactionOverrideConfig(
+                        enabled=False,
+                        threshold_tokens=160,
+                        reserve_tokens=0,
+                    ),
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="default-model",
+                    context_window=400,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+    owner_agent = _agent()
+    owner_agent.id = "alpha"
+    peer_agent = _agent()
+    peer_agent.id = "zeta"
+    peer_agent.role = "Verbose peer role " + ("r" * 600)
+    peer_agent.instructions = ["Instruction " + ("i" * 600)]
     scope_context = load_bound_scope_session_context(
         agents=[peer_agent, owner_agent],
         session_id="session-1",
