@@ -15,6 +15,7 @@ from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from agno.run.agent import RunOutput
+from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
@@ -643,19 +644,36 @@ def get_team_session(storage: SqliteDb, session_id: str) -> TeamSession | None:
     return None
 
 
-def remove_run_by_event_id(storage: SqliteDb, session_id: str, event_id: str) -> bool:
+def remove_run_by_event_id(
+    storage: SqliteDb,
+    session_id: str,
+    event_id: str,
+    *,
+    session_type: SessionType = SessionType.AGENT,
+) -> bool:
     """Remove a run whose matrix_event_id matches, save session.
 
     Returns True if a run was removed.
     """
-    session = get_agent_session(storage, session_id)
+    session = (
+        get_team_session(storage, session_id)
+        if session_type is SessionType.TEAM
+        else get_agent_session(
+            storage,
+            session_id,
+        )
+    )
     if session is None or not session.runs:
         return False
     original_len = len(session.runs)
     session.runs = [
         run
         for run in session.runs
-        if not (isinstance(run, RunOutput) and run.metadata and run.metadata.get("matrix_event_id") == event_id)
+        if not (
+            isinstance(run, (RunOutput, TeamRunOutput))
+            and run.metadata
+            and run.metadata.get("matrix_event_id") == event_id
+        )
     ]
     if len(session.runs) == original_len:
         return False

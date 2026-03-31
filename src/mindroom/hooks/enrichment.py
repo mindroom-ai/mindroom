@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 
 from agno.db.base import SessionType
 from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 if TYPE_CHECKING:
     from agno.db.sqlite import SqliteDb
@@ -80,20 +81,29 @@ def _strip_session_message_content(message: object) -> bool:
     return changed
 
 
-def _session_runs(session: AgentSession) -> list[RunOutput | TeamRunOutput]:
+def _session_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
     return list(session.runs or [])
 
 
-def strip_enrichment_from_session_storage(storage: SqliteDb, session_id: str) -> bool:
+def strip_enrichment_from_session_storage(
+    storage: SqliteDb,
+    session_id: str,
+    *,
+    session_type: SessionType = SessionType.AGENT,
+) -> bool:
     """Remove enrichment blocks from persisted Agno session history for one session."""
-    raw_session = storage.get_session(session_id, SessionType.AGENT)
+    raw_session = storage.get_session(session_id, session_type)
     if raw_session is None:
         return False
 
     if isinstance(raw_session, dict):
-        session = AgentSession.from_dict(cast("dict[str, object]", raw_session))
+        session = (
+            TeamSession.from_dict(cast("dict[str, object]", raw_session))
+            if session_type is SessionType.TEAM
+            else AgentSession.from_dict(cast("dict[str, object]", raw_session))
+        )
     else:
-        session = cast("AgentSession", raw_session)
+        session = cast("AgentSession | TeamSession", raw_session)
     if session is None:
         return False
 

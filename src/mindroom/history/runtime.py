@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -24,7 +24,12 @@ from mindroom.history.compaction import (
     resolve_compaction_runtime_settings,
     resolve_effective_compaction_threshold,
 )
-from mindroom.history.storage import clear_force_compaction_state, read_scope_state
+from mindroom.history.storage import (
+    clear_force_compaction_state,
+    consume_pending_force_compaction_scope,
+    read_scope_state,
+    write_scope_state,
+)
 from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_text_tokens
@@ -147,6 +152,10 @@ async def prepare_history_for_run(
 
     session = scope_context.session
     state = read_scope_state(session, scope_context.scope)
+    if consume_pending_force_compaction_scope(session, scope_context.scope):
+        state = replace(state, force_compact_before_next_run=True)
+        write_scope_state(session, scope_context.scope, state)
+        scope_context.storage.upsert_session(session)
     if state.force_compact_before_next_run and history_budget is None:
         state = clear_force_compaction_state(session, scope_context.scope, state)
         scope_context.storage.upsert_session(session)
@@ -330,7 +339,7 @@ def resolve_bound_team_scope_context(
     if team_scope_id is None:
         return None
     scope = HistoryScope(kind="team", scope_id=team_scope_id)
-    storage = _create_scope_session_storage(
+    storage = create_scope_session_storage(
         agent_name=owner_agent_name,
         scope=scope,
         config=config,
@@ -486,7 +495,7 @@ def _materialize_session(
     session: AgentSession | TeamSession | None,
 ) -> tuple[SqliteDb | None, AgentSession | TeamSession | None]:
     if storage is None:
-        storage = _create_scope_session_storage(
+        storage = create_scope_session_storage(
             agent_name=agent_name,
             scope=scope,
             config=config,
@@ -500,7 +509,7 @@ def _materialize_session(
     return storage, session
 
 
-def _create_scope_session_storage(
+def create_scope_session_storage(
     *,
     agent_name: str,
     scope: HistoryScope,
@@ -508,6 +517,7 @@ def _create_scope_session_storage(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> SqliteDb:
+    """Create the canonical SQLite storage for one persisted history scope."""
     if scope.kind == "agent":
         return create_session_storage(
             agent_name,

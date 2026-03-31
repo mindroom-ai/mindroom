@@ -2,22 +2,42 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
+from agno.db.base import SessionType
 from agno.media import Audio
+from agno.run.team import TeamRunOutput
+from agno.session.team import TeamSession
 
 from mindroom import interactive
-from mindroom.bot import AgentBot
+from mindroom.agents import remove_run_by_event_id
+from mindroom.bot import AgentBot, TeamBot
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
+from mindroom.thread_utils import create_session_id
 from tests.conftest import bind_runtime_paths, runtime_paths_for
+
+
+@dataclass
+class _FakeTeamStorage:
+    session: TeamSession | None
+    upserted_session: TeamSession | None = None
+
+    def get_session(self, session_id: str, _session_type: object) -> TeamSession | None:
+        if self.session is None or self.session.session_id != session_id:
+            return None
+        return self.session
+
+    def upsert_session(self, session: TeamSession) -> None:
+        self.upserted_session = session
 
 
 def _test_config(
@@ -52,6 +72,28 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
         },
     )
     return bind_runtime_paths(config, runtime_paths)
+
+
+def _team_test_config(tmp_path: Path) -> Config:
+    config = Config(
+        agents={
+            "worker": {
+                "display_name": "Worker",
+                "rooms": ["!test:example.com"],
+            },
+        },
+        teams={
+            "test_team": {
+                "display_name": "Test Team",
+                "role": "Coordinate worker",
+                "agents": ["worker"],
+                "rooms": ["!test:example.com"],
+            },
+        },
+        authorization={"default_room_access": True, "agent_reply_permissions": {}},
+        mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+    )
+    return _bind_runtime_paths(config, tmp_path)
 
 
 @pytest.mark.asyncio
@@ -196,6 +238,133 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
 
         # Verify that the response tracker still maps to the same response
         assert bot.response_tracker.get_response_event_id(original_event.event_id) == response_event_id
+
+
+def test_remove_run_by_event_id_removes_team_runs() -> None:
+    """Team edit regeneration should be able to delete stale runs from TeamSession storage."""
+    session = TeamSession(
+        session_id="session-1",
+        team_id="test_team",
+        runs=[
+            TeamRunOutput(
+                session_id="session-1",
+                metadata={"matrix_event_id": "$original:example.com"},
+            ),
+            TeamRunOutput(
+                session_id="session-1",
+                metadata={"matrix_event_id": "$other:example.com"},
+            ),
+        ],
+    )
+    storage = _FakeTeamStorage(session)
+
+    removed = remove_run_by_event_id(
+        storage,
+        "session-1",
+        "$original:example.com",
+        session_type=SessionType.TEAM,
+    )
+
+    assert removed is True
+    assert storage.upserted_session is session
+    assert len(session.runs or []) == 1
+    assert session.runs[0].metadata["matrix_event_id"] == "$other:example.com"
+
+
+@pytest.mark.asyncio
+async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path: Path) -> None:
+    """Team edit regeneration should delete stale runs from the shared team session."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_team",
+        user_id="@mindroom_test_team:example.com",
+        display_name="Test Team",
+        password="test_password",  # noqa: S106
+    )
+    config = _team_test_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    team_member = config.get_ids(runtime_paths)["worker"]
+    bot = TeamBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=["!test:example.com"],
+        team_agents=[team_member],
+        team_mode="coordinate",
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_team:example.com"
+    bot.response_tracker = ResponseTracker(agent_name="test_team", base_path=tmp_path)
+    bot.logger = MagicMock()
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_team:example.com")
+    response_event_id = "$response:example.com"
+    bot.response_tracker.mark_responded("$original:example.com", response_event_id)
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* @test_team redo that",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "@test_team redo that",
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {
+                    "event_id": "$original:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = {
+        "content": {
+            "body": "* @test_team redo that",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "@test_team redo that",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "event_id": "$original:example.com",
+                "rel_type": "m.replace",
+            },
+        },
+        "event_id": "$edit:example.com",
+        "sender": "@user:example.com",
+    }
+
+    storage = MagicMock()
+    with (
+        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch("mindroom.bot.should_agent_respond", return_value=True),
+        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate,
+        patch("mindroom.bot.create_scope_session_storage", return_value=storage) as mock_scope_storage,
+        patch("mindroom.bot.remove_run_by_event_id", return_value=True) as mock_remove_run,
+    ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[MatrixID.from_agent("test_team", "example.com", runtime_paths)],
+        )
+
+        await bot._on_message(room, edit_event)
+
+    mock_scope_storage.assert_called()
+    mock_remove_run.assert_called_once_with(
+        storage,
+        create_session_id("!test:example.com", None),
+        "$original:example.com",
+        session_type=SessionType.TEAM,
+    )
+    mock_generate.assert_awaited_once()
 
 
 @pytest.mark.asyncio

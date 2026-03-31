@@ -96,7 +96,7 @@ models:
 
 ## Context Window
 
-When `context_window` is set, MindRoom uses it to budget persisted replay and auto-compaction before each run. Manual `compact_context`, `threshold_tokens`, and `threshold_percent` only take effect when MindRoom can resolve a usable context window from the active model or an explicit `compaction.model`. The budget uses a chars/4 approximation and reserves headroom for the current prompt and output. MindRoom does not mutate configured `num_history_runs` to fit the window. Instead, it prepares scoped replay, optionally compacts older runs when auto-compaction is enabled, and then drops the oldest remaining persisted replay if the prepared payload still exceeds budget.
+When `context_window` is set, MindRoom uses it to budget persisted replay and auto-compaction before each run. Manual `compact_context`, `threshold_tokens`, and `threshold_percent` only take effect when MindRoom can resolve a usable context window from the active model or an explicit `compaction.model`. The budget uses a chars/4 approximation and reserves headroom for the current prompt and output. MindRoom does not mutate configured `num_history_runs` to fit the window. Instead, it prepares scoped replay and optionally compacts older runs into `session.summary` when auto-compaction is enabled. If the rewritten history is still too large, MindRoom performs additional compaction passes until the budget fits or it falls back to summary-only replay with no raw runs left.
 
 ```
 models:

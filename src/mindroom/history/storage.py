@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 _COMPACTION_METADATA_VERSION = 1
 _MATRIX_HISTORY_METADATA_VERSION = 1
+_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
 
 
 def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -> HistoryScopeState:
@@ -70,6 +71,60 @@ def clear_force_compaction_state(
     cleared_state = replace(state, force_compact_before_next_run=False)
     write_scope_state(session, scope, cleared_state)
     return cleared_state
+
+
+def add_pending_force_compaction_scope(
+    session_state: dict[str, object] | None,
+    scope: HistoryScope,
+) -> dict[str, object]:
+    """Record a next-run compaction request inside Agno session_state."""
+    next_session_state = dict(session_state or {})
+    raw_scope_keys = next_session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
+    scope_keys = (
+        [scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key]
+        if isinstance(raw_scope_keys, list)
+        else []
+    )
+    if scope.key not in scope_keys:
+        scope_keys.append(scope.key)
+    next_session_state[_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = scope_keys
+    return next_session_state
+
+
+def consume_pending_force_compaction_scope(
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+) -> bool:
+    """Consume one pending next-run compaction request from Agno session_state."""
+    session_data = session.session_data
+    if not isinstance(session_data, dict):
+        return False
+    raw_session_state = session_data.get("session_state")
+    if not isinstance(raw_session_state, dict):
+        return False
+    raw_scope_keys = raw_session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
+    if not isinstance(raw_scope_keys, list):
+        return False
+
+    scope_keys = [scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key]
+    if scope.key not in scope_keys:
+        return False
+
+    remaining_scope_keys = [scope_key for scope_key in scope_keys if scope_key != scope.key]
+    next_session_state = dict(raw_session_state)
+    if remaining_scope_keys:
+        next_session_state[_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = remaining_scope_keys
+    else:
+        next_session_state.pop(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY, None)
+
+    next_session_data = dict(session_data)
+    if next_session_state:
+        next_session_data["session_state"] = next_session_state
+    else:
+        next_session_data.pop("session_state", None)
+
+    session.session_data = next_session_data or None
+    return True
 
 
 def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:

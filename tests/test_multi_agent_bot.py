@@ -17,6 +17,7 @@ import httpx
 import nio
 import pytest
 import uvicorn
+from agno.db.base import SessionType
 from agno.knowledge.document import Document
 from agno.knowledge.knowledge import Knowledge
 from agno.media import Image
@@ -1618,7 +1619,7 @@ class TestAgentBot:
             patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
             patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.bot.team_response", new_callable=AsyncMock, return_value="Team reply"),
-            patch("mindroom.bot.create_session_storage", return_value=storage),
+            patch("mindroom.bot.create_scope_session_storage", return_value=storage),
             patch("mindroom.bot.strip_enrichment_from_session_storage") as mock_strip_enrichment,
         ):
             event_id = await bot._generate_team_response_helper(
@@ -1636,7 +1637,11 @@ class TestAgentBot:
             )
 
         assert event_id == "$team"
-        mock_strip_enrichment.assert_called_once_with(storage, create_session_id("!test:localhost", None))
+        mock_strip_enrichment.assert_called_once_with(
+            storage,
+            create_session_id("!test:localhost", None),
+            session_type=SessionType.TEAM,
+        )
 
     @pytest.mark.asyncio
     async def test_reaction_hooks_run_after_built_in_handlers_decline(
