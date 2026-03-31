@@ -18,6 +18,7 @@ _TOOL_TRACE_VERSION = 2
 _MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
 _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
 _MAX_TOOL_RESULT_DISPLAY_CHARS = 500
+_TRUNCATABLE_RESULT_ITEM_FIELDS = frozenset({"body_preview"})
 # Keep v2 trace indexing stable (`events[N-1]`) by not truncating event slots.
 # Large-message handling is responsible for payload size fallbacks.
 _MAX_TOOL_TRACE_EVENTS = 120
@@ -54,12 +55,227 @@ def _to_compact_text(value: object) -> str:
         return str(value)
 
 
+def _parse_structured_result(value: object) -> dict[str, object] | None:
+    parsed: dict[str, object] | None
+    if isinstance(value, dict):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        parsed = decoded if isinstance(decoded, dict) else None
+    else:
+        return None
+
+    if parsed is None:
+        return None
+
+    threads = parsed.get("threads")
+    if not isinstance(threads, list) or not threads:
+        return None
+    if not all(
+        isinstance(item, dict)
+        and isinstance(item.get("thread_id"), str)
+        and isinstance(item.get("body_preview"), str)
+        for item in threads
+    ):
+        return None
+
+    return parsed
+
+
 def _truncate(text: str, limit: int) -> tuple[str, bool]:
     if len(text) <= limit:
         return text, False
     if limit <= 1:
         return "…", True
     return f"{text[: limit - 1]}…", True
+
+
+def _truncate_result_item_field(item: object, field_name: str, limit: int) -> tuple[object, bool]:
+    if not isinstance(item, dict):
+        return item, False
+
+    value = item.get(field_name)
+    if not isinstance(value, str):
+        return item, False
+
+    truncated_value, truncated = _truncate(value, limit)
+    if not truncated:
+        return item, False
+
+    updated_item = dict(item)
+    updated_item[field_name] = truncated_value
+    return updated_item, True
+
+
+def _fit_structured_result_item(
+    preview_payload: dict[str, object],
+    list_key: str,
+    kept_items: list[object],
+    item: object,
+    limit: int,
+) -> tuple[object | None, bool]:
+    candidate_payload = dict(preview_payload)
+    candidate_payload[list_key] = [*kept_items, item]
+    if len(_to_compact_text(candidate_payload)) <= limit:
+        return item, False
+
+    if not isinstance(item, dict):
+        return None, False
+
+    best_item: object | None = None
+    item_truncated = False
+    for field_name in _TRUNCATABLE_RESULT_ITEM_FIELDS:
+        field_value = item.get(field_name)
+        if not isinstance(field_value, str):
+            continue
+
+        low = 0
+        high = len(field_value)
+        while low <= high:
+            mid = (low + high) // 2
+            candidate_item, field_truncated = _truncate_result_item_field(item, field_name, mid)
+            candidate_payload[list_key] = [*kept_items, candidate_item]
+            if len(_to_compact_text(candidate_payload)) <= limit:
+                best_item = candidate_item
+                item_truncated = field_truncated
+                low = mid + 1
+            else:
+                high = mid - 1
+
+    return best_item, item_truncated
+
+
+def _drop_last_structured_result_item(preview_payload: dict[str, object], list_keys: list[str]) -> bool:
+    for list_key in reversed(list_keys):
+        items = preview_payload.get(list_key)
+        if isinstance(items, list) and items:
+            items.pop()
+            return True
+    return False
+
+
+def _shrink_last_structured_result_item(
+    preview_payload: dict[str, object],
+    list_keys: list[str],
+    limit: int,
+) -> bool:
+    for list_key in reversed(list_keys):
+        items = preview_payload.get(list_key)
+        if not isinstance(items, list) or not items:
+            continue
+
+        last_item = items[-1]
+        if not isinstance(last_item, dict):
+            continue
+
+        for field_name in _TRUNCATABLE_RESULT_ITEM_FIELDS:
+            field_value = last_item.get(field_name)
+            if not isinstance(field_value, str):
+                continue
+
+            low = 0
+            high = len(field_value)
+            best_item: object | None = None
+            while low <= high:
+                mid = (low + high) // 2
+                candidate_item, _ = _truncate_result_item_field(last_item, field_name, mid)
+                if candidate_item == last_item:
+                    high = mid - 1
+                    continue
+
+                candidate_payload = dict(preview_payload)
+                candidate_items = list(items)
+                candidate_items[-1] = candidate_item
+                candidate_payload[list_key] = candidate_items
+                if len(_to_compact_text(candidate_payload)) <= limit:
+                    best_item = candidate_item
+                    low = mid + 1
+                else:
+                    high = mid - 1
+
+            if best_item is not None:
+                items[-1] = best_item
+                return True
+
+    return False
+
+
+def _format_structured_result_preview(result: object) -> tuple[str, bool] | None:
+    structured_result = _parse_structured_result(result)
+    if structured_result is None:
+        return None
+
+    full_text = _to_compact_text(structured_result)
+    if len(full_text) <= _MAX_TOOL_RESULT_DISPLAY_CHARS:
+        return full_text, False
+
+    list_keys = [key for key, value in structured_result.items() if isinstance(value, list)]
+    if not list_keys:
+        return None
+
+    preview_payload = {
+        key: ([] if isinstance(value, list) else value)
+        for key, value in structured_result.items()
+    }
+    truncated = False
+    dropped_entries = False
+
+    for list_key in list_keys:
+        items = structured_result[list_key]
+        assert isinstance(items, list)
+
+        kept_items: list[object] = []
+        for item in items:
+            preview_payload[list_key] = kept_items
+            fitted_item, item_truncated = _fit_structured_result_item(
+                preview_payload,
+                list_key,
+                kept_items,
+                item,
+                _MAX_TOOL_RESULT_DISPLAY_CHARS,
+            )
+            if fitted_item is None:
+                dropped_entries = True
+                truncated = True
+                break
+            kept_items.append(fitted_item)
+            if item_truncated:
+                truncated = True
+
+        preview_payload[list_key] = kept_items
+        if len(kept_items) < len(items):
+            dropped_entries = True
+
+    if dropped_entries:
+        preview_payload["truncated"] = True
+        while len(_to_compact_text(preview_payload)) > _MAX_TOOL_RESULT_DISPLAY_CHARS:
+            if _shrink_last_structured_result_item(
+                preview_payload,
+                list_keys,
+                _MAX_TOOL_RESULT_DISPLAY_CHARS,
+            ):
+                continue
+            if not _drop_last_structured_result_item(preview_payload, list_keys):
+                return None
+        truncated = True
+
+    preview_text = _to_compact_text(preview_payload)
+    if len(preview_text) > _MAX_TOOL_RESULT_DISPLAY_CHARS:
+        return None
+
+    return preview_text, truncated
+
+
+def _format_tool_result_preview(result: object) -> tuple[str, bool]:
+    structured_preview = _format_structured_result_preview(result)
+    if structured_preview is not None:
+        return structured_preview
+
+    result_text = _to_compact_text(result)
+    return _truncate(result_text, _MAX_TOOL_RESULT_DISPLAY_CHARS)
 
 
 def _neutralize_mentions(text: str) -> str:
@@ -129,8 +345,7 @@ def format_tool_combined(
 
     result_display = ""
     if result is not None and result != "":
-        result_text = _to_compact_text(result)
-        result_display, result_truncated = _truncate(result_text, _MAX_TOOL_RESULT_DISPLAY_CHARS)
+        result_display, result_truncated = _format_tool_result_preview(result)
         truncated = truncated or result_truncated
 
     block = _format_tool_marker(tool_name, tool_index, pending=False)
@@ -163,8 +378,7 @@ def complete_pending_tool_block(
     result_display = ""
     truncated = False
     if result is not None and result != "":
-        result_text = _to_compact_text(result)
-        result_display, truncated = _truncate(result_text, _MAX_TOOL_RESULT_DISPLAY_CHARS)
+        result_display, truncated = _format_tool_result_preview(result)
 
     updated = accumulated_text
     pending_line = _tool_marker_line(tool_name, tool_index, pending=True)

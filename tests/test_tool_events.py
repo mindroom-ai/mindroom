@@ -1,10 +1,13 @@
 """Tests for tool event formatting and metadata payloads."""
 
+import json
+
 import pytest
 from agno.models.response import ToolExecution
 
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.tool_system.events import (
+    _MAX_TOOL_RESULT_DISPLAY_CHARS,
     _MAX_TOOL_TRACE_EVENTS,
     _TOOL_TRACE_KEY,
     ToolTraceEntry,
@@ -15,6 +18,72 @@ from mindroom.tool_system.events import (
     format_tool_combined,
     format_tool_completed_event,
 )
+
+
+def _room_threads_result(
+    *,
+    thread_count: int,
+    body_len: int,
+    has_more: bool = True,
+    next_token: str | None = "NEXT_TOKEN_1234567890",
+) -> tuple[str, list[str]]:
+    thread_ids = [f"$thread_{i}_{'X' * 40}:localhost" for i in range(thread_count)]
+    payload = {
+        "action": "room-threads",
+        "count": thread_count,
+        "has_more": has_more,
+        "next_token": next_token,
+        "status": "ok",
+        "tool": "matrix_message",
+        "threads": [
+            {
+                "body_preview": "body " + ("y" * body_len),
+                "sender": "@user:localhost",
+                "thread_id": thread_id,
+            }
+            for thread_id in thread_ids
+        ],
+    }
+    return json.dumps(payload, sort_keys=True), thread_ids
+
+
+def _read_result(*, message_count: int, body_len: int) -> str:
+    payload = {
+        "action": "read",
+        "limit": 20,
+        "messages": [
+            {
+                "body": "message " + ("y" * body_len),
+                "event_id": f"$event_{index}:localhost",
+                "sender": "@user:localhost",
+            }
+            for index in range(message_count)
+        ],
+        "room_id": "!room:localhost",
+        "status": "ok",
+        "tool": "matrix_message",
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
+def _exact_limit_room_threads_result() -> tuple[str, list[str]]:
+    base_result, thread_ids = _room_threads_result(
+        thread_count=1,
+        body_len=0,
+        has_more=False,
+        next_token=None,
+    )
+    body_len = _MAX_TOOL_RESULT_DISPLAY_CHARS - len(base_result)
+    assert body_len >= 0
+
+    result, thread_ids = _room_threads_result(
+        thread_count=1,
+        body_len=body_len,
+        has_more=False,
+        next_token=None,
+    )
+    assert len(result) == _MAX_TOOL_RESULT_DISPLAY_CHARS
+    return result, thread_ids
 
 
 def test_format_tool_started_uses_plain_marker_and_truncates() -> None:
@@ -70,6 +139,101 @@ def test_format_tool_combined_truncates_long_result() -> None:
     assert trace.type == "tool_call_completed"
     assert trace.result_preview is not None
     assert trace.truncated is True
+
+
+def test_format_tool_combined_truncates_structured_room_threads_by_entry() -> None:
+    """Structured room-thread previews should drop whole entries and preserve metadata."""
+    result, thread_ids = _room_threads_result(thread_count=4, body_len=400)
+
+    _text, trace = format_tool_combined("matrix_message", {"action": "room-threads"}, result)
+
+    assert trace.result_preview is not None
+    assert len(trace.result_preview) <= _MAX_TOOL_RESULT_DISPLAY_CHARS
+    assert trace.truncated is True
+
+    preview = json.loads(trace.result_preview)
+    assert preview["count"] == 4
+    assert preview["has_more"] is True
+    assert preview["next_token"] == "NEXT_TOKEN_1234567890"
+    assert preview["truncated"] is True
+    assert preview["threads"]
+    assert len(preview["threads"]) < 4
+    assert all(item["thread_id"] in thread_ids for item in preview["threads"])
+    assert all(not item["thread_id"].endswith("…") for item in preview["threads"])
+
+
+def test_format_tool_combined_truncates_body_preview_without_dropping_only_entry() -> None:
+    """Single-entry structured previews should shorten body_preview before dropping the entry."""
+    result, thread_ids = _room_threads_result(
+        thread_count=1,
+        body_len=400,
+        has_more=False,
+        next_token=None,
+    )
+
+    _text, trace = format_tool_combined("matrix_message", {"action": "room-threads"}, result)
+
+    assert trace.result_preview is not None
+    assert len(trace.result_preview) <= _MAX_TOOL_RESULT_DISPLAY_CHARS
+    assert trace.truncated is True
+
+    preview = json.loads(trace.result_preview)
+    assert "truncated" not in preview
+    assert preview["count"] == 1
+    assert preview["has_more"] is False
+    assert preview["next_token"] is None
+    assert len(preview["threads"]) == 1
+    assert preview["threads"][0]["thread_id"] == thread_ids[0]
+    assert preview["threads"][0]["body_preview"].endswith("…")
+
+
+def test_format_tool_combined_falls_back_for_matrix_message_read_payload() -> None:
+    """Read payloads keep the original char-based truncation path."""
+    result = _read_result(message_count=3, body_len=300)
+
+    _text, trace = format_tool_combined("matrix_message", {"action": "read"}, result)
+
+    assert trace.result_preview is not None
+    assert trace.result_preview == f"{result[: _MAX_TOOL_RESULT_DISPLAY_CHARS - 1]}…"
+    assert trace.truncated is True
+    assert '"messages": []' not in trace.result_preview
+    assert '"truncated": true' not in trace.result_preview
+
+
+def test_format_tool_combined_falls_back_for_empty_threads_list_over_limit() -> None:
+    """Empty thread lists should use plain truncation instead of smart structured truncation."""
+    result = json.dumps(
+        {
+            "action": "room-threads",
+            "count": 0,
+            "has_more": True,
+            "next_token": "N" * 600,
+            "status": "ok",
+            "threads": [],
+            "tool": "matrix_message",
+        },
+        sort_keys=True,
+    )
+
+    _text, trace = format_tool_combined("matrix_message", {"action": "room-threads"}, result)
+
+    assert trace.result_preview is not None
+    assert trace.result_preview == f"{result[: _MAX_TOOL_RESULT_DISPLAY_CHARS - 1]}…"
+    assert trace.truncated is True
+    assert '"truncated": true' not in trace.result_preview
+
+
+def test_format_tool_combined_preserves_exact_limit_structured_result() -> None:
+    """Exact-at-limit thread payloads should not be marked truncated."""
+    result, thread_ids = _exact_limit_room_threads_result()
+
+    _text, trace = format_tool_combined("matrix_message", {"action": "room-threads"}, result)
+
+    assert trace.result_preview == result
+    assert trace.truncated is False
+    preview = json.loads(trace.result_preview)
+    assert preview["threads"][0]["thread_id"] == thread_ids[0]
+    assert not preview["threads"][0]["body_preview"].endswith("…")
 
 
 def test_format_tool_combined_with_none_result() -> None:
