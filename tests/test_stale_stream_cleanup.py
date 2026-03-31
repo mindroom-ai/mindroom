@@ -848,10 +848,9 @@ async def test_cleanup_preserves_tool_trace_and_ai_run_metadata(tmp_path: Path) 
     client.room_get_event_relations = MagicMock(return_value=_aiter())
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
 
-    cleaned_count, interrupted_threads = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+    cleaned, _ = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
 
-    assert cleaned_count == 1
-    assert interrupted_threads == []
+    assert cleaned == 1
     sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
     _assert_preserved_edit_payload(
         sent_content,
@@ -884,10 +883,9 @@ async def test_cleanup_preserves_multiple_mindroom_metadata_keys(tmp_path: Path)
     client.room_get_event_relations = MagicMock(return_value=_aiter())
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
 
-    cleaned_count, interrupted_threads = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+    cleaned, _ = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
 
-    assert cleaned_count == 1
-    assert interrupted_threads == []
+    assert cleaned == 1
     sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
     _assert_preserved_edit_payload(sent_content, expected_keys)
 
@@ -923,10 +921,9 @@ async def test_cleanup_prefers_latest_mindroom_metadata_from_edit_chain(tmp_path
     client.room_get_event_relations = MagicMock(return_value=_aiter())
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
 
-    cleaned_count, interrupted_threads = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+    cleaned, _ = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
 
-    assert cleaned_count == 1
-    assert interrupted_threads == []
+    assert cleaned == 1
     sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
     _assert_preserved_edit_payload(sent_content, latest_keys)
     assert sent_content["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$original"}

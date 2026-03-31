@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import nio
 from nio.api import RelationshipType
@@ -14,7 +14,6 @@ from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     STREAM_STATUS_COMPLETED,
-    STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
@@ -840,58 +839,14 @@ def _record_stop_reaction(
     message_states.setdefault(target_event_id, _MessageState()).stop_reaction_event_ids.add(reaction_event_id)
 
 
-def _merge_message_state(
-    message_states: dict[str, _MessageState],
-    *,
-    target_event_id: str,
-    body: str,
-    custom_content: dict[str, Any],
-    timestamp: int,
-    latest_event_id: str,
-    thread_id: str | None,
-) -> None:
-    """Keep the newest visible body for one original event ID."""
-    state = message_states.get(target_event_id)
-    if state is None:
-        message_states[target_event_id] = _MessageState(
-            latest_body=body,
-            custom_content=dict(custom_content),
-            latest_timestamp=timestamp,
-            latest_event_id=latest_event_id,
-            thread_id=thread_id,
-        )
-        return
-
-    if (timestamp, latest_event_id) <= (state.latest_timestamp, state.latest_event_id):
-        if state.thread_id is None and thread_id is not None:
-            state.thread_id = thread_id
-        return
-
-    state.latest_body = body
-    state.custom_content = dict(custom_content)
-    state.latest_timestamp = timestamp
-    state.latest_event_id = latest_event_id
-    state.thread_id = thread_id if thread_id is not None else state.thread_id
-
-
-def _extract_mindroom_custom_content(
-    content: object,
-    *,
-    prefer_new_content: bool = False,
-) -> dict[str, Any]:
+def _extract_mindroom_custom_content(content: object) -> dict[str, Any]:
     """Return io.mindroom.* keys from the canonical content payload."""
     if not isinstance(content, dict):
         return {}
 
-    content_dict = cast("dict[object, Any]", content)
-    if prefer_new_content:
-        new_content = content_dict.get("m.new_content")
-        if isinstance(new_content, dict):
-            content_dict = cast("dict[object, Any]", new_content)
+    return {key: value for key, value in content.items() if isinstance(key, str) and key.startswith("io.mindroom.")}
 
-    return {
-        key: value for key, value in content_dict.items() if isinstance(key, str) and key.startswith("io.mindroom.")
-    }
+
 async def _edit_stale_message(
     client: nio.AsyncClient,
     *,
