@@ -119,8 +119,6 @@ def _model_init_signature(model_class: type[Any]) -> tuple[frozenset[str], bool]
     supported_kwargs = frozenset(name for name in signature.parameters if name != "self")
     return supported_kwargs, accepts_var_kwargs
 
-
-<<<<<<< HEAD
 def _known_removed_model_kwargs_for_provider(canonical_provider: str) -> frozenset[str]:
     """Return the specific legacy constructor kwargs we intentionally ignore."""
     if canonical_provider in {"anthropic", "vertexai_claude"}:
