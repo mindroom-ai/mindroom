@@ -474,7 +474,7 @@ def _merge_response_extra_content(
     merged_extra_content = extra_content if extra_content is not None else {}
     if attachment_ids:
         merged_extra_content[ATTACHMENT_IDS_KEY] = attachment_ids
-    return merged_extra_content or None
+    return merged_extra_content if extra_content is not None or attachment_ids else None
 
 
 @dataclass

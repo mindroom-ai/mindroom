@@ -15,6 +15,13 @@ from .types import (
     EnrichmentItem,
 )
 
+
+class _UnsetType:
+    """Sentinel type for omitted optional hook arguments."""
+
+
+_UNSET = _UnsetType()
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -208,6 +215,28 @@ class ScheduleFiredContext(HookContext):
     created_by: str | None
     message_text: str
     suppress: bool = False
+
+    async def send_message(
+        self,
+        room_id: str,
+        text: str,
+        *,
+        thread_id: str | None | _UnsetType = _UNSET,
+        extra_content: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Send a Matrix message from a schedule hook and return the event ID when available."""
+        resolved_thread_id = self.thread_id if isinstance(thread_id, _UnsetType) else thread_id
+        return await _send_bound_message(
+            self.logger,
+            self.message_sender,
+            self.plugin_name,
+            self.event_name,
+            room_id,
+            text,
+            thread_id=resolved_thread_id,
+            extra_content=extra_content,
+            requester_id=_requester_id_for_hook_send(self),
+        )
 
 
 @dataclass(slots=True)

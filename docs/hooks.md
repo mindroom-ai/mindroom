@@ -432,6 +432,7 @@ Every hook context also exposes `await ctx.send_message(room_id, text, *, thread
 When a runtime sender is available, it sends a hook-originated Matrix message and returns the event ID when available.
 When no sender is bound for the current runtime, it returns `None`.
 For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
+For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while passing `thread_id=None` explicitly posts at room level.
 
 ### Transport objects
 
