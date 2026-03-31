@@ -1133,7 +1133,7 @@ class AgentBot:
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
         await self._dispatch_text_message(room, event, requester_user_id)
 
-    async def _dispatch_text_message(  # noqa: C901
+    async def _dispatch_text_message(
         self,
         room: nio.MatrixRoom,
         event: _TextDispatchEvent,
