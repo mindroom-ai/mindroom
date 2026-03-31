@@ -4374,6 +4374,7 @@ class TestAgentBot:
         mock_event.sender = "@user:localhost"
         mock_event.body = "Thread message without mention"
         mock_event.event_id = "event123"
+        mock_event.server_timestamp = 126
         mock_event.source = {
             "content": {
                 "m.relates_to": {
@@ -4424,6 +4425,7 @@ class TestAgentBot:
         mock_event_2.sender = "@user:localhost"
         mock_event_2.body = "Thread message without mention"
         mock_event_2.event_id = "event456"  # Different event ID
+        mock_event_2.server_timestamp = 127
         mock_event_2.source = {
             "content": {
                 "m.relates_to": {
@@ -4453,6 +4455,7 @@ class TestAgentBot:
         mock_event_with_mention.sender = "@user:localhost"
         mock_event_with_mention.body = "@mindroom_calculator:localhost What's 2+2?"
         mock_event_with_mention.event_id = "event789"  # Unique event ID for Test 3
+        mock_event_with_mention.server_timestamp = 128
         mock_event_with_mention.source = {
             "content": {
                 "body": "@mindroom_calculator:localhost What's 2+2?",

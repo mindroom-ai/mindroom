@@ -1,6 +1,30 @@
+## IMPORTANT: Tuwunel Already Running
+On this machine, the Matrix homeserver (Tuwunel/Conduwuit) is ALREADY RUNNING on localhost:8008. Do NOT start a new one. Skip `just local-matrix-up`. Use `MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false`.
+
 # Core MindRoom Live Run
 
 Use this reference for the local Matrix stack, the Python backend, Matty smoke tests, disposable Matrix users, and live API checks.
+
+## NixOS Environment (CRITICAL)
+
+On NixOS hosts (e.g., Incus containers), enter the repo dev shell before running `uv run` commands.
+The shell provides `libstdc++.so.6`, which is needed for numpy, qdrant, and chromadb.
+
+```bash
+nix-shell shell.nix
+# then run normally inside the shell:
+uv run pytest tests/test_foo.py -x -n 0 --no-cov -v
+uv run mindroom run
+```
+
+If `nix-shell shell.nix` cannot resolve `<nixpkgs>`, use:
+
+```bash
+nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix
+```
+
+Without this shell, imports fail with `AttributeError: module 'mindroom' has no attribute 'bot'`.
+The repo root `shell.nix` adds `stdenv.cc.cc.lib` to `LD_LIBRARY_PATH`, which is what provides `libstdc++.so.6`.
 
 ## Preflight
 

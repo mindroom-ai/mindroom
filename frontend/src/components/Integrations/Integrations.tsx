@@ -723,16 +723,16 @@ export function Integrations() {
 
   return (
     <>
-      <div className="h-full flex flex-col">
-        <div className="flex-shrink-0 mb-4">
-          <div className="flex items-center justify-between mb-2">
+      <div className="h-full overflow-y-auto">
+        <div className="mb-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
             <h2 className="text-2xl font-bold">Tools</h2>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
               <Select
                 value={scopeAgentName ?? 'shared'}
                 onValueChange={value => setScopeAgentName(value === 'shared' ? null : value)}
               >
-                <SelectTrigger className="w-72">
+                <SelectTrigger className="w-full sm:w-72">
                   <SelectValue placeholder="Shared deployment credentials" />
                 </SelectTrigger>
                 <SelectContent>
@@ -749,7 +749,7 @@ export function Integrations() {
                 placeholder="Search tools..."
                 value={searchTerm}
                 onChange={e => setSearchTerm(e.target.value)}
-                className="w-64"
+                className="w-full sm:w-64"
               />
               <FilterSelector
                 options={[
@@ -797,9 +797,9 @@ export function Integrations() {
           )}
         </div>
 
-        <div className="flex-1 overflow-auto">
+        <div className="">
           <Tabs defaultValue="all" className="h-full">
-            <TabsList className="flex flex-wrap">
+            <TabsList className="flex flex-wrap h-auto gap-1 overflow-visible">
               {categories.map(category => (
                 <TabsTrigger
                   key={category.id}
