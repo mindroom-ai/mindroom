@@ -179,6 +179,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
     fake_agent = MagicMock()
     fake_agent.name = "GeneralAgent"
+    fake_agent.id = "general"
     collector: list[object] = []
 
     with (
@@ -203,7 +204,9 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     assert mock_prepare.await_args.kwargs["agents"] == [fake_agent]
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     assert mock_prepare.await_args.kwargs["prompt"] == "Analyze this."
-    assert "scope_context" in mock_prepare.await_args.kwargs
+    scope_context = mock_prepare.await_args.kwargs["scope_context"]
+    assert scope_context is not None
+    assert scope_context.scope.kind == "team"
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
 
 
@@ -906,6 +909,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     orchestrator.agent_bots = {"general": MagicMock(running=True)}
     fake_agent = MagicMock()
     fake_agent.name = "GeneralAgent"
+    fake_agent.id = "general"
     collector: list[object] = []
     mock_team = MagicMock(name="team")
 
@@ -942,7 +946,9 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     assert mock_prepare.await_args.kwargs["agents"] == [fake_agent]
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     assert mock_prepare.await_args.kwargs["prompt"] == "Analyze this."
-    assert "scope_context" in mock_prepare.await_args.kwargs
+    scope_context = mock_prepare.await_args.kwargs["scope_context"]
+    assert scope_context is not None
+    assert scope_context.scope.kind == "team"
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
     assert mock_raw.await_count == 1
     assert mock_raw.await_args.kwargs["team"] is mock_team

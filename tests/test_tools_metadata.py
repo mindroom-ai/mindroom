@@ -27,7 +27,6 @@ from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_wo
 
 _BASE_TOOL_REGISTRY = _TOOL_REGISTRY.copy()
 _BASE_TOOL_METADATA = TOOL_METADATA.copy()
-_SKIP_PARALLEL_FACTORY_IMPORTS = {"daytona", "openbb"}
 
 
 def _restore_builtin_tool_metadata_state() -> None:
@@ -135,8 +134,6 @@ def test_registered_tools_declare_managed_init_args_for_explicit_constructor_inp
     managed_arg_names = {managed_arg.value for managed_arg in ToolManagedInitArg}
 
     for tool_name, tool_factory in _TOOL_REGISTRY.items():
-        if tool_name in _SKIP_PARALLEL_FACTORY_IMPORTS:
-            continue
         metadata = TOOL_METADATA[tool_name]
         tool_class = tool_factory()
         init_signature = inspect.signature(tool_class.__init__)

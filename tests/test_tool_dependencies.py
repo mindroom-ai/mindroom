@@ -32,19 +32,13 @@ from mindroom.tool_system.metadata import (
 
 HOOK_SCRIPT = Path(__file__).parent.parent / ".github" / "scripts" / "check_tool_extras_sync.py"
 TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"))
-_SKIP_PARALLEL_IMPORTS = {"daytona", "openbb"}
 
 
 def test_all_tools_can_be_imported() -> None:
     """Test that all registered tools can be imported and instantiated."""
     failed = []
-    # These heavy integrations are already imported by the config-sync suite.
-    # Skipping them here avoids duplicate parallel imports against the same
-    # shared CI virtualenv, which otherwise flakes on timeout.
 
     for tool_name in _TOOL_REGISTRY:
-        if tool_name in _SKIP_PARALLEL_IMPORTS:
-            continue
         metadata = TOOL_METADATA.get(tool_name)
         requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
 
