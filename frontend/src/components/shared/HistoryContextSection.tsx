@@ -4,7 +4,11 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { FieldGroup } from './FieldGroup';
-import type { CompactionConfig, Config } from '@/types/config';
+import {
+  resolveEffectiveCompactionEnabled,
+  type CompactionConfig,
+  type Config,
+} from '@/types/config';
 
 type HistoryFieldName = 'num_history_runs' | 'num_history_messages' | 'max_tool_calls_from_history';
 
@@ -102,10 +106,10 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
     | undefined;
   const [compactionThresholdPercentInput, setCompactionThresholdPercentInput] = useState('');
   const defaultCompaction = defaults?.compaction ?? null;
-  const effectiveCompactionEnabled =
-    compactionConfig != null
-      ? compactionConfig.enabled ?? true
-      : defaultCompaction?.enabled ?? false;
+  const effectiveCompactionEnabled = resolveEffectiveCompactionEnabled(
+    compactionConfig,
+    defaultCompaction
+  );
 
   useEffect(() => {
     setCompactionThresholdPercentInput(

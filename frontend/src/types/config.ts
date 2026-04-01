@@ -111,6 +111,33 @@ export interface CompactionConfig {
   notify?: boolean;
 }
 
+function isPureCompactionModelClear(compaction: CompactionConfig): boolean {
+  return (
+    compaction.model === null &&
+    compaction.enabled === undefined &&
+    compaction.threshold_tokens === undefined &&
+    compaction.threshold_percent === undefined &&
+    compaction.reserve_tokens === undefined &&
+    compaction.notify === undefined
+  );
+}
+
+export function resolveEffectiveCompactionEnabled(
+  compaction: CompactionConfig | null | undefined,
+  defaultCompaction: CompactionConfig | null | undefined
+): boolean {
+  if (compaction == null) {
+    return defaultCompaction?.enabled ?? false;
+  }
+  if (compaction.enabled !== undefined) {
+    return compaction.enabled;
+  }
+  if (isPureCompactionModelClear(compaction)) {
+    return defaultCompaction?.enabled ?? false;
+  }
+  return true;
+}
+
 export interface Agent {
   id: string; // The key in the agents object
   display_name: string;
@@ -292,15 +319,10 @@ function normalizeCompactionConfig(
     return undefined;
   }
 
-  const pureModelClear =
-    normalizedCompaction.model === null &&
+  if (
     normalizedCompaction.enabled === undefined &&
-    normalizedCompaction.threshold_tokens === undefined &&
-    normalizedCompaction.threshold_percent === undefined &&
-    normalizedCompaction.reserve_tokens === undefined &&
-    normalizedCompaction.notify === undefined;
-
-  if (normalizedCompaction.enabled === undefined && !pureModelClear) {
+    !isPureCompactionModelClear(normalizedCompaction)
+  ) {
     normalizedCompaction.enabled = true;
   }
 

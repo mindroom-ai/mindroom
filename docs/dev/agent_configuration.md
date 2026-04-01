@@ -63,7 +63,7 @@ Each model entry supports these fields:
 - **host** - Optional host URL (e.g., for Ollama or OpenAI-compatible servers)
 - **api_key** - Optional API key (usually set via env vars instead)
 - **extra_kwargs** - Additional provider-specific parameters (e.g., `base_url`)
-- **context_window** - Context window size in tokens; when set, history is dynamically reduced toward an 80% target
+- **context_window** - Context window size in tokens; when set, MindRoom budgets persisted replay and applies a final replay-fit step before each run, which may reduce replay, fall back to summary-only replay, or disable persisted replay entirely for that run
 
 ### Supported Providers
 

@@ -960,6 +960,34 @@ describe('AgentEditor', () => {
     });
   });
 
+  it('shows auto-compaction as disabled for a pure model clear when defaults are disabled', () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { model: null },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          compaction: {
+            enabled: false,
+            reserve_tokens: 16384,
+            threshold_percent: 0.8,
+            notify: false,
+          },
+        },
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByLabelText('Enable auto-compaction')).not.toBeChecked();
+  });
+
   it('shows field-level history and compaction validation errors', () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
