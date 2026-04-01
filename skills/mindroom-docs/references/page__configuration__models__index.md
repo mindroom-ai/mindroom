@@ -18,14 +18,14 @@ Models define the AI providers and model IDs used by agents.
 
 Each model configuration supports the following fields:
 
-| Field            | Required | Default | Description                                                                                                                                              |
-| ---------------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `provider`       | Yes      | -       | The AI provider (see supported providers above)                                                                                                          |
-| `id`             | Yes      | -       | Model ID specific to the provider                                                                                                                        |
-| `host`           | No       | `null`  | Host URL for self-hosted models (e.g., Ollama)                                                                                                           |
-| `api_key`        | No       | `null`  | API key (usually read from environment variables)                                                                                                        |
-| `extra_kwargs`   | No       | `null`  | Additional provider-specific parameters                                                                                                                  |
-| `context_window` | No       | `null`  | Context window size in tokens. MindRoom needs it on the active model, or on an explicit `compaction.model`, to enforce replay budgets and run compaction |
+| Field            | Required | Default | Description                                                                                                                                                                                               |
+| ---------------- | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provider`       | Yes      | -       | The AI provider (see supported providers above)                                                                                                                                                           |
+| `id`             | Yes      | -       | Model ID specific to the provider                                                                                                                                                                         |
+| `host`           | No       | `null`  | Host URL for self-hosted models (e.g., Ollama)                                                                                                                                                            |
+| `api_key`        | No       | `null`  | API key (usually read from environment variables)                                                                                                                                                         |
+| `extra_kwargs`   | No       | `null`  | Additional provider-specific parameters                                                                                                                                                                   |
+| `context_window` | No       | `null`  | Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit `compaction.model` also needs its own `context_window` for destructive compaction |
 
 ## Configuration Examples
 
@@ -96,7 +96,7 @@ models:
 
 ## Context Window
 
-When `context_window` is set, MindRoom uses it to budget persisted replay and auto-compaction before each run. When no `compaction` block is authored, that `context_window` still enables the default replay-overflow guard, which reduces or disables replay for the current run without rewriting stored history. Authoring `compaction` lets you customize the thresholds, reserve, summary model, and notices, or disable destructive auto-compaction entirely. Manual `compact_context`, `threshold_tokens`, and `threshold_percent` only take effect when MindRoom can resolve a usable context window from the active model or an explicit `compaction.model`. The budget uses a chars/4 approximation and reserves headroom for the current prompt and output. MindRoom does not mutate configured `num_history_runs` to fit the window. Instead, it prepares scoped replay and optionally compacts older runs into `session.summary` when auto-compaction is enabled. If the rewritten history is still too large, MindRoom performs additional compaction passes until the budget fits or it falls back to summary-only replay with no raw runs left.
+When `context_window` is set, MindRoom uses it to budget persisted replay and auto-compaction before each run. When no `compaction` block is authored, that `context_window` on the active runtime model still enables the default replay-overflow guard, which reduces or disables replay for the current run without rewriting stored history. Authoring `compaction` lets you customize the thresholds, reserve, summary model, and notices, or disable destructive auto-compaction entirely. Manual `compact_context`, `threshold_tokens`, and `threshold_percent` use the active runtime model window for replay budgeting. If you set `compaction.model`, that summary model must also define its own `context_window` for the summary pass. The budget uses a chars/4 approximation and reserves headroom for the current prompt and output. MindRoom does not mutate configured `num_history_runs` to fit the window. Instead, it prepares scoped replay and optionally compacts older runs into `session.summary` when auto-compaction is enabled. If the rewritten history is still too large, MindRoom performs additional compaction passes until the budget fits or it falls back to summary-only replay with no raw runs left.
 
 ```
 models:

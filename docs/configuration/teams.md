@@ -91,7 +91,7 @@ teams:
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
 | `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
 | `max_tool_calls_from_history` | No | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history |
-| `compaction` | No | `defaults.compaction` | Team-scoped auto-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`, `notify`). When no compaction block is authored, MindRoom still uses `context_window` as the default replay-overflow guard for the shared team scope, reducing or disabling replay for the run without rewriting stored history. Replay budgeting and compaction require a usable `context_window` on the active team model or the selected `compaction.model` |
+| `compaction` | No | `defaults.compaction` | Team-scoped auto-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`, `notify`). When no compaction block is authored, MindRoom still uses `context_window` on the active team model as the default replay-overflow guard for the shared team scope, reducing or disabling replay for the run without rewriting stored history. Replay budgeting always uses the active team model window. If you set `compaction.model`, that summary model must also define its own `context_window` so MindRoom can budget the summary pass correctly |
 
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
 

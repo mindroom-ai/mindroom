@@ -740,7 +740,7 @@ def _prepare_scope_state_for_run(
     ):
         state = clear_force_compaction_state(session, scope, state)
         storage.upsert_session(session)
-        description = describe_compaction_unavailability(execution_plan.unavailable_reason)
+        description = describe_compaction_unavailability(execution_plan)
         logger.warning(
             "Forced compaction skipped because destructive compaction is unavailable",
             session_id=session.session_id,

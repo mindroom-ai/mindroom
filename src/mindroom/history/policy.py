@@ -9,13 +9,13 @@ from mindroom.history.compaction import (
     resolve_compaction_runtime_settings,
     resolve_effective_compaction_threshold,
 )
-from mindroom.history.types import ResolvedHistoryExecutionPlan
+from mindroom.history.types import ResolvedHistoryExecutionPlan, _CompactionAvailabilityReason
 from mindroom.token_budget import compute_compaction_input_budget
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
-    from mindroom.history.types import _CompactionAvailabilityReason, _HistoryPreparationAction
+    from mindroom.history.types import _HistoryPreparationAction
 
 
 def resolve_history_execution_plan(
@@ -65,6 +65,7 @@ def resolve_history_execution_plan(
         authored_compaction_enabled=has_authored_compaction_config and compaction_config.enabled,
         destructive_compaction_available=unavailable_reason is None,
         implicit_context_window_guard_enabled=not has_authored_compaction_config and replay_budget_tokens is not None,
+        explicit_compaction_model=compaction_config.model is not None,
         compaction_model_name=compaction_runtime.model_name,
         compaction_context_window=compaction_context_window,
         replay_window_tokens=replay_window_tokens,
@@ -110,16 +111,19 @@ def select_history_preparation_action(
 
 def manual_compaction_unavailable_message(plan: ResolvedHistoryExecutionPlan) -> str | None:
     """Return the user-facing error for an unavailable manual compaction request."""
-    description = describe_compaction_unavailability(plan.unavailable_reason)
+    description = describe_compaction_unavailability(plan)
     if description is None:
         return None
     return f"Error: Compaction is unavailable for this scope because {description}."
 
 
-def describe_compaction_unavailability(reason: _CompactionAvailabilityReason | None) -> str | None:
+def describe_compaction_unavailability(plan: ResolvedHistoryExecutionPlan) -> str | None:
     """Return a short description for one unavailable destructive-compaction reason."""
+    reason = plan.unavailable_reason
     if reason == "no_context_window":
-        return "no context_window is configured on the active model or the selected compaction model"
+        if plan.explicit_compaction_model:
+            return "no context_window is configured on the selected compaction model"
+        return "no context_window is configured on the active model"
     if reason == "non_positive_summary_input_budget":
         return "the active compaction model leaves no usable summary input budget after reserve and prompt overhead"
     return None

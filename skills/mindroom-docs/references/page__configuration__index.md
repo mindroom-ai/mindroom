@@ -184,7 +184,7 @@ models:
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
-    context_window: null           # Optional: Needed on the active model or compaction.model for replay budgeting and compaction
+    context_window: null           # Optional: Needed on the active runtime model for replay budgeting; explicit compaction.model also needs its own window
 
 # Team configurations (optional)
 teams:

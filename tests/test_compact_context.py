@@ -186,8 +186,7 @@ async def test_compact_context_requires_compaction_window(tmp_path: Path) -> Non
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
     assert result == (
-        "Error: Compaction is unavailable for this scope because no context_window is configured on the "
-        "active model or the selected compaction model."
+        "Error: Compaction is unavailable for this scope because no context_window is configured on the active model."
     )
 
 
@@ -782,5 +781,5 @@ async def test_compact_context_rejects_explicit_compaction_model_without_context
 
     assert (
         result
-        == "Error: Compaction is unavailable for this scope because no context_window is configured on the active model or the selected compaction model."
+        == "Error: Compaction is unavailable for this scope because no context_window is configured on the selected compaction model."
     )

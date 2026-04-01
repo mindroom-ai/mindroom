@@ -61,6 +61,7 @@ class ResolvedHistoryExecutionPlan:
     authored_compaction_enabled: bool
     destructive_compaction_available: bool
     implicit_context_window_guard_enabled: bool
+    explicit_compaction_model: bool
     compaction_model_name: str
     compaction_context_window: int | None
     replay_window_tokens: int | None
