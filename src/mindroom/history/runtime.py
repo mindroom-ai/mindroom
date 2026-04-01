@@ -22,9 +22,9 @@ from mindroom.agents import (
 from mindroom.history.compaction import (
     compact_scope_history,
     completed_top_level_runs,
+    estimate_agent_static_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
-    estimate_static_tokens,
     estimate_team_static_tokens,
     runs_for_scope,
 )
@@ -548,10 +548,10 @@ def estimate_preparation_static_tokens(
     fallback_full_prompt: str | None = None,
 ) -> int:
     """Estimate static prompt tokens using the largest prompt variant this run may send."""
-    primary_tokens = estimate_static_tokens(agent, full_prompt)
+    primary_tokens = estimate_agent_static_tokens(agent, full_prompt)
     if fallback_full_prompt is None:
         return primary_tokens
-    return max(primary_tokens, estimate_static_tokens(agent, fallback_full_prompt))
+    return max(primary_tokens, estimate_agent_static_tokens(agent, fallback_full_prompt))
 
 
 def estimate_preparation_prompt_tokens(
@@ -928,7 +928,7 @@ def _resolve_preparation_inputs(
 ) -> _ResolvedPreparationInputs:
     resolved_static_prompt_tokens = static_prompt_tokens
     if resolved_static_prompt_tokens is None:
-        resolved_static_prompt_tokens = estimate_static_tokens(agent, full_prompt)
+        resolved_static_prompt_tokens = estimate_agent_static_tokens(agent, full_prompt)
     resolved_history_settings = history_settings
     if resolved_history_settings is None and agent_name not in config.agents:
         resolved_history_settings = _history_settings_from_agent(agent)

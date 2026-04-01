@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -35,6 +36,7 @@ from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, RuntimePaths, r
 from mindroom.history import PreparedHistoryState, prepare_history_for_run
 from mindroom.history.compaction import (
     _build_summary_input,
+    estimate_agent_static_tokens,
     estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
@@ -356,6 +358,47 @@ def test_estimate_static_tokens_includes_tool_definitions() -> None:
     assert estimate_static_tokens(agent_with_tools, "Current prompt") == (
         estimate_static_tokens(baseline_agent, "Current prompt") + tool_tokens
     )
+
+
+def test_estimate_agent_static_tokens_uses_real_system_message_builder() -> None:
+    @dataclass
+    class PromptAwareModel(FakeModel):
+        def get_instructions_for_model(self, tools: list[Any] | None = None) -> list[str] | None:
+            _ = tools
+            return ["Follow provider guidance."]
+
+        def get_system_message_for_model(self, tools: list[Any] | None = None) -> str | None:
+            _ = tools
+            return "Provider system message."
+
+    agent = _agent(model=PromptAwareModel(id="fake-model", provider="fake"))
+    agent.role = "Engineer"
+    agent.instructions = ["Stay concise."]
+    agent.markdown = True
+
+    session = AgentSession(
+        session_id="history-budget",
+        agent_id=agent.id,
+        user_id="history-budget-user",
+    )
+    run_context = RunContext(
+        run_id="history-budget",
+        session_id="history-budget",
+        user_id="history-budget-user",
+        session_state={},
+    )
+    system_message = agent.get_system_message(
+        session=session,
+        run_context=run_context,
+        tools=None,
+        add_session_state_to_context=False,
+    )
+    assert system_message is not None
+    assert system_message.content is not None
+
+    expected_tokens = estimate_text_tokens("Current prompt") + estimate_text_tokens(str(system_message.content))
+    assert estimate_agent_static_tokens(agent, "Current prompt") == expected_tokens
+    assert estimate_agent_static_tokens(agent, "Current prompt") > estimate_static_tokens(agent, "Current prompt")
 
 
 def test_estimate_tool_definition_tokens_processes_functions_with_custom_parameters() -> None:
@@ -1849,6 +1892,31 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
     assert execution_plan.summary_input_budget_tokens == 0
     assert execution_plan.destructive_compaction_available is False
     assert execution_plan.unavailable_reason == "non_positive_summary_input_budget"
+
+
+def test_resolve_history_execution_plan_does_not_apply_compaction_thresholds_when_disabled(
+    tmp_path: Path,
+) -> None:
+    config, _runtime_paths_value = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(
+            enabled=False,
+            threshold_tokens=100,
+        ),
+        context_window=1_000,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.get_entity_compaction_config("test_agent"),
+        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        active_model_name="default",
+        active_context_window=1_000,
+        static_prompt_tokens=10,
+    )
+
+    assert execution_plan.trigger_threshold_tokens is None
+    assert execution_plan.replay_budget_tokens == 990
 
 
 def test_should_attempt_destructive_compaction_forced_compaction_takes_priority() -> None:

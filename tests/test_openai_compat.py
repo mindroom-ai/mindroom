@@ -1963,6 +1963,81 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert mock_team.arun.call_args.args[0] == "Build it"
 
+    def test_team_streaming_falls_back_to_final_team_run_output(self, team_app_client: TestClient) -> None:
+        """Providers that yield a final TeamRunOutput in stream mode should still emit content."""
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        mock_agents = [MagicMock(name="GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamRunOutput(content="Team consensus result")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        content_parts: list[str] = []
+        for line in response.text.strip().split("\n\n"):
+            if line.startswith("data: ") and line != "data: [DONE]":
+                chunk = json.loads(line.removeprefix("data: "))
+                delta = chunk["choices"][0]["delta"]
+                if "content" in delta:
+                    content_parts.append(delta["content"])
+        assert "".join(content_parts) == "**Team Consensus**:\n\nTeam consensus result"
+
+    def test_team_streaming_first_team_run_output_error_returns_500(self, team_app_client: TestClient) -> None:
+        """Streaming should treat an error-status TeamRunOutput as a failed team execution."""
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        mock_agents = [MagicMock(name="GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamRunOutput(status="error", content="Team execution failed upstream")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.json()["error"]["type"] == "server_error"
+        assert response.json()["error"]["message"] == "Team execution failed"
+
     def test_team_streaming_keeps_scope_storage_open_until_stream_finishes(self, team_app_client: TestClient) -> None:
         """The bound team scope must stay open until SSE streaming is fully consumed."""
         from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415

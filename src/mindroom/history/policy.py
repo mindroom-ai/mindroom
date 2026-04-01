@@ -43,17 +43,20 @@ def resolve_history_execution_plan(
     threshold_tokens = None
     replay_budget_tokens = None
     if replay_window_tokens is not None and static_prompt_tokens is not None:
-        threshold_tokens = _resolve_replay_threshold_tokens(
-            compaction_config=compaction_config,
-            replay_window_tokens=replay_window_tokens,
-        )
-        replay_budget_tokens = _resolve_replay_budget_tokens(
-            compaction_config=compaction_config,
-            has_authored_compaction_config=has_authored_compaction_config,
-            replay_window_tokens=replay_window_tokens,
-            threshold_tokens=threshold_tokens,
-            static_prompt_tokens=static_prompt_tokens,
-        )
+        if compaction_config.enabled:
+            threshold_tokens = _resolve_replay_threshold_tokens(
+                compaction_config=compaction_config,
+                replay_window_tokens=replay_window_tokens,
+            )
+            replay_budget_tokens = _resolve_replay_budget_tokens(
+                compaction_config=compaction_config,
+                has_authored_compaction_config=has_authored_compaction_config,
+                replay_window_tokens=replay_window_tokens,
+                threshold_tokens=threshold_tokens,
+                static_prompt_tokens=static_prompt_tokens,
+            )
+        else:
+            replay_budget_tokens = max(0, replay_window_tokens - static_prompt_tokens)
 
     return ResolvedHistoryExecutionPlan(
         authored_compaction_config=has_authored_compaction_config,

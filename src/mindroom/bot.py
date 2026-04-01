@@ -537,14 +537,45 @@ class AgentBot:
         reply_to_event_id: str | None,
     ) -> asyncio.Lock:
         """Return the per-thread lock that serializes one response lifecycle."""
-        resolved_thread_id = self._resolve_reply_thread_id(
-            thread_id,
-            reply_to_event_id,
+        resolved_thread_id = self._resolved_conversation_thread_id(
             room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
         )
         return _get_or_create_lock(
             cast("dict[object, asyncio.Lock]", self._response_lifecycle_locks),
             (room_id, resolved_thread_id),
+        )
+
+    def _resolved_conversation_thread_id(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        reply_to_event_id: str | None,
+    ) -> str | None:
+        """Return the canonical conversation root for locks and persisted sessions."""
+        return self._resolve_reply_thread_id(
+            thread_id,
+            reply_to_event_id,
+            room_id=room_id,
+        )
+
+    def _conversation_session_id(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        reply_to_event_id: str | None,
+    ) -> str:
+        """Return the canonical persisted session ID for one response lifecycle."""
+        return create_session_id(
+            room_id,
+            self._resolved_conversation_thread_id(
+                room_id=room_id,
+                thread_id=thread_id,
+                reply_to_event_id=reply_to_event_id,
+            ),
         )
 
     def _hook_base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
@@ -2728,7 +2759,11 @@ class AgentBot:
             source_kind="message",
         )
         resolved_correlation_id = correlation_id or reply_to_event_id
-        session_id = create_session_id(room_id, thread_id)
+        session_id = self._conversation_session_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
@@ -3122,7 +3157,11 @@ class AgentBot:
             return _ResponseDispatchResult(event_id=existing_event_id, response_text="", delivery_kind=None)
 
         media_inputs = media or MediaInputs()
-        session_id = create_session_id(room_id, thread_id)
+        session_id = self._conversation_session_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         model_prompt = self._append_matrix_prompt_context(
             model_prompt or prompt,
             room_id=room_id,
@@ -3307,7 +3346,11 @@ class AgentBot:
             thread_history,
         )
 
-        session_id = create_session_id(room_id, thread_id)
+        session_id = self._conversation_session_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         model_prompt = self._append_matrix_prompt_context(
             prompt,
             room_id=room_id,
@@ -3591,7 +3634,11 @@ class AgentBot:
             return _ResponseDispatchResult(event_id=existing_event_id, response_text="", delivery_kind=None)
 
         media_inputs = media or MediaInputs()
-        session_id = create_session_id(room_id, thread_id)
+        session_id = self._conversation_session_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         room_mode = self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room_id) == "room"
         model_prompt = self._append_matrix_prompt_context(
             model_prompt or prompt,
@@ -3908,7 +3955,11 @@ class AgentBot:
         media_inputs = media or MediaInputs()
 
         # Prepare session id for memory storage (store after sending response)
-        session_id = create_session_id(room_id, thread_id)
+        session_id = self._conversation_session_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         execution_identity = self._build_tool_execution_identity(
             room_id=room_id,
             thread_id=thread_id,
@@ -4462,8 +4513,16 @@ class AgentBot:
         # Remove the stale run from Agno history before regenerating.
         # The original run stored reply_to_event_id (= original_event_id) as
         # matrix_event_id in its metadata, so we look up by that key.
+        resolved_thread_id = self._resolved_conversation_thread_id(
+            room_id=room.room_id,
+            thread_id=context.thread_id,
+            reply_to_event_id=event_info.original_event_id,
+        )
         session_contexts = [
-            (context.thread_id, create_session_id(room.room_id, context.thread_id)),
+            (
+                resolved_thread_id,
+                create_session_id(room.room_id, resolved_thread_id),
+            ),
             (None, create_session_id(room.room_id, None)),
         ]
         checked_session_ids: set[str] = set()
@@ -4604,7 +4663,11 @@ class TeamBot(AgentBot):
         assert team_resolution.mode is not None
 
         # Store memory once for the entire team (avoids duplicate LLM processing)
-        session_id = create_session_id(room_id, thread_id)
+        session_id = self._conversation_session_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         execution_identity = self._build_tool_execution_identity(
             room_id=room_id,
             thread_id=thread_id,

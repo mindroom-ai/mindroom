@@ -218,6 +218,67 @@ def test_response_lifecycle_lock_stays_room_scoped_in_room_mode(
     assert first_lock is second_lock
 
 
+def test_conversation_session_id_uses_resolved_thread_root_for_first_turns(
+    tmp_path: Path,
+    mock_agent_user: AgentMatrixUser,
+) -> None:
+    """Different first-turn replies in one room should persist into distinct sessions."""
+    config = TestAgentBot.create_mock_config(tmp_path)
+    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+    first_session_id = bot._conversation_session_id(
+        room_id="!test:localhost",
+        thread_id=None,
+        reply_to_event_id="$event-a",
+    )
+    second_session_id = bot._conversation_session_id(
+        room_id="!test:localhost",
+        thread_id=None,
+        reply_to_event_id="$event-b",
+    )
+
+    assert first_session_id == create_session_id("!test:localhost", "$event-a")
+    assert second_session_id == create_session_id("!test:localhost", "$event-b")
+    assert first_session_id != second_session_id
+
+
+def test_conversation_session_id_stays_room_scoped_in_room_mode(
+    tmp_path: Path,
+    mock_agent_user: AgentMatrixUser,
+) -> None:
+    """Room-mode agents should continue to share one room session."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    thread_mode="room",
+                ),
+            },
+            teams={},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=True),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+    first_session_id = bot._conversation_session_id(
+        room_id="!test:localhost",
+        thread_id=None,
+        reply_to_event_id="$event-a",
+    )
+    second_session_id = bot._conversation_session_id(
+        room_id="!test:localhost",
+        thread_id=None,
+        reply_to_event_id="$event-b",
+    )
+
+    assert first_session_id == create_session_id("!test:localhost", None)
+    assert first_session_id == second_session_id
+
+
 @asynccontextmanager
 async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
     yield
@@ -1732,7 +1793,7 @@ class TestAgentBot:
         assert event_id == "$team"
         mock_strip_enrichment.assert_called_once_with(
             storage,
-            create_session_id("!test:localhost", None),
+            create_session_id("!test:localhost", "$team-root"),
             session_type=SessionType.TEAM,
         )
 

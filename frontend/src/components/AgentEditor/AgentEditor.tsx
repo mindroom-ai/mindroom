@@ -27,6 +27,7 @@ import {
   AgentPrivateConfig,
   AgentPrivateKnowledgeConfig,
   getDefaultPrivateConfig,
+  resolveEffectiveDefaultTools,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
 } from '@/types/config';
 import { Badge } from '@/components/ui/badge';
@@ -206,13 +207,13 @@ export function AgentEditor() {
   // Compute effective tools: agent tools + defaults.tools (when include_default_tools is enabled)
   const effectiveTools = useMemo(() => {
     const tools = new Set(agentTools);
-    if ((includeDefaultTools ?? true) && config?.defaults.tools) {
-      for (const t of config.defaults.tools) {
+    if (includeDefaultTools ?? true) {
+      for (const t of resolveEffectiveDefaultTools(config?.defaults)) {
         tools.add(t);
       }
     }
     return [...tools];
-  }, [agentTools, includeDefaultTools, config?.defaults.tools]);
+  }, [agentTools, includeDefaultTools, config?.defaults]);
 
   // Prepare checkbox items for skills (includes orphaned selected skills)
   const skillItems: CheckboxListItem[] = useMemo(() => {

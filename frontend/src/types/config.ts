@@ -111,6 +111,8 @@ export interface CompactionConfig {
   notify?: boolean;
 }
 
+const DEFAULT_INHERITED_TOOLS = ['scheduler'] as const;
+
 function isPureCompactionModelClear(compaction: CompactionConfig): boolean {
   return (
     compaction.model === null &&
@@ -136,6 +138,16 @@ export function resolveEffectiveCompactionEnabled(
     return defaultCompaction?.enabled ?? false;
   }
   return true;
+}
+
+export function resolveEffectiveDefaultTools(
+  defaults: Config['defaults'] | null | undefined
+): string[] {
+  const defaultTools = defaults?.tools;
+  if (defaultTools !== undefined) {
+    return [...defaultTools];
+  }
+  return [...DEFAULT_INHERITED_TOOLS];
 }
 
 export interface Agent {

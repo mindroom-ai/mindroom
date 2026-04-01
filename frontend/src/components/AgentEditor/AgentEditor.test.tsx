@@ -209,6 +209,21 @@ describe('AgentEditor', () => {
     expect(useTools).toHaveBeenCalledWith('test_agent', 'user');
   });
 
+  it('shows inherited default tools even when defaults.tools is omitted from authored config', () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      config: {
+        ...mockConfig,
+        defaults: {},
+      },
+      agents: [{ ...mockAgent, include_default_tools: undefined }],
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByLabelText('worker scheduler')).toBeInTheDocument();
+  });
+
   it('fails closed when agent policy preview is unavailable', () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,

@@ -1416,6 +1416,9 @@ def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent) -> st
     """Extract explicit error text from a team stream event."""
     if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
         return str(event.content or "Unknown team error")
+    if isinstance(event, TeamRunOutput) and str(event.status).lower() == "error":
+        formatted_output = _format_team_output(event).strip()
+        return formatted_output or "Unknown team error"
     return None
 
 
@@ -1439,6 +1442,11 @@ def _classify_team_event(
     # Team leader content — stream directly (synthesized answer)
     if isinstance(event, TeamContentEvent) and event.content:
         return str(event.content)
+
+    # Some providers fall back to a single final TeamRunOutput even in streaming mode.
+    if isinstance(event, TeamRunOutput):
+        formatted_output = _format_team_output(event).strip()
+        return formatted_output or None
 
     # Everything else (member content, reasoning, memory, hooks, etc.) — skip.
     return None

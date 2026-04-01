@@ -14,6 +14,7 @@ from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 from agno.tools import Toolkit
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
     from agno.models.base import Model
-    from agno.session.agent import AgentSession
     from agno.team import Team
 
     from mindroom.config.main import Config
@@ -291,6 +291,25 @@ def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
     return (static_chars // 4) + estimate_tool_definition_tokens(agent)
 
 
+def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:
+    """Estimate the non-history agent prompt using Agno's real system-message builder."""
+    static_tokens = estimate_text_tokens(full_prompt)
+    previous_tool_instructions = agent._tool_instructions
+    try:
+        session, run_context, prepared_tools = _prepare_agent_prompt_inputs_for_estimation(agent)
+        system_message = agent.get_system_message(
+            session=session,
+            run_context=run_context,
+            tools=prepared_tools or None,
+            add_session_state_to_context=False,
+        )
+    finally:
+        agent._tool_instructions = previous_tool_instructions
+    if system_message is not None and system_message.content is not None:
+        static_tokens += estimate_text_tokens(str(system_message.content))
+    return static_tokens + _estimate_prepared_tool_definition_tokens(prepared_tools)
+
+
 def estimate_tool_definition_tokens(agent: Agent) -> int:
     """Estimate the model-visible tool schema and tool instructions for one agent."""
     prepared_tools, tool_instructions = _prepare_tools_for_estimation(agent.tools)
@@ -468,6 +487,61 @@ def _prepare_team_prompt_inputs_for_estimation(
         check_mcp_tools=False,
     )
     return session, [tool for tool in prepared_tools if isinstance(tool, Function) or _is_tool_definition_dict(tool)]
+
+
+def _prepare_agent_prompt_inputs_for_estimation(
+    agent: Agent,
+) -> tuple[AgentSession, RunContext, list[Function | _ToolDefinition]]:
+    """Reuse Agno's agent tool-preparation path for prompt budgeting.
+
+    Agno exposes `Agent.get_system_message()` publicly, but the prepared tool
+    payload and `_tool_instructions` that feed that prompt are only finalized by
+    the internal `_determine_tools_for_model()` path. Using that single internal
+    entrypoint keeps MindRoom aligned with `agno==2.4.7` without re-implementing
+    several private agent helpers.
+    """
+    budget_session_id = "history-budget"
+    budget_user_id = "history-budget-user"
+    session = AgentSession(
+        session_id=budget_session_id,
+        agent_id=agent.id,
+        user_id=budget_user_id,
+    )
+    run_response = RunOutput(
+        run_id=budget_session_id,
+        agent_id=agent.id,
+        agent_name=agent.name,
+        session_id=budget_session_id,
+        user_id=budget_user_id,
+        session_state={},
+    )
+    run_context = RunContext(
+        run_id=budget_session_id,
+        session_id=budget_session_id,
+        user_id=budget_user_id,
+        session_state={},
+    )
+    model = agent.model
+    assert model is not None
+    processed_tools = agent.get_tools(
+        run_response=run_response,
+        run_context=run_context,
+        session=session,
+        user_id=budget_user_id,
+    )
+    prepared_tools = agent._determine_tools_for_model(
+        model=model,
+        processed_tools=processed_tools,
+        run_response=run_response,
+        run_context=run_context,
+        session=session,
+        async_mode=False,
+    )
+    return (
+        session,
+        run_context,
+        [tool for tool in prepared_tools if isinstance(tool, Function) or _is_tool_definition_dict(tool)],
+    )
 
 
 def resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
