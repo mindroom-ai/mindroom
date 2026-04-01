@@ -1081,6 +1081,122 @@ class TestUserIdPassthrough:
         assert "utilization_pct" not in payload["context"]
 
     @pytest.mark.asyncio
+    async def test_ai_response_metadata_uses_room_resolved_runtime_model(self, tmp_path: Path) -> None:
+        """Non-streaming metadata should report the room-resolved runtime model."""
+        runtime_paths = _runtime_paths(tmp_path)
+        config = bind_runtime_paths(
+            Config(
+                agents={"general": AgentConfig(display_name="General", model="default")},
+                room_models={"lobby": "large"},
+                models={
+                    "default": ModelConfig(provider="openai", id="default-model", context_window=2000),
+                    "large": ModelConfig(provider="openai", id="large-model", context_window=48000),
+                },
+            ),
+            runtime_paths,
+        )
+        mock_agent = MagicMock()
+        mock_run_output = MagicMock()
+        mock_run_output.run_id = "run-room"
+        mock_run_output.session_id = "session1"
+        mock_run_output.status = RunStatus.completed
+        mock_run_output.model = "large-model"
+        mock_run_output.model_provider = "openai"
+        mock_run_output.metrics = Metrics(input_tokens=800, output_tokens=50, total_tokens=850, duration=1.2)
+        mock_run_output.tools = None
+        mock_run_output.content = "Response"
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+            patch("mindroom.matrix.rooms.get_room_alias_from_id", return_value="lobby"),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            run_metadata: dict[str, object] = {}
+            await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                room_id="!test:localhost",
+                runtime_paths=runtime_paths,
+                config=config,
+                run_metadata_collector=run_metadata,
+            )
+
+        payload = run_metadata["io.mindroom.ai_run"]
+        assert payload["model"]["config"] == "large"
+        assert payload["model"]["id"] == "large-model"
+        assert payload["context"]["window_tokens"] == 48000
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_metadata_uses_room_resolved_runtime_model(self, tmp_path: Path) -> None:
+        """Streaming metadata should report the room-resolved runtime model."""
+        runtime_paths = _runtime_paths(tmp_path)
+        config = bind_runtime_paths(
+            Config(
+                agents={"general": AgentConfig(display_name="General", model="default")},
+                room_models={"lobby": "large"},
+                models={
+                    "default": ModelConfig(provider="openai", id="default-model", context_window=1000),
+                    "large": ModelConfig(provider="openai", id="large-model", context_window=32000),
+                },
+            ),
+            runtime_paths,
+        )
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "large-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="hello")
+            yield ModelRequestCompletedEvent(
+                model="large-model",
+                model_provider="openai",
+                input_tokens=500,
+                output_tokens=60,
+                total_tokens=560,
+                time_to_first_token=0.33,
+            )
+            yield RunCompletedEvent(
+                run_id="run-room-stream",
+                session_id="session1",
+                metrics=Metrics(
+                    input_tokens=500,
+                    output_tokens=60,
+                    total_tokens=560,
+                    duration=2.4,
+                ),
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+            patch("mindroom.matrix.rooms.get_room_alias_from_id", return_value="lobby"),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            run_metadata: dict[str, object] = {}
+            async for _chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                room_id="!test:localhost",
+                runtime_paths=runtime_paths,
+                config=config,
+                run_metadata_collector=run_metadata,
+            ):
+                pass
+
+        payload = run_metadata["io.mindroom.ai_run"]
+        assert payload["model"]["config"] == "large"
+        assert payload["model"]["id"] == "large-model"
+        assert payload["context"]["window_tokens"] == 32000
+
+    @pytest.mark.asyncio
     async def test_stream_agent_response_raises_cancelled_error_for_run_cancelled_event(self, tmp_path: Path) -> None:
         """Graceful stream cancellation should preserve metadata and end as CancelledError."""
         mock_agent = MagicMock()

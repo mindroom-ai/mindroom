@@ -145,6 +145,7 @@ def _make_config(
     num_history_messages: int | None = None,
     compaction: CompactionOverrideConfig | None = None,
     context_window: int | None = 48_000,
+    models: dict[str, ModelConfig] | None = None,
 ) -> tuple[Config, RuntimePaths]:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -158,13 +159,17 @@ def _make_config(
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
-            models={
-                "default": ModelConfig(
-                    provider="openai",
-                    id="test-model",
-                    context_window=context_window,
-                ),
-            },
+            models=(
+                models
+                if models is not None
+                else {
+                    "default": ModelConfig(
+                        provider="openai",
+                        id="test-model",
+                        context_window=context_window,
+                    ),
+                }
+            ),
         ),
         runtime_paths,
     )
@@ -276,7 +281,12 @@ def test_estimate_static_tokens_includes_tool_definitions() -> None:
         """Export the current working notes as markdown with full metadata attached."""
         return f"{title}:{include_metadata}"
 
-    toolkit = Toolkit(name="docs", tools=[search_docs])
+    toolkit = Toolkit(
+        name="docs",
+        tools=[search_docs],
+        instructions="Always cite the relevant document section when using search_docs.",
+        add_instructions=True,
+    )
     export_tool = Function(
         name="export_notes",
         entrypoint=export_notes,
@@ -305,7 +315,10 @@ def test_estimate_static_tokens_includes_tool_definitions() -> None:
         },
     ]
     tool_tokens = estimate_tool_definition_tokens(agent_with_tools)
-    assert tool_tokens == len(stable_serialize(expected_payloads)) // 4
+    assert tool_tokens == (
+        len(stable_serialize(expected_payloads)) // 4
+        + estimate_text_tokens("Always cite the relevant document section when using search_docs.")
+    )
     assert estimate_tool_definition_tokens(baseline_agent) == 0
     assert estimate_static_tokens(agent_with_tools, "Current prompt") == (
         estimate_static_tokens(baseline_agent, "Current prompt") + tool_tokens
@@ -1521,6 +1534,35 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
     assert execution_plan.summary_input_budget_tokens == 0
     assert execution_plan.destructive_compaction_available is False
     assert execution_plan.unavailable_reason == "non_positive_summary_input_budget"
+
+
+def test_resolve_history_execution_plan_requires_context_window_on_explicit_compaction_model(
+    tmp_path: Path,
+) -> None:
+    config, _runtime_paths_value = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, model="summary-model"),
+        context_window=48_000,
+        models={
+            "default": ModelConfig(provider="openai", id="default-model", context_window=48_000),
+            "summary-model": ModelConfig(provider="openai", id="summary-model", context_window=None),
+        },
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.get_entity_compaction_config("test_agent"),
+        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        active_model_name="default",
+        active_context_window=48_000,
+        static_prompt_tokens=500,
+    )
+
+    assert execution_plan.compaction_model_name == "summary-model"
+    assert execution_plan.compaction_context_window is None
+    assert execution_plan.destructive_compaction_available is False
+    assert execution_plan.summary_input_budget_tokens is None
+    assert execution_plan.unavailable_reason == "no_context_window"
 
 
 def test_select_history_preparation_action_forced_compaction_takes_priority() -> None:

@@ -197,11 +197,21 @@ def _extract_tool_trace(response: RunOutput) -> list[ToolTraceEntry]:
     return trace
 
 
-def _get_model_config(config: Config, agent_name: str) -> tuple[str | None, ModelConfig | None]:
+def _get_model_config(
+    config: Config,
+    agent_name: str,
+    *,
+    runtime_paths: RuntimePaths,
+    room_id: str | None = None,
+) -> tuple[str | None, ModelConfig | None]:
     """Return configured model name/config for an agent when available."""
     if agent_name not in config.agents and agent_name not in config.teams and agent_name != ROUTER_AGENT_NAME:
         return None, None
-    model_name = config.get_entity_model_name(agent_name)
+    model_name = config.resolve_runtime_model(
+        entity_name=agent_name,
+        room_id=room_id,
+        runtime_paths=runtime_paths,
+    ).model_name
     return model_name, config.models.get(model_name)
 
 
@@ -262,16 +272,23 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     *,
     agent_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     run_id: str | None,
     session_id: str | None,
     status: RunStatus | str | None,
     model: str | None,
     model_provider: str | None,
+    room_id: str | None = None,
     metrics: Metrics | dict[str, Any] | None = None,
     metrics_fallback: dict[str, Any] | None = None,
     tool_count: int | None = None,
 ) -> dict[str, Any] | None:
-    model_name, model_config = _get_model_config(config, agent_name)
+    model_name, model_config = _get_model_config(
+        config,
+        agent_name,
+        runtime_paths=runtime_paths,
+        room_id=room_id,
+    )
     model_id = model or (model_config.id if model_config is not None else None)
     provider = model_provider or (model_config.provider if model_config is not None else None)
 
@@ -1164,11 +1181,13 @@ async def ai_response(  # noqa: C901
             run_metadata = _build_ai_run_metadata_content(
                 agent_name=agent_name,
                 config=config,
+                runtime_paths=runtime_paths,
                 run_id=response.run_id,
                 session_id=response.session_id or session_id,
                 status=response.status,
                 model=response.model,
                 model_provider=response.model_provider,
+                room_id=room_id,
                 metrics=response.metrics,
                 tool_count=len(response.tools) if response.tools is not None else 0,
             )
@@ -1388,11 +1407,13 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     cached_metadata = _build_ai_run_metadata_content(
                         agent_name=agent_name,
                         config=config,
+                        runtime_paths=runtime_paths,
                         run_id=cached_run.run_id,
                         session_id=cached_run.session_id or session_id,
                         status="cached",
                         model=cached_run.model,
                         model_provider=cached_run.model_provider,
+                        room_id=room_id,
                         metrics=cached_run.metrics,
                         tool_count=len(cached_run.tools) if cached_run.tools else 0,
                     )
@@ -1476,11 +1497,13 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     cancelled_metadata = _build_ai_run_metadata_content(
                         agent_name=agent_name,
                         config=config,
+                        runtime_paths=runtime_paths,
                         run_id=state.cancelled_run_event.run_id,
                         session_id=state.cancelled_run_event.session_id or session_id,
                         status=RunStatus.cancelled,
                         model=state.latest_model_id,
                         model_provider=state.latest_model_provider,
+                        room_id=room_id,
                         metrics=fallback_metrics,
                         tool_count=state.observed_tool_calls,
                     )
@@ -1498,6 +1521,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             run_metadata = _build_ai_run_metadata_content(
                 agent_name=agent_name,
                 config=config,
+                runtime_paths=runtime_paths,
                 run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
                 session_id=(
                     state.completed_run_event.session_id
@@ -1507,6 +1531,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 status=RunStatus.completed,
                 model=state.latest_model_id,
                 model_provider=state.latest_model_provider,
+                room_id=room_id,
                 metrics=state.completed_run_event.metrics if state.completed_run_event is not None else None,
                 metrics_fallback=fallback_metrics,
                 tool_count=(

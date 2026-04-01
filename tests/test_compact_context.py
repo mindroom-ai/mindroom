@@ -21,7 +21,7 @@ from agno.tools.function import Function
 from mindroom.agents import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
+from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.history import prepare_history_for_run
@@ -718,3 +718,69 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
     agent_state = read_scope_state(reloaded_scope_context.session, HistoryScope(kind="agent", scope_id="test_agent"))
     assert agent_state.force_compact_before_next_run is True
     assert result == "Compaction scheduled for the next reply in this conversation scope."
+
+
+@pytest.mark.asyncio
+async def test_compact_context_rejects_explicit_compaction_model_without_context_window(
+    tmp_path: Path,
+) -> None:
+    """Manual compaction should reject an explicit summary model without a window."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": AgentConfig(
+                    display_name="Test Agent",
+                    model="default",
+                    compaction=CompactionOverrideConfig(enabled=True, model="summary-model"),
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(provider="openai", id="default-model", context_window=48_000),
+                "summary-model": ModelConfig(provider="openai", id="summary-model", context_window=None),
+            },
+        ),
+        runtime_paths,
+    )
+
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=SimpleNamespace(session_id="session-1"),
+    )
+    scope_context = load_scope_session_context(
+        agent=_agent(),
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    )
+    assert scope_context is not None
+    assert scope_context.session is not None
+    scope_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
+    scope_context.storage.upsert_session(scope_context.session)
+
+    runtime_context = ToolRuntimeContext(
+        agent_name="test_agent",
+        room_id="!room:localhost",
+        thread_id="thread-1",
+        resolved_thread_id="thread-1",
+        requester_id="@alice:localhost",
+        client=SimpleNamespace(),
+        config=config,
+        runtime_paths=runtime_paths,
+        active_model_name="default",
+        session_id="session-1",
+    )
+
+    with tool_runtime_context(runtime_context):
+        result = await tool.compact_context(agent=_agent())
+
+    assert (
+        result
+        == "Error: Compaction is unavailable for this scope because no context_window is configured on the active model or the selected compaction model."
+    )

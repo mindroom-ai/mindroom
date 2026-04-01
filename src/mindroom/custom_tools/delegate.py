@@ -17,7 +17,11 @@ from mindroom.agents import describe_agent
 from mindroom.ai import ai_response
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    get_tool_runtime_context,
+    tool_runtime_context,
+)
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -116,10 +120,15 @@ class DelegateTools(Toolkit):
                 else None
             )
             runtime_context = get_tool_runtime_context()
-            delegated_runtime_context = (
-                replace(runtime_context, agent_name=agent_name, session_id=session_id)
-                if runtime_context is not None
-                else None
+            room_id = _resolve_delegated_room_id(
+                runtime_context=runtime_context,
+                execution_identity=execution_identity,
+            )
+            delegated_runtime_context = self._build_delegated_runtime_context(
+                agent_name=agent_name,
+                session_id=session_id,
+                room_id=room_id,
+                runtime_context=runtime_context,
             )
             with tool_runtime_context(delegated_runtime_context):
                 response = await ai_response(
@@ -130,6 +139,7 @@ class DelegateTools(Toolkit):
                     config=self._config,
                     knowledge=knowledge,
                     user_id=execution_identity.requester_id if execution_identity is not None else None,
+                    room_id=room_id,
                     include_interactive_questions=False,
                     execution_identity=execution_identity,
                     delegation_depth=self._delegation_depth + 1,
@@ -144,3 +154,39 @@ class DelegateTools(Toolkit):
             return f"Delegation to '{agent_name}' failed: {e}"
         else:
             return response or "Agent completed the task but returned no content."
+
+    def _build_delegated_runtime_context(
+        self,
+        *,
+        agent_name: str,
+        session_id: str,
+        room_id: str | None,
+        runtime_context: ToolRuntimeContext | None,
+    ) -> ToolRuntimeContext | None:
+        """Return the child tool runtime context for one delegated run."""
+        if runtime_context is None:
+            return None
+        runtime_model = self._config.resolve_runtime_model(
+            entity_name=agent_name,
+            room_id=room_id,
+            runtime_paths=self._runtime_paths,
+        )
+        return replace(
+            runtime_context,
+            agent_name=agent_name,
+            active_model_name=runtime_model.model_name,
+            session_id=session_id,
+        )
+
+
+def _resolve_delegated_room_id(
+    *,
+    runtime_context: ToolRuntimeContext | None,
+    execution_identity: ToolExecutionIdentity | None,
+) -> str | None:
+    """Resolve the room context that should apply to a delegated child run."""
+    if runtime_context is not None:
+        return runtime_context.room_id
+    if execution_identity is not None:
+        return execution_identity.room_id
+    return None

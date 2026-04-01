@@ -372,6 +372,7 @@ class TestDelegateKnowledge:
         assert delegated_identity.thread_id == "$thread"
         assert delegated_identity.session_id == call_kwargs["session_id"]
         assert delegated_identity.session_id.startswith("delegate:leader:worker:")
+        assert call_kwargs["room_id"] == "!room:example.org"
         assert call_kwargs["user_id"] == "@alice:example.org"
         assert call_kwargs["delegation_depth"] == 1
 
@@ -427,6 +428,87 @@ class TestDelegateKnowledge:
             assert context is not None
             assert context.agent_name == "worker"
             assert context.session_id == kwargs["session_id"]
+            assert context.room_id == "!room:example.org"
+            assert kwargs["room_id"] == "!room:example.org"
+            assert context.active_model_name == "default"
+            return "done"
+
+        with (
+            tool_runtime_context(runtime_context),
+            patch("mindroom.custom_tools.delegate.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+        ):
+            result = await tools.delegate_task("worker", "do work")
+
+        assert result == "done"
+
+    @pytest.mark.asyncio
+    async def test_delegation_rebinds_room_resolved_model_for_child_agent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Delegated child tools should see the child's room-resolved runtime model."""
+        config = Config(
+            agents={
+                "leader": AgentConfig(
+                    display_name="Leader",
+                    role="Lead",
+                    delegate_to=["worker"],
+                    model="default",
+                ),
+                "worker": AgentConfig(
+                    display_name="Worker",
+                    role="Work",
+                    model="default",
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            room_models={"lobby": "large"},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model", context_window=8_000),
+                "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
+            },
+        )
+        config = _bind_runtime_paths(config, tmp_path)
+        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+        monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="leader",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+        tools = DelegateTools(
+            agent_name="leader",
+            delegate_to=["worker"],
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            delegation_depth=0,
+        )
+        runtime_context = ToolRuntimeContext(
+            agent_name="leader",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            requester_id="@alice:example.org",
+            client=MagicMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            active_model_name="default",
+            session_id="session-1",
+        )
+
+        async def fake_ai_response(**kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            assert context.agent_name == "worker"
+            assert context.room_id == "!room:example.org"
+            assert context.active_model_name == "large"
+            assert kwargs["room_id"] == "!room:example.org"
             return "done"
 
         with (

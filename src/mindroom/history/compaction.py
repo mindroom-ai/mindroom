@@ -303,11 +303,12 @@ def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
 
 
 def estimate_tool_definition_tokens(agent: Agent) -> int:
-    """Estimate the model-visible JSON schema payload for the agent's tools."""
-    prepared_tools, _tool_instructions = _prepare_tools_for_estimation(agent.tools)
-    if not prepared_tools:
-        return 0
-    return _estimate_prepared_tool_definition_tokens(prepared_tools)
+    """Estimate the model-visible tool schema and tool instructions for one agent."""
+    prepared_tools, tool_instructions = _prepare_tools_for_estimation(agent.tools)
+    return _estimate_prepared_tool_definition_tokens(
+        prepared_tools,
+        tool_instructions=tool_instructions,
+    )
 
 
 def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
@@ -328,11 +329,15 @@ def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
     return static_tokens + _estimate_prepared_tool_definition_tokens(prepared_tools)
 
 
-def _estimate_prepared_tool_definition_tokens(prepared_tools: Sequence[Function | dict[str, object]]) -> int:
+def _estimate_prepared_tool_definition_tokens(
+    prepared_tools: Sequence[Function | dict[str, object]],
+    *,
+    tool_instructions: Sequence[str] = (),
+) -> int:
     tool_definitions = _prepared_tool_definition_payloads(prepared_tools)
-    if not tool_definitions:
-        return 0
-    return len(stable_serialize(tool_definitions)) // 4
+    tool_definition_tokens = len(stable_serialize(tool_definitions)) // 4 if tool_definitions else 0
+    instruction_tokens = sum(estimate_text_tokens(instruction) for instruction in tool_instructions)
+    return tool_definition_tokens + instruction_tokens
 
 
 def _prepare_tools_for_estimation(tools: object) -> tuple[list[Function | _ToolDefinition], list[str]]:
@@ -503,6 +508,11 @@ def resolve_compaction_runtime_settings(
     """Resolve the effective compaction model name and usable window for one run."""
     model_name = compaction_config.model or active_model_name
     model_context_window = config.get_model_context_window(model_name)
+    if compaction_config.model is not None:
+        return ResolvedCompactionRuntime(
+            model_name=model_name,
+            context_window=model_context_window,
+        )
     return ResolvedCompactionRuntime(
         model_name=model_name,
         context_window=model_context_window or active_context_window,
