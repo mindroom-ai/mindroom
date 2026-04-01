@@ -687,10 +687,11 @@ def _resolve_available_history_budget(
     static_prompt_tokens: int,
 ) -> int | None:
     if compaction_context_window is None:
-        logger.warning(
-            "Compaction budget unavailable: no context_window configured for compaction model",
-            compaction_model=compaction_config.model,
-        )
+        if has_authored_compaction_config and compaction_config.enabled:
+            logger.warning(
+                "Compaction budget unavailable: no context_window configured for compaction model",
+                compaction_model=compaction_config.model,
+            )
         return None
     threshold_tokens = compaction_config.threshold_tokens
     if threshold_tokens is None:

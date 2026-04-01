@@ -332,17 +332,21 @@ def test_estimate_tool_definition_tokens_processes_functions_with_custom_paramet
 
     assert expected_tool.description == "Sync the current event draft into the shared calendar."
     assert expected_tool.parameters["additionalProperties"] is False
-    assert estimate_tool_definition_tokens(agent) == len(
-        stable_serialize(
-            [
-                {
-                    "name": "sync_calendar_event",
-                    "description": expected_tool.description,
-                    "parameters": expected_tool.parameters,
-                }
-            ]
+    assert (
+        estimate_tool_definition_tokens(agent)
+        == len(
+            stable_serialize(
+                [
+                    {
+                        "name": "sync_calendar_event",
+                        "description": expected_tool.description,
+                        "parameters": expected_tool.parameters,
+                    },
+                ],
+            ),
         )
-    ) // 4
+        // 4
+    )
 
 
 def test_estimate_tool_definition_tokens_ignores_empty_toolkit() -> None:
@@ -835,6 +839,80 @@ async def test_prepare_history_for_run_without_context_window_skips_auto_compact
     assert prepared.has_persisted_history is True
 
 
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_without_authored_compaction_and_no_window_skips_warning(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path, context_window=None)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    storage.upsert_session(session)
+
+    with patch("mindroom.history.runtime.logger.warning") as mock_warning:
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
+    assert prepared.compaction_outcomes == []
+    assert prepared.has_persisted_history is True
+    assert mock_warning.call_args_list == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_skips_warning(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=False),
+        context_window=None,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    storage.upsert_session(session)
+
+    with patch("mindroom.history.runtime.logger.warning") as mock_warning:
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
+    assert prepared.compaction_outcomes == []
+    assert prepared.has_persisted_history is True
+    assert mock_warning.call_args_list == []
+
+
 def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
     big_run = _completed_run(
         "run-big",
@@ -1024,7 +1102,9 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert mock_prepare.await_args.kwargs["agent"] is owner_agent
     assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
     assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+beta")
-    assert estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
+    assert (
+        estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
+    )
     assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == expected_static_prompt_tokens
 
 
@@ -1084,7 +1164,27 @@ def test_estimate_preparation_static_tokens_for_team_includes_agentic_state_tool
         expected_static_prompt_tokens += estimate_text_tokens(str(system_message.content))
     expected_static_prompt_tokens += len(stable_serialize(expected_payloads)) // 4
 
-    assert estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
+    assert (
+        estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
+    )
+
+
+def test_estimate_preparation_static_tokens_for_team_preserves_tool_instructions() -> None:
+    owner_agent = _agent(agent_id="alpha", name="Alpha")
+    peer_agent = _agent(agent_id="beta", name="Beta")
+    team = Team(
+        members=[owner_agent, peer_agent],
+        model=FakeModel(id="fake-model", provider="fake"),
+        id="team_alpha+beta",
+        name="Pair",
+        role="Stateful team role",
+        enable_agentic_state=True,
+    )
+    team._tool_instructions = ["keep me"]
+
+    estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt")
+
+    assert team._tool_instructions == ["keep me"]
 
 
 def test_create_team_instance_enables_native_team_history_and_disables_members(tmp_path: Path) -> None:
@@ -1230,6 +1330,32 @@ def test_get_entity_compaction_config_merges_authored_overrides(tmp_path: Path) 
     assert resolved.reserve_tokens == 2_048
     assert resolved.model == "summary-model"
     assert resolved.notify is True
+
+
+def test_validate_compaction_model_references_skips_disabled_compaction_warning(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    with patch("mindroom.config.main.logger.warning") as mock_warning:
+        bind_runtime_paths(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        compaction=CompactionOverrideConfig(enabled=False),
+                    ),
+                },
+                defaults=DefaultsConfig(tools=[]),
+                models={
+                    "default": ModelConfig(
+                        provider="openai",
+                        id="test-model",
+                        context_window=None,
+                    ),
+                },
+            ),
+            runtime_paths,
+        )
+
+    assert mock_warning.call_args_list == []
 
 
 @pytest.mark.asyncio

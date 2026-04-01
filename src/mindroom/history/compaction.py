@@ -340,12 +340,11 @@ def estimate_tool_definition_tokens(agent: Agent) -> int:
 def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
     """Estimate the non-history team prompt using Agno's team system-message builder."""
     static_tokens = estimate_text_tokens(full_prompt)
-    prepared_tools, tool_instructions = _prepare_tools_for_estimation(_team_tools_for_estimation(team))
     previous_tool_instructions = team._tool_instructions
     try:
-        team._tool_instructions = tool_instructions
+        session, prepared_tools = _prepare_team_prompt_inputs_for_estimation(team)
         system_message = team.get_system_message(
-            session=TeamSession(session_id="history-budget", team_id=team.id),
+            session=session,
             tools=prepared_tools or None,
             add_session_state_to_context=False,
         )
@@ -466,8 +465,19 @@ def _default_function_parameters() -> dict[str, object]:
     return {"type": "object", "properties": {}, "required": []}
 
 
-def _team_tools_for_estimation(team: Team) -> list[Toolkit | Function | dict[str, object] | object]:
+def _prepare_team_prompt_inputs_for_estimation(
+    team: Team,
+) -> tuple[TeamSession, list[Function | _ToolDefinition]]:
+    """Reuse Agno's own team tool-preparation path for prompt budgeting.
+
+    Agno exposes `Team.get_system_message()` publicly, but the exact prepared tool
+    payload and `_tool_instructions` state that feed that prompt are only built by
+    the internal `_determine_tools_for_model()` path. Using that single internal
+    entrypoint is less brittle than re-implementing several private team helpers in
+    MindRoom.
+    """
     budget_session_id = "history-budget"
+    session = TeamSession(session_id=budget_session_id, team_id=team.id)
     run_response = TeamRunOutput(
         run_id=budget_session_id,
         team_id=team.id,
@@ -479,49 +489,17 @@ def _team_tools_for_estimation(team: Team) -> list[Toolkit | Function | dict[str
         session_id=budget_session_id,
         session_state={},
     )
-    session = TeamSession(session_id=budget_session_id, team_id=team.id)
-    tools: list[Toolkit | Function | dict[str, object] | object] = list(team.tools or [])
-
-    if team.read_chat_history:
-        tools.append(team._get_chat_history_function(session=session, async_mode=False))
-    if team.memory_manager is not None and team.enable_agentic_memory:
-        tools.append(team._get_update_user_memory_function(async_mode=False))
-    if team.enable_agentic_state:
-        tools.append(Function(name="update_session_state", entrypoint=team._update_session_state_tool))
-    if team.search_session_history:
-        tools.append(
-            team._get_previous_sessions_messages_function(
-                num_history_sessions=team.num_history_sessions,
-                async_mode=False,
-            ),
-        )
-    if team.knowledge is not None and team.search_knowledge:
-        tools.extend(
-            team.knowledge.get_tools(
-                run_response=run_response,
-                run_context=run_context,
-                knowledge_filters=run_context.knowledge_filters,
-                async_mode=False,
-                enable_agentic_filters=team.enable_agentic_knowledge_filters,
-                agent=team,
-            ),
-        )
-    if team.knowledge is not None and team.update_knowledge:
-        tools.append(team.add_to_knowledge)
-    if not team.members:
-        return tools
-
-    tools.append(
-        team._get_delegate_task_function(
-            run_response=run_response,
-            run_context=run_context,
-            session=session,
-            team_run_context={},
-        ),
+    model = team.model
+    assert model is not None
+    prepared_tools = team._determine_tools_for_model(
+        model=model,
+        run_response=run_response,
+        run_context=run_context,
+        team_run_context={},
+        session=session,
+        check_mcp_tools=False,
     )
-    if team.get_member_information_tool:
-        tools.append(team.get_member_information)
-    return tools
+    return session, [tool for tool in prepared_tools if isinstance(tool, Function) or _is_tool_definition_dict(tool)]
 
 
 def resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:

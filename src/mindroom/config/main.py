@@ -342,11 +342,13 @@ class Config(BaseModel):
         """Return the effective models used when compaction is enabled anywhere."""
         compaction_models: set[str] = set()
         defaults_compaction = self.defaults.compaction
-        if defaults_compaction is not None:
+        if defaults_compaction is not None and defaults_compaction.enabled:
             compaction_models.add(defaults_compaction.model or "default")
 
-        for agent_config in self.agents.values():
+        for agent_name, agent_config in self.agents.items():
             if agent_config.compaction is None and defaults_compaction is None:
+                continue
+            if not self.get_entity_compaction_config(agent_name).enabled:
                 continue
             model_name = (
                 (agent_config.compaction.model if agent_config.compaction else None)
@@ -355,8 +357,10 @@ class Config(BaseModel):
             )
             compaction_models.add(model_name)
 
-        for team_config in self.teams.values():
+        for team_name, team_config in self.teams.items():
             if team_config.compaction is None and defaults_compaction is None:
+                continue
+            if not self.get_entity_compaction_config(team_name).enabled:
                 continue
             model_name = (
                 (team_config.compaction.model if team_config.compaction else None)
