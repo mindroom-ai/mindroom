@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Any
 
 import nio
+from aiohttp import ClientConnectionError
 from nio import crypto
 from nio.api import RelationshipType
+from nio.responses import RoomThreadsResponse
 
 from mindroom.config.main import Config
 from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
@@ -198,6 +200,22 @@ def replace_visible_message(
 
 class PermanentMatrixStartupError(ValueError):
     """Raised for Matrix startup failures that should not be retried."""
+
+
+class RoomThreadsPageError(ValueError):
+    """Raised when a single /threads page request fails."""
+
+    def __init__(
+        self,
+        *,
+        response: str,
+        errcode: str | None = None,
+        retry_after_ms: int | None = None,
+    ) -> None:
+        super().__init__(response)
+        self.response = response
+        self.errcode = errcode
+        self.retry_after_ms = retry_after_ms
 
 
 def _require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
@@ -534,6 +552,24 @@ def _describe_matrix_response_error(response: object) -> str:
         if response.message:
             return str(response.message)
     return str(response)
+
+
+def _room_threads_page_error_from_response(response: object) -> RoomThreadsPageError:
+    """Preserve nio response details for /threads pagination failures."""
+    if isinstance(response, nio.ErrorResponse):
+        return RoomThreadsPageError(
+            response=str(response),
+            errcode=response.status_code,
+            retry_after_ms=response.retry_after_ms,
+        )
+    return RoomThreadsPageError(response=str(response))
+
+
+def _room_threads_page_error_from_exception(exc: BaseException) -> RoomThreadsPageError:
+    """Normalize transport failures into the same structured /threads error."""
+    detail = str(exc)
+    response = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+    return RoomThreadsPageError(response=response)
 
 
 async def _get_room_join_rule(client: nio.AsyncClient, room_id: str) -> str | None:
@@ -1569,6 +1605,40 @@ async def fetch_thread_history(
             reason=str(exc),
         )
         return await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
+
+
+async def get_room_threads_page(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    limit: int,
+    page_token: str | None = None,
+) -> tuple[list[nio.Event], str | None]:
+    """Fetch a single page of thread roots for a room."""
+    if not client.access_token:
+        raise RoomThreadsPageError(
+            response="Matrix client access token is required for room thread pagination.",
+        )
+
+    method, path = nio.Api.room_get_threads(
+        client.access_token,
+        room_id,
+        paginate_from=page_token,
+        limit=limit,
+    )
+    try:
+        response = await client._send(  # matrix-nio only exposes single-page /threads via the private transport helper
+            RoomThreadsResponse,
+            method,
+            path,
+            response_data=(room_id,),
+        )
+    except (ClientConnectionError, TimeoutError) as exc:
+        raise _room_threads_page_error_from_exception(exc) from exc
+    if not isinstance(response, RoomThreadsResponse):
+        raise _room_threads_page_error_from_response(response)
+
+    return response.thread_roots, response.next_batch
 
 
 async def _latest_thread_event_id(

@@ -27,9 +27,11 @@ from mindroom.interactive import (
 )
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
+    RoomThreadsPageError,
     edit_message,
     fetch_thread_history,
     get_latest_thread_event_id_if_needed,
+    get_room_threads_page,
     send_message,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -56,7 +58,7 @@ class MatrixMessageTools(Toolkit):
         nio.RoomMessageNotice,
     )
     _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset(
-        {"send", "thread-reply", "reply", "react", "read", "thread-list", "edit", "context"},
+        {"send", "thread-reply", "reply", "react", "read", "room-threads", "thread-list", "edit", "context"},
     )
 
     def __init__(self) -> None:
@@ -102,7 +104,7 @@ class MatrixMessageTools(Toolkit):
                 "error",
                 action=action,
                 message=(
-                    "Unsupported action. Use send, reply, thread-reply, react, read, thread-list, edit, or context."
+                    "Unsupported action. Use send, reply, thread-reply, react, read, room-threads, thread-list, edit, or context."
                 ),
             )
         if attachment_count and not supports_attachments:
@@ -422,17 +424,44 @@ class MatrixMessageTools(Toolkit):
             return compact
         return f"{compact[: max_length - 3].rstrip()}..."
 
+    @staticmethod
+    def _message_to_dict(message: ResolvedVisibleMessage | dict[str, object]) -> dict[str, object]:
+        if isinstance(message, ResolvedVisibleMessage):
+            return message.to_dict()
+        return {key: value for key, value in message.items() if isinstance(key, str)}
+
+    @classmethod
+    def _message_event_id(cls, message: ResolvedVisibleMessage | dict[str, object]) -> str | None:
+        if isinstance(message, ResolvedVisibleMessage):
+            return message.event_id
+        event_id = cls._message_to_dict(message).get("event_id")
+        return event_id if isinstance(event_id, str) else None
+
+    @classmethod
+    def _message_sender(cls, message: ResolvedVisibleMessage | dict[str, object]) -> str | None:
+        if isinstance(message, ResolvedVisibleMessage):
+            return message.sender
+        sender = cls._message_to_dict(message).get("sender")
+        return sender if isinstance(sender, str) else None
+
+    @classmethod
+    def _message_body(cls, message: ResolvedVisibleMessage | dict[str, object]) -> str | None:
+        if isinstance(message, ResolvedVisibleMessage):
+            return message.body
+        body = cls._message_to_dict(message).get("body")
+        return body if isinstance(body, str) else None
+
     def _build_edit_options(
         self,
         context: ToolRuntimeContext,
         *,
-        messages: Sequence[ResolvedVisibleMessage],
+        messages: Sequence[ResolvedVisibleMessage | dict[str, object]],
     ) -> list[dict[str, object]]:
         current_user_id = context.client.user_id
         options: list[dict[str, object]] = []
         for message in reversed(messages):
-            event_id = message.event_id
-            sender = message.sender
+            event_id = self._message_event_id(message)
+            sender = self._message_sender(message)
             if not isinstance(event_id, str) or not isinstance(sender, str):
                 continue
             can_edit = current_user_id is not None and sender == current_user_id
@@ -440,12 +469,89 @@ class MatrixMessageTools(Toolkit):
                 "event_id": event_id,
                 "sender": sender,
                 "can_edit": can_edit,
-                "body_preview": self._message_preview(message.body),
+                "body_preview": self._message_preview(self._message_body(message)),
             }
             if can_edit:
                 option["edit_action"] = {"action": "edit", "target": event_id}
             options.append(option)
         return options
+
+    @staticmethod
+    def _thread_reply_count(event: nio.Event) -> int:
+        unsigned = event.source.get("unsigned", {})
+        if not isinstance(unsigned, dict):
+            return 0
+        relations = unsigned.get("m.relations", {})
+        if not isinstance(relations, dict):
+            return 0
+        thread_metadata = relations.get("m.thread", {})
+        if not isinstance(thread_metadata, dict):
+            return 0
+        count = thread_metadata.get("count")
+        return count if isinstance(count, int) and not isinstance(count, bool) else 0
+
+    async def _serialize_thread_root(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        event: nio.Event,
+    ) -> dict[str, object]:
+        source = event.source
+        if source.get("type") == "m.room.encrypted":
+            body_preview = "[encrypted]"
+        elif isinstance(event, nio.RoomMessageText):
+            resolved_message = await extract_and_resolve_message(event, context.client)
+            body_preview = self._message_preview(resolved_message.get("body"))
+        else:
+            content = source.get("content", {})
+            body = content.get("body") if isinstance(content, dict) else None
+            body_preview = self._message_preview(body)
+
+        return {
+            "thread_id": event.event_id,
+            "sender": event.sender,
+            "timestamp": event.server_timestamp,
+            "body_preview": body_preview,
+            "reply_count": self._thread_reply_count(event),
+        }
+
+    async def _room_threads(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        read_limit: int,
+        page_token: str | None,
+    ) -> str:
+        try:
+            thread_roots, next_token = await get_room_threads_page(
+                context.client,
+                room_id,
+                limit=read_limit,
+                page_token=page_token,
+            )
+        except RoomThreadsPageError as exc:
+            error_payload: dict[str, object] = {
+                "action": "room-threads",
+                "response": exc.response,
+                "room_id": room_id,
+            }
+            if exc.errcode is not None:
+                error_payload["errcode"] = exc.errcode
+            if exc.retry_after_ms is not None:
+                error_payload["retry_after_ms"] = exc.retry_after_ms
+            return self._payload("error", **error_payload)
+
+        threads = [await self._serialize_thread_root(context, event=event) for event in thread_roots]
+        return self._payload(
+            "ok",
+            action="room-threads",
+            room_id=room_id,
+            count=len(threads),
+            threads=threads,
+            next_token=next_token,
+            has_more=next_token is not None,
+        )
 
     async def _thread_read_payload(
         self,
@@ -464,7 +570,7 @@ class MatrixMessageTools(Toolkit):
             room_id=room_id,
             thread_id=thread_id,
             limit=read_limit,
-            messages=[message.to_dict() for message in recent_messages],
+            messages=[self._message_to_dict(message) for message in recent_messages],
             edit_options=self._build_edit_options(context, messages=recent_messages),
         )
 
@@ -594,7 +700,7 @@ class MatrixMessageTools(Toolkit):
             agent_name=context.agent_name,
         )
 
-    async def _dispatch_action(
+    async def _dispatch_action(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
         *,
@@ -607,6 +713,7 @@ class MatrixMessageTools(Toolkit):
         thread_id: str | None,
         ignore_mentions: bool,
         limit: int | None,
+        page_token: str | None,
     ) -> str:
         if action in {"send", "thread-reply", "reply"}:
             allow_context_fallback = action in {"thread-reply", "reply"}
@@ -647,6 +754,13 @@ class MatrixMessageTools(Toolkit):
                 effective_thread_id=safe_thread,
                 read_limit=self._read_limit(limit),
             )
+        if action == "room-threads":
+            return await self._room_threads(
+                context,
+                room_id=room_id,
+                read_limit=self._read_limit(limit),
+                page_token=page_token,
+            )
         if action == "thread-list":
             safe_thread = resolve_context_thread_id(
                 context,
@@ -677,7 +791,9 @@ class MatrixMessageTools(Toolkit):
         return self._payload(
             "error",
             action=action,
-            message=("Unsupported action. Use send, reply, thread-reply, react, read, thread-list, edit, or context."),
+            message=(
+                "Unsupported action. Use send, reply, thread-reply, react, read, room-threads, thread-list, edit, or context."
+            ),
         )
 
     async def matrix_message(  # noqa: PLR0911
@@ -691,6 +807,7 @@ class MatrixMessageTools(Toolkit):
         thread_id: str | None = None,
         ignore_mentions: bool = True,
         limit: int | None = None,
+        page_token: str | None = None,
     ) -> str:
         """Send, reply, react to, read, edit, or inspect Matrix messages using current room and thread context defaults.
 
@@ -702,6 +819,7 @@ class MatrixMessageTools(Toolkit):
         - thread-reply: Same threading behavior as `reply`, kept as a separate action name for agent convenience.
         - react: React to `target` with `message` as the emoji, defaulting to thumbs-up when `message` is empty.
         - read: Read recent messages from the current thread when one is active, otherwise from the room timeline.
+        - room-threads: List thread roots in a room with pagination support via `page_token`.
         - thread-list: List messages in a thread and include edit options keyed by event ID.
           It uses the current thread when one is active, otherwise you must pass `thread_id`.
         - edit: Edit a previously sent message identified by `target`.
@@ -814,4 +932,5 @@ class MatrixMessageTools(Toolkit):
             thread_id=thread_id,
             ignore_mentions=ignore_mentions,
             limit=limit,
+            page_token=page_token,
         )

@@ -9,11 +9,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from nio.api import RelationshipType
+from nio.responses import RoomThreadsError, RoomThreadsResponse
 
 from mindroom.matrix.client import (
+    RoomThreadsPageError,
     _latest_thread_event_id,
     build_threaded_edit_content,
     fetch_thread_history,
+    get_room_threads_page,
 )
 from tests.conftest import make_visible_message
 
@@ -1308,3 +1311,133 @@ class TestThreadHistory:
 
         assert client.room_messages.call_count == 1
         assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+
+
+@pytest.mark.asyncio
+async def test_get_room_threads_page_uses_single_threads_request() -> None:
+    """get_room_threads_page should request exactly one /threads page and preserve next_batch."""
+    client = AsyncMock()
+    auth_value = "secret"
+    page_marker = "page_1"
+    next_page = "page_2"
+    client.access_token = auth_value
+    thread_root = nio.RoomMessageText.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1234,
+            "content": {"msgtype": "m.text", "body": "Thread root"},
+        },
+    )
+    response = RoomThreadsResponse("!room:localhost", [thread_root], next_page)
+    client._send = AsyncMock(return_value=response)
+
+    with patch(
+        "mindroom.matrix.client.nio.Api.room_get_threads",
+        return_value=("GET", "/_matrix/client/v1/rooms/%21room%3Alocalhost/threads"),
+    ) as mock_api:
+        thread_roots, next_token = await get_room_threads_page(
+            client,
+            "!room:localhost",
+            limit=20,
+            page_token=page_marker,
+        )
+
+    mock_api.assert_called_once_with(
+        auth_value,
+        "!room:localhost",
+        paginate_from=page_marker,
+        limit=20,
+    )
+    client._send.assert_awaited_once_with(
+        RoomThreadsResponse,
+        "GET",
+        "/_matrix/client/v1/rooms/%21room%3Alocalhost/threads",
+        response_data=("!room:localhost",),
+    )
+    assert [event.event_id for event in thread_roots] == ["$thread_root"]
+    assert next_token == next_page
+
+
+@pytest.mark.asyncio
+async def test_get_room_threads_page_raises_for_matrix_error() -> None:
+    """get_room_threads_page should preserve Matrix error details for invalid tokens."""
+    client = AsyncMock()
+    auth_value = "secret"
+    stale_page = "stale"
+    client.access_token = auth_value
+    client._send = AsyncMock(
+        return_value=RoomThreadsError(
+            "Unknown or invalid from token",
+            "M_INVALID_PARAM",
+        ),
+    )
+
+    with pytest.raises(RoomThreadsPageError) as exc_info:
+        await get_room_threads_page(
+            client,
+            "!room:localhost",
+            limit=20,
+            page_token=stale_page,
+        )
+
+    assert exc_info.value.response == "RoomThreadsError: M_INVALID_PARAM Unknown or invalid from token"
+    assert exc_info.value.errcode == "M_INVALID_PARAM"
+    assert exc_info.value.retry_after_ms is None
+
+
+@pytest.mark.asyncio
+async def test_get_room_threads_page_preserves_rate_limit_details() -> None:
+    """get_room_threads_page should preserve retry metadata from nio errors."""
+    client = AsyncMock()
+    auth_value = "secret"
+    page_marker = "page_1"
+    client.access_token = auth_value
+    client._send = AsyncMock(
+        return_value=RoomThreadsError(
+            "Too many requests",
+            "M_LIMIT_EXCEEDED",
+            retry_after_ms=1500,
+        ),
+    )
+
+    with pytest.raises(RoomThreadsPageError) as exc_info:
+        await get_room_threads_page(
+            client,
+            "!room:localhost",
+            limit=20,
+            page_token=page_marker,
+        )
+
+    assert exc_info.value.response == "RoomThreadsError: M_LIMIT_EXCEEDED Too many requests - retry after 1500ms"
+    assert exc_info.value.errcode == "M_LIMIT_EXCEEDED"
+    assert exc_info.value.retry_after_ms == 1500
+
+
+@pytest.mark.asyncio
+async def test_get_room_threads_page_wraps_transport_timeout() -> None:
+    """get_room_threads_page should convert transport exceptions into structured errors."""
+    client = AsyncMock()
+    auth_value = "secret"
+    page_marker = "page_1"
+    client.access_token = auth_value
+    client._send = AsyncMock(side_effect=TimeoutError("request timed out"))
+
+    with (
+        patch(
+            "mindroom.matrix.client.nio.Api.room_get_threads",
+            return_value=("GET", "/_matrix/client/v1/rooms/%21room%3Alocalhost/threads"),
+        ),
+        pytest.raises(RoomThreadsPageError) as exc_info,
+    ):
+        await get_room_threads_page(
+            client,
+            "!room:localhost",
+            limit=20,
+            page_token=page_marker,
+        )
+
+    assert exc_info.value.response == "TimeoutError: request timed out"
+    assert exc_info.value.errcode is None
+    assert exc_info.value.retry_after_ms is None
