@@ -1322,10 +1322,7 @@ class Config(BaseModel):
         if resolved_context_window is None:
             resolved_context_window = self.get_model_context_window(resolved_model_name)
 
-        return ResolvedRuntimeModel(
-            model_name=resolved_model_name,
-            context_window=resolved_context_window,
-        )
+        return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
 
     def get_configured_bots_for_room(
         self,

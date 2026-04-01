@@ -129,4 +129,4 @@ class PreparedHistoryState:
     """Prepared persisted-history state for one run."""
 
     compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
-    has_persisted_history: bool = False
+    replays_persisted_history: bool = False

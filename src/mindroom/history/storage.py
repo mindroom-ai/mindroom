@@ -26,7 +26,7 @@ _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_
 def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -> HistoryScopeState:
     """Return the scoped compaction state for one session and scope."""
     states = read_scope_states(session)
-    return states.get(scope.key) or states.get("*") or HistoryScopeState()
+    return states.get(scope.key) or HistoryScopeState()
 
 
 def read_scope_states(session: AgentSession | TeamSession) -> dict[str, HistoryScopeState]:
@@ -34,19 +34,15 @@ def read_scope_states(session: AgentSession | TeamSession) -> dict[str, HistoryS
     metadata = session.metadata
     if isinstance(metadata, dict):
         raw_value = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
-        if isinstance(raw_value, dict):
-            if raw_value.get("version") == 1:
-                return {"*": _parse_state(raw_value)}
-
-            if raw_value.get("version") == _COMPACTION_METADATA_VERSION:
-                raw_states = raw_value.get("states")
-                if isinstance(raw_states, dict):
-                    parsed_states: dict[str, HistoryScopeState] = {}
-                    for scope_key, raw_state in raw_states.items():
-                        if not isinstance(scope_key, str) or not scope_key or not isinstance(raw_state, dict):
-                            continue
-                        parsed_states[scope_key] = _parse_state(raw_state)
-                    return parsed_states
+        if isinstance(raw_value, dict) and raw_value.get("version") == _COMPACTION_METADATA_VERSION:
+            raw_states = raw_value.get("states")
+            if isinstance(raw_states, dict):
+                parsed_states: dict[str, HistoryScopeState] = {}
+                for scope_key, raw_state in raw_states.items():
+                    if not isinstance(scope_key, str) or not scope_key or not isinstance(raw_state, dict):
+                        continue
+                    parsed_states[scope_key] = _parse_state(raw_state)
+                return parsed_states
     return {}
 
 

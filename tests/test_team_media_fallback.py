@@ -213,7 +213,7 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
+        mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -275,7 +275,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
+        mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -335,7 +335,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
+        mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
         await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -951,7 +951,7 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
+        mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -1014,7 +1014,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
+        mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
         chunks = [
             chunk
             async for chunk in team_response_stream(

@@ -1284,7 +1284,7 @@ async def _prepare_materialized_team_execution(
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
         )
-    elif prepared_history.has_persisted_history:
+    elif prepared_history.replays_persisted_history:
         prepared_prompt = message
     else:
         prepared_prompt = fallback_prompt

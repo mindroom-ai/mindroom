@@ -2449,7 +2449,7 @@ class TestTeamCompletion:
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
+            mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -2497,7 +2497,7 @@ class TestTeamCompletion:
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedHistoryState(has_persisted_history=True)
+            mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={

@@ -117,7 +117,7 @@ async def compact_scope_history(
     notify: bool,
 ) -> tuple[HistoryScopeState, CompactionOutcome | None]:
     """Compact one scope by rewriting session.summary and session.runs."""
-    visible_runs = _runs_for_scope(_completed_top_level_runs(session), scope)
+    visible_runs = runs_for_scope(completed_top_level_runs(session), scope)
     compactable_runs = _select_runs_to_compact(
         visible_runs=visible_runs,
         session=session,
@@ -175,7 +175,7 @@ async def compact_scope_history(
         model=_model_identifier(summary_model),
     )
 
-    after_visible_runs = _runs_for_scope(_completed_top_level_runs(session), scope)
+    after_visible_runs = runs_for_scope(completed_top_level_runs(session), scope)
     after_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         scope=scope,
@@ -217,7 +217,7 @@ async def _rewrite_working_session_for_compaction(
     total_compacted_run_count = 0
 
     while True:
-        working_visible_runs = _runs_for_scope(_completed_top_level_runs(working_session), scope)
+        working_visible_runs = runs_for_scope(completed_top_level_runs(working_session), scope)
         selection_state = (
             state if total_compacted_run_count == 0 else replace(state, force_compact_before_next_run=False)
         )
@@ -794,7 +794,7 @@ def estimate_prompt_visible_history_tokens(
     history_settings: ResolvedHistorySettings,
 ) -> int:
     """Estimate the persisted summary plus raw history Agno would replay for one run."""
-    summary_tokens = _estimate_session_summary_tokens(session.summary.summary if session.summary is not None else None)
+    summary_tokens = estimate_session_summary_tokens(session.summary.summary if session.summary is not None else None)
     history_messages = _history_messages_for_session(
         session=session,
         scope=scope,
@@ -927,7 +927,8 @@ def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str] 
     return [history_settings.system_message_role]
 
 
-def _estimate_session_summary_tokens(summary_text: str | None) -> int:
+def estimate_session_summary_tokens(summary_text: str | None) -> int:
+    """Estimate replay-visible tokens for one stored Agno session summary."""
     if summary_text is None or summary_text.strip() == "":
         return 0
     wrapper = (
@@ -940,7 +941,8 @@ def _estimate_session_summary_tokens(summary_text: str | None) -> int:
     return estimate_text_tokens(wrapper)
 
 
-def _completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
+def completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
+    """Return completed top-level runs that can contribute to persisted replay."""
     skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
     return [
         run
@@ -949,10 +951,11 @@ def _completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOu
     ]
 
 
-def _runs_for_scope(
+def runs_for_scope(
     runs: Sequence[RunOutput | TeamRunOutput],
     scope: HistoryScope,
 ) -> list[RunOutput | TeamRunOutput]:
+    """Filter completed top-level runs down to one persisted history scope."""
     if scope.kind == "team":
         return [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id]
     return [run for run in runs if isinstance(run, RunOutput) and run.agent_id == scope.scope_id]

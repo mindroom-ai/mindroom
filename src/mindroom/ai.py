@@ -852,7 +852,7 @@ async def _cached_agent_run(
     """Cached wrapper for agent.arun() calls."""
     media_inputs = media or MediaInputs()
     storage_path = runtime_paths.storage_root
-    history_state_requires_bypass = prepared_history is not None and prepared_history.has_persisted_history
+    history_state_requires_bypass = prepared_history is not None and prepared_history.replays_persisted_history
     cache = (
         None
         if media_inputs.has_any() or history_state_requires_bypass
@@ -1015,7 +1015,7 @@ async def _prepare_agent_and_prompt(
             active_event_ids=active_event_ids,
             response_sender_id=matrix_id.full_id if matrix_id else None,
         )
-    elif prepared_history.has_persisted_history:
+    elif prepared_history.replays_persisted_history:
         full_prompt = enhanced_prompt
     else:
         full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
@@ -1382,7 +1382,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     try:
         metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
 
-        history_state_requires_bypass = prepared_history.has_persisted_history
+        history_state_requires_bypass = prepared_history.replays_persisted_history
         cache = (
             None
             if media_inputs.has_any() or history_state_requires_bypass

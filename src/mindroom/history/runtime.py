@@ -13,13 +13,13 @@ from agno.session.team import TeamSession
 
 from mindroom.agents import create_session_storage, create_state_storage_db, get_agent_session, get_team_session
 from mindroom.history.compaction import (
-    _completed_top_level_runs,
-    _estimate_session_summary_tokens,
-    _runs_for_scope,
     compact_scope_history,
+    completed_top_level_runs,
     estimate_prompt_visible_history_tokens,
+    estimate_session_summary_tokens,
     estimate_static_tokens,
     estimate_team_static_tokens,
+    runs_for_scope,
 )
 from mindroom.history.policy import (
     describe_compaction_unavailability,
@@ -269,7 +269,11 @@ async def prepare_history_for_run(
 
     prepared = PreparedHistoryState(
         compaction_outcomes=compaction_outcomes,
-        has_persisted_history=_has_persisted_history(session, scope_context.scope),
+        replays_persisted_history=_has_effective_persisted_replay(
+            session=session,
+            scope=scope_context.scope,
+            target=resolved_replay_target,
+        ),
     )
     if compaction_outcomes_collector is not None:
         compaction_outcomes_collector.extend(compaction_outcomes)
@@ -302,26 +306,6 @@ async def prepare_bound_agents_for_run(
     if bound_scope is None:
         return PreparedHistoryState()
 
-    if team_name is not None and team_name in config.teams:
-        history_settings = config.get_entity_history_settings(team_name)
-        compaction_config = config.get_entity_compaction_config(team_name)
-        has_authored_compaction_config = config.has_authored_entity_compaction_config(team_name)
-        runtime_model = config.resolve_runtime_model(
-            entity_name=team_name,
-            active_model_name=active_model_name,
-            active_context_window=active_context_window,
-        )
-    else:
-        history_settings = config.get_default_history_settings()
-        compaction_config = config.get_default_compaction_config()
-        has_authored_compaction_config = config.has_authored_default_compaction_config()
-        runtime_model = config.resolve_runtime_model(
-            entity_name=None,
-            active_model_name=active_model_name,
-            active_context_window=active_context_window,
-        )
-    resolved_active_model_name = runtime_model.model_name
-    resolved_active_context_window = runtime_model.context_window
     static_prompt_tokens = (
         estimate_preparation_static_tokens_for_team(
             team,
@@ -334,15 +318,14 @@ async def prepare_bound_agents_for_run(
             fallback_full_prompt=fallback_full_prompt,
         )
     )
-    execution_plan = resolve_history_execution_plan(
+    resolved_inputs = _resolve_entity_preparation_inputs(
         config=config,
-        compaction_config=compaction_config,
-        has_authored_compaction_config=has_authored_compaction_config,
-        active_model_name=resolved_active_model_name,
-        active_context_window=resolved_active_context_window,
+        entity_name=team_name if team_name in config.teams else None,
         static_prompt_tokens=static_prompt_tokens,
+        active_model_name=active_model_name,
+        active_context_window=active_context_window,
     )
-    available_history_budget = execution_plan.replay_budget_tokens
+    available_history_budget = resolved_inputs.execution_plan.replay_budget_tokens
 
     return await prepare_history_for_run(
         agent=bound_scope.owner_agent,
@@ -354,15 +337,15 @@ async def prepare_bound_agents_for_run(
         execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
         storage=bound_scope.storage,
-        history_settings=history_settings,
-        compaction_config=compaction_config,
-        has_authored_compaction_config=has_authored_compaction_config,
-        active_model_name=resolved_active_model_name,
-        active_context_window=resolved_active_context_window,
+        history_settings=resolved_inputs.history_settings,
+        compaction_config=resolved_inputs.compaction_config,
+        has_authored_compaction_config=resolved_inputs.execution_plan.authored_compaction_config,
+        active_model_name=resolved_inputs.active_model_name,
+        active_context_window=resolved_inputs.active_context_window,
         static_prompt_tokens=static_prompt_tokens,
         available_history_budget=available_history_budget,
         scope=bound_scope.scope,
-        execution_plan=execution_plan,
+        execution_plan=resolved_inputs.execution_plan,
         replay_target=team,
     )
 
@@ -629,6 +612,66 @@ def _history_settings_from_agent(agent: Agent) -> ResolvedHistorySettings:
     )
 
 
+def _resolve_entity_preparation_inputs(
+    *,
+    config: Config,
+    entity_name: str | None,
+    static_prompt_tokens: int,
+    active_model_name: str | None,
+    active_context_window: int | None,
+    history_settings: ResolvedHistorySettings | None = None,
+    compaction_config: CompactionConfig | None = None,
+    has_authored_compaction_config: bool | None = None,
+    execution_plan: ResolvedHistoryExecutionPlan | None = None,
+) -> _ResolvedPreparationInputs:
+    resolved_history_settings = history_settings
+    if resolved_history_settings is None:
+        resolved_history_settings = (
+            config.get_entity_history_settings(entity_name)
+            if entity_name is not None
+            else config.get_default_history_settings()
+        )
+
+    resolved_compaction_config = compaction_config
+    if resolved_compaction_config is None:
+        resolved_compaction_config = (
+            config.get_entity_compaction_config(entity_name)
+            if entity_name is not None
+            else config.get_default_compaction_config()
+        )
+
+    resolved_has_authored_compaction_config = has_authored_compaction_config
+    if resolved_has_authored_compaction_config is None:
+        resolved_has_authored_compaction_config = (
+            config.has_authored_entity_compaction_config(entity_name)
+            if entity_name is not None
+            else config.has_authored_default_compaction_config()
+        )
+
+    runtime_model = config.resolve_runtime_model(
+        entity_name=entity_name,
+        active_model_name=active_model_name,
+        active_context_window=active_context_window,
+    )
+    resolved_execution_plan = execution_plan or resolve_history_execution_plan(
+        config=config,
+        compaction_config=resolved_compaction_config,
+        has_authored_compaction_config=resolved_has_authored_compaction_config,
+        active_model_name=runtime_model.model_name,
+        active_context_window=runtime_model.context_window,
+        static_prompt_tokens=static_prompt_tokens,
+    )
+
+    return _ResolvedPreparationInputs(
+        history_settings=resolved_history_settings,
+        compaction_config=resolved_compaction_config,
+        active_model_name=runtime_model.model_name,
+        active_context_window=runtime_model.context_window,
+        static_prompt_tokens=static_prompt_tokens,
+        execution_plan=resolved_execution_plan,
+    )
+
+
 def _resolve_preparation_inputs(
     *,
     agent: Agent,
@@ -643,54 +686,22 @@ def _resolve_preparation_inputs(
     static_prompt_tokens: int | None,
     execution_plan: ResolvedHistoryExecutionPlan | None,
 ) -> _ResolvedPreparationInputs:
-    resolved_history_settings = history_settings
-    if resolved_history_settings is None:
-        if agent_name in config.agents:
-            resolved_history_settings = config.get_entity_history_settings(agent_name)
-        else:
-            resolved_history_settings = _history_settings_from_agent(agent)
-
-    resolved_compaction_config = compaction_config
-    if resolved_compaction_config is None:
-        if agent_name in config.agents:
-            resolved_compaction_config = config.get_entity_compaction_config(agent_name)
-        else:
-            resolved_compaction_config = config.get_default_compaction_config()
-
-    resolved_has_authored_compaction_config = has_authored_compaction_config
-    if resolved_has_authored_compaction_config is None:
-        if agent_name in config.agents:
-            resolved_has_authored_compaction_config = config.has_authored_entity_compaction_config(agent_name)
-        else:
-            resolved_has_authored_compaction_config = config.has_authored_default_compaction_config()
-
-    runtime_model = config.resolve_runtime_model(
-        entity_name=agent_name if agent_name in config.agents else None,
-        active_model_name=active_model_name,
-        active_context_window=active_context_window,
-    )
-    resolved_active_model_name = runtime_model.model_name
-    resolved_active_context_window = runtime_model.context_window
     resolved_static_prompt_tokens = static_prompt_tokens
     if resolved_static_prompt_tokens is None:
         resolved_static_prompt_tokens = estimate_static_tokens(agent, full_prompt)
-
-    resolved_execution_plan = execution_plan or resolve_history_execution_plan(
+    resolved_history_settings = history_settings
+    if resolved_history_settings is None and agent_name not in config.agents:
+        resolved_history_settings = _history_settings_from_agent(agent)
+    return _resolve_entity_preparation_inputs(
         config=config,
-        compaction_config=resolved_compaction_config,
-        has_authored_compaction_config=resolved_has_authored_compaction_config,
-        active_model_name=resolved_active_model_name,
-        active_context_window=resolved_active_context_window,
+        entity_name=agent_name if agent_name in config.agents else None,
         static_prompt_tokens=resolved_static_prompt_tokens,
-    )
-
-    return _ResolvedPreparationInputs(
+        active_model_name=active_model_name,
+        active_context_window=active_context_window,
         history_settings=resolved_history_settings,
-        compaction_config=resolved_compaction_config,
-        active_model_name=resolved_active_model_name,
-        active_context_window=resolved_active_context_window,
-        static_prompt_tokens=resolved_static_prompt_tokens,
-        execution_plan=resolved_execution_plan,
+        compaction_config=compaction_config,
+        has_authored_compaction_config=has_authored_compaction_config,
+        execution_plan=execution_plan,
     )
 
 
@@ -763,7 +774,7 @@ def plan_replay_that_fits(
             history_limit=fitting_limit,
         )
 
-    summary_tokens = _estimate_session_summary_tokens(
+    summary_tokens = estimate_session_summary_tokens(
         session.summary.summary if session.summary is not None else None,
     )
     if 0 < summary_tokens <= available_history_budget:
@@ -803,7 +814,7 @@ def _context_window_guard_limit_bounds(
     if history_settings.policy.mode == "messages":
         return "messages", history_settings.policy.limit or 0
 
-    visible_run_count = len(_runs_for_scope(_completed_top_level_runs(session), scope))
+    visible_run_count = len(runs_for_scope(completed_top_level_runs(session), scope))
     if history_settings.policy.mode == "all":
         return "runs", visible_run_count
     return "runs", min(history_settings.policy.limit or 0, visible_run_count)
@@ -911,9 +922,15 @@ def _configured_replay_plan(
     )
 
 
-def _has_persisted_history(session: AgentSession | TeamSession, scope: HistoryScope) -> bool:
+def _has_effective_persisted_replay(
+    *,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    target: Agent | Team,
+) -> bool:
     summary = session.summary.summary if session.summary is not None else None
-    if isinstance(summary, str) and summary.strip():
-        return True
-
-    return bool(_runs_for_scope(_completed_top_level_runs(session), scope))
+    has_replayed_summary = target.add_session_summary_to_context and isinstance(summary, str) and bool(summary.strip())
+    has_replayed_runs = target.add_history_to_context and bool(
+        runs_for_scope(completed_top_level_runs(session), scope),
+    )
+    return has_replayed_summary or has_replayed_runs
