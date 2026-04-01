@@ -85,9 +85,7 @@ def select_history_preparation_action(
     replay_budget_tokens: int | None = None,
 ) -> _HistoryPreparationAction:
     """Choose the single history-preparation action for this run."""
-    effective_replay_budget_tokens = (
-        replay_budget_tokens if replay_budget_tokens is not None else plan.replay_budget_tokens
-    )
+    effective_replay_budget_tokens = plan.replay_budget_tokens if replay_budget_tokens is None else replay_budget_tokens
     if (
         force_compact_before_next_run
         and plan.destructive_compaction_available
@@ -95,21 +93,16 @@ def select_history_preparation_action(
     ):
         return "compact"
 
-    if (
-        plan.authored_compaction_enabled
-        and plan.destructive_compaction_available
-        and effective_replay_budget_tokens is not None
-        and current_history_tokens is not None
-        and current_history_tokens > effective_replay_budget_tokens
-    ):
+    if effective_replay_budget_tokens is None or current_history_tokens is None:
+        return "none"
+
+    if current_history_tokens <= effective_replay_budget_tokens:
+        return "none"
+
+    if plan.authored_compaction_enabled and plan.destructive_compaction_available:
         return "compact"
 
-    if (
-        plan.implicit_context_window_guard_enabled
-        and effective_replay_budget_tokens is not None
-        and current_history_tokens is not None
-        and current_history_tokens > effective_replay_budget_tokens
-    ):
+    if plan.implicit_context_window_guard_enabled:
         return "implicit_guard"
 
     return "none"

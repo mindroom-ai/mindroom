@@ -14,7 +14,6 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-import mindroom.history.compaction as history_compaction
 from mindroom.agents import create_session_storage, create_state_storage_db, get_agent_session, get_team_session
 from mindroom.history.compaction import (
     compact_scope_history,
@@ -201,10 +200,12 @@ async def prepare_history_for_run(
         compaction_budget = history_budget
         assert compaction_budget is not None
         assert execution_plan.summary_input_budget_tokens is not None
-        summary_model = history_compaction.load_compaction_model(
-            config=config,
-            runtime_paths=runtime_paths,
-            model_name=execution_plan.compaction_model_name,
+        from mindroom.ai import get_model_instance  # noqa: PLC0415
+
+        summary_model = get_model_instance(
+            config,
+            runtime_paths,
+            execution_plan.compaction_model_name,
         )
         try:
             _next_state, outcome = await compact_scope_history(

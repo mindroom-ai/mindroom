@@ -35,7 +35,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
-    from mindroom.constants import RuntimePaths
     from mindroom.history.types import ResolvedHistorySettings
 
 logger = get_logger(__name__)
@@ -492,18 +491,6 @@ def normalize_compaction_budget_tokens(tokens: int, context_window: int | None) 
     if context_window is None or context_window <= 0:
         return tokens
     return min(tokens, context_window // 2)
-
-
-def load_compaction_model(
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    model_name: str,
-) -> Model:
-    """Load the summary model used for single-pass compaction."""
-    from mindroom.ai import get_model_instance  # noqa: PLC0415
-
-    return get_model_instance(config, runtime_paths, model_name)
 
 
 def resolve_compaction_runtime_settings(

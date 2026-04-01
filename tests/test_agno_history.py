@@ -50,7 +50,13 @@ from mindroom.history.storage import (
     update_scope_seen_event_ids,
     write_scope_state,
 )
-from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
+from mindroom.history.types import (
+    HistoryPolicy,
+    HistoryScope,
+    HistoryScopeState,
+    ResolvedHistoryExecutionPlan,
+    ResolvedHistorySettings,
+)
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
@@ -439,7 +445,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
 
     with (
         patch(
-            "mindroom.history.compaction.load_compaction_model",
+            "mindroom.ai.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -515,7 +521,7 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
 
     with (
         patch(
-            "mindroom.history.compaction.load_compaction_model",
+            "mindroom.ai.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -603,7 +609,7 @@ async def test_prepare_history_for_run_auto_compaction_rechecks_after_merged_sum
     )
     with (
         patch(
-            "mindroom.history.compaction.load_compaction_model",
+            "mindroom.ai.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -768,7 +774,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
 
     with (
         patch(
-            "mindroom.history.compaction.load_compaction_model",
+            "mindroom.ai.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1460,6 +1466,58 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
     assert execution_plan.unavailable_reason == "non_positive_summary_input_budget"
 
 
+def test_select_history_preparation_action_forced_compaction_takes_priority() -> None:
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_config=True,
+        authored_compaction_enabled=True,
+        destructive_compaction_available=True,
+        implicit_context_window_guard_enabled=False,
+        compaction_model_name="summary-model",
+        compaction_context_window=32_000,
+        replay_window_tokens=32_000,
+        threshold_tokens=24_000,
+        reserve_tokens=16_384,
+        static_prompt_tokens=2_000,
+        replay_budget_tokens=10_000,
+        summary_input_budget_tokens=5_000,
+    )
+
+    assert (
+        select_history_preparation_action(
+            plan=execution_plan,
+            force_compact_before_next_run=True,
+            current_history_tokens=None,
+        )
+        == "compact"
+    )
+
+
+def test_select_history_preparation_action_uses_authored_compaction_when_over_budget() -> None:
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_config=True,
+        authored_compaction_enabled=True,
+        destructive_compaction_available=True,
+        implicit_context_window_guard_enabled=False,
+        compaction_model_name="summary-model",
+        compaction_context_window=32_000,
+        replay_window_tokens=32_000,
+        threshold_tokens=24_000,
+        reserve_tokens=16_384,
+        static_prompt_tokens=2_000,
+        replay_budget_tokens=10_000,
+        summary_input_budget_tokens=5_000,
+    )
+
+    assert (
+        select_history_preparation_action(
+            plan=execution_plan,
+            force_compact_before_next_run=False,
+            current_history_tokens=10_001,
+        )
+        == "compact"
+    )
+
+
 def test_select_history_preparation_action_uses_implicit_guard_for_non_authored_scope(tmp_path: Path) -> None:
     config, _runtime_paths_value = _make_config(tmp_path)
 
@@ -1589,7 +1647,7 @@ async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summar
 
     with (
         patch(
-            "mindroom.history.compaction.load_compaction_model",
+            "mindroom.ai.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1709,7 +1767,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
 
     with (
         patch(
-            "mindroom.history.compaction.load_compaction_model",
+            "mindroom.ai.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
