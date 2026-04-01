@@ -18,6 +18,7 @@ from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
+from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
@@ -162,13 +163,20 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
                 return_value=True,
             ),
         ):
+            bot.client.room_send.side_effect = [
+                nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, room.room_id),
+                nio.RoomSendResponse.from_dict({"event_id": "$edit"}, room.room_id),
+            ]
             await bot._on_message(room, event)
 
-    # Team bot should have sent exactly one message
-    assert bot.client.room_send.call_count == 2  # initial + streaming updates for team
-    _, kwargs = bot.client.room_send.call_args
-    # kwargs contains content with formatted body
-    assert "🤝 Team Response" in kwargs["content"]["formatted_body"]
+    # Team bot should send a visible pending placeholder and the final team message.
+    sent_contents = [call.kwargs["content"] for call in bot.client.room_send.call_args_list]
+    assert len(sent_contents) == 2
+    assert sent_contents[0][STREAM_STATUS_KEY] == "pending"
+    assert sent_contents[0]["body"].startswith("Thinking...")
+    assert sent_contents[1]["m.relates_to"]["rel_type"] == "m.replace"
+    assert sent_contents[1]["m.new_content"]["body"] == "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
+    bot.client.room_send.side_effect = None
 
 
 @pytest.mark.asyncio

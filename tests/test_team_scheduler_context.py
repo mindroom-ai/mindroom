@@ -177,6 +177,9 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
             team_mode="coordinate",
             thread_history=[],
             requester_user_id="@user:localhost",
+            response_envelope=_response_envelope(),
+            enrichment_digest=None,
+            correlation_id="corr-team-cancelled",
         )
 
     bot._edit_message.assert_awaited_once_with(

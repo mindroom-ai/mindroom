@@ -86,8 +86,15 @@ def _reset_worker_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
 
 
 @pytest.fixture
-def runner_client() -> Iterator[TestClient]:
+def runner_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestClient]:
     """Create a test client for the sandbox runner app."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
 
     class _RuntimeRefreshingTestClient(TestClient):
         def request(
@@ -705,6 +712,12 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     original_manager = credentials_module._credentials_manager
     original_signature = credentials_module._credentials_manager_signature
     shared_storage = tmp_path / "shared-storage"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(shared_storage))
     metadata_module._TOOL_REGISTRY[tool_name] = lambda: DummyTool
     TOOL_METADATA[tool_name] = ToolMetadata(

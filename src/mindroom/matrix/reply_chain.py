@@ -16,6 +16,7 @@ import nio
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 if TYPE_CHECKING:
     import structlog
@@ -23,6 +24,10 @@ if TYPE_CHECKING:
 # Callback type for fetching thread history, injected by the caller to keep
 # this module decoupled from the concrete import (and easy to mock in tests).
 type _FetchThreadHistory = Callable[
+    [nio.AsyncClient, str, str],
+    Coroutine[Any, Any, list[dict[str, Any]]],
+]
+type _FetchThreadSnapshot = Callable[
     [nio.AsyncClient, str, str],
     Coroutine[Any, Any, list[dict[str, Any]]],
 ]
@@ -115,6 +120,13 @@ def _next_reply_chain_event_id(event_info: EventInfo, current_event_id: str) -> 
 def _thread_history_has_replies(thread_history: list[dict[str, Any]], root_event_id: str) -> bool:
     """Return whether a root event already has thread replies."""
     return any(msg.get("event_id") != root_event_id for msg in thread_history)
+
+
+def _thread_history_is_full(thread_history: list[dict[str, Any]], *, default: bool) -> bool:
+    """Return whether *thread_history* is already fully hydrated."""
+    if isinstance(thread_history, ThreadHistoryResult):
+        return thread_history.is_full_history
+    return default
 
 
 def _unique_history_event_ids(messages: list[dict[str, Any]]) -> list[str]:
@@ -271,18 +283,20 @@ async def _fetch_node(
 async def _resolve_direct_thread_root(
     client: nio.AsyncClient,
     caches: ReplyChainCaches,
-    fetch_history: _FetchThreadHistory,
+    fetch_snapshot: _FetchThreadSnapshot,
     room_id: str,
     event_id: str,
     node: _ReplyChainNode,
     visited_event_ids: list[str],
     chain_history_length: int,
+    *,
+    default_history_is_full: bool,
 ) -> tuple[str, list[dict[str, Any]], bool, bool] | None:
     """Resolve clients that reply to an existing thread root without m.thread metadata."""
     if chain_history_length != 1 or node.parent_event_id or node.thread_root_id or node.has_relations:
         return None
 
-    thread_history = await fetch_history(client, room_id, event_id)
+    thread_history = await fetch_snapshot(client, room_id, event_id)
     if not _thread_history_has_replies(thread_history, event_id):
         return None
 
@@ -297,7 +311,12 @@ async def _resolve_direct_thread_root(
         ),
     )
     _cache_roots(caches, room_id, visited_event_ids, event_id, points_to_thread=True)
-    return event_id, thread_history, True, True
+    return (
+        event_id,
+        thread_history,
+        True,
+        _thread_history_is_full(thread_history, default=default_history_is_full),
+    )
 
 
 async def canonicalize_related_event_id(
@@ -369,9 +388,11 @@ async def _resolve_reply_chain(
     client: nio.AsyncClient,
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
-    fetch_history: _FetchThreadHistory,
+    fetch_snapshot: _FetchThreadSnapshot,
     room_id: str,
     reply_to_event_id: str,
+    *,
+    default_history_is_full: bool,
 ) -> tuple[str, list[dict[str, Any]], bool, bool]:
     """Resolve reply-chain context for clients that don't send thread relations.
 
@@ -418,12 +439,13 @@ async def _resolve_reply_chain(
         direct_thread_root_context = await _resolve_direct_thread_root(
             client,
             caches,
-            fetch_history,
+            fetch_snapshot,
             room_id=room_id,
             event_id=current_event_id,
             node=node,
             visited_event_ids=visited_event_ids,
             chain_history_length=len(chain_history),
+            default_history_is_full=default_history_is_full,
         )
         if direct_thread_root_context is not None:
             break
@@ -482,6 +504,7 @@ async def derive_conversation_context(
         fetch_history,
         room_id,
         reply_chain_seed,
+        default_history_is_full=True,
     )
     if points_to_thread:
         if is_full_thread_history:
@@ -495,3 +518,60 @@ async def derive_conversation_context(
     # Policy choice: reply-only chains are still treated as one conversation
     # context so responder selection and memory use a stable root.
     return True, context_root_id, chain_history
+
+
+async def derive_conversation_target(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_info: EventInfo,
+    caches: ReplyChainCaches,
+    logger: structlog.stdlib.BoundLogger,
+    fetch_snapshot: _FetchThreadSnapshot,
+) -> tuple[bool, str | None, list[dict[str, Any]], bool]:
+    """Derive the conversation target with lightweight history for dispatch.
+
+    Returns:
+        Tuple of (is_thread, thread_id, thread_history, requires_full_thread_history)
+
+    """
+    thread_root_id = event_info.thread_id
+    if thread_root_id is None and event_info.is_edit:
+        thread_root_id = event_info.thread_id_from_edit
+    if thread_root_id is not None:
+        thread_history = await fetch_snapshot(client, room_id, thread_root_id)
+        return (
+            True,
+            thread_root_id,
+            thread_history,
+            not _thread_history_is_full(thread_history, default=False),
+        )
+
+    reply_chain_seed = event_info.original_event_id if event_info.is_edit else event_info.reply_to_event_id
+    if not reply_chain_seed:
+        return False, None, [], False
+
+    (
+        context_root_id,
+        chain_history,
+        points_to_thread,
+        is_full_thread_history,
+    ) = await _resolve_reply_chain(
+        client,
+        caches,
+        logger,
+        fetch_snapshot,
+        room_id,
+        reply_chain_seed,
+        default_history_is_full=False,
+    )
+    if points_to_thread:
+        if is_full_thread_history:
+            return True, context_root_id, chain_history, False
+
+        thread_history = await fetch_snapshot(client, room_id, context_root_id)
+        requires_full_thread_history = not _thread_history_is_full(thread_history, default=False)
+        if chain_history:
+            thread_history = _merge_thread_and_chain_history(thread_history, chain_history)
+        return True, context_root_id, thread_history, requires_full_thread_history
+
+    return True, context_root_id, chain_history, False

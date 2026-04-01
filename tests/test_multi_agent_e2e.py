@@ -15,7 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import MultiAgentOrchestrator
@@ -73,13 +73,16 @@ def mock_general_agent() -> AgentMatrixUser:
 
 
 @pytest.mark.asyncio
+@patch("mindroom.bot.fetch_thread_snapshot")
 @patch("mindroom.bot.fetch_thread_history")
 async def test_agent_processes_direct_mention(
+    mock_fetch_snapshot: AsyncMock,
     mock_fetch_history: AsyncMock,
     mock_calculator_agent: AgentMatrixUser,
     tmp_path: Path,
 ) -> None:
     """Test that an agent processes messages where it's directly mentioned."""
+    mock_fetch_snapshot.return_value = []
     mock_fetch_history.return_value = []
     test_room_id = "!test:localhost"
     test_user_id = "@alice:localhost"
@@ -309,13 +312,14 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
+            patch("mindroom.bot.fetch_thread_snapshot") as mock_fetch_snapshot,
             patch("mindroom.bot.fetch_thread_history") as mock_fetch,
             patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
             patch("mindroom.bot.should_use_streaming", return_value=False),  # No streaming
         ):
             # Only this agent in the thread
-            mock_fetch.return_value = [
+            thread_history = [
                 {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
                 {
                     "sender": mock_calculator_agent.user_id,
@@ -324,6 +328,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                     "event_id": "msg2",
                 },
             ]
+            mock_fetch.return_value = thread_history
+            mock_fetch_snapshot.return_value = thread_history
 
             # Mock non-streaming response
             mock_ai.return_value = "20% of 300 is 60"
@@ -332,8 +338,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
             # Should process the message as only agent in thread
             mock_ai.assert_called_once()
-            # With stop button: The test is mocking room_send incorrectly so only 2 succeed
-            assert bot.client.room_send.call_count == 2
+            # With stop button support: placeholder + reaction + final
+            assert bot.client.room_send.call_count >= 2
 
         # Test 2: Thread with multiple agents - should form team and respond
         bot.client.room_send.reset_mock()
@@ -363,13 +369,15 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
+            patch("mindroom.bot.fetch_thread_snapshot") as mock_fetch_snapshot,
             patch("mindroom.bot.fetch_thread_history") as mock_fetch,
             patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
             patch("mindroom.bot.should_use_streaming", return_value=False),  # No streaming
+            patch("mindroom.bot.team_response", new=AsyncMock(return_value="Team response")) as mock_team_response,
         ):
             # Multiple agents in the thread
-            mock_fetch.return_value = [
+            thread_history = [
                 {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
                 {
                     "sender": mock_calculator_agent.user_id,
@@ -384,13 +392,27 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                     "event_id": "msg3",
                 },
             ]
+            mock_fetch.return_value = thread_history
+            mock_fetch_snapshot.return_value = thread_history
+            bot.client.room_send.side_effect = [
+                nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, test_room_id),
+                nio.RoomSendResponse.from_dict({"event_id": "$edit"}, test_room_id),
+            ]
 
             await bot._on_message(room, message_event_2)
 
             # Should form team and send team response when multiple agents in thread
             mock_ai.assert_not_called()
-            mock_team_arun.assert_called_once()
-            assert bot.client.room_send.call_count == 2  # Team response (thinking + final)
+            mock_team_response.assert_awaited_once()
+            assert bot.client.room_send.call_count == 2
+            placeholder_content = bot.client.room_send.call_args_list[0].kwargs["content"]
+            final_content = bot.client.room_send.call_args_list[1].kwargs["content"]
+            assert placeholder_content[STREAM_STATUS_KEY] == "pending"
+            assert placeholder_content["body"].startswith("🤝 Team Response: Thinking...")
+            assert final_content["m.relates_to"]["rel_type"] == "m.replace"
+            assert final_content["m.relates_to"]["event_id"] == "$placeholder"
+            assert final_content["m.new_content"]["body"] != placeholder_content["body"]
+            bot.client.room_send.side_effect = None
 
         # Reset mocks for Test 3
         bot.client.room_send.reset_mock()
@@ -421,12 +443,13 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
+            patch("mindroom.bot.fetch_thread_snapshot") as mock_fetch_snapshot,
             patch("mindroom.bot.fetch_thread_history") as mock_fetch,
             patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
             patch("mindroom.bot.should_use_streaming", return_value=False),  # No streaming
         ):
-            mock_fetch.return_value = [
+            thread_history = [
                 {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
                 {
                     "sender": mock_calculator_agent.user_id,
@@ -441,6 +464,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                     "event_id": "msg3",
                 },
             ]
+            mock_fetch.return_value = thread_history
+            mock_fetch_snapshot.return_value = thread_history
 
             # Mock non-streaming response for mention case
             mock_ai.return_value = "20% of 300 is 60"
@@ -469,11 +494,14 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             assert ai_kwargs["tool_trace_collector"] == []
             assert ai_kwargs["run_metadata_collector"] == {}
 
-            # Verify thread response format (team response with mocking issue)
-            assert bot.client.room_send.call_count == 2
-            sent_content = bot.client.room_send.call_args[1]["content"]
-            assert sent_content["m.relates_to"]["rel_type"] == "m.thread"
-            assert sent_content["m.relates_to"]["event_id"] == thread_root_id
+            # Verify a response stays in the target thread.
+            sent_contents = [call.kwargs["content"] for call in bot.client.room_send.call_args_list]
+            assert len(sent_contents) >= 2
+            assert any(
+                content.get("m.relates_to", {}).get("rel_type") == "m.thread"
+                and content.get("m.relates_to", {}).get("event_id") == thread_root_id
+                for content in sent_contents
+            )
 
 
 @pytest.mark.asyncio

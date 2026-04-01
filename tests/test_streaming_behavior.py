@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,6 +18,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY
+from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import (
@@ -751,6 +753,102 @@ class TestStreamingBehavior:
         assert final_text == PROGRESS_PLACEHOLDER
         assert final_content["body"] == PROGRESS_PLACEHOLDER
         assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_streaming_first_send_uses_resolved_thread_root(
+        self,
+        mock_helper_agent: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming without a preexisting placeholder should keep the original thread root."""
+
+        @asynccontextmanager
+        async def noop_typing(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
+            yield
+
+        async def response_stream() -> AsyncIterator[str]:
+            yield "Hello from the original thread"
+
+        async def empty_request_knowledge_managers(
+            _agent_names: list[str],
+            _execution_identity: object,
+        ) -> dict[str, object]:
+            return {}
+
+        async def no_latest_thread_event(
+            _client: object,
+            _room_id: str,
+            _thread_id: str | None,
+            _reply_to_event_id: str | None,
+            _existing_event_id: str | None = None,
+        ) -> None:
+            return None
+
+        sent_contents: list[dict[str, object]] = []
+        config = self.config
+        bot = AgentBot(
+            mock_helper_agent,
+            tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=True,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        bot.client = MagicMock(rooms={})
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._ensure_request_knowledge_managers = empty_request_knowledge_managers
+        envelope = MessageEnvelope(
+            source_event_id="$reply_plain:localhost",
+            room_id="!test:localhost",
+            thread_id=None,
+            resolved_thread_id="$thread_root:localhost",
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="Continue",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="helper",
+            source_kind="message",
+        )
+
+        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> str:
+            sent_contents.append(content)
+            return "$stream_1"
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            _new_text: str,
+        ) -> str:
+            return "$stream_1"
+
+        with (
+            patch("mindroom.bot.stream_agent_response", new=MagicMock(return_value=response_stream())),
+            patch("mindroom.bot.typing_indicator", new=noop_typing),
+            patch("mindroom.streaming.get_latest_thread_event_id_if_needed", new=no_latest_thread_event),
+            patch("mindroom.streaming.send_message", new=record_send),
+            patch("mindroom.streaming.edit_message", new=record_edit),
+        ):
+            delivery = await bot._process_and_respond_streaming(
+                room_id="!test:localhost",
+                prompt="Continue",
+                reply_to_event_id="$reply_plain:localhost",
+                thread_id=None,
+                thread_history=[],
+                existing_event_id=None,
+                user_id="@user:localhost",
+                response_envelope=envelope,
+                correlation_id="$request:localhost",
+            )
+
+        assert delivery.event_id == "$stream_1"
+        assert sent_contents
+        first_content = sent_contents[0]
+        assert first_content["m.relates_to"]["rel_type"] == "m.thread"
+        assert first_content["m.relates_to"]["event_id"] == "$thread_root:localhost"
+        assert first_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply_plain:localhost"
 
     @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(
