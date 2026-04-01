@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent
@@ -1026,6 +1026,39 @@ async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_sk
     assert mock_warning.call_args_list == []
 
 
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_warns_once_when_authored_compaction_is_unavailable(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=None,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    storage.upsert_session(session)
+
+    with patch("mindroom.history.runtime.logger.warning") as mock_warning:
+        await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert len(mock_warning.call_args_list) == 1
+
+
 def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
     big_run = _completed_run(
         "run-big",
@@ -1209,10 +1242,16 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
         expected_static_prompt_tokens += estimate_text_tokens(str(system_message.content))
     expected_static_prompt_tokens += len(stable_serialize(expected_payloads)) // 4
 
-    with patch(
-        "mindroom.history.runtime.prepare_history_for_run",
-        new=AsyncMock(return_value=PreparedHistoryState(replays_persisted_history=True)),
-    ) as mock_prepare:
+    with (
+        patch(
+            "mindroom.history.runtime.prepare_scope_history",
+            new=AsyncMock(return_value=MagicMock()),
+        ) as mock_prepare,
+        patch(
+            "mindroom.history.runtime.finalize_history_preparation",
+            return_value=PreparedHistoryState(replays_persisted_history=True),
+        ),
+    ):
         prepared = await prepare_bound_agents_for_run(
             agents=[peer_agent, owner_agent],
             team=team,
@@ -1517,6 +1556,107 @@ def test_validate_compaction_model_references_rejects_explicit_model_without_con
         )
 
 
+def test_validate_compaction_model_references_rejects_disabled_explicit_model_without_context_window(
+    tmp_path: Path,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+
+    with pytest.raises(
+        ValueError,
+        match=r"Explicit compaction\.model requires a model with context_window",
+    ):
+        bind_runtime_paths(
+            Config(
+                defaults=DefaultsConfig(
+                    tools=[],
+                    compaction=CompactionConfig(
+                        enabled=False,
+                        model="summary-model",
+                    ),
+                ),
+                models={
+                    "default": ModelConfig(
+                        provider="openai",
+                        id="test-model",
+                        context_window=48_000,
+                    ),
+                    "summary-model": ModelConfig(
+                        provider="openai",
+                        id="summary-model-id",
+                        context_window=None,
+                    ),
+                },
+            ),
+            runtime_paths,
+        )
+
+
+def test_authored_model_dump_preserves_explicit_compaction_model_clear(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": AgentConfig(
+                    display_name="Test Agent",
+                    compaction=CompactionOverrideConfig(enabled=True, model=None),
+                ),
+            },
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=48_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+
+    assert config.authored_model_dump()["agents"]["test_agent"]["compaction"] == {
+        "enabled": True,
+        "model": None,
+    }
+
+
+def test_get_entity_compaction_config_inherits_disabled_defaults_for_pure_model_clear(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": AgentConfig(
+                    display_name="Test Agent",
+                    compaction=CompactionOverrideConfig(model=None),
+                ),
+            },
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(
+                    enabled=False,
+                    model="summary-model",
+                ),
+            ),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=48_000,
+                ),
+                "summary-model": ModelConfig(
+                    provider="openai",
+                    id="summary-model-id",
+                    context_window=32_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+
+    compaction_config = config.get_entity_compaction_config("test_agent")
+
+    assert compaction_config.enabled is False
+    assert compaction_config.model is None
+
+
 def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_summary_budget(
     tmp_path: Path,
 ) -> None:
@@ -1746,9 +1886,13 @@ async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
         patch(
-            "mindroom.ai.prepare_history_for_run",
-            new=AsyncMock(return_value=PreparedHistoryState()),
+            "mindroom.execution_preparation.prepare_scope_history",
+            new=AsyncMock(return_value=MagicMock()),
         ) as mock_prepare,
+        patch(
+            "mindroom.execution_preparation.finalize_history_preparation",
+            return_value=PreparedHistoryState(),
+        ),
     ):
         await _prepare_agent_and_prompt(
             "test_agent",
@@ -1792,9 +1936,13 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
         patch("mindroom.ai.create_agent", return_value=live_agent) as mock_create_agent,
         patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
         patch(
-            "mindroom.ai.prepare_history_for_run",
-            new=AsyncMock(return_value=PreparedHistoryState()),
+            "mindroom.execution_preparation.prepare_scope_history",
+            new=AsyncMock(return_value=MagicMock()),
         ) as mock_prepare,
+        patch(
+            "mindroom.execution_preparation.finalize_history_preparation",
+            return_value=PreparedHistoryState(),
+        ),
     ):
         await _prepare_agent_and_prompt(
             "test_agent",
@@ -1824,8 +1972,12 @@ async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_repla
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
         patch(
-            "mindroom.ai.prepare_history_for_run",
-            new=AsyncMock(return_value=PreparedHistoryState(replays_persisted_history=False)),
+            "mindroom.execution_preparation.prepare_scope_history",
+            new=AsyncMock(return_value=MagicMock()),
+        ),
+        patch(
+            "mindroom.execution_preparation.finalize_history_preparation",
+            return_value=PreparedHistoryState(replays_persisted_history=False),
         ),
     ):
         prepared_agent, full_prompt, _unseen_event_ids, prepared = await _prepare_agent_and_prompt(

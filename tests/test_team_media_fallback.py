@@ -20,7 +20,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.history import PreparedHistoryState
+from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.history.runtime import load_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.matrix.identity import MatrixID
@@ -53,6 +53,21 @@ def _build_test_config() -> Config:
             },
         ),
         runtime_paths,
+    )
+
+
+def _prepared_team_execution_context(
+    *,
+    final_prompt: str,
+    replays_persisted_history: bool = False,
+    unseen_event_ids: list[str] | None = None,
+) -> PreparedExecutionContext:
+    return PreparedExecutionContext(
+        final_prompt=final_prompt,
+        replay_plan=None,
+        unseen_event_ids=unseen_event_ids or [],
+        replays_persisted_history=replays_persisted_history,
+        compaction_outcomes=[],
     )
 
 
@@ -170,9 +185,9 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedHistoryState()
+        mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Analyze this.")
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -187,7 +202,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     assert mock_prepare.await_count == 1
     assert mock_prepare.await_args.kwargs["agents"] == [fake_agent]
     assert mock_prepare.await_args.kwargs["team"] is mock_team
-    assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
+    assert mock_prepare.await_args.kwargs["prompt"] == "Analyze this."
     assert mock_prepare.await_args.kwargs["session_id"] == "session-123"
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
 
@@ -211,9 +226,12 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
+        mock_prepare.return_value = _prepared_team_execution_context(
+            final_prompt="Analyze this.",
+            replays_persisted_history=True,
+        )
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -226,8 +244,8 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
 
     assert "Recovered team response" in response
     assert mock_prepare.await_args.kwargs["team"] is mock_team
-    assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
-    assert "Old thread context" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
+    assert mock_prepare.await_args.kwargs["prompt"] == "Analyze this."
+    assert "Old thread context" in mock_prepare.await_args.kwargs["fallback_prompt"]
     prompt = mock_team.arun.await_args.args[0]
     assert prompt == "Analyze this."
     assert "Thread Context:" not in prompt
@@ -273,9 +291,15 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
+        mock_prepare.return_value = _prepared_team_execution_context(
+            final_prompt=(
+                "Messages from other participants since your last response:\nuser: Fresh follow-up\n\nAnalyze this."
+            ),
+            replays_persisted_history=True,
+            unseen_event_ids=["event-2"],
+        )
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -289,11 +313,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
         )
 
     assert "Recovered team response" in response
-    budget_prompt = mock_prepare.await_args.kwargs["full_prompt"]
     assert mock_prepare.await_args.kwargs["team"] is mock_team
-    assert "Fresh follow-up" in budget_prompt
-    assert "Already seen" not in budget_prompt
-    assert "Current message body" not in budget_prompt
     prompt = mock_team.arun.await_args.args[0]
     assert "Analyze this." in prompt
     assert "Fresh follow-up" in prompt
@@ -333,9 +353,13 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
-        mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
+        mock_prepare.return_value = _prepared_team_execution_context(
+            final_prompt="Analyze this.",
+            replays_persisted_history=True,
+            unseen_event_ids=["event-1"],
+        )
         await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -892,14 +916,14 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
         patch(
             "mindroom.teams._team_response_stream_raw",
             new_callable=AsyncMock,
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedHistoryState()
+        mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Analyze this.")
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -917,7 +941,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     assert mock_prepare.await_count == 1
     assert mock_prepare.await_args.kwargs["agents"] == [fake_agent]
     assert mock_prepare.await_args.kwargs["team"] is mock_team
-    assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
+    assert mock_prepare.await_args.kwargs["prompt"] == "Analyze this."
     assert mock_prepare.await_args.kwargs["session_id"] == "session-123"
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
     assert mock_raw.await_count == 1
@@ -944,14 +968,17 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
         patch(
             "mindroom.teams._team_response_stream_raw",
             new_callable=AsyncMock,
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
+        mock_prepare.return_value = _prepared_team_execution_context(
+            final_prompt="Analyze this.",
+            replays_persisted_history=True,
+        )
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -967,8 +994,8 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
     assert len(chunks) == 1
     assert "Streamed team response" in str(chunks[0])
     assert mock_prepare.await_args.kwargs["team"] is mock_team
-    assert mock_prepare.await_args.kwargs["full_prompt"] == "Analyze this."
-    assert "Old thread context" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
+    assert mock_prepare.await_args.kwargs["prompt"] == "Analyze this."
+    assert "Old thread context" in mock_prepare.await_args.kwargs["fallback_prompt"]
     assert mock_raw.await_args.kwargs["prompt"] == "Analyze this."
 
 
@@ -1007,14 +1034,20 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_agents_for_run", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
         patch(
             "mindroom.teams._team_response_stream_raw",
             new_callable=AsyncMock,
             return_value=raw_stream(),
         ) as mock_raw,
     ):
-        mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
+        mock_prepare.return_value = _prepared_team_execution_context(
+            final_prompt=(
+                "Messages from other participants since your last response:\nuser: Fresh follow-up\n\nAnalyze this."
+            ),
+            replays_persisted_history=True,
+            unseen_event_ids=["event-2"],
+        )
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -1034,10 +1067,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
         ]
 
     assert len(chunks) == 1
-    budget_prompt = mock_prepare.await_args.kwargs["full_prompt"]
     assert mock_prepare.await_args.kwargs["team"] is mock_team
-    assert "Fresh follow-up" in budget_prompt
-    assert "Already seen" not in budget_prompt
     prompt = mock_raw.await_args.kwargs["prompt"]
     assert "Analyze this." in prompt
     assert "Fresh follow-up" in prompt

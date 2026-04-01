@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, get_type_hints
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from agno.agent import Agent
@@ -122,6 +123,38 @@ def _agent(*, team_id: str | None = None) -> Agent:
     return agent
 
 
+@pytest.fixture(autouse=True)
+def _close_test_storages(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Close temporary SQLite handles created directly by compact-context tests."""
+    storages: list[object] = []
+    module = sys.modules[__name__]
+    original_create_session_storage = create_session_storage
+    original_load_scope_session_context = load_scope_session_context
+
+    def _tracked_create_session_storage(*args: object, **kwargs: object) -> object:
+        storage = original_create_session_storage(*args, **kwargs)
+        storages.append(storage)
+        return storage
+
+    def _tracked_load_scope_session_context(*args: object, **kwargs: object) -> object:
+        scope_context = original_load_scope_session_context(*args, **kwargs)
+        if scope_context is not None:
+            storages.append(scope_context.storage)
+        return scope_context
+
+    monkeypatch.setattr(module, "create_session_storage", _tracked_create_session_storage)
+    monkeypatch.setattr(module, "load_scope_session_context", _tracked_load_scope_session_context)
+    yield
+
+    seen_storage_ids: set[int] = set()
+    for storage in storages:
+        storage_id = id(storage)
+        if storage_id in seen_storage_ids:
+            continue
+        seen_storage_ids.add(storage_id)
+        storage.close()
+
+
 def test_compact_context_runtime_annotations_resolve_for_agno_registration(tmp_path: Path) -> None:
     """Agno should be able to evaluate tool annotations at runtime."""
     config, runtime_paths = _make_config(tmp_path)
@@ -188,6 +221,77 @@ async def test_compact_context_requires_compaction_window(tmp_path: Path) -> Non
     assert result == (
         "Error: Compaction is unavailable for this scope because no context_window is configured on the active model."
     )
+
+
+@pytest.mark.asyncio
+async def test_compact_context_closes_scope_storage_after_budget_error(tmp_path: Path) -> None:
+    """Temporary scope storage should always be closed after manual validation fails."""
+    config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=None)
+    storage = SimpleNamespace(upsert_session=Mock(), close=Mock())
+    scope_context = SimpleNamespace(
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        storage=storage,
+        session=_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]),
+    )
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=SimpleNamespace(session_id="session-1"),
+    )
+
+    with patch.object(
+        tool,
+        "_resolve_compaction_request",
+        return_value=SimpleNamespace(
+            session_id="session-1",
+            scope_context=scope_context,
+            active_model_name="default",
+            active_context_window=None,
+            compaction_config=config.get_entity_compaction_config("test_agent"),
+        ),
+    ):
+        result = await tool.compact_context(agent=_agent())
+
+    assert result == (
+        "Error: Compaction is unavailable for this scope because no context_window is configured on the active model."
+    )
+    storage.close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_compact_context_closes_scope_storage_after_success(tmp_path: Path) -> None:
+    """Temporary scope storage should be closed after a successful scheduling request."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = SimpleNamespace(upsert_session=Mock(), close=Mock())
+    scope_context = SimpleNamespace(
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        storage=storage,
+        session=_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]),
+    )
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=SimpleNamespace(session_id="session-1"),
+    )
+
+    with patch.object(
+        tool,
+        "_resolve_compaction_request",
+        return_value=SimpleNamespace(
+            session_id="session-1",
+            scope_context=scope_context,
+            active_model_name="default",
+            active_context_window=48_000,
+            compaction_config=config.get_entity_compaction_config("test_agent"),
+        ),
+    ):
+        result = await tool.compact_context(agent=_agent())
+
+    assert result == "Compaction scheduled for the next reply in this conversation scope."
+    storage.upsert_session.assert_called_once_with(scope_context.session)
+    storage.close.assert_called_once_with()
 
 
 @pytest.mark.asyncio

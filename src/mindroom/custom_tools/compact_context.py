@@ -62,32 +62,34 @@ class CompactContextTools(Toolkit):
         request = self._resolve_compaction_request(agent)
         if isinstance(request, str):
             return request
-
-        budget_error = self._validate_compaction_budget(
-            active_model_name=request.active_model_name,
-            active_context_window=request.active_context_window,
-            compaction_config=request.compaction_config,
-        )
-        if budget_error is not None:
-            return budget_error
-
-        session = request.scope_context.session
-        assert session is not None
-        current_state = read_scope_state(session, request.scope_context.scope)
-        next_state = replace(current_state, force_compact_before_next_run=True)
-        write_scope_state(session, request.scope_context.scope, next_state)
-        request.scope_context.storage.upsert_session(session)
-        if run_context is not None:
-            run_context.session_state = add_pending_force_compaction_scope(
-                run_context.session_state,
-                request.scope_context.scope,
+        try:
+            budget_error = self._validate_compaction_budget(
+                active_model_name=request.active_model_name,
+                active_context_window=request.active_context_window,
+                compaction_config=request.compaction_config,
             )
-        logger.info(
-            "Manual compaction scheduled",
-            agent=self._agent_name,
-            scope=request.scope_context.scope.key,
-        )
-        return "Compaction scheduled for the next reply in this conversation scope."
+            if budget_error is not None:
+                return budget_error
+
+            session = request.scope_context.session
+            assert session is not None
+            current_state = read_scope_state(session, request.scope_context.scope)
+            next_state = replace(current_state, force_compact_before_next_run=True)
+            write_scope_state(session, request.scope_context.scope, next_state)
+            request.scope_context.storage.upsert_session(session)
+            if run_context is not None:
+                run_context.session_state = add_pending_force_compaction_scope(
+                    run_context.session_state,
+                    request.scope_context.scope,
+                )
+            logger.info(
+                "Manual compaction scheduled",
+                agent=self._agent_name,
+                scope=request.scope_context.scope.key,
+            )
+            return "Compaction scheduled for the next reply in this conversation scope."
+        finally:
+            request.scope_context.storage.close()
 
     def _resolve_compaction_request(self, agent: Agent) -> _CompactionRequest | str:
         """Resolve the current session, scope, and active compaction settings."""
@@ -111,6 +113,7 @@ class CompactContextTools(Toolkit):
         if scope_context is None:
             return "Error: Current agent has no history scope. Cannot compact context."
         if scope_context.session is None:
+            scope_context.storage.close()
             return "Error: No stored session available. Cannot compact context."
 
         runtime_model, compaction_config = self._resolve_active_compaction_settings(agent, runtime_context)

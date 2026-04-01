@@ -866,7 +866,6 @@ describe('AgentEditor', () => {
 
   it('preserves explicit compaction model clears during normalization', () => {
     expect(normalizeAgentUpdates(mockAgent, { compaction: { model: null } }).compaction).toEqual({
-      enabled: true,
       model: null,
     });
   });

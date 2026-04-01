@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import html
-import json
 import re
 from typing import TYPE_CHECKING, cast
 
@@ -46,16 +44,6 @@ def render_enrichment_block(items: list[EnrichmentItem]) -> str:
         for item in items
     ]
     return "<mindroom_message_context>\n" + "\n".join(rendered_items) + "\n</mindroom_message_context>"
-
-
-def compute_enrichment_digest(items: list[EnrichmentItem]) -> str | None:
-    """Return a stable digest for the current merged enrichment set."""
-    if not items:
-        return None
-
-    payload = [{"key": item.key, "text": item.text, "cache_policy": item.cache_policy} for item in items]
-    digest_input = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-    return hashlib.sha256(digest_input.encode("utf-8")).hexdigest()
 
 
 def strip_enrichment_block(text: str) -> str:

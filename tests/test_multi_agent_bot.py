@@ -1618,7 +1618,7 @@ class TestAgentBot:
                 requester_user_id="@user:localhost",
                 payload=_DispatchPayload(prompt="team prompt"),
                 response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
-                enrichment_digest="digest",
+                strip_transient_enrichment_after_run=True,
                 correlation_id="corr-team",
             )
 
@@ -1664,7 +1664,7 @@ class TestAgentBot:
                 requester_user_id="@user:localhost",
                 payload=_DispatchPayload(prompt="team prompt"),
                 response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
-                enrichment_digest="digest",
+                strip_transient_enrichment_after_run=True,
                 correlation_id="corr-team",
             )
 

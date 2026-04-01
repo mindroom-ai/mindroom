@@ -27,7 +27,6 @@ from mindroom.hooks import (
     ReactionReceivedContext,
     ResponseDraft,
     ResponseResult,
-    compute_enrichment_digest,
     emit,
     emit_collect,
     emit_transform,
@@ -432,7 +431,7 @@ class _PreparedHookedPayload:
 
     payload: _DispatchPayload
     envelope: MessageEnvelope
-    enrichment_digest: str | None = None
+    strip_transient_enrichment_after_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -1995,7 +1994,7 @@ class AgentBot:
                 requester_user_id=dispatch.requester_user_id,
                 existing_event_id=None,
                 response_envelope=prepared_payload.envelope,
-                enrichment_digest=prepared_payload.enrichment_digest,
+                strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
                 correlation_id=dispatch.correlation_id,
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
@@ -2032,7 +2031,7 @@ class AgentBot:
             media=prepared_payload.payload.media,
             attachment_ids=prepared_payload.payload.attachment_ids,
             model_prompt=prepared_payload.payload.model_prompt,
-            enrichment_digest=prepared_payload.enrichment_digest,
+            strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
             response_envelope=prepared_payload.envelope,
             correlation_id=dispatch.correlation_id,
         )
@@ -2529,7 +2528,7 @@ class AgentBot:
             source_kind=dispatch.envelope.source_kind,
         )
         model_prompt: str | None = None
-        enrichment_digest: str | None = None
+        strip_transient_enrichment_after_run = False
         if self.hook_registry.has_hooks(EVENT_MESSAGE_ENRICH):
             context = MessageEnrichContext(
                 **self._hook_base_kwargs(EVENT_MESSAGE_ENRICH, dispatch.correlation_id),
@@ -2541,7 +2540,7 @@ class AgentBot:
             if items:
                 enrichment_block = render_enrichment_block(items)
                 model_prompt = f"{payload.prompt.rstrip()}\n\n{enrichment_block}"
-                enrichment_digest = compute_enrichment_digest(items)
+                strip_transient_enrichment_after_run = True
 
         return _PreparedHookedPayload(
             payload=_DispatchPayload(
@@ -2551,7 +2550,7 @@ class AgentBot:
                 attachment_ids=payload.attachment_ids,
             ),
             envelope=envelope,
-            enrichment_digest=enrichment_digest,
+            strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
         )
 
     async def _apply_before_response_hooks(
@@ -2620,7 +2619,7 @@ class AgentBot:
         *,
         payload: _DispatchPayload,
         response_envelope: MessageEnvelope | None = None,
-        enrichment_digest: str | None = None,
+        strip_transient_enrichment_after_run: bool = False,
         correlation_id: str | None = None,
         reason_prefix: str = "Team request",
     ) -> str | None:
@@ -2641,7 +2640,7 @@ class AgentBot:
                 existing_event_id=existing_event_id,
                 payload=payload,
                 response_envelope=response_envelope,
-                enrichment_digest=enrichment_digest,
+                strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
                 correlation_id=correlation_id,
                 reason_prefix=reason_prefix,
             )
@@ -2659,7 +2658,7 @@ class AgentBot:
         *,
         payload: _DispatchPayload,
         response_envelope: MessageEnvelope | None = None,
-        enrichment_digest: str | None = None,
+        strip_transient_enrichment_after_run: bool = False,
         correlation_id: str | None = None,
         reason_prefix: str = "Team request",
     ) -> str | None:
@@ -2670,7 +2669,7 @@ class AgentBot:
             thread_history,
         )
         # Team flows call Agno's team APIs directly instead of ai_response()/stream_agent_response().
-        # The enrichment digest is only used to decide whether transient enrichment
+        # This flag is only used to decide whether transient enrichment
         # must be scrubbed back out of persisted team session history after the response finishes.
 
         # Get the appropriate model for this team and room
@@ -2921,7 +2920,7 @@ class AgentBot:
             run_id=response_run_id,
         )
         try:
-            if enrichment_digest is not None:
+            if strip_transient_enrichment_after_run:
                 storage = self._create_team_history_storage(
                     team_agents=team_agents,
                     execution_identity=execution_identity,
@@ -3108,7 +3107,6 @@ class AgentBot:
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
-        enrichment_digest: str | None = None,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
         response_kind: str = "ai",
@@ -3188,7 +3186,6 @@ class AgentBot:
                         run_metadata_collector=run_metadata_content,
                         execution_identity=execution_identity,
                         compaction_outcomes_collector=compaction_outcomes,
-                        enrichment_digest=enrichment_digest,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -3579,7 +3576,6 @@ class AgentBot:
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
-        enrichment_digest: str | None = None,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
         response_kind: str = "ai",
@@ -3659,7 +3655,6 @@ class AgentBot:
                         run_metadata_collector=run_metadata_content,
                         execution_identity=execution_identity,
                         compaction_outcomes_collector=compaction_outcomes,
-                        enrichment_digest=enrichment_digest,
                     )
                     response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
 
@@ -3835,7 +3830,7 @@ class AgentBot:
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
-        enrichment_digest: str | None = None,
+        strip_transient_enrichment_after_run: bool = False,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
     ) -> str | None:
@@ -3853,7 +3848,8 @@ class AgentBot:
             media: Optional multimodal inputs (audio/images/files/videos)
             attachment_ids: Attachment IDs available for tool-side file processing
             model_prompt: Optional model-facing prompt that may include transient enrichment.
-            enrichment_digest: Optional digest for hook-provided enrichment attached to this turn.
+            strip_transient_enrichment_after_run: Whether hook-provided transient enrichment
+                must be scrubbed from persisted session history after this turn.
             response_envelope: Optional normalized inbound envelope for response hooks.
             correlation_id: Optional request correlation ID propagated to hook logging.
 
@@ -3874,7 +3870,7 @@ class AgentBot:
                 media=media,
                 attachment_ids=attachment_ids,
                 model_prompt=model_prompt,
-                enrichment_digest=enrichment_digest,
+                strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
                 response_envelope=response_envelope,
                 correlation_id=correlation_id,
             )
@@ -3891,7 +3887,7 @@ class AgentBot:
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
-        enrichment_digest: str | None = None,
+        strip_transient_enrichment_after_run: bool = False,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
     ) -> str | None:
@@ -3951,7 +3947,6 @@ class AgentBot:
                     media=media_inputs,
                     attachment_ids=attachment_ids,
                     model_prompt=model_prompt_text,
-                    enrichment_digest=enrichment_digest,
                     response_envelope=response_envelope,
                     correlation_id=correlation_id,
                 )
@@ -3968,7 +3963,6 @@ class AgentBot:
                     media=media_inputs,
                     attachment_ids=attachment_ids,
                     model_prompt=model_prompt_text,
-                    enrichment_digest=enrichment_digest,
                     response_envelope=response_envelope,
                     correlation_id=correlation_id,
                 )
@@ -3991,7 +3985,7 @@ class AgentBot:
         )
 
         try:
-            if enrichment_digest is not None:
+            if strip_transient_enrichment_after_run:
                 storage = self._create_history_scope_storage(execution_identity)
                 strip_enrichment_from_session_storage(
                     storage,
@@ -4564,7 +4558,7 @@ class TeamBot(AgentBot):
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
-        enrichment_digest: str | None = None,
+        strip_transient_enrichment_after_run: bool = False,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
     ) -> str | None:
@@ -4666,7 +4660,7 @@ class TeamBot(AgentBot):
                 agent_name=self.agent_name,
                 source_kind="message",
             ),
-            enrichment_digest=enrichment_digest,
+            strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
             correlation_id=correlation_id or reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
         )

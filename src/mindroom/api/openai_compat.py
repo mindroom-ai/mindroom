@@ -26,11 +26,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mindroom.agents import create_agent
-from mindroom.ai import AIStreamChunk, ai_response, build_prompt_with_thread_history, stream_agent_response
+from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
-from mindroom.history import (
-    prepare_bound_agents_for_run,
+from mindroom.execution_preparation import (
+    build_prompt_with_thread_history,
+    prepare_bound_team_execution_context,
 )
 from mindroom.history.runtime import apply_replay_plan
 from mindroom.knowledge.manager import initialize_shared_knowledge_managers
@@ -1166,11 +1167,12 @@ async def _prepare_openai_team_prompt(
     """Prepare the final prompt for one OpenAI-compatible team run."""
     fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
     runtime_model = config.resolve_runtime_model(entity_name=team_name)
-    prepared_history = await prepare_bound_agents_for_run(
+    prepared_execution = await prepare_bound_team_execution_context(
         agents=agents,
         team=team,
-        full_prompt=prompt,
-        fallback_full_prompt=fallback_prompt,
+        prompt=prompt,
+        fallback_prompt=fallback_prompt,
+        thread_history=thread_history,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
@@ -1179,9 +1181,9 @@ async def _prepare_openai_team_prompt(
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
     )
-    if prepared_history.replay_plan is not None:
-        apply_replay_plan(target=team, replay_plan=prepared_history.replay_plan)
-    return prompt if prepared_history.replays_persisted_history else fallback_prompt
+    if prepared_execution.replay_plan is not None:
+        apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)
+    return prepared_execution.final_prompt
 
 
 async def _non_stream_team_completion(

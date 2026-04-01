@@ -9,14 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.ai import (
-    _build_prompt_with_unseen,
-    _classify_partial_reply,
-    _clean_partial_reply_body,
-    _get_unseen_event_ids_for_metadata,
-    _get_unseen_messages,
-    _PartialReplyKind,
-)
 from mindroom.config.main import Config
 from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
@@ -25,6 +17,14 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+)
+from mindroom.execution_preparation import (
+    _build_prompt_with_unseen,
+    _classify_partial_reply,
+    _clean_partial_reply_body,
+    _get_unseen_event_ids_for_metadata,
+    _get_unseen_messages_for_sender,
+    _PartialReplyKind,
 )
 from mindroom.matrix.client import _stream_status_from_content, fetch_thread_history
 from mindroom.streaming import (
@@ -45,6 +45,27 @@ def _make_config() -> Config:
         },
     )
     return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
+
+
+def _get_unseen_messages(
+    thread_history: list[dict[str, object]],
+    agent_name: str,
+    config: Config,
+    runtime_paths: object,
+    *,
+    seen_event_ids: set[str],
+    current_event_id: str | None,
+    active_event_ids: set[str],
+) -> tuple[list[dict[str, object]], set[_PartialReplyKind]]:
+    response_sender_id = config.get_ids(runtime_paths).get(agent_name)
+    response_sender = response_sender_id.full_id if response_sender_id is not None else None
+    return _get_unseen_messages_for_sender(
+        thread_history,
+        sender_id=response_sender,
+        seen_event_ids=seen_event_ids,
+        current_event_id=current_event_id,
+        active_event_ids=active_event_ids,
+    )
 
 
 def _make_text_event(

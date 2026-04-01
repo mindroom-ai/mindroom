@@ -17,7 +17,6 @@ from mindroom import constants, frontend_assets
 from mindroom.api import main
 from mindroom.api import workers as workers_api
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
 from mindroom.matrix.health import (
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
@@ -1641,11 +1640,53 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
 
     assert saved_config["models"]["default"]["id"] == "test-model-2"
     assert "new_agent" in saved_config["agents"]
-    # Build expected defaults from the authoritative model so the test
-    # tracks the schema instead of hardcoding a stale subset.
-    # The save endpoint excludes None values from YAML, so match that.
-    expected_defaults = yaml.safe_load(yaml.dump(DefaultsConfig().model_dump(exclude_none=True)))
-    assert saved_config["defaults"] == expected_defaults
+    # The editor-facing authored serializer preserves explicit emptiness
+    # instead of materializing model defaults into saved config.
+    assert saved_config["defaults"] == {}
+
+
+def test_save_config_preserves_explicit_compaction_model_null_clear(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Config save/load should preserve explicit null clears for inherited compaction models."""
+    new_config = {
+        "models": {
+            "default": {"provider": "openai", "id": "test-model", "context_window": 48_000},
+            "summary": {"provider": "openai", "id": "summary-model", "context_window": 32_000},
+        },
+        "defaults": {
+            "compaction": {
+                "enabled": True,
+                "model": "summary",
+            },
+        },
+        "agents": {
+            "new_agent": {
+                "display_name": "New Agent",
+                "role": "New role",
+                "tools": [],
+                "instructions": [],
+                "rooms": ["new_room"],
+                "compaction": {
+                    "model": None,
+                },
+            },
+        },
+    }
+
+    save_response = test_client.put("/api/config/save", json=new_config)
+    assert save_response.status_code == 200
+
+    with temp_config_file.open() as f:
+        saved_config = yaml.safe_load(f)
+
+    assert saved_config["agents"]["new_agent"]["compaction"] == {"model": None}
+
+    load_response = test_client.post("/api/config/load")
+    assert load_response.status_code == 200
+    loaded_config = load_response.json()
+    assert loaded_config["agents"]["new_agent"]["compaction"] == {"model": None}
 
 
 def test_save_config_rejects_runtime_sensitive_invalid_payload(
@@ -1749,8 +1790,8 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
     assert context.config_data == original_config
 
 
-def test_load_config_from_file_normalizes_legacy_null_sections(tmp_path: Path) -> None:
-    """API config loads should normalize legacy null optional sections."""
+def test_load_config_from_file_omits_legacy_null_optional_sections(tmp_path: Path) -> None:
+    """API config loads should drop legacy null optional sections from authored config data."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n"
@@ -1768,12 +1809,13 @@ def test_load_config_from_file_normalizes_legacy_null_sections(tmp_path: Path) -
 
     main._load_config_from_file(runtime_paths, main.app)
 
-    assert main._app_context(main.app).config_data["teams"] == {}
-    assert main._app_context(main.app).config_data["plugins"] == []
+    config_data = main._app_context(main.app).config_data
+    assert "teams" not in config_data
+    assert "plugins" not in config_data
 
 
-def test_run_config_write_normalizes_legacy_null_sections(tmp_path: Path) -> None:
-    """API config writes should accept legacy null optional sections already loaded in memory."""
+def test_run_config_write_omits_legacy_null_optional_sections(tmp_path: Path) -> None:
+    """API config writes should drop legacy null optional sections from authored config data."""
     config_path = tmp_path / "config.yaml"
     main.initialize_api_app(
         main.app,
@@ -1793,8 +1835,9 @@ def test_run_config_write_normalizes_legacy_null_sections(tmp_path: Path) -> Non
         error_prefix="Failed to save configuration",
     )
 
-    assert main._app_context(main.app).config_data["teams"] == {}
-    assert main._app_context(main.app).config_data["plugins"] == []
+    config_data = main._app_context(main.app).config_data
+    assert "teams" not in config_data
+    assert "plugins" not in config_data
 
 
 def test_error_handling_agent_not_found(test_client: TestClient) -> None:

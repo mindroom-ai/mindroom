@@ -27,23 +27,21 @@ from pydantic import BaseModel, Field
 from mindroom.agents import create_agent, enable_all_history_replay
 from mindroom.ai import (
     build_matrix_run_metadata,
-    build_prompt_with_thread_history,
-    build_prompt_with_unseen_thread_context,
     get_model_instance,
 )
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.history import (
-    CompactionOutcome,
-    prepare_bound_agents_for_run,
+from mindroom.execution_preparation import (
+    build_prompt_with_thread_history,
+    prepare_bound_team_execution_context,
 )
 from mindroom.history.runtime import (
     apply_replay_plan,
     load_bound_scope_session_context,
     resolve_bound_team_scope_context,
 )
-from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
+from mindroom.history.storage import update_scope_seen_event_ids
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
@@ -70,6 +68,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.history import CompactionOutcome
     from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestrator import MultiAgentOrchestrator
@@ -951,28 +950,6 @@ def resolve_configured_team(
     )
 
 
-def _collect_bound_seen_event_ids(
-    *,
-    agents: list[Agent],
-    session_id: str | None,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-    team_name: str | None = None,
-) -> set[str]:
-    scope_context = load_bound_scope_session_context(
-        agents=agents,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        team_name=team_name,
-    )
-    if scope_context is None or scope_context.session is None:
-        return set()
-    return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
-
-
 def _persist_bound_seen_event_ids(
     *,
     agents: list[Agent],
@@ -1249,57 +1226,32 @@ async def _prepare_materialized_team_execution(
         configured_team_name=configured_team_name,
         execution_identity=execution_identity,
     )
-    seen_event_ids = _collect_bound_seen_event_ids(
-        agents=team_members.agents,
-        session_id=session_id,
-        runtime_paths=orchestrator.runtime_paths,
-        config=orchestrator.config,
-        execution_identity=execution_identity,
-        team_name=configured_team_name,
-    )
-    prompt_for_history, unseen_event_ids = build_prompt_with_unseen_thread_context(
-        message,
-        thread_history,
-        seen_event_ids=seen_event_ids,
-        current_event_id=reply_to_event_id,
-        active_event_ids=active_event_ids,
-        response_sender_id=response_sender_id,
-    )
-    prepared_history = await prepare_bound_agents_for_run(
+    prepared_execution = await prepare_bound_team_execution_context(
         agents=team_members.agents,
         team=team,
-        full_prompt=prompt_for_history,
-        fallback_full_prompt=None if reply_to_event_id and thread_history else fallback_prompt,
+        prompt=message,
+        fallback_prompt=fallback_prompt,
+        thread_history=thread_history,
         session_id=session_id,
         runtime_paths=orchestrator.runtime_paths,
         config=orchestrator.config,
         execution_identity=execution_identity,
-        compaction_outcomes_collector=compaction_outcomes_collector,
         team_name=configured_team_name,
         active_model_name=resolved_team_runtime_model.model_name,
         active_context_window=resolved_team_runtime_model.context_window,
+        reply_to_event_id=reply_to_event_id,
+        active_event_ids=active_event_ids,
+        response_sender_id=response_sender_id,
+        compaction_outcomes_collector=compaction_outcomes_collector,
     )
-    if prepared_history.replay_plan is not None:
-        apply_replay_plan(target=team, replay_plan=prepared_history.replay_plan)
-    if reply_to_event_id and thread_history:
-        prepared_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
-            message,
-            thread_history,
-            seen_event_ids=seen_event_ids,
-            current_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
-            response_sender_id=response_sender_id,
-        )
-    elif prepared_history.replays_persisted_history:
-        prepared_prompt = message
-    else:
-        prepared_prompt = fallback_prompt
-    run_metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
+    if prepared_execution.replay_plan is not None:
+        apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)
+    run_metadata = build_matrix_run_metadata(reply_to_event_id, prepared_execution.unseen_event_ids)
     return _PreparedMaterializedTeamExecution(
         team=team,
-        prepared_prompt=prepared_prompt,
+        prepared_prompt=prepared_execution.final_prompt,
         run_metadata=run_metadata,
-        unseen_event_ids=unseen_event_ids,
+        unseen_event_ids=prepared_execution.unseen_event_ids,
     )
 
 

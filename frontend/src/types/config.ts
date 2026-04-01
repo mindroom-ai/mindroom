@@ -292,7 +292,15 @@ function normalizeCompactionConfig(
     return undefined;
   }
 
-  if (normalizedCompaction.enabled === undefined) {
+  const pureModelClear =
+    normalizedCompaction.model === null &&
+    normalizedCompaction.enabled === undefined &&
+    normalizedCompaction.threshold_tokens === undefined &&
+    normalizedCompaction.threshold_percent === undefined &&
+    normalizedCompaction.reserve_tokens === undefined &&
+    normalizedCompaction.notify === undefined;
+
+  if (normalizedCompaction.enabled === undefined && !pureModelClear) {
     normalizedCompaction.enabled = true;
   }
 

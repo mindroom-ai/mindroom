@@ -28,7 +28,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.history import PreparedHistoryState
+from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.history.types import ResolvedReplayPlan
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -39,6 +39,21 @@ from mindroom.tool_system.worker_routing import (
 
 def _runtime_paths(process_env: dict[str, str] | None = None) -> RuntimePaths:
     return resolve_runtime_paths(config_path=Path(__file__), process_env=process_env or {})
+
+
+def _prepared_team_execution_context(
+    *,
+    final_prompt: str,
+    replay_plan: ResolvedReplayPlan | None = None,
+    replays_persisted_history: bool = False,
+) -> PreparedExecutionContext:
+    return PreparedExecutionContext(
+        final_prompt=final_prompt,
+        replay_plan=replay_plan,
+        unseen_event_ids=[],
+        replays_persisted_history=replays_persisted_history,
+        compaction_outcomes=[],
+    )
 
 
 @pytest.fixture
@@ -1830,11 +1845,11 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_agents_for_run",
+                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedHistoryState()
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build a feature")
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -1852,6 +1867,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_count == 1
         assert mock_prepare.await_args.kwargs["agents"] == mock_agents
         assert mock_prepare.await_args.kwargs["team"] is mock_team
+        assert mock_prepare.await_args.kwargs["prompt"] == "Build a feature"
 
     def test_team_streaming(self, team_app_client: TestClient) -> None:
         """Streaming team completion streams TeamContentEvent (leader text) directly."""
@@ -1874,11 +1890,11 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_agents_for_run",
+                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedHistoryState()
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -2450,11 +2466,12 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_agents_for_run",
+                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedHistoryState(
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="Follow-up",
                 replay_plan=ResolvedReplayPlan(
                     mode="limited",
                     estimated_tokens=100,
@@ -2480,10 +2497,10 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        assert mock_prepare.await_args.kwargs["full_prompt"] == "Follow-up"
+        assert mock_prepare.await_args.kwargs["prompt"] == "Follow-up"
         assert mock_prepare.await_args.kwargs["team"] is mock_team
-        assert "Start" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
-        assert "Ack" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
+        assert "Start" in mock_prepare.await_args.kwargs["fallback_prompt"]
+        assert "Ack" in mock_prepare.await_args.kwargs["fallback_prompt"]
         prompt = mock_team.arun.call_args.args[0]
         assert prompt == "Follow-up"
         assert "Previous conversation in this thread:" not in prompt
@@ -2511,11 +2528,14 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_agents_for_run",
+                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="Follow-up",
+                replays_persisted_history=True,
+            )
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -2530,10 +2550,10 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        assert mock_prepare.await_args.kwargs["full_prompt"] == "Follow-up"
+        assert mock_prepare.await_args.kwargs["prompt"] == "Follow-up"
         assert mock_prepare.await_args.kwargs["team"] is mock_team
-        assert "Start" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
-        assert "Ack" in mock_prepare.await_args.kwargs["fallback_full_prompt"]
+        assert "Start" in mock_prepare.await_args.kwargs["fallback_prompt"]
+        assert "Ack" in mock_prepare.await_args.kwargs["fallback_prompt"]
         prompt = mock_team.arun.call_args.args[0]
         assert prompt == "Follow-up"
         assert "Previous conversation in this thread:" not in prompt

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
@@ -84,10 +84,21 @@ class BoundTeamScopeContext:
 class _ResolvedPreparationInputs:
     history_settings: ResolvedHistorySettings
     compaction_config: CompactionConfig
+    has_authored_compaction_config: bool
     active_model_name: str
     active_context_window: int | None
     static_prompt_tokens: int
     execution_plan: ResolvedHistoryExecutionPlan
+
+
+@dataclass(frozen=True)
+class PreparedScopeHistory:
+    """Durable history preparation result before final replay planning."""
+
+    scope: HistoryScope | None
+    scope_context: ScopeSessionContext | None
+    resolved_inputs: _ResolvedPreparationInputs
+    compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
 
 
 def resolve_history_scope(agent: Agent) -> HistoryScope | None:
@@ -101,7 +112,7 @@ def resolve_history_scope(agent: Agent) -> HistoryScope | None:
     return None
 
 
-async def prepare_history_for_run(
+async def prepare_scope_history(
     *,
     agent: Agent,
     agent_name: str,
@@ -122,23 +133,8 @@ async def prepare_history_for_run(
     available_history_budget: int | None = None,
     scope: HistoryScope | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
-) -> PreparedHistoryState:
-    """Prepare one scope by compacting durable history and planning safe replay for the run."""
-    resolved_scope = scope or resolve_history_scope(agent)
-    scope_context = load_scope_session_context(
-        agent=agent,
-        agent_name=agent_name,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        storage=storage,
-        session=session,
-        scope=resolved_scope,
-    )
-    if scope_context is None or scope_context.session is None:
-        return PreparedHistoryState()
-
+) -> PreparedScopeHistory:
+    """Prepare durable scope history before final replay planning."""
     resolved_inputs = _resolve_preparation_inputs(
         agent=agent,
         agent_name=agent_name,
@@ -152,17 +148,29 @@ async def prepare_history_for_run(
         static_prompt_tokens=static_prompt_tokens,
         execution_plan=execution_plan,
     )
+    resolved_scope = scope or resolve_history_scope(agent)
+    scope_context = load_scope_session_context(
+        agent=agent,
+        agent_name=agent_name,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        storage=storage,
+        session=session,
+        scope=resolved_scope,
+    )
+    if scope_context is None or scope_context.session is None:
+        return PreparedScopeHistory(
+            scope=resolved_scope,
+            scope_context=scope_context,
+            resolved_inputs=resolved_inputs,
+        )
+
     execution_plan = resolved_inputs.execution_plan
     history_budget = available_history_budget
     if history_budget is None:
         history_budget = execution_plan.replay_budget_tokens
-        if execution_plan.authored_compaction_enabled and execution_plan.unavailable_reason is not None:
-            description = describe_compaction_unavailability(execution_plan)
-            logger.warning(
-                "Compaction unavailable for this run",
-                compaction_model=execution_plan.compaction_model_name,
-                reason=description,
-            )
 
     session = scope_context.session
     state = _prepare_scope_state_for_run(
@@ -241,15 +249,66 @@ async def prepare_history_for_run(
                     after_tokens=outcome.after_tokens,
                     runs_compacted=outcome.compacted_run_count,
                 )
+    if compaction_outcomes_collector is not None:
+        compaction_outcomes_collector.extend(compaction_outcomes)
+    return PreparedScopeHistory(
+        scope=scope_context.scope,
+        scope_context=scope_context,
+        resolved_inputs=resolved_inputs,
+        compaction_outcomes=compaction_outcomes,
+    )
+
+
+def finalize_history_preparation(
+    *,
+    prepared_scope_history: PreparedScopeHistory,
+    config: Config,
+    static_prompt_tokens: int | None = None,
+    available_history_budget: int | None = None,
+) -> PreparedHistoryState:
+    """Return the final persisted-replay decision after durable history prep."""
+    resolved_inputs = prepared_scope_history.resolved_inputs
+    resolved_static_prompt_tokens = (
+        resolved_inputs.static_prompt_tokens if static_prompt_tokens is None else static_prompt_tokens
+    )
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=resolved_inputs.compaction_config,
+        has_authored_compaction_config=resolved_inputs.has_authored_compaction_config,
+        active_model_name=resolved_inputs.active_model_name,
+        active_context_window=resolved_inputs.active_context_window,
+        static_prompt_tokens=resolved_static_prompt_tokens,
+    )
+    history_budget = available_history_budget
+    if history_budget is None:
+        history_budget = execution_plan.replay_budget_tokens
+        if execution_plan.authored_compaction_enabled and execution_plan.unavailable_reason is not None:
+            description = describe_compaction_unavailability(execution_plan)
+            logger.warning(
+                "Compaction unavailable for this run",
+                compaction_model=execution_plan.compaction_model_name,
+                reason=description,
+            )
+
+    scope_context = prepared_scope_history.scope_context
+    if scope_context is None or scope_context.session is None:
+        return PreparedHistoryState(
+            compaction_outcomes=prepared_scope_history.compaction_outcomes,
+            replay_plan=_configured_replay_plan(
+                history_settings=resolved_inputs.history_settings,
+                estimated_tokens=0,
+            ),
+            replays_persisted_history=False,
+        )
 
     current_history_tokens = estimate_prompt_visible_history_tokens(
-        session=session,
+        session=scope_context.session,
         scope=scope_context.scope,
         history_settings=resolved_inputs.history_settings,
     )
     if history_budget is not None:
         replay_plan = plan_replay_that_fits(
-            session=session,
+            session=scope_context.session,
             scope=scope_context.scope,
             history_settings=resolved_inputs.history_settings,
             available_history_budget=history_budget,
@@ -266,21 +325,70 @@ async def prepare_history_for_run(
             estimated_tokens=current_history_tokens,
         )
 
-    prepared = PreparedHistoryState(
-        compaction_outcomes=compaction_outcomes,
+    return PreparedHistoryState(
+        compaction_outcomes=prepared_scope_history.compaction_outcomes,
         replay_plan=replay_plan,
         replays_persisted_history=_has_effective_persisted_replay(
-            session=session,
+            session=scope_context.session,
             scope=scope_context.scope,
             replay_plan=replay_plan,
         ),
     )
-    if compaction_outcomes_collector is not None:
-        compaction_outcomes_collector.extend(compaction_outcomes)
-    return prepared
 
 
-async def prepare_bound_agents_for_run(
+async def prepare_history_for_run(
+    *,
+    agent: Agent,
+    agent_name: str,
+    full_prompt: str,
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    storage: SqliteDb | None = None,
+    session: AgentSession | TeamSession | None = None,
+    history_settings: ResolvedHistorySettings | None = None,
+    compaction_config: CompactionConfig | None = None,
+    has_authored_compaction_config: bool | None = None,
+    active_model_name: str | None = None,
+    active_context_window: int | None = None,
+    static_prompt_tokens: int | None = None,
+    available_history_budget: int | None = None,
+    scope: HistoryScope | None = None,
+    execution_plan: ResolvedHistoryExecutionPlan | None = None,
+) -> PreparedHistoryState:
+    """Prepare one scope by compacting durable history and planning safe replay for the run."""
+    prepared_scope_history = await prepare_scope_history(
+        agent=agent,
+        agent_name=agent_name,
+        full_prompt=full_prompt,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        compaction_outcomes_collector=compaction_outcomes_collector,
+        storage=storage,
+        session=session,
+        history_settings=history_settings,
+        compaction_config=compaction_config,
+        has_authored_compaction_config=has_authored_compaction_config,
+        active_model_name=active_model_name,
+        active_context_window=active_context_window,
+        static_prompt_tokens=static_prompt_tokens,
+        available_history_budget=available_history_budget,
+        scope=scope,
+        execution_plan=execution_plan,
+    )
+    return finalize_history_preparation(
+        prepared_scope_history=prepared_scope_history,
+        config=config,
+        static_prompt_tokens=static_prompt_tokens,
+        available_history_budget=available_history_budget,
+    )
+
+
+async def prepare_bound_scope_history(
     *,
     agents: list[Agent],
     team: Team | None = None,
@@ -294,7 +402,7 @@ async def prepare_bound_agents_for_run(
     team_name: str | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
-) -> PreparedHistoryState:
+) -> PreparedScopeHistory:
     """Prepare one team-owned scope by compacting its persisted session before the run."""
     bound_scope = resolve_bound_team_scope_context(
         agents=agents,
@@ -304,7 +412,29 @@ async def prepare_bound_agents_for_run(
         team_name=team_name,
     )
     if bound_scope is None:
-        return PreparedHistoryState()
+        resolved_inputs = _resolve_entity_preparation_inputs(
+            config=config,
+            entity_name=team_name if team_name in config.teams else None,
+            static_prompt_tokens=(
+                estimate_preparation_static_tokens_for_team(
+                    team,
+                    full_prompt=full_prompt,
+                    fallback_full_prompt=fallback_full_prompt,
+                )
+                if team is not None
+                else estimate_preparation_prompt_tokens(
+                    full_prompt=full_prompt,
+                    fallback_full_prompt=fallback_full_prompt,
+                )
+            ),
+            active_model_name=active_model_name,
+            active_context_window=active_context_window,
+        )
+        return PreparedScopeHistory(
+            scope=None,
+            scope_context=None,
+            resolved_inputs=resolved_inputs,
+        )
 
     static_prompt_tokens = (
         estimate_preparation_static_tokens_for_team(
@@ -327,7 +457,7 @@ async def prepare_bound_agents_for_run(
     )
     available_history_budget = resolved_inputs.execution_plan.replay_budget_tokens
 
-    return await prepare_history_for_run(
+    return await prepare_scope_history(
         agent=bound_scope.owner_agent,
         agent_name=bound_scope.owner_agent_name,
         full_prompt=full_prompt,
@@ -346,6 +476,42 @@ async def prepare_bound_agents_for_run(
         available_history_budget=available_history_budget,
         scope=bound_scope.scope,
         execution_plan=resolved_inputs.execution_plan,
+    )
+
+
+async def prepare_bound_agents_for_run(
+    *,
+    agents: list[Agent],
+    team: Team | None = None,
+    full_prompt: str,
+    fallback_full_prompt: str | None = None,
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    team_name: str | None = None,
+    active_model_name: str | None = None,
+    active_context_window: int | None = None,
+) -> PreparedHistoryState:
+    """Prepare one team-owned scope by compacting its persisted session before the run."""
+    prepared_scope_history = await prepare_bound_scope_history(
+        agents=agents,
+        team=team,
+        full_prompt=full_prompt,
+        fallback_full_prompt=fallback_full_prompt,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        compaction_outcomes_collector=compaction_outcomes_collector,
+        team_name=team_name,
+        active_model_name=active_model_name,
+        active_context_window=active_context_window,
+    )
+    return finalize_history_preparation(
+        prepared_scope_history=prepared_scope_history,
+        config=config,
     )
 
 
@@ -664,6 +830,7 @@ def _resolve_entity_preparation_inputs(
     return _ResolvedPreparationInputs(
         history_settings=resolved_history_settings,
         compaction_config=resolved_compaction_config,
+        has_authored_compaction_config=resolved_has_authored_compaction_config,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
         static_prompt_tokens=static_prompt_tokens,

@@ -279,7 +279,7 @@ class AgentConfig(BaseModel):
 
     def authored_model_dump(self) -> dict[str, object]:
         """Serialize the authored agent config."""
-        return self.model_dump(exclude_none=True)
+        return self.model_dump(exclude_unset=True)
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:

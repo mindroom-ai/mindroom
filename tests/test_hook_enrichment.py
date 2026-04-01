@@ -1,4 +1,4 @@
-"""Tests for hook enrichment rendering, stripping, and digests."""
+"""Tests for hook enrichment rendering and stripping."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from agno.session.team import TeamSession
 
 from mindroom.hooks import (
     EnrichmentItem,
-    compute_enrichment_digest,
     render_enrichment_block,
     strip_enrichment_block,
     strip_enrichment_from_session_storage,
@@ -34,15 +33,14 @@ class _FakeStorage:
         self.upserted_session = session
 
 
-def test_render_enrichment_block_and_digest_are_stable() -> None:
-    """Rendering and digesting should be deterministic for one item set."""
+def test_render_enrichment_block_is_stable() -> None:
+    """Rendering should be deterministic for one item set."""
     items = [
         EnrichmentItem(key="location", text="User is in Amsterdam", cache_policy="stable"),
         EnrichmentItem(key="weather", text="12C and windy", cache_policy="volatile"),
     ]
 
     rendered = render_enrichment_block(items)
-    digest = compute_enrichment_digest(items)
 
     assert rendered == (
         "<mindroom_message_context>\n"
@@ -54,7 +52,6 @@ def test_render_enrichment_block_and_digest_are_stable() -> None:
         "</item>\n"
         "</mindroom_message_context>"
     )
-    assert digest == compute_enrichment_digest(list(items))
 
 
 def test_render_enrichment_block_escapes_xml_sensitive_content() -> None:

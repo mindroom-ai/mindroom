@@ -275,7 +275,10 @@ class TestUserIdPassthrough:
         assert agent is mock_agent
         assert full_prompt == "enhanced"
         assert unseen_event_ids == []
-        assert prepared_history == PreparedHistoryState()
+        assert prepared_history.compaction_outcomes == []
+        assert prepared_history.replays_persisted_history is False
+        assert prepared_history.replay_plan is not None
+        assert prepared_history.replay_plan.mode == "configured"
         assert "runtime_paths" not in mock_create_agent.call_args.kwargs
 
     @pytest.mark.asyncio
