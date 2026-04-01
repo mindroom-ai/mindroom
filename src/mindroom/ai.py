@@ -124,6 +124,7 @@ class _StreamingAttemptState:
     pending_tools: list[tuple[str, int]] = field(default_factory=list)
     latest_model_id: str | None = None
     latest_model_provider: str | None = None
+    latest_request_input_tokens: int | None = None
     cancelled_run_event: RunCancelledEvent | None = None
     completed_run_event: RunCompletedEvent | None = None
     request_metric_totals: dict[str, int] = field(default_factory=_empty_request_metric_totals)
@@ -230,16 +231,16 @@ def _build_model_request_metrics_fallback(
 
 def _build_context_payload(
     *,
-    input_tokens: int | None,
+    context_input_tokens: int | None,
     model_config: ModelConfig | None,
 ) -> dict[str, Any] | None:
-    if input_tokens is None or model_config is None or model_config.context_window is None:
+    if context_input_tokens is None or model_config is None or model_config.context_window is None:
         return None
     context_window = model_config.context_window
     if context_window <= 0:
         return None
     return {
-        "input_tokens": input_tokens,
+        "input_tokens": context_input_tokens,
         "window_tokens": context_window,
     }
 
@@ -257,6 +258,7 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     room_id: str | None = None,
     metrics: Metrics | dict[str, Any] | None = None,
     metrics_fallback: dict[str, Any] | None = None,
+    context_input_tokens: int | None = None,
     tool_count: int | None = None,
 ) -> dict[str, Any] | None:
     model_name, model_config = _get_model_config(
@@ -272,9 +274,9 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     if usage_payload is None and metrics_fallback:
         usage_payload = dict(metrics_fallback)
 
-    input_tokens = usage_payload.get("input_tokens") if usage_payload else None
-    if not isinstance(input_tokens, int):
-        input_tokens = None
+    usage_input_tokens = usage_payload.get("input_tokens") if usage_payload else None
+    if not isinstance(usage_input_tokens, int):
+        usage_input_tokens = None
 
     payload: dict[str, Any] = {"version": _AI_RUN_METADATA_VERSION}
     if run_id is not None:
@@ -297,7 +299,7 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     if usage_payload:
         payload["usage"] = usage_payload
     context_payload = _build_context_payload(
-        input_tokens=input_tokens,
+        context_input_tokens=context_input_tokens if context_input_tokens is not None else usage_input_tokens,
         model_config=model_config,
     )
     if context_payload:
@@ -554,6 +556,7 @@ def _track_model_request_metrics(
     if event.model_provider:
         state.latest_model_provider = event.model_provider
     if isinstance(event.input_tokens, int):
+        state.latest_request_input_tokens = event.input_tokens
         state.request_metric_totals["input_tokens"] += event.input_tokens
     if isinstance(event.output_tokens, int):
         state.request_metric_totals["output_tokens"] += event.output_tokens
@@ -1121,6 +1124,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             model_provider=state.latest_model_provider,
                             room_id=room_id,
                             metrics=fallback_metrics,
+                            context_input_tokens=state.latest_request_input_tokens,
                             tool_count=state.observed_tool_calls,
                         )
                         if cancelled_metadata:
@@ -1150,6 +1154,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     room_id=room_id,
                     metrics=state.completed_run_event.metrics if state.completed_run_event is not None else None,
                     metrics_fallback=fallback_metrics,
+                    context_input_tokens=state.latest_request_input_tokens,
                     tool_count=(
                         len(state.completed_run_event.tools)
                         if state.completed_run_event is not None and state.completed_run_event.tools is not None
