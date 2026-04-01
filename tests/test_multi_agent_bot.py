@@ -162,6 +162,62 @@ def test_get_or_create_lock_evicts_enough_unlocked_entries_to_stay_bounded() -> 
     assert len(locks) == 100
 
 
+def test_response_lifecycle_lock_uses_resolved_thread_root_for_first_turns(
+    tmp_path: Path,
+    mock_agent_user: AgentMatrixUser,
+) -> None:
+    """Different first-turn replies in one room should not serialize on a shared None key."""
+    config = TestAgentBot.create_mock_config(tmp_path)
+    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+    first_lock = bot._response_lifecycle_lock("!test:localhost", None, "$event-a")
+    second_lock = bot._response_lifecycle_lock("!test:localhost", None, "$event-b")
+
+    assert first_lock is not second_lock
+
+
+def test_response_lifecycle_lock_reuses_same_resolved_thread_root(
+    tmp_path: Path,
+    mock_agent_user: AgentMatrixUser,
+) -> None:
+    """Existing-thread and first-turn replies sharing a root should share one lifecycle lock."""
+    config = TestAgentBot.create_mock_config(tmp_path)
+    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+    existing_thread_lock = bot._response_lifecycle_lock("!test:localhost", "$root", "$event-a")
+    first_turn_lock = bot._response_lifecycle_lock("!test:localhost", None, "$root")
+
+    assert existing_thread_lock is first_turn_lock
+
+
+def test_response_lifecycle_lock_stays_room_scoped_in_room_mode(
+    tmp_path: Path,
+    mock_agent_user: AgentMatrixUser,
+) -> None:
+    """Room-mode agents should continue to serialize one room-scoped lifecycle at a time."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    thread_mode="room",
+                ),
+            },
+            teams={},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=True),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+    first_lock = bot._response_lifecycle_lock("!test:localhost", None, "$event-a")
+    second_lock = bot._response_lifecycle_lock("!test:localhost", None, "$event-b")
+
+    assert first_lock is second_lock
+
+
 @asynccontextmanager
 async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
     yield

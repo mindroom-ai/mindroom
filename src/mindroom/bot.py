@@ -530,11 +530,21 @@ class AgentBot:
             return "team"
         return "agent"
 
-    def _response_lifecycle_lock(self, room_id: str, thread_id: str | None) -> asyncio.Lock:
+    def _response_lifecycle_lock(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        reply_to_event_id: str | None,
+    ) -> asyncio.Lock:
         """Return the per-thread lock that serializes one response lifecycle."""
+        resolved_thread_id = self._resolve_reply_thread_id(
+            thread_id,
+            reply_to_event_id,
+            room_id=room_id,
+        )
         return _get_or_create_lock(
             cast("dict[object, asyncio.Lock]", self._response_lifecycle_locks),
-            (room_id, thread_id),
+            (room_id, resolved_thread_id),
         )
 
     def _hook_base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
@@ -2631,7 +2641,7 @@ class AgentBot:
 
         Returns the initial message ID if created, None otherwise.
         """
-        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id)
+        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id, reply_to_event_id)
         async with lifecycle_lock:
             return await self._generate_team_response_helper_locked(
                 room_id=room_id,
@@ -3263,7 +3273,7 @@ class AgentBot:
         reply_to_event: nio.RoomMessageText | None = None,
     ) -> str | None:
         """Send a skill command response using a specific agent."""
-        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id)
+        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id, reply_to_event_id)
         async with lifecycle_lock:
             return await self._send_skill_command_response_locked(
                 room_id=room_id,
@@ -3852,7 +3862,7 @@ class AgentBot:
             Event ID of the response message, or None if failed
 
         """
-        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id)
+        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id, reply_to_event_id)
         async with lifecycle_lock:
             return await self._generate_response_locked(
                 room_id=room_id,
