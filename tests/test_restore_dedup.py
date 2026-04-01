@@ -79,6 +79,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkey
 async def test_restore_marks_ancient_missed_task_as_failed() -> None:
     """One-time task older than the grace period should be marked as failed."""
     client = AsyncMock()
+    client.room_put_state = AsyncMock(side_effect=[object(), object()])
     config = AsyncMock()
 
     ancient_once = ScheduledWorkflow(
@@ -99,11 +100,14 @@ async def test_restore_marks_ancient_missed_task_as_failed() -> None:
     restored = await restore_scheduled_tasks(client, "!r:server", config, resolve_runtime_paths(process_env={}))
     assert restored == 0
 
-    # Verify the task was marked as failed via room_put_state
-    client.room_put_state.assert_called_once()
-    call_kwargs = client.room_put_state.call_args
-    assert call_kwargs.kwargs["content"]["status"] == "failed"
-    assert call_kwargs.kwargs["state_key"] == "id-ancient"
+    assert client.room_put_state.await_count == 2
+    status_write = client.room_put_state.await_args_list[0].kwargs
+    assert status_write["content"]["status"] == "failed"
+    assert status_write["state_key"] == "id-ancient"
+
+    tombstone_write = client.room_put_state.await_args_list[1].kwargs
+    assert tombstone_write["state_key"] == "id-ancient"
+    assert tombstone_write["content"] == {}
 
 
 @pytest.mark.asyncio
