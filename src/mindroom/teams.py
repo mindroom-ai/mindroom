@@ -26,7 +26,7 @@ from agno.session.team import TeamSession
 from agno.team import Team
 from pydantic import BaseModel, Field
 
-from mindroom.agents import create_agent, enable_all_history_replay, get_team_session
+from mindroom.agents import create_agent, enable_all_history_replay, get_agent_runtime_sqlite_dbs, get_team_session
 from mindroom.ai import (
     build_matrix_run_metadata,
     get_model_instance,
@@ -1193,10 +1193,8 @@ async def _prepare_materialized_team_execution(
     mode: TeamMode,
     message: str,
     orchestrator: MultiAgentOrchestrator,
-    execution_identity: ToolExecutionIdentity | None,
     thread_history: list[dict] | None,
     model_name: str | None,
-    session_id: str | None,
     reply_to_event_id: str | None,
     active_event_ids: Collection[str],
     response_sender_id: str | None,
@@ -1239,10 +1237,8 @@ async def _prepare_materialized_team_execution(
         prompt=message,
         fallback_prompt=fallback_prompt,
         thread_history=thread_history,
-        session_id=session_id,
         runtime_paths=orchestrator.runtime_paths,
         config=orchestrator.config,
-        execution_identity=execution_identity,
         team_name=configured_team_name,
         active_model_name=resolved_team_runtime_model.model_name,
         active_context_window=resolved_team_runtime_model.context_window,
@@ -1326,10 +1322,8 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 mode=mode,
                 message=message,
                 orchestrator=orchestrator,
-                execution_identity=execution_identity,
                 thread_history=thread_history,
                 model_name=model_name,
-                session_id=session_id,
                 reply_to_event_id=reply_to_event_id,
                 active_event_ids=active_event_ids,
                 response_sender_id=response_sender_id,
@@ -1444,9 +1438,10 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     finally:
         close_unique_sqlite_dbs(
             *(
-                cast("SqliteDb | None", agent.db)
+                storage
                 for agent in agents
-                if scope_context is None or agent.db is not scope_context.storage
+                for storage in get_agent_runtime_sqlite_dbs(agent)
+                if scope_context is None or storage is not scope_context.storage
             ),
             cast("SqliteDb | None", team.db)
             if team is not None and (scope_context is None or team.db is not scope_context.storage)
@@ -1583,10 +1578,8 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 mode=mode,
                 message=message,
                 orchestrator=orchestrator,
-                execution_identity=execution_identity,
                 thread_history=thread_history,
                 model_name=model_name,
-                session_id=session_id,
                 reply_to_event_id=reply_to_event_id,
                 active_event_ids=active_event_ids,
                 response_sender_id=response_sender_id,
@@ -1896,9 +1889,10 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     finally:
         close_unique_sqlite_dbs(
             *(
-                cast("SqliteDb | None", agent.db)
+                storage
                 for agent in team_members.agents
-                if scope_context is None or agent.db is not scope_context.storage
+                for storage in get_agent_runtime_sqlite_dbs(agent)
+                if scope_context is None or storage is not scope_context.storage
             ),
             cast("SqliteDb | None", team.db)
             if team is not None and (scope_context is None or team.db is not scope_context.storage)

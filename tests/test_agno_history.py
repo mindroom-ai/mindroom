@@ -557,6 +557,30 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_prepare_history_for_run_uses_provided_storage_without_reopening_scope_context(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    storage.upsert_session(session)
+
+    with patch("mindroom.history.runtime.open_scope_session_context") as mock_open_scope_context:
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    mock_open_scope_context.assert_not_called()
+    assert prepared.replay_plan is not None
+
+
+@pytest.mark.asyncio
 async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
@@ -2512,7 +2536,6 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
                     {"event_id": "event-2", "sender": "alice", "body": "Fresh follow-up"},
                     {"event_id": "event-3", "sender": "alice", "body": "Current message body"},
                 ],
-                session_id="session-1",
                 reply_to_event_id="event-3",
             )
 

@@ -554,6 +554,14 @@ def _resolve_agent_learning(
     )
 
 
+def get_agent_runtime_sqlite_dbs(agent: Agent) -> tuple[SqliteDb | None, SqliteDb | None]:
+    """Return the runtime-owned SQLite handles attached to one agent."""
+    history_db = agent.db if isinstance(agent.db, SqliteDb) else None
+    learning = agent.learning
+    learning_db = learning.db if isinstance(learning, LearningMachine) and isinstance(learning.db, SqliteDb) else None
+    return history_db, learning_db
+
+
 def create_session_storage(
     agent_name: str,
     config: Config,

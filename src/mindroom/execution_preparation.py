@@ -36,7 +36,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.history import CompactionOutcome
     from mindroom.history.types import ResolvedReplayPlan
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -279,13 +278,11 @@ async def prepare_agent_execution_context(
     agent_name: str,
     prompt: str,
     thread_history: list[dict[str, Any]] | None,
-    session_id: str | None,
     runtime_paths: RuntimePaths,
     config: Config,
     room_id: str | None,
     reply_to_event_id: str | None,
     active_event_ids: Collection[str],
-    execution_identity: ToolExecutionIdentity | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None,
 ) -> PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
@@ -324,10 +321,8 @@ async def prepare_agent_execution_context(
         agent=agent,
         agent_name=agent_name,
         full_prompt=provisional_prompt,
-        session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
-        execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
         scope_context=scope_context,
         active_model_name=runtime_model.model_name,
@@ -381,10 +376,8 @@ async def prepare_bound_team_execution_context(
     prompt: str,
     fallback_prompt: str,
     thread_history: list[dict[str, Any]] | None,
-    session_id: str | None,
     runtime_paths: RuntimePaths,
     config: Config,
-    execution_identity: ToolExecutionIdentity | None,
     team_name: str | None,
     active_model_name: str | None,
     active_context_window: int | None,
@@ -416,10 +409,8 @@ async def prepare_bound_team_execution_context(
         team=team,
         full_prompt=provisional_prompt,
         fallback_full_prompt=None if reply_to_event_id and thread_history else fallback_prompt,
-        session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
-        execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
         scope_context=scope_context,
         team_name=team_name,

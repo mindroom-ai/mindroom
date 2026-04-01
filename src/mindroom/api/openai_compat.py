@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from html import escape
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -25,7 +26,7 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from mindroom.agents import create_agent
+from mindroom.agents import create_agent, get_agent_runtime_sqlite_dbs
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
     from agno.agent import Agent
+    from agno.db.sqlite import SqliteDb
     from agno.knowledge.knowledge import Knowledge
     from agno.models.response import ToolExecution
     from agno.run.agent import RunOutput, RunOutputEvent
@@ -592,14 +594,15 @@ async def _resolve_auto_route(
     and no agents are available.
     """
     available = _openai_compatible_agent_names(config)
+    if not available:
+        return _error_response(
+            500,
+            "No OpenAI-compatible agents configured for auto-routing",
+            error_type="server_error",
+        )
+
     routed = await suggest_agent(prompt, available, config, runtime_paths, thread_history)
     if routed is None:
-        if not available:
-            return _error_response(
-                500,
-                "No OpenAI-compatible agents configured for auto-routing",
-                error_type="server_error",
-            )
         routed = available[0]
         logger.warning("Auto-routing failed, falling back", agent=routed)
     else:
@@ -1165,11 +1168,9 @@ async def _prepare_openai_team_prompt(
     agents: list[Agent],
     team: Team,
     prompt: str,
-    session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
-    execution_identity: ToolExecutionIdentity | None,
 ) -> str:
     """Prepare the final prompt for one OpenAI-compatible team run."""
     fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
@@ -1181,10 +1182,8 @@ async def _prepare_openai_team_prompt(
         prompt=prompt,
         fallback_prompt=fallback_prompt,
         thread_history=thread_history,
-        session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
-        execution_identity=execution_identity,
         team_name=team_name,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
@@ -1245,11 +1244,9 @@ async def _non_stream_team_completion(
                     agents=agents,
                     team=team,
                     prompt=prompt,
-                    session_id=session_id,
                     config=config,
                     runtime_paths=runtime_paths,
                     thread_history=thread_history,
-                    execution_identity=execution_identity,
                 )
             except Exception:
                 logger.exception("Team member preparation failed", team=team_name)
@@ -1280,12 +1277,19 @@ async def _non_stream_team_completion(
             return JSONResponse(content=result.model_dump())
     finally:
         close_unique_sqlite_dbs(
-            *(agent.db for agent in agents if scope_context is None or agent.db is not scope_context.storage),
-            team.db if team is not None and (scope_context is None or team.db is not scope_context.storage) else None,
+            *(
+                storage
+                for agent in agents
+                for storage in get_agent_runtime_sqlite_dbs(agent)
+                if scope_context is None or storage is not scope_context.storage
+            ),
+            cast("SqliteDb | None", team.db)
+            if team is not None and (scope_context is None or team.db is not scope_context.storage)
+            else None,
         )
 
 
-async def _stream_team_completion(
+async def _stream_team_completion(  # noqa: C901
     team_name: str,
     model_id: str,
     prompt: str,
@@ -1297,83 +1301,106 @@ async def _stream_team_completion(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
+    stack = ExitStack()
     agents: list[Agent] = []
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
+    stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None] | None = None
+
+    async def _cleanup() -> None:
+        if stream is not None:
+            await stream.aclose()
+        stack.close()
+        close_unique_sqlite_dbs(
+            *(
+                storage
+                for agent in agents
+                for storage in get_agent_runtime_sqlite_dbs(agent)
+                if scope_context is None or storage is not scope_context.storage
+            ),
+            cast("SqliteDb | None", team.db)
+            if team is not None and (scope_context is None or team.db is not scope_context.storage)
+            else None,
+        )
+
     try:
-        with open_bound_scope_session_context(
-            agents=[],
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            team_name=team_name,
-        ) as opened_scope_context:
-            scope_context = opened_scope_context
-            try:
-                with tool_execution_identity(execution_identity):
-                    agents, team, mode = _build_team(
-                        team_name,
-                        config,
-                        runtime_paths,
-                        execution_identity,
-                        scope_context,
-                    )
-            except ValueError as e:
-                return _error_response(500, str(e), error_type="server_error")
-
-            logger.info(
-                "Team streaming request",
-                team=team_name,
-                mode=mode.value,
-                members=len(agents),
+        scope_context = stack.enter_context(
+            open_bound_scope_session_context(
+                agents=[],
                 session_id=session_id,
-            )
-
-            try:
-                team_prompt = await _prepare_openai_team_prompt(
-                    scope_context=scope_context,
-                    team_name=team_name,
-                    agents=agents,
-                    team=team,
-                    prompt=prompt,
-                    session_id=session_id,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    thread_history=thread_history,
-                    execution_identity=execution_identity,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+                team_name=team_name,
+            ),
+        )
+        try:
+            with tool_execution_identity(execution_identity):
+                agents, team, mode = _build_team(
+                    team_name,
+                    config,
+                    runtime_paths,
+                    execution_identity,
+                    scope_context,
                 )
-            except Exception:
-                logger.exception("Team member preparation failed", team=team_name)
-                return _error_response(500, "Team execution failed", error_type="server_error")
+        except ValueError as e:
+            await _cleanup()
+            return _error_response(500, str(e), error_type="server_error")
+
+        logger.info(
+            "Team streaming request",
+            team=team_name,
+            mode=mode.value,
+            members=len(agents),
+            session_id=session_id,
+        )
+
+        try:
+            team_prompt = await _prepare_openai_team_prompt(
+                scope_context=scope_context,
+                team_name=team_name,
+                agents=agents,
+                team=team,
+                prompt=prompt,
+                config=config,
+                runtime_paths=runtime_paths,
+                thread_history=thread_history,
+            )
+        except Exception:
+            logger.exception("Team member preparation failed", team=team_name)
+            await _cleanup()
+            return _error_response(500, "Team execution failed", error_type="server_error")
+        try:
+            with tool_execution_identity(execution_identity):
+                raw_stream = team.arun(
+                    team_prompt,
+                    stream=True,
+                    stream_events=True,
+                    session_id=session_id,
+                    user_id=user,
+                )
+                stream = cast("AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None]", raw_stream)
+                first_event = await anext(stream, None)
+        except Exception:
+            logger.exception("Team execution failed", team=team_name)
+            await _cleanup()
+            return _error_response(500, "Team execution failed", error_type="server_error")
+
+        if first_event is None:
+            await _cleanup()
+            return _error_response(500, "Team returned empty response", error_type="server_error")
+        first_error = _extract_team_stream_error(first_event)
+        if first_error is not None:
+            logger.warning("Team streaming returned error", team=team_name, error=first_error)
+            await _cleanup()
+            return _error_response(500, "Team execution failed", error_type="server_error")
+
+        completion_id = f"chatcmpl-{uuid4().hex[:12]}"
+        created = int(time.time())
+
+        async def _event_generator() -> AsyncGenerator[str, None]:
             try:
-                with tool_execution_identity(execution_identity):
-                    raw_stream = team.arun(
-                        team_prompt,
-                        stream=True,
-                        stream_events=True,
-                        session_id=session_id,
-                        user_id=user,
-                    )
-                    stream = cast("AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None]", raw_stream)
-                    first_event = await anext(stream, None)
-            except Exception:
-                logger.exception("Team execution failed", team=team_name)
-                return _error_response(500, "Team execution failed", error_type="server_error")
-
-            if first_event is None:
-                await stream.aclose()
-                return _error_response(500, "Team returned empty response", error_type="server_error")
-            first_error = _extract_team_stream_error(first_event)
-            if first_error is not None:
-                logger.warning("Team streaming returned error", team=team_name, error=first_error)
-                await stream.aclose()
-                return _error_response(500, "Team execution failed", error_type="server_error")
-
-            completion_id = f"chatcmpl-{uuid4().hex[:12]}"
-            created = int(time.time())
-            return StreamingResponse(
-                _team_stream_event_generator(
+                async for chunk in _team_stream_event_generator(
                     stream=stream,
                     first_event=first_event,
                     completion_id=completion_id,
@@ -1381,14 +1408,26 @@ async def _stream_team_completion(
                     model_id=model_id,
                     team_name=team_name,
                     execution_identity=execution_identity,
-                ),
-                media_type="text/event-stream",
-            )
-    finally:
+                ):
+                    yield chunk
+            finally:
+                await _cleanup()
+
+        return StreamingResponse(_event_generator(), media_type="text/event-stream")
+    except Exception:
+        stack.close()
         close_unique_sqlite_dbs(
-            *(agent.db for agent in agents if scope_context is None or agent.db is not scope_context.storage),
-            team.db if team is not None and (scope_context is None or team.db is not scope_context.storage) else None,
+            *(
+                storage
+                for agent in agents
+                for storage in get_agent_runtime_sqlite_dbs(agent)
+                if scope_context is None or storage is not scope_context.storage
+            ),
+            cast("SqliteDb | None", team.db)
+            if team is not None and (scope_context is None or team.db is not scope_context.storage)
+            else None,
         )
+        raise
 
 
 def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent) -> str | None:

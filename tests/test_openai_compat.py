@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -29,8 +30,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import PreparedExecutionContext
-from mindroom.history.runtime import open_bound_scope_session_context
-from mindroom.history.types import ResolvedReplayPlan
+from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
+from mindroom.history.types import HistoryScope, ResolvedReplayPlan
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -96,8 +97,11 @@ def app_client(test_config: Config) -> Iterator[TestClient]:
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
     initialize_api_app(app, runtime_paths)
 
-    with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
-        yield TestClient(app)
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
+        TestClient(app) as client,
+    ):
+        yield client
 
 
 @pytest.fixture
@@ -112,8 +116,11 @@ def authed_client(test_config: Config) -> Iterator[TestClient]:
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "test-key-1,test-key-2"})
     initialize_api_app(app, runtime_paths)
 
-    with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
-        yield TestClient(app)
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
+        TestClient(app) as client,
+    ):
+        yield client
 
 
 def test_load_config_uses_dynamic_runtime_config_path(
@@ -230,8 +237,10 @@ class TestListModels:
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         initialize_api_app(app, runtime_paths)
 
-        with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
-            client = TestClient(app)
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
+            TestClient(app) as client,
+        ):
             response = client.get("/v1/models")
 
         assert response.status_code == 200
@@ -254,8 +263,10 @@ class TestListModels:
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         initialize_api_app(app, runtime_paths)
 
-        with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
-            client = TestClient(app)
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
+            TestClient(app) as client,
+        ):
             response = client.get("/v1/models")
 
         assert response.status_code == 200
@@ -278,8 +289,10 @@ class TestListModels:
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         initialize_api_app(app, runtime_paths)
 
-        with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
-            client = TestClient(app)
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
+            TestClient(app) as client,
+        ):
             response = client.get("/v1/models")
 
         assert response.status_code == 200
@@ -326,8 +339,10 @@ class TestListModels:
             models={"default": ModelConfig(provider="ollama", id="test")},
             router=RouterConfig(model="default"),
         )
-        with patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, runtime_paths)):
-            client = TestClient(app)
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, runtime_paths)),
+            TestClient(app) as client,
+        ):
             response = client.get("/v1/models")
             assert response.status_code == 200
             data = response.json()["data"]
@@ -513,8 +528,10 @@ class TestChatCompletions:
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         initialize_api_app(app, runtime_paths)
 
-        with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
-            client = TestClient(app)
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
+            TestClient(app) as client,
+        ):
             response = client.post(
                 "/v1/chat/completions",
                 json={
@@ -549,8 +566,10 @@ class TestChatCompletions:
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         initialize_api_app(app, runtime_paths)
 
-        with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
-            client = TestClient(app)
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
+            TestClient(app) as client,
+        ):
             response = client.post(
                 "/v1/chat/completions",
                 json={
@@ -579,8 +598,10 @@ class TestChatCompletions:
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         initialize_api_app(app, runtime_paths)
 
-        with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
-            client = TestClient(app)
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
+            TestClient(app) as client,
+        ):
             response = client.post(
                 "/v1/chat/completions",
                 json={
@@ -609,8 +630,10 @@ class TestChatCompletions:
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         initialize_api_app(app, runtime_paths)
 
-        with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
-            client = TestClient(app)
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
+            TestClient(app) as client,
+        ):
             response = client.post(
                 "/v1/chat/completions",
                 json={
@@ -1195,8 +1218,10 @@ class TestAuthentication:
             },
         )
         initialize_api_app(app, runtime_paths)
-        with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
-            client = TestClient(app)
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
+            TestClient(app) as client,
+        ):
             response = client.get("/v1/models")
         assert response.status_code == 401
         assert response.json()["error"]["code"] == "invalid_api_key"
@@ -1212,8 +1237,10 @@ class TestAuthentication:
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "test-key-1"})
         initialize_api_app(app, runtime_paths)
 
-        with patch("mindroom.api.openai_compat._load_config", side_effect=RuntimeError("should not load config")):
-            client = TestClient(app)
+        with (
+            patch("mindroom.api.openai_compat._load_config", side_effect=RuntimeError("should not load config")),
+            TestClient(app) as client,
+        ):
             response = client.get("/v1/models")
 
         assert response.status_code == 401
@@ -1697,9 +1724,9 @@ class TestAutoRouting:
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, runtime_paths)),
             patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            TestClient(app) as client,
         ):
             mock_route.return_value = None
-            client = TestClient(app)
             response = client.post(
                 "/v1/chat/completions",
                 json={
@@ -1803,8 +1830,11 @@ def team_app_client(team_config: Config) -> Iterator[TestClient]:
     app.include_router(router)
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
     initialize_api_app(app, runtime_paths)
-    with patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)):
-        yield TestClient(app)
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
+        TestClient(app) as client,
+    ):
+        yield client
 
 
 class TestTeamCompletion:
@@ -1932,6 +1962,68 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["agents"] == mock_agents
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert mock_team.arun.call_args.args[0] == "Build it"
+
+    def test_team_streaming_keeps_scope_storage_open_until_stream_finishes(self, team_app_client: TestClient) -> None:
+        """The bound team scope must stay open until SSE streaming is fully consumed."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        class _FakeStorage:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        fake_storage = _FakeStorage()
+        mock_team = MagicMock()
+        mock_team.db = fake_storage
+        mock_agents: list[MagicMock] = []
+
+        @contextmanager
+        def _open_scope_context() -> Iterator[ScopeSessionContext]:
+            yield ScopeSessionContext(
+                scope=HistoryScope(kind="team", scope_id="super_team"),
+                storage=fake_storage,
+                session=None,
+            )
+            fake_storage.close()
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            assert fake_storage.closed is False
+            yield TeamContentEvent(content="Hello ")
+            assert fake_storage.closed is False
+            yield TeamContentEvent(content="world!")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        with (
+            patch(
+                "mindroom.api.openai_compat.open_bound_scope_session_context",
+                return_value=_open_scope_context(),
+            ),
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert fake_storage.closed is True
 
     def test_team_streaming_keeps_execution_identity_for_full_stream(self, team_app_client: TestClient) -> None:
         """Team streaming must keep worker-routing identity active after preflight."""
@@ -2780,8 +2872,11 @@ def knowledge_app_client(knowledge_config: Config) -> Iterator[TestClient]:
     app.include_router(router)
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
     initialize_api_app(app, runtime_paths)
-    with patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)):
-        yield TestClient(app)
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
+        TestClient(app) as client,
+    ):
+        yield client
 
 
 class TestKnowledgeIntegration:
@@ -2842,10 +2937,9 @@ class TestKnowledgeIntegration:
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
+            TestClient(app) as client,
         ):
             mock_ai.return_value = "Response with keyed knowledge"
-
-            client = TestClient(app)
             response = client.post(
                 "/v1/chat/completions",
                 json={
@@ -2984,10 +3078,9 @@ class TestKnowledgeIntegration:
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
+            TestClient(app) as client,
         ):
             mock_ai.return_value = "Merged knowledge response"
-
-            client = TestClient(app)
             response = client.post(
                 "/v1/chat/completions",
                 json={

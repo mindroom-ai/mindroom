@@ -30,7 +30,7 @@ from agno.run.agent import (
 )
 from agno.run.base import RunStatus
 
-from mindroom.agents import create_agent
+from mindroom.agents import create_agent, get_agent_runtime_sqlite_dbs
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ROUTER_AGENT_NAME,
@@ -70,7 +70,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection
 
     from agno.agent import Agent
-    from agno.db.sqlite import SqliteDb
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
 
@@ -607,7 +606,6 @@ async def _prepare_agent_and_prompt(
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
     include_interactive_questions: bool = True,
-    session_id: str | None = None,
     reply_to_event_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
     execution_identity: ToolExecutionIdentity | None = None,
@@ -656,13 +654,11 @@ async def _prepare_agent_and_prompt(
         agent_name=agent_name,
         prompt=enhanced_prompt,
         thread_history=thread_history,
-        session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
         room_id=room_id,
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
-        execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
     )
     prepared_history = PreparedHistoryState(
@@ -766,7 +762,6 @@ async def ai_response(  # noqa: C901
                     room_id,
                     knowledge,
                     include_interactive_questions=include_interactive_questions,
-                    session_id=session_id,
                     reply_to_event_id=reply_to_event_id,
                     active_event_ids=active_event_ids,
                     execution_identity=execution_identity,
@@ -863,9 +858,11 @@ async def ai_response(  # noqa: C901
             return _extract_response_content(response, show_tool_calls=show_tool_calls)
     finally:
         close_unique_sqlite_dbs(
-            cast("SqliteDb | None", agent.db)
-            if agent is not None and (scope_context is None or agent.db is not scope_context.storage)
-            else None,
+            *(
+                storage
+                for storage in (get_agent_runtime_sqlite_dbs(agent) if agent is not None else ())
+                if scope_context is None or storage is not scope_context.storage
+            ),
         )
 
 
@@ -1033,7 +1030,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     room_id,
                     knowledge,
                     include_interactive_questions=include_interactive_questions,
-                    session_id=session_id,
                     reply_to_event_id=reply_to_event_id,
                     active_event_ids=active_event_ids,
                     execution_identity=execution_identity,
@@ -1167,7 +1163,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     run_metadata_collector.update(run_metadata)
     finally:
         close_unique_sqlite_dbs(
-            cast("SqliteDb | None", agent.db)
-            if agent is not None and (scope_context is None or agent.db is not scope_context.storage)
-            else None,
+            *(
+                storage
+                for storage in (get_agent_runtime_sqlite_dbs(agent) if agent is not None else ())
+                if scope_context is None or storage is not scope_context.storage
+            ),
         )

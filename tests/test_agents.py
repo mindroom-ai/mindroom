@@ -16,7 +16,12 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 from pydantic import ValidationError
 
 from mindroom import agent_prompts
-from mindroom.agents import _CULTURE_MANAGER_CACHE, _PRIVATE_CULTURE_MANAGER_CACHE, create_agent
+from mindroom.agents import (
+    _CULTURE_MANAGER_CACHE,
+    _PRIVATE_CULTURE_MANAGER_CACHE,
+    create_agent,
+    get_agent_runtime_sqlite_dbs,
+)
 from mindroom.config.agent import (
     AgentConfig,
     AgentPrivateConfig,
@@ -202,6 +207,26 @@ def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.learning.user_profile.mode is LearningMode.ALWAYS
     assert isinstance(agent.learning.user_memory, UserMemoryConfig)
     assert agent.learning.user_memory.mode is LearningMode.ALWAYS
+
+
+def test_get_agent_runtime_sqlite_dbs_includes_learning_storage(tmp_path: Path) -> None:
+    """Runtime-owned agent DB cleanup should include the separate learning storage."""
+    config = _test_config()
+    config.models = {"default": ModelConfig(provider="ollama", id="test-model")}
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+
+    agent = _create_agent_for_test("general", config=config)
+
+    assert isinstance(agent.learning, LearningMachine)
+    history_db, learning_db = get_agent_runtime_sqlite_dbs(agent)
+    assert history_db is agent.db
+    assert learning_db is agent.learning.db
+    assert history_db is not learning_db
+
+    if learning_db is not None:
+        learning_db.close()
+    if history_db is not None:
+        history_db.close()
 
 
 @patch("mindroom.agents.SqliteDb")

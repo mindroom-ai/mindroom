@@ -441,7 +441,8 @@ def _prepare_team_prompt_inputs_for_estimation(
     payload and `_tool_instructions` state that feed that prompt are only built by
     the internal `_determine_tools_for_model()` path. Using that single internal
     entrypoint is less brittle than re-implementing several private team helpers in
-    MindRoom.
+    MindRoom. This logic is verified against `agno==2.4.7`; if Agno changes those
+    internals, update this estimator to match the new team prompt builder.
     """
     budget_session_id = "history-budget"
     session = TeamSession(session_id=budget_session_id, team_id=team.id)
