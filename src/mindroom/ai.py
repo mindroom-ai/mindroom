@@ -48,7 +48,13 @@ from mindroom.history import (
     CompactionOutcome,
     PreparedHistoryState,
 )
-from mindroom.history.runtime import apply_replay_plan
+from mindroom.history.runtime import (
+    ScopeSessionContext,
+    apply_replay_plan,
+    close_unique_sqlite_dbs,
+    open_resolved_scope_session_context,
+)
+from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
@@ -64,6 +70,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection
 
     from agno.agent import Agent
+    from agno.db.sqlite import SqliteDb
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
 
@@ -595,6 +602,7 @@ async def _prepare_agent_and_prompt(
     prompt: str,
     runtime_paths: RuntimePaths,
     config: Config,
+    scope_context: ScopeSessionContext | None = None,
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
@@ -634,6 +642,7 @@ async def _prepare_agent_and_prompt(
         agent_name,
         config,
         runtime_paths,
+        history_storage=scope_context.storage if scope_context is not None else None,
         active_model_name=runtime_model.model_name,
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
@@ -642,6 +651,7 @@ async def _prepare_agent_and_prompt(
     )
 
     prepared_execution = await prepare_agent_execution_context(
+        scope_context=scope_context,
         agent=agent,
         agent_name=agent_name,
         prompt=enhanced_prompt,
@@ -734,117 +744,129 @@ async def ai_response(  # noqa: C901
     logger.info("AI request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
-    prepared_history = PreparedHistoryState()
-
+    scope_context: ScopeSessionContext | None = None
     try:
-        agent, full_prompt, unseen_event_ids, prepared_history = await _prepare_agent_and_prompt(
-            agent_name,
-            prompt,
-            runtime_paths,
-            config,
-            thread_history,
-            room_id,
-            knowledge,
-            include_interactive_questions=include_interactive_questions,
+        with open_resolved_scope_session_context(
+            agent_name=agent_name,
+            scope=HistoryScope(kind="agent", scope_id=agent_name),
             session_id=session_id,
-            reply_to_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
+            runtime_paths=runtime_paths,
+            config=config,
             execution_identity=execution_identity,
-            compaction_outcomes_collector=compaction_outcomes_collector,
-            delegation_depth=delegation_depth,
-        )
-    except Exception as e:
-        logger.exception("Error preparing agent", agent=agent_name)
-        return get_user_friendly_error_message(e, agent_name)
-
-    try:
-        metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
-
-        response: RunOutput | None = None
-        attempt_prompt = full_prompt
-        attempt_media_inputs = media_inputs
-        attempt_run_id = run_id
-
-        for retried_without_inline_media in (False, True):
+        ) as opened_scope_context:
+            scope_context = opened_scope_context
             try:
-                response = await _run_agent_turn(
-                    agent,
-                    attempt_prompt,
-                    session_id,
-                    user_id=user_id,
-                    run_id=attempt_run_id,
-                    run_id_callback=run_id_callback,
-                    media=attempt_media_inputs,
-                    metadata=metadata,
+                agent, full_prompt, unseen_event_ids, _prepared_history = await _prepare_agent_and_prompt(
+                    agent_name,
+                    prompt,
+                    runtime_paths,
+                    config,
+                    scope_context,
+                    thread_history,
+                    room_id,
+                    knowledge,
+                    include_interactive_questions=include_interactive_questions,
+                    session_id=session_id,
+                    reply_to_event_id=reply_to_event_id,
+                    active_event_ids=active_event_ids,
+                    execution_identity=execution_identity,
+                    compaction_outcomes_collector=compaction_outcomes_collector,
+                    delegation_depth=delegation_depth,
                 )
             except Exception as e:
-                if not retried_without_inline_media and should_retry_without_inline_media(e, attempt_media_inputs):
-                    logger.warning(
-                        "Retrying AI response without inline media after validation error",
-                        agent=agent_name,
-                        error=str(e),
-                    )
-                    attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
-                    attempt_media_inputs = MediaInputs()
-                    attempt_run_id = _next_retry_run_id(run_id)
-                    continue
-
-                logger.exception("Error generating AI response", agent=agent_name)
+                logger.exception("Error preparing agent", agent=agent_name)
                 return get_user_friendly_error_message(e, agent_name)
 
-            if response.status == RunStatus.error:
-                error_text = str(response.content or "Unknown agent error")
-                if not retried_without_inline_media and should_retry_without_inline_media(
-                    error_text,
-                    attempt_media_inputs,
-                ):
-                    logger.warning(
-                        "Retrying AI response without inline media after errored run output",
-                        agent=agent_name,
-                        error=error_text,
+            metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
+
+            response: RunOutput | None = None
+            attempt_prompt = full_prompt
+            attempt_media_inputs = media_inputs
+            attempt_run_id = run_id
+
+            for retried_without_inline_media in (False, True):
+                try:
+                    response = await _run_agent_turn(
+                        agent,
+                        attempt_prompt,
+                        session_id,
+                        user_id=user_id,
+                        run_id=attempt_run_id,
+                        run_id_callback=run_id_callback,
+                        media=attempt_media_inputs,
+                        metadata=metadata,
                     )
-                    attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
-                    attempt_media_inputs = MediaInputs()
-                    attempt_run_id = _next_retry_run_id(run_id)
-                    continue
+                except Exception as e:
+                    if not retried_without_inline_media and should_retry_without_inline_media(e, attempt_media_inputs):
+                        logger.warning(
+                            "Retrying AI response without inline media after validation error",
+                            agent=agent_name,
+                            error=str(e),
+                        )
+                        attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                        attempt_media_inputs = MediaInputs()
+                        attempt_run_id = _next_retry_run_id(run_id)
+                        continue
 
-                logger.warning("AI response returned errored run output", agent=agent_name, error=error_text)
+                    logger.exception("Error generating AI response", agent=agent_name)
+                    return get_user_friendly_error_message(e, agent_name)
 
-            break
+                if response.status == RunStatus.error:
+                    error_text = str(response.content or "Unknown agent error")
+                    if not retried_without_inline_media and should_retry_without_inline_media(
+                        error_text,
+                        attempt_media_inputs,
+                    ):
+                        logger.warning(
+                            "Retrying AI response without inline media after errored run output",
+                            agent=agent_name,
+                            error=error_text,
+                        )
+                        attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                        attempt_media_inputs = MediaInputs()
+                        attempt_run_id = _next_retry_run_id(run_id)
+                        continue
 
-        assert response is not None
+                    logger.warning("AI response returned errored run output", agent=agent_name, error=error_text)
 
-        if tool_trace_collector is not None:
-            tool_trace_collector.extend(_extract_tool_trace(response))
-        if run_metadata_collector is not None:
-            run_metadata = _build_ai_run_metadata_content(
-                agent_name=agent_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                run_id=response.run_id,
-                session_id=response.session_id or session_id,
-                status=response.status,
-                model=response.model,
-                model_provider=response.model_provider,
-                room_id=room_id,
-                metrics=response.metrics,
-                tool_count=len(response.tools) if response.tools is not None else 0,
-            )
-            if run_metadata:
-                run_metadata_collector.update(run_metadata)
+                break
 
-        if response.status == RunStatus.cancelled:
-            raise asyncio.CancelledError(response.content or "Run cancelled")
-        if response.status == RunStatus.error:
-            return get_user_friendly_error_message(
-                Exception(str(response.content or "Unknown agent error")),
-                agent_name,
-            )
+            assert response is not None
 
-        return _extract_response_content(response, show_tool_calls=show_tool_calls)
+            if tool_trace_collector is not None:
+                tool_trace_collector.extend(_extract_tool_trace(response))
+            if run_metadata_collector is not None:
+                run_metadata = _build_ai_run_metadata_content(
+                    agent_name=agent_name,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    run_id=response.run_id,
+                    session_id=response.session_id or session_id,
+                    status=response.status,
+                    model=response.model,
+                    model_provider=response.model_provider,
+                    room_id=room_id,
+                    metrics=response.metrics,
+                    tool_count=len(response.tools) if response.tools is not None else 0,
+                )
+                if run_metadata:
+                    run_metadata_collector.update(run_metadata)
+
+            if response.status == RunStatus.cancelled:
+                raise asyncio.CancelledError(response.content or "Run cancelled")
+            if response.status == RunStatus.error:
+                return get_user_friendly_error_message(
+                    Exception(str(response.content or "Unknown agent error")),
+                    agent_name,
+                )
+
+            return _extract_response_content(response, show_tool_calls=show_tool_calls)
     finally:
-        # Native Agno replay no longer binds transient per-run history state.
-        pass
+        close_unique_sqlite_dbs(
+            cast("SqliteDb | None", agent.db)
+            if agent is not None and (scope_context is None or agent.db is not scope_context.storage)
+            else None,
+        )
 
 
 async def _process_stream_events(  # noqa: C901
@@ -988,151 +1010,164 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     logger.info("AI streaming request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
-    prepared_history = PreparedHistoryState()
+    scope_context: ScopeSessionContext | None = None
 
     try:
-        agent, full_prompt, unseen_event_ids, prepared_history = await _prepare_agent_and_prompt(
-            agent_name,
-            prompt,
-            runtime_paths,
-            config,
-            thread_history,
-            room_id,
-            knowledge,
-            include_interactive_questions=include_interactive_questions,
+        with open_resolved_scope_session_context(
+            agent_name=agent_name,
+            scope=HistoryScope(kind="agent", scope_id=agent_name),
             session_id=session_id,
-            reply_to_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
+            runtime_paths=runtime_paths,
+            config=config,
             execution_identity=execution_identity,
-            compaction_outcomes_collector=compaction_outcomes_collector,
-            delegation_depth=delegation_depth,
-        )
-    except Exception as e:
-        logger.exception("Error preparing agent for streaming", agent=agent_name)
-        yield get_user_friendly_error_message(e, agent_name)
-        return
-
-    try:
-        metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
-
-        attempt_prompt = full_prompt
-        attempt_media_inputs = media_inputs
-        attempt_run_id = run_id
-        state = _StreamingAttemptState()
-
-        for retried_without_inline_media in (False, True):
-            state = _StreamingAttemptState()
-
+        ) as opened_scope_context:
+            scope_context = opened_scope_context
             try:
-                _note_attempt_run_id(run_id_callback, attempt_run_id)
-                stream_generator = agent.arun(
-                    attempt_prompt,
+                agent, full_prompt, unseen_event_ids, _prepared_history = await _prepare_agent_and_prompt(
+                    agent_name,
+                    prompt,
+                    runtime_paths,
+                    config,
+                    scope_context,
+                    thread_history,
+                    room_id,
+                    knowledge,
+                    include_interactive_questions=include_interactive_questions,
                     session_id=session_id,
-                    user_id=user_id,
-                    run_id=attempt_run_id,
-                    audio=attempt_media_inputs.audio,
-                    images=attempt_media_inputs.images,
-                    files=attempt_media_inputs.files,
-                    videos=attempt_media_inputs.videos,
-                    stream=True,
-                    stream_events=True,
-                    metadata=metadata,
+                    reply_to_event_id=reply_to_event_id,
+                    active_event_ids=active_event_ids,
+                    execution_identity=execution_identity,
+                    compaction_outcomes_collector=compaction_outcomes_collector,
+                    delegation_depth=delegation_depth,
                 )
             except Exception as e:
-                if _request_stream_retry(
-                    state,
-                    retried_without_inline_media=retried_without_inline_media,
-                    media_inputs=attempt_media_inputs,
-                    error=e,
-                    log_message="Retrying streaming AI response without inline media after validation error",
+                logger.exception("Error preparing agent for streaming", agent=agent_name)
+                yield get_user_friendly_error_message(e, agent_name)
+                return
+
+            metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
+
+            attempt_prompt = full_prompt
+            attempt_media_inputs = media_inputs
+            attempt_run_id = run_id
+            state = _StreamingAttemptState()
+
+            for retried_without_inline_media in (False, True):
+                state = _StreamingAttemptState()
+
+                try:
+                    _note_attempt_run_id(run_id_callback, attempt_run_id)
+                    stream_generator = agent.arun(
+                        attempt_prompt,
+                        session_id=session_id,
+                        user_id=user_id,
+                        run_id=attempt_run_id,
+                        audio=attempt_media_inputs.audio,
+                        images=attempt_media_inputs.images,
+                        files=attempt_media_inputs.files,
+                        videos=attempt_media_inputs.videos,
+                        stream=True,
+                        stream_events=True,
+                        metadata=metadata,
+                    )
+                except Exception as e:
+                    if _request_stream_retry(
+                        state,
+                        retried_without_inline_media=retried_without_inline_media,
+                        media_inputs=attempt_media_inputs,
+                        error=e,
+                        log_message="Retrying streaming AI response without inline media after validation error",
+                        agent_name=agent_name,
+                    ):
+                        attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                        attempt_media_inputs = MediaInputs()
+                        attempt_run_id = _next_retry_run_id(run_id)
+                        continue
+                    logger.exception("Error starting streaming AI response")
+                    yield get_user_friendly_error_message(e, agent_name)
+                    return
+
+                async for stream_chunk in _process_stream_events(
+                    stream_generator,
+                    state=state,
+                    show_tool_calls=show_tool_calls,
                     agent_name=agent_name,
+                    media_inputs=attempt_media_inputs,
+                    retried_without_inline_media=retried_without_inline_media,
                 ):
+                    yield stream_chunk
+
+                if state.retry_requested:
                     attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
                     attempt_media_inputs = MediaInputs()
                     attempt_run_id = _next_retry_run_id(run_id)
                     continue
-                logger.exception("Error starting streaming AI response")
-                yield get_user_friendly_error_message(e, agent_name)
-                return
 
-            async for stream_chunk in _process_stream_events(
-                stream_generator,
-                state=state,
-                show_tool_calls=show_tool_calls,
-                agent_name=agent_name,
-                media_inputs=attempt_media_inputs,
-                retried_without_inline_media=retried_without_inline_media,
-            ):
-                yield stream_chunk
+                if state.user_error is not None:
+                    yield get_user_friendly_error_message(state.user_error, agent_name)
+                    return
 
-            if state.retry_requested:
-                attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
-                attempt_media_inputs = MediaInputs()
-                attempt_run_id = _next_retry_run_id(run_id)
-                continue
+                if state.stream_exception is not None:
+                    yield get_user_friendly_error_message(state.stream_exception, agent_name)
+                    return
 
-            if state.user_error is not None:
-                yield get_user_friendly_error_message(state.user_error, agent_name)
-                return
+                if state.cancelled_run_event is not None:
+                    if run_metadata_collector is not None:
+                        fallback_metrics = _build_model_request_metrics_fallback(
+                            state.request_metric_totals,
+                            state.first_token_latency,
+                        )
+                        cancelled_metadata = _build_ai_run_metadata_content(
+                            agent_name=agent_name,
+                            config=config,
+                            runtime_paths=runtime_paths,
+                            run_id=state.cancelled_run_event.run_id,
+                            session_id=state.cancelled_run_event.session_id or session_id,
+                            status=RunStatus.cancelled,
+                            model=state.latest_model_id,
+                            model_provider=state.latest_model_provider,
+                            room_id=room_id,
+                            metrics=fallback_metrics,
+                            tool_count=state.observed_tool_calls,
+                        )
+                        if cancelled_metadata:
+                            run_metadata_collector.update(cancelled_metadata)
+                    raise asyncio.CancelledError(state.cancelled_run_event.reason or "Run cancelled")
 
-            if state.stream_exception is not None:
-                yield get_user_friendly_error_message(state.stream_exception, agent_name)
-                return
+                break
 
-            if state.cancelled_run_event is not None:
-                if run_metadata_collector is not None:
-                    fallback_metrics = _build_model_request_metrics_fallback(
-                        state.request_metric_totals,
-                        state.first_token_latency,
-                    )
-                    cancelled_metadata = _build_ai_run_metadata_content(
-                        agent_name=agent_name,
-                        config=config,
-                        runtime_paths=runtime_paths,
-                        run_id=state.cancelled_run_event.run_id,
-                        session_id=state.cancelled_run_event.session_id or session_id,
-                        status=RunStatus.cancelled,
-                        model=state.latest_model_id,
-                        model_provider=state.latest_model_provider,
-                        room_id=room_id,
-                        metrics=fallback_metrics,
-                        tool_count=state.observed_tool_calls,
-                    )
-                    if cancelled_metadata:
-                        run_metadata_collector.update(cancelled_metadata)
-                raise asyncio.CancelledError(state.cancelled_run_event.reason or "Run cancelled")
-
-            break
-
-        if run_metadata_collector is not None:
-            fallback_metrics = _build_model_request_metrics_fallback(
-                state.request_metric_totals,
-                state.first_token_latency,
-            )
-            run_metadata = _build_ai_run_metadata_content(
-                agent_name=agent_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
-                session_id=(
-                    state.completed_run_event.session_id
-                    if state.completed_run_event is not None and state.completed_run_event.session_id is not None
-                    else session_id
-                ),
-                status=RunStatus.completed,
-                model=state.latest_model_id,
-                model_provider=state.latest_model_provider,
-                room_id=room_id,
-                metrics=state.completed_run_event.metrics if state.completed_run_event is not None else None,
-                metrics_fallback=fallback_metrics,
-                tool_count=(
-                    len(state.completed_run_event.tools)
-                    if state.completed_run_event is not None and state.completed_run_event.tools is not None
-                    else state.observed_tool_calls
-                ),
-            )
-            if run_metadata:
-                run_metadata_collector.update(run_metadata)
+            if run_metadata_collector is not None:
+                fallback_metrics = _build_model_request_metrics_fallback(
+                    state.request_metric_totals,
+                    state.first_token_latency,
+                )
+                run_metadata = _build_ai_run_metadata_content(
+                    agent_name=agent_name,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
+                    session_id=(
+                        state.completed_run_event.session_id
+                        if state.completed_run_event is not None and state.completed_run_event.session_id is not None
+                        else session_id
+                    ),
+                    status=RunStatus.completed,
+                    model=state.latest_model_id,
+                    model_provider=state.latest_model_provider,
+                    room_id=room_id,
+                    metrics=state.completed_run_event.metrics if state.completed_run_event is not None else None,
+                    metrics_fallback=fallback_metrics,
+                    tool_count=(
+                        len(state.completed_run_event.tools)
+                        if state.completed_run_event is not None and state.completed_run_event.tools is not None
+                        else state.observed_tool_calls
+                    ),
+                )
+                if run_metadata:
+                    run_metadata_collector.update(run_metadata)
     finally:
-        # Native Agno replay no longer binds transient per-run history state.
-        pass
+        close_unique_sqlite_dbs(
+            cast("SqliteDb | None", agent.db)
+            if agent is not None and (scope_context is None or agent.db is not scope_context.storage)
+            else None,
+        )

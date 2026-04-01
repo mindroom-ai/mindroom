@@ -21,7 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.execution_preparation import PreparedExecutionContext
-from mindroom.history.runtime import load_bound_scope_session_context
+from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
@@ -268,18 +268,18 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
     fake_agent = MagicMock()
     fake_agent.id = "general"
     fake_agent.name = "GeneralAgent"
-    scope_context = load_bound_scope_session_context(
+    with open_bound_scope_session_context(
         agents=[fake_agent],
         session_id="session-123",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
         create_session_if_missing=True,
-    )
-    assert scope_context is not None
-    assert scope_context.session is not None
-    update_scope_seen_event_ids(scope_context.session, scope_context.scope, ["event-1"])
-    scope_context.storage.upsert_session(scope_context.session)
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        update_scope_seen_event_ids(scope_context.session, scope_context.scope, ["event-1"])
+        scope_context.storage.upsert_session(scope_context.session)
 
     thread_history = [
         {"event_id": "event-1", "sender": "user", "body": "Already seen"},
@@ -337,17 +337,17 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
     fake_agent = MagicMock()
     fake_agent.id = "general"
     fake_agent.name = "GeneralAgent"
-    scope_context = load_bound_scope_session_context(
+    with open_bound_scope_session_context(
         agents=[fake_agent],
         session_id="session-456",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
         create_session_if_missing=True,
-    )
-    assert scope_context is not None
-    assert scope_context.session is not None
-    scope_context.storage.upsert_session(scope_context.session)
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        scope_context.storage.upsert_session(scope_context.session)
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -375,19 +375,19 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
             response_sender_id="@mindroom_team:example.org",
         )
 
-    scope_context = load_bound_scope_session_context(
+    with open_bound_scope_session_context(
         agents=[fake_agent],
         session_id="session-456",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
-    )
-    assert scope_context is not None
-    assert scope_context.session is not None
-    assert read_scope_seen_event_ids(scope_context.session, scope_context.scope) == {
-        "event-1",
-        "event-2",
-    }
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        assert read_scope_seen_event_ids(scope_context.session, scope_context.scope) == {
+            "event-1",
+            "event-2",
+        }
 
 
 @pytest.mark.asyncio
@@ -1013,18 +1013,18 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
     fake_agent = MagicMock()
     fake_agent.id = "general"
     fake_agent.name = "GeneralAgent"
-    scope_context = load_bound_scope_session_context(
+    with open_bound_scope_session_context(
         agents=[fake_agent],
         session_id="session-789",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
         create_session_if_missing=True,
-    )
-    assert scope_context is not None
-    assert scope_context.session is not None
-    update_scope_seen_event_ids(scope_context.session, scope_context.scope, ["event-1"])
-    scope_context.storage.upsert_session(scope_context.session)
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        update_scope_seen_event_ids(scope_context.session, scope_context.scope, ["event-1"])
+        scope_context.storage.upsert_session(scope_context.session)
     mock_team = MagicMock(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:

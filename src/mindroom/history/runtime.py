@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
@@ -45,6 +46,8 @@ from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_text_tokens
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
     from agno.team import Team
@@ -72,12 +75,11 @@ class ScopeSessionContext:
 
 @dataclass(frozen=True)
 class BoundTeamScopeContext:
-    """Resolved stable scope/storage for one live team run."""
+    """Resolved stable owner and scope for one live team run."""
 
     owner_agent: Agent
     owner_agent_name: str
     scope: HistoryScope
-    storage: SqliteDb
 
 
 @dataclass(frozen=True)
@@ -96,7 +98,7 @@ class PreparedScopeHistory:
     """Durable history preparation result before final replay planning."""
 
     scope: HistoryScope | None
-    scope_context: ScopeSessionContext | None
+    session: AgentSession | TeamSession | None
     resolved_inputs: _ResolvedPreparationInputs
     compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
 
@@ -122,6 +124,7 @@ async def prepare_scope_history(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    scope_context: ScopeSessionContext | None = None,
     storage: SqliteDb | None = None,
     session: AgentSession | TeamSession | None = None,
     history_settings: ResolvedHistorySettings | None = None,
@@ -133,8 +136,44 @@ async def prepare_scope_history(
     available_history_budget: int | None = None,
     scope: HistoryScope | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
+    _scope_context_opened: bool = False,
 ) -> PreparedScopeHistory:
     """Prepare durable scope history before final replay planning."""
+    if scope_context is None and not _scope_context_opened:
+        with open_scope_session_context(
+            agent=agent,
+            agent_name=agent_name,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            scope=scope,
+        ) as opened_scope_context:
+            scope_context = opened_scope_context
+            return await prepare_scope_history(
+                agent=agent,
+                agent_name=agent_name,
+                full_prompt=full_prompt,
+                session_id=session_id,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+                compaction_outcomes_collector=compaction_outcomes_collector,
+                scope_context=scope_context,
+                storage=storage,
+                session=session,
+                history_settings=history_settings,
+                compaction_config=compaction_config,
+                has_authored_compaction_config=has_authored_compaction_config,
+                active_model_name=active_model_name,
+                active_context_window=active_context_window,
+                static_prompt_tokens=static_prompt_tokens,
+                available_history_budget=available_history_budget,
+                scope=scope,
+                execution_plan=execution_plan,
+                _scope_context_opened=True,
+            )
+
     resolved_inputs = _resolve_preparation_inputs(
         agent=agent,
         agent_name=agent_name,
@@ -149,21 +188,10 @@ async def prepare_scope_history(
         execution_plan=execution_plan,
     )
     resolved_scope = scope or resolve_history_scope(agent)
-    scope_context = load_scope_session_context(
-        agent=agent,
-        agent_name=agent_name,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        storage=storage,
-        session=session,
-        scope=resolved_scope,
-    )
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
             scope=resolved_scope,
-            scope_context=scope_context,
+            session=None,
             resolved_inputs=resolved_inputs,
         )
 
@@ -253,7 +281,7 @@ async def prepare_scope_history(
         compaction_outcomes_collector.extend(compaction_outcomes)
     return PreparedScopeHistory(
         scope=scope_context.scope,
-        scope_context=scope_context,
+        session=scope_context.session,
         resolved_inputs=resolved_inputs,
         compaction_outcomes=compaction_outcomes,
     )
@@ -290,8 +318,7 @@ def finalize_history_preparation(
                 reason=description,
             )
 
-    scope_context = prepared_scope_history.scope_context
-    if scope_context is None or scope_context.session is None:
+    if prepared_scope_history.scope is None or prepared_scope_history.session is None:
         return PreparedHistoryState(
             compaction_outcomes=prepared_scope_history.compaction_outcomes,
             replay_plan=_configured_replay_plan(
@@ -302,20 +329,20 @@ def finalize_history_preparation(
         )
 
     current_history_tokens = estimate_prompt_visible_history_tokens(
-        session=scope_context.session,
-        scope=scope_context.scope,
+        session=prepared_scope_history.session,
+        scope=prepared_scope_history.scope,
         history_settings=resolved_inputs.history_settings,
     )
     if history_budget is not None:
         replay_plan = plan_replay_that_fits(
-            session=scope_context.session,
-            scope=scope_context.scope,
+            session=prepared_scope_history.session,
+            scope=prepared_scope_history.scope,
             history_settings=resolved_inputs.history_settings,
             available_history_budget=history_budget,
         )
         _log_replay_plan(
             replay_plan=replay_plan,
-            scope=scope_context.scope,
+            scope=prepared_scope_history.scope,
             available_history_budget=history_budget,
             current_history_tokens=current_history_tokens,
         )
@@ -329,8 +356,8 @@ def finalize_history_preparation(
         compaction_outcomes=prepared_scope_history.compaction_outcomes,
         replay_plan=replay_plan,
         replays_persisted_history=_has_effective_persisted_replay(
-            session=scope_context.session,
-            scope=scope_context.scope,
+            session=prepared_scope_history.session,
+            scope=prepared_scope_history.scope,
             replay_plan=replay_plan,
         ),
     )
@@ -399,16 +426,43 @@ async def prepare_bound_scope_history(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    scope_context: ScopeSessionContext | None = None,
     team_name: str | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
+    _scope_context_opened: bool = False,
 ) -> PreparedScopeHistory:
     """Prepare one team-owned scope by compacting its persisted session before the run."""
+    if scope_context is None and not _scope_context_opened:
+        with open_bound_scope_session_context(
+            agents=agents,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            team_name=team_name,
+        ) as opened_scope_context:
+            scope_context = opened_scope_context
+            return await prepare_bound_scope_history(
+                agents=agents,
+                team=team,
+                full_prompt=full_prompt,
+                fallback_full_prompt=fallback_full_prompt,
+                session_id=session_id,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+                compaction_outcomes_collector=compaction_outcomes_collector,
+                scope_context=scope_context,
+                team_name=team_name,
+                active_model_name=active_model_name,
+                active_context_window=active_context_window,
+                _scope_context_opened=True,
+            )
+
     bound_scope = resolve_bound_team_scope_context(
         agents=agents,
-        runtime_paths=runtime_paths,
         config=config,
-        execution_identity=execution_identity,
         team_name=team_name,
     )
     if bound_scope is None:
@@ -432,7 +486,7 @@ async def prepare_bound_scope_history(
         )
         return PreparedScopeHistory(
             scope=None,
-            scope_context=None,
+            session=None,
             resolved_inputs=resolved_inputs,
         )
 
@@ -466,7 +520,7 @@ async def prepare_bound_scope_history(
         config=config,
         execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
-        storage=bound_scope.storage,
+        scope_context=scope_context,
         history_settings=resolved_inputs.history_settings,
         compaction_config=resolved_inputs.compaction_config,
         has_authored_compaction_config=resolved_inputs.execution_plan.authored_compaction_config,
@@ -531,12 +585,10 @@ def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str 
 def resolve_bound_team_scope_context(
     *,
     agents: list[Agent],
-    runtime_paths: RuntimePaths,
     config: Config,
-    execution_identity: ToolExecutionIdentity | None,
     team_name: str | None = None,
 ) -> BoundTeamScopeContext | None:
-    """Resolve the stable scope/storage backing one live team run."""
+    """Resolve the stable owner and scope backing one live team run."""
     owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
     if owner_agent is None or owner_agent_name is None:
         return None
@@ -545,18 +597,10 @@ def resolve_bound_team_scope_context(
     if team_scope_id is None:
         return None
     scope = HistoryScope(kind="team", scope_id=team_scope_id)
-    storage = create_scope_session_storage(
-        agent_name=owner_agent_name,
-        scope=scope,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    )
     return BoundTeamScopeContext(
         owner_agent=owner_agent,
         owner_agent_name=owner_agent_name,
         scope=scope,
-        storage=storage,
     )
 
 
@@ -598,76 +642,47 @@ def estimate_preparation_static_tokens_for_team(
     return max(primary_tokens, estimate_team_static_tokens(team, fallback_full_prompt))
 
 
-def load_bound_scope_session_context(
+@contextmanager
+def open_scope_storage(
     *,
-    agents: list[Agent],
-    session_id: str | None,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-    team_name: str | None = None,
-    create_session_if_missing: bool = False,
-) -> ScopeSessionContext | None:
-    """Load the canonical scope-backed session context for one bound team run."""
-    if session_id is None:
-        return None
-    bound_scope = resolve_bound_team_scope_context(
-        agents=agents,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        team_name=team_name,
-    )
-    if bound_scope is None:
-        return None
-    return load_scope_session_context(
-        agent=bound_scope.owner_agent,
-        agent_name=bound_scope.owner_agent_name,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        storage=bound_scope.storage,
-        scope=bound_scope.scope,
-        create_session_if_missing=create_session_if_missing,
-    )
-
-
-def load_scope_session_context(
-    *,
-    agent: Agent,
     agent_name: str,
-    session_id: str | None,
+    scope: HistoryScope,
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-    storage: SqliteDb | None = None,
-    session: AgentSession | TeamSession | None = None,
-    scope: HistoryScope | None = None,
+) -> Iterator[SqliteDb]:
+    """Open the canonical SQLite storage for one persisted history scope."""
+    storage = create_scope_session_storage(
+        agent_name=agent_name,
+        scope=scope,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    try:
+        yield storage
+    finally:
+        storage.close()
+
+
+def _build_scope_session_context(
+    *,
+    scope: HistoryScope | None,
+    session_id: str | None,
+    storage: SqliteDb,
     create_session_if_missing: bool = False,
 ) -> ScopeSessionContext | None:
-    """Load the canonical storage/session backing one scope for one live agent."""
-    resolved_scope = scope or resolve_history_scope(agent)
-    if session_id is None or resolved_scope is None:
+    """Build one scope/session context from an already-open storage handle."""
+    if session_id is None or scope is None:
         return None
 
-    storage, session = _materialize_session(
-        agent_name=agent_name,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        scope=resolved_scope,
-        storage=storage,
-        session=session,
-    )
-    assert storage is not None
+    session = get_team_session(storage, session_id) if scope.kind == "team" else get_agent_session(storage, session_id)
     if session is None and create_session_if_missing:
         created_at = int(datetime.now(UTC).timestamp())
-        if resolved_scope.kind == "team":
+        if scope.kind == "team":
             session = TeamSession(
                 session_id=session_id,
-                team_id=resolved_scope.scope_id,
+                team_id=scope.scope_id,
                 metadata={},
                 runs=[],
                 created_at=created_at,
@@ -676,43 +691,121 @@ def load_scope_session_context(
         else:
             session = AgentSession(
                 session_id=session_id,
-                agent_id=_scope_session_agent_id(resolved_scope),
+                agent_id=_scope_session_agent_id(scope),
                 metadata={},
                 runs=[],
                 created_at=created_at,
                 updated_at=created_at,
             )
     return ScopeSessionContext(
-        scope=resolved_scope,
+        scope=scope,
         storage=storage,
         session=session,
     )
 
 
-def _materialize_session(
+@contextmanager
+def open_resolved_scope_session_context(
     *,
     agent_name: str,
-    session_id: str,
+    scope: HistoryScope | None,
+    session_id: str | None,
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-    scope: HistoryScope,
-    storage: SqliteDb | None,
-    session: AgentSession | TeamSession | None,
-) -> tuple[SqliteDb | None, AgentSession | TeamSession | None]:
-    if storage is None:
-        storage = create_scope_session_storage(
-            agent_name=agent_name,
+    create_session_if_missing: bool = False,
+) -> Iterator[ScopeSessionContext | None]:
+    """Open one already-resolved persisted history scope for the current request."""
+    if session_id is None:
+        yield None
+        return
+    if scope is None:
+        yield None
+        return
+    with open_scope_storage(
+        agent_name=agent_name,
+        scope=scope,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+    ) as storage:
+        yield _build_scope_session_context(
             scope=scope,
-            config=config,
+            session_id=session_id,
+            storage=storage,
+            create_session_if_missing=create_session_if_missing,
+        )
+
+
+@contextmanager
+def open_scope_session_context(
+    *,
+    agent: Agent,
+    agent_name: str,
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    scope: HistoryScope | None = None,
+    create_session_if_missing: bool = False,
+) -> Iterator[ScopeSessionContext | None]:
+    """Open the canonical persisted history scope for one live agent."""
+    resolved_scope = scope or resolve_history_scope(agent)
+    with open_resolved_scope_session_context(
+        agent_name=agent_name,
+        scope=resolved_scope,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        create_session_if_missing=create_session_if_missing,
+    ) as scope_context:
+        yield scope_context
+
+
+@contextmanager
+def open_bound_scope_session_context(
+    *,
+    agents: list[Agent],
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    team_name: str | None = None,
+    create_session_if_missing: bool = False,
+) -> Iterator[ScopeSessionContext | None]:
+    """Open the canonical scope-backed session context for one bound team run."""
+    if not agents and team_name is not None and team_name in config.teams:
+        with open_resolved_scope_session_context(
+            agent_name=team_name,
+            scope=HistoryScope(kind="team", scope_id=team_name),
+            session_id=session_id,
             runtime_paths=runtime_paths,
+            config=config,
             execution_identity=execution_identity,
-        )
-    if session is None:
-        session = (
-            get_team_session(storage, session_id) if scope.kind == "team" else get_agent_session(storage, session_id)
-        )
-    return storage, session
+            create_session_if_missing=create_session_if_missing,
+        ) as scope_context:
+            yield scope_context
+        return
+
+    bound_scope = resolve_bound_team_scope_context(
+        agents=agents,
+        config=config,
+        team_name=team_name,
+    )
+    if bound_scope is None:
+        yield None
+        return
+    with open_resolved_scope_session_context(
+        agent_name=bound_scope.owner_agent_name,
+        scope=bound_scope.scope,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        create_session_if_missing=create_session_if_missing,
+    ) as scope_context:
+        yield scope_context
 
 
 def create_scope_session_storage(
@@ -739,6 +832,19 @@ def create_scope_session_storage(
         subdir="sessions",
         session_table=f"{storage_name}_sessions",
     )
+
+
+def close_unique_sqlite_dbs(*storages: SqliteDb | None) -> None:
+    """Close each distinct SQLite handle at most once."""
+    seen: set[int] = set()
+    for storage in storages:
+        if storage is None:
+            continue
+        storage_id = id(storage)
+        if storage_id in seen:
+            continue
+        seen.add(storage_id)
+        storage.close()
 
 
 def _scope_session_storage_name(scope: HistoryScope) -> str:

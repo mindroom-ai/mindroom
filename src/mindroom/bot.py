@@ -156,7 +156,7 @@ from .constants import (
     RuntimePaths,
     resolve_avatar_path,
 )
-from .history.runtime import create_scope_session_storage
+from .history.runtime import open_scope_storage
 from .history.types import HistoryScope
 from .knowledge.utils import (
     MultiKnowledgeVectorDb,
@@ -192,7 +192,6 @@ if TYPE_CHECKING:
 
     import structlog
     from agno.agent import Agent
-    from agno.db.sqlite import SqliteDb
     from agno.knowledge.knowledge import Knowledge
     from agno.media import Image
 
@@ -2360,16 +2359,6 @@ class AgentBot:
         """Return the Agno session type used by this bot's persisted history."""
         return SessionType.TEAM if self.agent_name in self.config.teams else SessionType.AGENT
 
-    def _create_history_scope_storage(self, execution_identity: ToolExecutionIdentity | None) -> SqliteDb:
-        """Create the canonical storage backing this bot's persisted history scope."""
-        return create_scope_session_storage(
-            agent_name=self.agent_name,
-            scope=self._history_scope(),
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            execution_identity=execution_identity,
-        )
-
     def _team_history_scope(self, team_agents: list[MatrixID]) -> HistoryScope:
         """Return the persisted team-history scope for one team response."""
         if self.agent_name in self.config.teams:
@@ -2378,21 +2367,6 @@ class AgentBot:
             matrix_id.agent_name(self.config, self.runtime_paths) or matrix_id.username for matrix_id in team_agents
         ]
         return HistoryScope(kind="team", scope_id=f"team_{'+'.join(sorted(team_member_names))}")
-
-    def _create_team_history_storage(
-        self,
-        *,
-        team_agents: list[MatrixID],
-        execution_identity: ToolExecutionIdentity | None,
-    ) -> SqliteDb:
-        """Create the canonical shared storage backing one team response."""
-        return create_scope_session_storage(
-            agent_name=self.agent_name,
-            scope=self._team_history_scope(team_agents),
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            execution_identity=execution_identity,
-        )
 
     def _build_tool_execution_identity(
         self,
@@ -2921,15 +2895,18 @@ class AgentBot:
         )
         try:
             if strip_transient_enrichment_after_run:
-                storage = self._create_team_history_storage(
-                    team_agents=team_agents,
+                with open_scope_storage(
+                    agent_name=self.agent_name,
+                    scope=self._team_history_scope(team_agents),
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
                     execution_identity=execution_identity,
-                )
-                strip_enrichment_from_session_storage(
-                    storage,
-                    session_id,
-                    session_type=SessionType.TEAM,
-                )
+                ) as storage:
+                    strip_enrichment_from_session_storage(
+                        storage,
+                        session_id,
+                        session_type=SessionType.TEAM,
+                    )
         except Exception:
             self.logger.exception(
                 "Failed to strip hook enrichment from team session history",
@@ -3986,12 +3963,18 @@ class AgentBot:
 
         try:
             if strip_transient_enrichment_after_run:
-                storage = self._create_history_scope_storage(execution_identity)
-                strip_enrichment_from_session_storage(
-                    storage,
-                    session_id,
-                    session_type=self._history_session_type(),
-                )
+                with open_scope_storage(
+                    agent_name=self.agent_name,
+                    scope=self._history_scope(),
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
+                    execution_identity=execution_identity,
+                ) as storage:
+                    strip_enrichment_from_session_storage(
+                        storage,
+                        session_id,
+                        session_type=self._history_session_type(),
+                    )
         except Exception:
             self.logger.exception(
                 "Failed to strip hook enrichment from session history",
@@ -4479,13 +4462,19 @@ class AgentBot:
                 user_id=requester_user_id,
                 session_id=session_id,
             )
-            storage = self._create_history_scope_storage(execution_identity)
-            removed = remove_run_by_event_id(
-                storage,
-                session_id,
-                event_info.original_event_id,
-                session_type=self._history_session_type(),
-            )
+            with open_scope_storage(
+                agent_name=self.agent_name,
+                scope=self._history_scope(),
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                execution_identity=execution_identity,
+            ) as storage:
+                removed = remove_run_by_event_id(
+                    storage,
+                    session_id,
+                    event_info.original_event_id,
+                    session_type=self._history_session_type(),
+                )
             if removed:
                 self.logger.info(
                     "Removed stale run for edited message",

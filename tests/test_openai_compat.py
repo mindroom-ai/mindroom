@@ -29,6 +29,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import PreparedExecutionContext
+from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.types import ResolvedReplayPlan
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -2621,6 +2622,7 @@ class TestTeamCompletion:
 
     def test_build_team_uses_stable_team_scope_db(self) -> None:
         """Configured teams should persist runs into the stable team scope store."""
+        runtime_paths = _runtime_paths()
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
@@ -2644,7 +2646,21 @@ class TestTeamCompletion:
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team("coord_team", config, _runtime_paths(), execution_identity=None)
+            with open_bound_scope_session_context(
+                agents=[],
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+                team_name="coord_team",
+            ) as scope_context:
+                _build_team(
+                    "coord_team",
+                    config,
+                    runtime_paths,
+                    execution_identity=None,
+                    scope_context=scope_context,
+                )
 
         assert mock_team_init.call_args.kwargs["id"] == "coord_team"
         assert mock_team_init.call_args.kwargs["db"] is not None

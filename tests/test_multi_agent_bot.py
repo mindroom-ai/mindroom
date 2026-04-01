@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -101,6 +101,11 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
         config,
         test_runtime_paths(runtime_root),
     )
+
+
+@contextmanager
+def _open_storage(storage: object) -> object:
+    yield storage
 
 
 def _mock_shared_knowledge_manager(
@@ -1651,7 +1656,7 @@ class TestAgentBot:
             patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
             patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.bot.team_response", new_callable=AsyncMock, return_value="Team reply"),
-            patch("mindroom.bot.create_scope_session_storage", return_value=storage),
+            patch("mindroom.bot.open_scope_storage", return_value=_open_storage(storage)),
             patch("mindroom.bot.strip_enrichment_from_session_storage") as mock_strip_enrichment,
         ):
             event_id = await bot._generate_team_response_helper(

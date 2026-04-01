@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,7 +46,7 @@ from mindroom.history.runtime import (
     apply_replay_plan,
     estimate_preparation_static_tokens,
     estimate_preparation_static_tokens_for_team,
-    load_scope_session_context,
+    open_scope_session_context,
     plan_replay_that_fits,
 )
 from mindroom.history.storage import (
@@ -233,6 +235,30 @@ def _session(
         created_at=1,
         updated_at=1,
     )
+
+
+@pytest.fixture(autouse=True)
+def _close_test_storages(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Close temporary SQLite handles created directly by Agno history tests."""
+    storages: list[object] = []
+    module = sys.modules[__name__]
+    original_create_session_storage = create_session_storage
+
+    def _tracked_create_session_storage(*args: object, **kwargs: object) -> object:
+        storage = original_create_session_storage(*args, **kwargs)
+        storages.append(storage)
+        return storage
+
+    monkeypatch.setattr(module, "create_session_storage", _tracked_create_session_storage)
+    yield
+
+    seen_storage_ids: set[int] = set()
+    for storage in storages:
+        storage_id = id(storage)
+        if storage_id in seen_storage_ids:
+            continue
+        seen_storage_ids.add(storage_id)
+        storage.close()
 
 
 def _team_session(
@@ -431,7 +457,7 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
     config, runtime_paths = _make_config(tmp_path)
     agent = _agent()
     agent.team_id = "team-123"
-    scope_context = load_scope_session_context(
+    with open_scope_session_context(
         agent=agent,
         agent_name="test_agent",
         session_id="session-1",
@@ -439,16 +465,16 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
         config=config,
         execution_identity=None,
         create_session_if_missing=True,
-    )
-    assert scope_context is not None
-    assert scope_context.scope == HistoryScope(kind="team", scope_id="team-123")
-    session = _team_session(
-        "session-1",
-        team_id="team-123",
-        runs=[_completed_team_run("team-1", team_id="team-123")],
-        summary=SessionSummary(summary="team summary", updated_at=datetime.now(UTC)),
-    )
-    scope_context.storage.upsert_session(session)
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.scope == HistoryScope(kind="team", scope_id="team-123")
+        session = _team_session(
+            "session-1",
+            team_id="team-123",
+            runs=[_completed_team_run("team-1", team_id="team-123")],
+            summary=SessionSummary(summary="team summary", updated_at=datetime.now(UTC)),
+        )
+        scope_context.storage.upsert_session(session)
 
     prepared = await prepare_history_for_run(
         agent=agent,
@@ -458,8 +484,6 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
-        storage=scope_context.storage,
-        session=session,
     )
 
     assert prepared.replays_persisted_history is True
@@ -2464,23 +2488,33 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
     recording_model = RecordingModel(id="recording-model", provider="fake")
     live_agent = _agent(model=recording_model, db=storage, num_history_runs=1)
 
-    with (
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
-    ):
-        agent, full_prompt, unseen_event_ids, prepared = await _prepare_agent_and_prompt(
-            "test_agent",
-            "Current prompt",
-            runtime_paths,
-            config,
-            thread_history=[
-                {"event_id": "event-1", "sender": "alice", "body": "Already seen"},
-                {"event_id": "event-2", "sender": "alice", "body": "Fresh follow-up"},
-                {"event_id": "event-3", "sender": "alice", "body": "Current message body"},
-            ],
-            session_id="session-1",
-            reply_to_event_id="event-3",
-        )
+    with open_scope_session_context(
+        agent=live_agent,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        with (
+            patch("mindroom.ai.create_agent", return_value=live_agent),
+            patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        ):
+            agent, full_prompt, unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+                "test_agent",
+                "Current prompt",
+                runtime_paths,
+                config,
+                scope_context=scope_context,
+                thread_history=[
+                    {"event_id": "event-1", "sender": "alice", "body": "Already seen"},
+                    {"event_id": "event-2", "sender": "alice", "body": "Fresh follow-up"},
+                    {"event_id": "event-3", "sender": "alice", "body": "Current message body"},
+                ],
+                session_id="session-1",
+                reply_to_event_id="event-3",
+            )
 
     assert unseen_event_ids == ["event-2"]
     assert prepared.replays_persisted_history is True

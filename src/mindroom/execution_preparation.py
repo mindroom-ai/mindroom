@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from mindroom.agents import create_session_storage, get_agent_session
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
     STREAM_STATUS_CANCELLED,
@@ -17,14 +16,12 @@ from mindroom.constants import (
     RuntimePaths,
 )
 from mindroom.history.runtime import (
-    PreparedScopeHistory,
+    ScopeSessionContext,
     estimate_preparation_static_tokens,
     estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
-    load_bound_scope_session_context,
     prepare_bound_scope_history,
     prepare_scope_history,
-    resolve_history_scope,
 )
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.logging_config import get_logger
@@ -268,9 +265,8 @@ def _build_prompt_with_unseen(
     )
 
 
-def _scope_seen_event_ids(prepared_scope_history: PreparedScopeHistory) -> set[str]:
-    """Return currently persisted seen IDs for one prepared scope."""
-    scope_context = prepared_scope_history.scope_context
+def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]:
+    """Return currently persisted seen IDs for one open prepared scope."""
     if scope_context is None or scope_context.session is None:
         return set()
     return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
@@ -278,6 +274,7 @@ def _scope_seen_event_ids(prepared_scope_history: PreparedScopeHistory) -> set[s
 
 async def prepare_agent_execution_context(
     *,
+    scope_context: ScopeSessionContext | None,
     agent: Agent,
     agent_name: str,
     prompt: str,
@@ -292,19 +289,11 @@ async def prepare_agent_execution_context(
     compaction_outcomes_collector: list[CompactionOutcome] | None,
 ) -> PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
-    storage = None
-    session = None
-    if session_id:
-        storage = create_session_storage(
-            agent_name,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        )
-        session = get_agent_session(storage, session_id)
-
-    scope = resolve_history_scope(agent)
-    seen_ids = read_scope_seen_event_ids(session, scope) if session is not None and scope is not None else set()
+    seen_ids = (
+        read_scope_seen_event_ids(scope_context.session, scope_context.scope)
+        if scope_context is not None and scope_context.session is not None
+        else set()
+    )
     response_sender_id = config.get_ids(runtime_paths).get(agent_name)
     response_sender = response_sender_id.full_id if response_sender_id is not None else None
     provisional_prompt = prompt
@@ -340,8 +329,7 @@ async def prepare_agent_execution_context(
         config=config,
         execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
-        storage=storage,
-        session=session,
+        scope_context=scope_context,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
         static_prompt_tokens=estimate_preparation_static_tokens(
@@ -355,7 +343,7 @@ async def prepare_agent_execution_context(
         final_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
             prompt,
             thread_history,
-            seen_event_ids=_scope_seen_event_ids(prepared_scope_history),
+            seen_event_ids=_scope_seen_event_ids(scope_context),
             current_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
             response_sender_id=response_sender,
@@ -387,6 +375,7 @@ async def prepare_agent_execution_context(
 
 async def prepare_bound_team_execution_context(
     *,
+    scope_context: ScopeSessionContext | None,
     agents: list[Agent],
     team: Team,
     prompt: str,
@@ -405,17 +394,9 @@ async def prepare_bound_team_execution_context(
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
-    initial_scope_context = load_bound_scope_session_context(
-        agents=agents,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        team_name=team_name,
-    )
     seen_event_ids = (
-        read_scope_seen_event_ids(initial_scope_context.session, initial_scope_context.scope)
-        if initial_scope_context is not None and initial_scope_context.session is not None
+        read_scope_seen_event_ids(scope_context.session, scope_context.scope)
+        if scope_context is not None and scope_context.session is not None
         else set()
     )
 
@@ -440,6 +421,7 @@ async def prepare_bound_team_execution_context(
         config=config,
         execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
+        scope_context=scope_context,
         team_name=team_name,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
@@ -449,7 +431,7 @@ async def prepare_bound_team_execution_context(
         final_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
             prompt,
             thread_history,
-            seen_event_ids=_scope_seen_event_ids(prepared_scope_history),
+            seen_event_ids=_scope_seen_event_ids(scope_context),
             current_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,

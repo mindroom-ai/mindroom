@@ -761,6 +761,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     runtime_paths: constants.RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,
+    history_storage: SqliteDb | None = None,
     active_model_name: str | None = None,
     hook_registry: HookRegistry | None = None,
     knowledge: KnowledgeProtocol | None = None,
@@ -775,6 +776,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         runtime_paths: Explicit runtime context for paths, env, and credentials.
         execution_identity: Request execution identity used to resolve scoped
             state, workspaces, worker routing, and requester-local storage.
+        history_storage: Optional already-open session storage owned by the
+            caller for this request. When omitted, create_agent opens its own
+            storage and the caller must close it after the run if needed.
         active_model_name: Optional resolved runtime model name for this run.
             When omitted, the agent's configured model is used.
         hook_registry: Optional hook registry for plugin-based tool call
@@ -852,7 +856,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 error=str(exc),
             )
 
-    storage = create_state_storage_db(
+    storage = history_storage or create_state_storage_db(
         storage_name=agent_name,
         state_root=agent_runtime.state_root,
         subdir="sessions",

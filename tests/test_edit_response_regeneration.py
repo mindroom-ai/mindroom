@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -72,6 +73,11 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
         },
     )
     return bind_runtime_paths(config, runtime_paths)
+
+
+@contextmanager
+def _open_storage(storage: object) -> object:
+    yield storage
 
 
 def _team_test_config(tmp_path: Path) -> Config:
@@ -344,7 +350,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=True),
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate,
-        patch("mindroom.bot.create_scope_session_storage", return_value=storage) as mock_scope_storage,
+        patch("mindroom.bot.open_scope_storage", return_value=_open_storage(storage)) as mock_scope_storage,
         patch("mindroom.bot.remove_run_by_event_id", return_value=True) as mock_remove_run,
     ):
         mock_context.return_value = MagicMock(

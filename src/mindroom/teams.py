@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
 from agno.agent import Agent
@@ -21,10 +22,11 @@ from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
+from agno.session.team import TeamSession
 from agno.team import Team
 from pydantic import BaseModel, Field
 
-from mindroom.agents import create_agent, enable_all_history_replay
+from mindroom.agents import create_agent, enable_all_history_replay, get_team_session
 from mindroom.ai import (
     build_matrix_run_metadata,
     get_model_instance,
@@ -37,8 +39,10 @@ from mindroom.execution_preparation import (
     prepare_bound_team_execution_context,
 )
 from mindroom.history.runtime import (
+    ScopeSessionContext,
     apply_replay_plan,
-    load_bound_scope_session_context,
+    close_unique_sqlite_dbs,
+    open_bound_scope_session_context,
     resolve_bound_team_scope_context,
 )
 from mindroom.history.storage import update_scope_seen_event_ids
@@ -64,6 +68,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Collection, Mapping
 
     import nio
+    from agno.db.sqlite import SqliteDb
     from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
@@ -952,29 +957,30 @@ def resolve_configured_team(
 
 def _persist_bound_seen_event_ids(
     *,
-    agents: list[Agent],
+    scope_context: ScopeSessionContext | None,
     session_id: str | None,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
     event_ids: list[str],
-    team_name: str | None = None,
 ) -> None:
-    if not event_ids:
+    if not event_ids or scope_context is None or session_id is None:
         return
-    scope_context = load_bound_scope_session_context(
-        agents=agents,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        team_name=team_name,
-        create_session_if_missing=True,
-    )
-    if scope_context is None or scope_context.session is None:
-        return
-    if update_scope_seen_event_ids(scope_context.session, scope_context.scope, event_ids):
-        scope_context.storage.upsert_session(scope_context.session)
+    session = scope_context.session or get_team_session(scope_context.storage, session_id)
+    if session is None:
+        created_at = int(datetime.now(UTC).timestamp())
+        session = TeamSession(
+            session_id=session_id,
+            team_id=scope_context.scope.scope_id,
+            metadata={},
+            runs=[],
+            created_at=created_at,
+            updated_at=created_at,
+        )
+    if update_scope_seen_event_ids(session, scope_context.scope, event_ids):
+        scope_context.storage.upsert_session(session)
+
+
+def _raise_team_run_cancelled(reason: str | None) -> NoReturn:
+    """Raise the canonical team cancellation error."""
+    raise asyncio.CancelledError(reason or "Run cancelled")
 
 
 def _build_agent_from_orchestrator(
@@ -1082,7 +1088,7 @@ def _create_team_instance(
     fallback_team_id: str,
     model_name: str | None = None,
     configured_team_name: str | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
+    history_storage: SqliteDb | None = None,
 ) -> Team:
     """Create a configured Team instance.
 
@@ -1095,7 +1101,8 @@ def _create_team_instance(
         fallback_team_id: Stable fallback id when no team scope storage is available
         model_name: Optional model name override
         configured_team_name: Optional configured team id for stable team-scope history
-        execution_identity: Optional request execution identity for private/runtime storage resolution
+        history_storage: Optional already-open shared team history storage
+            owned by the caller for this request.
 
     Returns:
         Configured Team instance
@@ -1108,9 +1115,7 @@ def _create_team_instance(
         history_settings = config.get_default_history_settings()
     scope_context = resolve_bound_team_scope_context(
         agents=agents,
-        runtime_paths=runtime_paths,
         config=config,
-        execution_identity=execution_identity,
         team_name=configured_team_name,
     )
     team_id = scope_context.scope.scope_id if scope_context is not None else fallback_team_id
@@ -1126,7 +1131,7 @@ def _create_team_instance(
         id=team_id,
         name=team_display_name,
         model=model,
-        db=scope_context.storage if scope_context is not None else None,
+        db=history_storage,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
         add_history_to_context=True,
         add_session_summary_to_context=True,
@@ -1183,6 +1188,7 @@ def select_model_for_team(
 
 async def _prepare_materialized_team_execution(
     *,
+    scope_context: ScopeSessionContext | None,
     team_members: ResolvedExactTeamMembers,
     mode: TeamMode,
     message: str,
@@ -1224,9 +1230,10 @@ async def _prepare_materialized_team_execution(
         fallback_team_id=team_label,
         model_name=resolved_team_model_name,
         configured_team_name=configured_team_name,
-        execution_identity=execution_identity,
+        history_storage=scope_context.storage if scope_context is not None else None,
     )
     prepared_execution = await prepare_bound_team_execution_context(
+        scope_context=scope_context,
         agents=team_members.agents,
         team=team,
         prompt=message,
@@ -1300,129 +1307,151 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
     media_inputs = media or MediaInputs()
+    team: Team | None = None
+    scope_context: ScopeSessionContext | None = None
 
     try:
-        prepared_execution = await _prepare_materialized_team_execution(
-            team_members=team_members,
-            mode=mode,
-            message=message,
-            orchestrator=orchestrator,
-            execution_identity=execution_identity,
-            thread_history=thread_history,
-            model_name=model_name,
+        with open_bound_scope_session_context(
+            agents=agents,
             session_id=session_id,
-            reply_to_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
-            response_sender_id=response_sender_id,
-            compaction_outcomes_collector=compaction_outcomes_collector,
-            configured_team_name=configured_team_name,
-        )
+            runtime_paths=orchestrator.runtime_paths,
+            config=orchestrator.config,
+            execution_identity=execution_identity,
+            team_name=configured_team_name,
+        ) as opened_scope_context:
+            scope_context = opened_scope_context
+            prepared_execution = await _prepare_materialized_team_execution(
+                scope_context=scope_context,
+                team_members=team_members,
+                mode=mode,
+                message=message,
+                orchestrator=orchestrator,
+                execution_identity=execution_identity,
+                thread_history=thread_history,
+                model_name=model_name,
+                session_id=session_id,
+                reply_to_event_id=reply_to_event_id,
+                active_event_ids=active_event_ids,
+                response_sender_id=response_sender_id,
+                compaction_outcomes_collector=compaction_outcomes_collector,
+                configured_team_name=configured_team_name,
+            )
+            team = prepared_execution.team
+            prompt = prepared_execution.prepared_prompt
+            unseen_event_ids = prepared_execution.unseen_event_ids
+            run_metadata = prepared_execution.run_metadata
+            logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
+            logger.info(f"TEAM PROMPT: {prompt[:500]}")
+
+            async def _run(
+                current_prompt: str,
+                current_media_inputs: MediaInputs,
+                current_run_id: str | None,
+            ) -> object:
+                if run_id_callback is not None and current_run_id is not None:
+                    run_id_callback(current_run_id)
+                return await team.arun(
+                    current_prompt,
+                    session_id=session_id,
+                    run_id=current_run_id,
+                    user_id=user_id,
+                    audio=current_media_inputs.audio,
+                    images=current_media_inputs.images,
+                    files=current_media_inputs.files,
+                    videos=current_media_inputs.videos,
+                    metadata=run_metadata,
+                )
+
+            response: object | None = None
+            attempt_prompt = prompt
+            attempt_media_inputs = media_inputs
+            attempt_run_id = run_id
+
+            for retried_without_inline_media in (False, True):
+                try:
+                    response = await _run(attempt_prompt, attempt_media_inputs, attempt_run_id)
+                except Exception as e:
+                    if not retried_without_inline_media and should_retry_without_inline_media(e, attempt_media_inputs):
+                        logger.warning(
+                            "Retrying team response without inline media after validation error",
+                            agents=agent_list,
+                            error=str(e),
+                        )
+                        attempt_prompt = append_inline_media_fallback_prompt(prompt)
+                        attempt_media_inputs = MediaInputs()
+                        attempt_run_id = _next_retry_run_id(run_id)
+                        continue
+
+                    logger.exception(f"Error in team response with agents {agent_list}")
+                    return get_user_friendly_error_message(e, team_name)
+
+                if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
+                    error_text = str(response.content or "Unknown team error")
+                    if not retried_without_inline_media and should_retry_without_inline_media(
+                        error_text,
+                        attempt_media_inputs,
+                    ):
+                        logger.warning(
+                            "Retrying team response without inline media after errored run output",
+                            agents=agent_list,
+                            error=error_text,
+                        )
+                        attempt_prompt = append_inline_media_fallback_prompt(prompt)
+                        attempt_media_inputs = MediaInputs()
+                        attempt_run_id = _next_retry_run_id(run_id)
+                        continue
+                    logger.warning("Team response returned errored run output", agents=agent_list, error=error_text)
+
+                break
+
+            assert response is not None
+
+            if isinstance(response, TeamRunOutput) and response.status == RunStatus.cancelled:
+                _raise_team_run_cancelled(response.content)
+            if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
+                return get_user_friendly_error_message(
+                    Exception(str(response.content or "Unknown team error")),
+                    team_name,
+                )
+            if reply_to_event_id:
+                _persist_bound_seen_event_ids(
+                    scope_context=scope_context,
+                    session_id=session_id,
+                    event_ids=[reply_to_event_id, *unseen_event_ids],
+                )
+
+            if isinstance(response, TeamRunOutput):
+                if response.member_responses:
+                    logger.debug(f"Team had {len(response.member_responses)} member responses")
+
+                logger.info(f"Team consensus content: {response.content[:200] if response.content else 'None'}")
+
+                parts = format_team_response(response)
+                team_response_text = "\n\n".join(parts) if parts else "No team response generated."
+            else:
+                logger.warning(f"Unexpected response type: {type(response)}", response=response)
+                team_response_text = str(response)
+
+            logger.info(f"TEAM RESPONSE ({agent_list}): {team_response_text[:_MAX_LOG_MESSAGE_LENGTH]}")
+            if len(team_response_text) > _MAX_LOG_MESSAGE_LENGTH:
+                logger.debug(f"TEAM RESPONSE (full): {team_response_text}")
+
+            team_header = _format_team_header(team_members.display_names)
+            return team_header + team_response_text
     except Exception as e:
         logger.exception("Error preparing team members", agents=agent_list)
         return get_user_friendly_error_message(e, team_name)
-    team = prepared_execution.team
-    prompt = prepared_execution.prepared_prompt
-    unseen_event_ids = prepared_execution.unseen_event_ids
-    run_metadata = prepared_execution.run_metadata
-    logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
-    logger.info(f"TEAM PROMPT: {prompt[:500]}")
-
-    async def _run(current_prompt: str, current_media_inputs: MediaInputs, current_run_id: str | None) -> object:
-        if run_id_callback is not None and current_run_id is not None:
-            run_id_callback(current_run_id)
-        return await team.arun(
-            current_prompt,
-            session_id=session_id,
-            run_id=current_run_id,
-            user_id=user_id,
-            audio=current_media_inputs.audio,
-            images=current_media_inputs.images,
-            files=current_media_inputs.files,
-            videos=current_media_inputs.videos,
-            metadata=run_metadata,
-        )
-
-    response: object | None = None
-    attempt_prompt = prompt
-    attempt_media_inputs = media_inputs
-    attempt_run_id = run_id
-
-    try:
-        for retried_without_inline_media in (False, True):
-            try:
-                response = await _run(attempt_prompt, attempt_media_inputs, attempt_run_id)
-            except Exception as e:
-                if not retried_without_inline_media and should_retry_without_inline_media(e, attempt_media_inputs):
-                    logger.warning(
-                        "Retrying team response without inline media after validation error",
-                        agents=agent_list,
-                        error=str(e),
-                    )
-                    attempt_prompt = append_inline_media_fallback_prompt(prompt)
-                    attempt_media_inputs = MediaInputs()
-                    attempt_run_id = _next_retry_run_id(run_id)
-                    continue
-
-                logger.exception(f"Error in team response with agents {agent_list}")
-                return get_user_friendly_error_message(e, team_name)
-
-            if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
-                error_text = str(response.content or "Unknown team error")
-                if not retried_without_inline_media and should_retry_without_inline_media(
-                    error_text,
-                    attempt_media_inputs,
-                ):
-                    logger.warning(
-                        "Retrying team response without inline media after errored run output",
-                        agents=agent_list,
-                        error=error_text,
-                    )
-                    attempt_prompt = append_inline_media_fallback_prompt(prompt)
-                    attempt_media_inputs = MediaInputs()
-                    attempt_run_id = _next_retry_run_id(run_id)
-                    continue
-                logger.warning("Team response returned errored run output", agents=agent_list, error=error_text)
-
-            break
-
-        assert response is not None
-
-        if isinstance(response, TeamRunOutput) and response.status == RunStatus.cancelled:
-            raise asyncio.CancelledError(response.content or "Run cancelled")
-        if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
-            return get_user_friendly_error_message(Exception(str(response.content or "Unknown team error")), team_name)
-        if reply_to_event_id:
-            _persist_bound_seen_event_ids(
-                agents=agents,
-                session_id=session_id,
-                runtime_paths=orchestrator.runtime_paths,
-                config=orchestrator.config,
-                execution_identity=execution_identity,
-                event_ids=[reply_to_event_id, *unseen_event_ids],
-                team_name=configured_team_name,
-            )
-
-        if isinstance(response, TeamRunOutput):
-            if response.member_responses:
-                logger.debug(f"Team had {len(response.member_responses)} member responses")
-
-            logger.info(f"Team consensus content: {response.content[:200] if response.content else 'None'}")
-
-            parts = format_team_response(response)
-            team_response_text = "\n\n".join(parts) if parts else "No team response generated."
-        else:
-            logger.warning(f"Unexpected response type: {type(response)}", response=response)
-            team_response_text = str(response)
-
-        logger.info(f"TEAM RESPONSE ({agent_list}): {team_response_text[:_MAX_LOG_MESSAGE_LENGTH]}")
-        if len(team_response_text) > _MAX_LOG_MESSAGE_LENGTH:
-            logger.debug(f"TEAM RESPONSE (full): {team_response_text}")
-
-        team_header = _format_team_header(team_members.display_names)
-        return team_header + team_response_text
     finally:
-        # Native Agno replay no longer binds transient per-member history state.
-        pass
+        close_unique_sqlite_dbs(
+            *(
+                cast("SqliteDb | None", agent.db)
+                for agent in agents
+                if scope_context is None or agent.db is not scope_context.storage
+            ),
+            cast("SqliteDb | None", team.db)
+            if team is not None and (scope_context is None or team.db is not scope_context.storage)
+            else None,
+        )
 
 
 async def _team_response_stream_raw(
@@ -1534,220 +1563,251 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return
     agent_names = team_members.display_names
     display_names = team_members.display_names
+    team: Team | None = None
+    scope_context: ScopeSessionContext | None = None
+    team_label = f"Team ({', '.join(agent_names)})"
+
     try:
-        prepared_execution = await _prepare_materialized_team_execution(
-            team_members=team_members,
-            mode=mode,
-            message=message,
-            orchestrator=orchestrator,
-            execution_identity=execution_identity,
-            thread_history=thread_history,
-            model_name=model_name,
+        with open_bound_scope_session_context(
+            agents=team_members.agents,
             session_id=session_id,
-            reply_to_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
-            response_sender_id=response_sender_id,
-            compaction_outcomes_collector=compaction_outcomes_collector,
-            configured_team_name=configured_team_name,
-        )
-    except Exception as e:
-        logger.exception("Error preparing team members for streaming", agents=agent_names)
-        yield get_user_friendly_error_message(e, f"Team ({', '.join(agent_names)})")
-        return
-    team = prepared_execution.team
-    prepared_prompt = prepared_execution.prepared_prompt
-    unseen_event_ids = prepared_execution.unseen_event_ids
-    run_metadata = prepared_execution.run_metadata
-    logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
-    media_inputs = media or MediaInputs()
-    attempt_prompt = prepared_prompt
-    attempt_media_inputs = media_inputs
-    attempt_run_id = run_id
-    team_name = f"Team ({', '.join(agent_names)})"
-
-    per_member: dict[str, str] = {}
-    consensus: str = ""
-    tool_trace: list[ToolTraceEntry] = []
-    next_tool_index = 1
-    pending_tools: list[tuple[str, int, str]] = []
-
-    def _scope_key_for_agent(agent_name: str) -> str:
-        return f"agent:{agent_name}"
-
-    def _get_consensus() -> str:
-        return consensus
-
-    def _append_to_consensus(text: str) -> None:
-        nonlocal consensus
-        consensus += text
-
-    def _set_consensus(value: str) -> None:
-        nonlocal consensus
-        consensus = value
-
-    def _ensure_hidden_tool_gap(*, get_text: Callable[[], str], apply_text: Callable[[str], None]) -> None:
-        if not get_text().endswith("\n\n"):
-            apply_text("\n\n")
-
-    def _start_tool(
-        *,
-        scope_key: str,
-        get_text: Callable[[], str],
-        apply_text: Callable[[str], None],
-        tool: ToolExecution | None,
-    ) -> None:
-        nonlocal next_tool_index
-        if not show_tool_calls:
-            _ensure_hidden_tool_gap(get_text=get_text, apply_text=apply_text)
-            return
-
-        tool_msg, trace_entry = format_tool_started_event(tool, tool_index=next_tool_index)
-        if tool_msg:
-            apply_text(tool_msg)
-        if trace_entry is not None:
-            tool_trace.append(trace_entry)
-            pending_tools.append((trace_entry.tool_name, next_tool_index, scope_key))
-            next_tool_index += 1
-
-    def _complete_tool(
-        *,
-        scope_key: str,
-        get_text: Callable[[], str],
-        set_text: Callable[[str], None],
-        tool: ToolExecution | None,
-    ) -> None:
-        info = extract_tool_completed_info(tool)
-        if not info:
-            return
-        if not show_tool_calls:
-            return
-
-        tool_name, result = info
-        match_pos = next(
-            (
-                pos
-                for pos in range(len(pending_tools) - 1, -1, -1)
-                if pending_tools[pos][0] == tool_name and pending_tools[pos][2] == scope_key
-            ),
-            None,
-        )
-        if match_pos is None:
-            logger.warning(
-                "Missing pending tool start in team stream; skipping completion marker",
-                tool_name=tool_name,
-                scope=scope_key,
-            )
-            return
-
-        _, tool_index, _ = pending_tools.pop(match_pos)
-        updated_text, trace_entry = complete_pending_tool_block(
-            get_text(),
-            tool_name,
-            result,
-            tool_index=tool_index,
-        )
-        set_text(updated_text)
-
-        if 0 < tool_index <= len(tool_trace):
-            existing_entry = tool_trace[tool_index - 1]
-            existing_entry.type = "tool_call_completed"
-            existing_entry.result_preview = trace_entry.result_preview
-            existing_entry.truncated = existing_entry.truncated or trace_entry.truncated
-        else:
-            logger.warning(
-                "Missing tool trace slot in team stream for completion",
-                tool_name=tool_name,
-                tool_index=tool_index,
-                trace_len=len(tool_trace),
-            )
-
-    def _start_tool_for_member(agent_name: str, tool: ToolExecution | None) -> None:
-        if agent_name not in per_member:
-            per_member[agent_name] = ""
-
-        def _get_text() -> str:
-            return per_member[agent_name]
-
-        def _apply_text(text: str) -> None:
-            per_member[agent_name] += text
-
-        _start_tool(
-            scope_key=_scope_key_for_agent(agent_name),
-            get_text=_get_text,
-            apply_text=_apply_text,
-            tool=tool,
-        )
-
-    def _complete_tool_for_member(agent_name: str, tool: ToolExecution | None) -> None:
-        if agent_name not in per_member:
-            per_member[agent_name] = ""
-
-        def _get_text() -> str:
-            return per_member[agent_name]
-
-        def _set_text(value: str) -> None:
-            per_member[agent_name] = value
-
-        _complete_tool(
-            scope_key=_scope_key_for_agent(agent_name),
-            get_text=_get_text,
-            set_text=_set_text,
-            tool=tool,
-        )
-
-    try:
-        for retried_without_inline_media in (False, True):
-            # Buffers keyed by display names (Agno emits display name as agent_name)
-            per_member = dict.fromkeys(display_names, "")
-            consensus = ""
-            tool_trace = []
-            next_tool_index = 1
-            pending_tools = []
-            emitted_output = False
-            retry_requested = False
-
-            if run_id_callback is not None and attempt_run_id is not None:
-                run_id_callback(attempt_run_id)
-
-            raw_stream = await _team_response_stream_raw(
-                team=team,
+            runtime_paths=orchestrator.runtime_paths,
+            config=orchestrator.config,
+            execution_identity=execution_identity,
+            team_name=configured_team_name,
+        ) as opened_scope_context:
+            scope_context = opened_scope_context
+            prepared_execution = await _prepare_materialized_team_execution(
+                scope_context=scope_context,
                 team_members=team_members,
-                prompt=attempt_prompt,
-                metadata=run_metadata,
-                media=attempt_media_inputs,
+                mode=mode,
+                message=message,
+                orchestrator=orchestrator,
+                execution_identity=execution_identity,
+                thread_history=thread_history,
+                model_name=model_name,
                 session_id=session_id,
-                run_id=attempt_run_id,
-                user_id=user_id,
+                reply_to_event_id=reply_to_event_id,
+                active_event_ids=active_event_ids,
+                response_sender_id=response_sender_id,
+                compaction_outcomes_collector=compaction_outcomes_collector,
+                configured_team_name=configured_team_name,
             )
-            async for event in raw_stream:
-                # Handle explicit fallback stream outputs (for example no agents available)
-                if isinstance(event, RunOutput):
-                    if reply_to_event_id:
-                        _persist_bound_seen_event_ids(
-                            agents=team_members.agents,
-                            session_id=session_id,
-                            runtime_paths=orchestrator.runtime_paths,
-                            config=orchestrator.config,
-                            execution_identity=execution_identity,
-                            event_ids=[reply_to_event_id, *unseen_event_ids],
-                            team_name=configured_team_name,
-                        )
-                    content = _get_response_content(event)
-                    yield content
+            team = prepared_execution.team
+            prepared_prompt = prepared_execution.prepared_prompt
+            unseen_event_ids = prepared_execution.unseen_event_ids
+            run_metadata = prepared_execution.run_metadata
+            logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
+            media_inputs = media or MediaInputs()
+            attempt_prompt = prepared_prompt
+            attempt_media_inputs = media_inputs
+            attempt_run_id = run_id
+
+            per_member: dict[str, str] = {}
+            consensus: str = ""
+            tool_trace: list[ToolTraceEntry] = []
+            next_tool_index = 1
+            pending_tools: list[tuple[str, int, str]] = []
+
+            def _scope_key_for_agent(agent_name: str) -> str:
+                return f"agent:{agent_name}"
+
+            def _get_consensus() -> str:
+                return consensus
+
+            def _append_to_consensus(text: str) -> None:
+                nonlocal consensus
+                consensus += text
+
+            def _set_consensus(value: str) -> None:
+                nonlocal consensus
+                consensus = value
+
+            def _ensure_hidden_tool_gap(*, get_text: Callable[[], str], apply_text: Callable[[str], None]) -> None:
+                if not get_text().endswith("\n\n"):
+                    apply_text("\n\n")
+
+            def _start_tool(
+                *,
+                scope_key: str,
+                get_text: Callable[[], str],
+                apply_text: Callable[[str], None],
+                tool: ToolExecution | None,
+            ) -> None:
+                nonlocal next_tool_index
+                if not show_tool_calls:
+                    _ensure_hidden_tool_gap(get_text=get_text, apply_text=apply_text)
                     return
 
-                if isinstance(event, TeamRunOutput):
-                    if event.status == RunStatus.cancelled:
-                        raise asyncio.CancelledError(event.content or "Run cancelled")
-                    if event.status == RunStatus.error:
-                        error_text = str(event.content or "Unknown team error")
+                tool_msg, trace_entry = format_tool_started_event(tool, tool_index=next_tool_index)
+                if tool_msg:
+                    apply_text(tool_msg)
+                if trace_entry is not None:
+                    tool_trace.append(trace_entry)
+                    pending_tools.append((trace_entry.tool_name, next_tool_index, scope_key))
+                    next_tool_index += 1
+
+            def _complete_tool(
+                *,
+                scope_key: str,
+                get_text: Callable[[], str],
+                set_text: Callable[[str], None],
+                tool: ToolExecution | None,
+            ) -> None:
+                info = extract_tool_completed_info(tool)
+                if not info or not show_tool_calls:
+                    return
+
+                tool_name, result = info
+                match_pos = next(
+                    (
+                        pos
+                        for pos in range(len(pending_tools) - 1, -1, -1)
+                        if pending_tools[pos][0] == tool_name and pending_tools[pos][2] == scope_key
+                    ),
+                    None,
+                )
+                if match_pos is None:
+                    logger.warning(
+                        "Missing pending tool start in team stream; skipping completion marker",
+                        tool_name=tool_name,
+                        scope=scope_key,
+                    )
+                    return
+
+                _, tool_index, _ = pending_tools.pop(match_pos)
+                updated_text, trace_entry = complete_pending_tool_block(
+                    get_text(),
+                    tool_name,
+                    result,
+                    tool_index=tool_index,
+                )
+                set_text(updated_text)
+
+                if 0 < tool_index <= len(tool_trace):
+                    existing_entry = tool_trace[tool_index - 1]
+                    existing_entry.type = "tool_call_completed"
+                    existing_entry.result_preview = trace_entry.result_preview
+                    existing_entry.truncated = existing_entry.truncated or trace_entry.truncated
+                else:
+                    logger.warning(
+                        "Missing tool trace slot in team stream for completion",
+                        tool_name=tool_name,
+                        tool_index=tool_index,
+                        trace_len=len(tool_trace),
+                    )
+
+            def _start_tool_for_member(agent_name: str, tool: ToolExecution | None) -> None:
+                if agent_name not in per_member:
+                    per_member[agent_name] = ""
+
+                def _get_text() -> str:
+                    return per_member[agent_name]
+
+                def _apply_text(text: str) -> None:
+                    per_member[agent_name] += text
+
+                _start_tool(
+                    scope_key=_scope_key_for_agent(agent_name),
+                    get_text=_get_text,
+                    apply_text=_apply_text,
+                    tool=tool,
+                )
+
+            def _complete_tool_for_member(agent_name: str, tool: ToolExecution | None) -> None:
+                if agent_name not in per_member:
+                    per_member[agent_name] = ""
+
+                def _get_text() -> str:
+                    return per_member[agent_name]
+
+                def _set_text(value: str) -> None:
+                    per_member[agent_name] = value
+
+                _complete_tool(
+                    scope_key=_scope_key_for_agent(agent_name),
+                    get_text=_get_text,
+                    set_text=_set_text,
+                    tool=tool,
+                )
+
+            for retried_without_inline_media in (False, True):
+                per_member = dict.fromkeys(display_names, "")
+                consensus = ""
+                tool_trace = []
+                next_tool_index = 1
+                pending_tools = []
+                emitted_output = False
+                retry_requested = False
+
+                if run_id_callback is not None and attempt_run_id is not None:
+                    run_id_callback(attempt_run_id)
+
+                raw_stream = await _team_response_stream_raw(
+                    team=team,
+                    team_members=team_members,
+                    prompt=attempt_prompt,
+                    metadata=run_metadata,
+                    media=attempt_media_inputs,
+                    session_id=session_id,
+                    run_id=attempt_run_id,
+                    user_id=user_id,
+                )
+                async for event in raw_stream:
+                    if isinstance(event, RunOutput):
+                        if reply_to_event_id:
+                            _persist_bound_seen_event_ids(
+                                scope_context=scope_context,
+                                session_id=session_id,
+                                event_ids=[reply_to_event_id, *unseen_event_ids],
+                            )
+                        yield _get_response_content(event)
+                        return
+
+                    if isinstance(event, TeamRunOutput):
+                        if event.status == RunStatus.cancelled:
+                            _raise_team_run_cancelled(event.content)
+                        if event.status == RunStatus.error:
+                            error_text = str(event.content or "Unknown team error")
+                            if (
+                                not retried_without_inline_media
+                                and not emitted_output
+                                and should_retry_without_inline_media(error_text, attempt_media_inputs)
+                            ):
+                                logger.warning(
+                                    "Retrying team streaming without inline media after errored run output",
+                                    agents=", ".join(agent_names),
+                                    error=error_text,
+                                )
+                                attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
+                                attempt_media_inputs = MediaInputs()
+                                attempt_run_id = _next_retry_run_id(run_id)
+                                retry_requested = True
+                                break
+                            yield get_user_friendly_error_message(Exception(error_text), team_label)
+                            return
+                        if reply_to_event_id:
+                            _persist_bound_seen_event_ids(
+                                scope_context=scope_context,
+                                session_id=session_id,
+                                event_ids=[reply_to_event_id, *unseen_event_ids],
+                            )
+                        parts = format_team_response(event)
+                        team_response_text = (
+                            "\n\n".join(parts) if parts else str(event.content or "No team response generated.")
+                        )
+                        yield _format_team_header(team_members.display_names) + team_response_text
+                        return
+
+                    if isinstance(event, TeamRunErrorEvent):
+                        error_text = event.content or "Unknown team error"
                         if (
                             not retried_without_inline_media
                             and not emitted_output
                             and should_retry_without_inline_media(error_text, attempt_media_inputs)
                         ):
                             logger.warning(
-                                "Retrying team streaming without inline media after errored run output",
+                                "Retrying team streaming without inline media after team error",
                                 agents=", ".join(agent_names),
                                 error=error_text,
                             )
@@ -1756,137 +1816,91 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             attempt_run_id = _next_retry_run_id(run_id)
                             retry_requested = True
                             break
-                        yield get_user_friendly_error_message(Exception(error_text), team_name)
+                        yield get_user_friendly_error_message(Exception(error_text), team_label)
                         return
-                    if reply_to_event_id:
-                        _persist_bound_seen_event_ids(
-                            agents=team_members.agents,
-                            session_id=session_id,
-                            runtime_paths=orchestrator.runtime_paths,
-                            config=orchestrator.config,
-                            execution_identity=execution_identity,
-                            event_ids=[reply_to_event_id, *unseen_event_ids],
-                            team_name=configured_team_name,
+
+                    if isinstance(event, TeamRunCancelledEvent):
+                        _raise_team_run_cancelled(event.reason)
+
+                    if isinstance(event, AgentRunContentEvent):
+                        member_name = event.agent_name
+                        if member_name:
+                            if member_name not in per_member:
+                                per_member[member_name] = ""
+                            per_member[member_name] += str(event.content or "")
+                    elif isinstance(event, AgentToolCallStartedEvent):
+                        member_name = event.agent_name
+                        if member_name:
+                            _start_tool_for_member(member_name, event.tool)
+                    elif isinstance(event, AgentToolCallCompletedEvent):
+                        member_name = event.agent_name
+                        if member_name:
+                            _complete_tool_for_member(member_name, event.tool)
+                    elif isinstance(event, TeamRunContentEvent):
+                        if event.content:
+                            consensus += str(event.content)
+                        else:
+                            logger.debug("Empty team consensus event received")
+                    elif isinstance(event, TeamToolCallStartedEvent):
+                        _start_tool(
+                            scope_key="team",
+                            get_text=_get_consensus,
+                            apply_text=_append_to_consensus,
+                            tool=event.tool,
                         )
-                    parts = format_team_response(event)
-                    team_response_text = (
-                        "\n\n".join(parts) if parts else str(event.content or "No team response generated.")
-                    )
-                    yield _format_team_header(team_members.display_names) + team_response_text
-                    return
-
-                # Handle setup/stream-time team errors from provider/model
-                if isinstance(event, TeamRunErrorEvent):
-                    error_text = event.content or "Unknown team error"
-                    if (
-                        not retried_without_inline_media
-                        and not emitted_output
-                        and should_retry_without_inline_media(error_text, attempt_media_inputs)
-                    ):
-                        logger.warning(
-                            "Retrying team streaming without inline media after team error",
-                            agents=", ".join(agent_names),
-                            error=error_text,
+                    elif isinstance(event, TeamToolCallCompletedEvent):
+                        _complete_tool(
+                            scope_key="team",
+                            get_text=_get_consensus,
+                            set_text=_set_consensus,
+                            tool=event.tool,
                         )
-                        attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
-                        attempt_media_inputs = MediaInputs()
-                        attempt_run_id = _next_retry_run_id(run_id)
-                        retry_requested = True
-                        break
-                    yield get_user_friendly_error_message(Exception(error_text), team_name)
-                    return
-
-                if isinstance(event, TeamRunCancelledEvent):
-                    raise asyncio.CancelledError(event.reason or "Run cancelled")
-
-                # Individual agent response event
-                if isinstance(event, AgentRunContentEvent):
-                    agent_name = event.agent_name
-                    if agent_name:
-                        content = str(event.content or "")
-                        if agent_name not in per_member:
-                            per_member[agent_name] = ""
-                        per_member[agent_name] += content
-
-                # Agent tool call started
-                elif isinstance(event, AgentToolCallStartedEvent):
-                    agent_name = event.agent_name
-                    if agent_name:
-                        _start_tool_for_member(agent_name, event.tool)
-
-                # Agent tool call completed
-                elif isinstance(event, AgentToolCallCompletedEvent):
-                    agent_name = event.agent_name
-                    if agent_name:
-                        _complete_tool_for_member(agent_name, event.tool)
-
-                # Team consensus content event
-                elif isinstance(event, TeamRunContentEvent):
-                    if event.content:
-                        consensus += str(event.content)
                     else:
-                        logger.debug("Empty team consensus event received")
+                        logger.debug(f"Ignoring event type: {type(event).__name__}")
+                        continue
 
-                # Team-level tool call events (no specific agent context)
-                elif isinstance(event, TeamToolCallStartedEvent):
-                    _start_tool(
-                        scope_key="team",
-                        get_text=_get_consensus,
-                        apply_text=_append_to_consensus,
-                        tool=event.tool,
-                    )
+                    parts: list[str] = []
+                    for display in display_names:
+                        body = per_member.get(display, "").strip()
+                        if body:
+                            parts.append(_format_member_contribution(display, body))
+                    for display, body in per_member.items():
+                        if display not in display_names and body.strip():
+                            parts.append(_format_member_contribution(display, body.strip()))
 
-                elif isinstance(event, TeamToolCallCompletedEvent):
-                    _complete_tool(
-                        scope_key="team",
-                        get_text=_get_consensus,
-                        set_text=_set_consensus,
-                        tool=event.tool,
-                    )
+                    if consensus.strip():
+                        parts.extend(_format_team_consensus(consensus.strip()))
+                    elif parts:
+                        parts.append(_format_no_consensus_note())
 
-                # Skip other event types
-                else:
-                    logger.debug(f"Ignoring event type: {type(event).__name__}")
+                    if parts:
+                        emitted_output = True
+                        header = _format_team_header(team_members.display_names)
+                        full_text = "\n\n".join(parts)
+                        chunk_tool_trace = tool_trace.copy() if show_tool_calls and tool_trace else None
+                        yield StructuredStreamChunk(content=header + full_text, tool_trace=chunk_tool_trace)
+
+                if retry_requested:
                     continue
-
-                parts: list[str] = []
-
-                # First render configured agents (display names) in order
-                for display in display_names:
-                    body = per_member.get(display, "").strip()
-                    if body:
-                        parts.append(_format_member_contribution(display, body))
-                # Then render any late/unknown agents that appeared during stream
-                for display, body in per_member.items():
-                    if display not in display_names and body.strip():
-                        parts.append(_format_member_contribution(display, body.strip()))
-
-                if consensus.strip():
-                    parts.extend(_format_team_consensus(consensus.strip()))
-                elif parts:
-                    parts.append(_format_no_consensus_note())
-
-                if parts:
-                    emitted_output = True
-                    header = _format_team_header(team_members.display_names)
-                    full_text = "\n\n".join(parts)
-                    chunk_tool_trace = tool_trace.copy() if show_tool_calls and tool_trace else None
-                    yield StructuredStreamChunk(content=header + full_text, tool_trace=chunk_tool_trace)
-
-            if retry_requested:
-                continue
-            if emitted_output and reply_to_event_id:
-                _persist_bound_seen_event_ids(
-                    agents=team_members.agents,
-                    session_id=session_id,
-                    runtime_paths=orchestrator.runtime_paths,
-                    config=orchestrator.config,
-                    execution_identity=execution_identity,
-                    event_ids=[reply_to_event_id, *unseen_event_ids],
-                    team_name=configured_team_name,
-                )
-
-            return
+                if emitted_output and reply_to_event_id:
+                    _persist_bound_seen_event_ids(
+                        scope_context=scope_context,
+                        session_id=session_id,
+                        event_ids=[reply_to_event_id, *unseen_event_ids],
+                    )
+                return
+    except Exception as e:
+        logger.exception("Error preparing team members for streaming", agents=agent_names)
+        yield get_user_friendly_error_message(e, team_label)
+        return
     finally:
-        # Native Agno replay no longer binds transient per-member history state.
-        pass
+        close_unique_sqlite_dbs(
+            *(
+                cast("SqliteDb | None", agent.db)
+                for agent in team_members.agents
+                if scope_context is None or agent.db is not scope_context.storage
+            ),
+            cast("SqliteDb | None", team.db)
+            if team is not None and (scope_context is None or team.db is not scope_context.storage)
+            else None,
+        )

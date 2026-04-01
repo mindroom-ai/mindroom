@@ -1777,7 +1777,9 @@ def test_agent_preload_cap_truncates_context_files_in_order(
 ) -> None:
     """Preload cap should drop earlier context files before later ones."""
     config = _test_config()
-    config.defaults.max_preload_chars = 420
+    authored_defaults = config.defaults.model_dump(mode="python")
+    authored_defaults["max_preload_chars"] = 420
+    config.defaults = DefaultsConfig(**authored_defaults)
 
     workspace = agent_workspace_root_path(tmp_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
