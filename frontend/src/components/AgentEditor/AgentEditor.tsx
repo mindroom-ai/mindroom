@@ -127,6 +127,13 @@ export function AgentEditor() {
   );
   const validationErrorForPath = useScopedConfigValidation(validationPrefix);
   const agentRootError = validationErrorForPath([], true);
+  const numHistoryRunsError = validationErrorForPath(['num_history_runs'], true);
+  const numHistoryMessagesError = validationErrorForPath(['num_history_messages'], true);
+  const maxToolCallsFromHistoryError = validationErrorForPath(
+    ['max_tool_calls_from_history'],
+    true
+  );
+  const compactionError = validationErrorForPath(['compaction'], true);
   const privateScopeError = validationErrorForPath(['private', 'per'], true);
   const privateRootError = validationErrorForPath(['private', 'root'], true);
   const privateTemplateDirError = validationErrorForPath(['private', 'template_dir'], true);
@@ -1758,6 +1765,10 @@ export function AgentEditor() {
         autoCompactionHelperText="Automatically compact older session history before a run when the context budget gets tight."
         thresholdTokensHelperText="Absolute token threshold that triggers compaction. Leave empty to use threshold percent or the runtime fallback."
         compactionModelPlaceholder={config?.defaults.compaction?.model ?? 'Default: agent model'}
+        numHistoryRunsError={numHistoryRunsError}
+        numHistoryMessagesError={numHistoryMessagesError}
+        maxToolCallsFromHistoryError={maxToolCallsFromHistoryError}
+        compactionError={compactionError}
         compressToolResults={{
           defaultValue: defaultCompressToolResults,
           helperText: `Compress tool results in history to save context (global default: ${

@@ -864,6 +864,13 @@ describe('AgentEditor', () => {
     );
   });
 
+  it('preserves explicit compaction model clears during normalization', () => {
+    expect(normalizeAgentUpdates(mockAgent, { compaction: { model: null } }).compaction).toEqual({
+      enabled: true,
+      model: null,
+    });
+  });
+
   it('enables authored compaction overrides and clears the inherited sibling threshold', () => {
     expect(
       normalizeAgentUpdates(mockAgent, {
@@ -924,6 +931,81 @@ describe('AgentEditor', () => {
         })
       );
     });
+  });
+
+  it('clears the compaction model as an explicit null override', async () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { enabled: true, model: 'summary-model' },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    fireEvent.change(screen.getByLabelText('Compaction Model'), { target: { value: '' } });
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith(
+        'test_agent',
+        expect.objectContaining({
+          compaction: { enabled: true, model: null },
+        })
+      );
+    });
+  });
+
+  it('shows field-level history and compaction validation errors', () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      diagnostics: [
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'num_history_runs'],
+            msg: 'History runs must be at least 1.',
+            type: 'value_error',
+          },
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'num_history_messages'],
+            msg: 'History messages must be at least 1.',
+            type: 'value_error',
+          },
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'max_tool_calls_from_history'],
+            msg: 'Max tool calls must be at least 0.',
+            type: 'value_error',
+          },
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'compaction'],
+            msg: 'Compaction config is invalid.',
+            type: 'value_error',
+          },
+        },
+      ],
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByText('History runs must be at least 1.')).toBeInTheDocument();
+    expect(screen.getByText('History messages must be at least 1.')).toBeInTheDocument();
+    expect(screen.getByText('Max tool calls must be at least 0.')).toBeInTheDocument();
+    expect(screen.getByText('Compaction config is invalid.')).toBeInTheDocument();
   });
 
   it('uses the canonical shared context placeholder', async () => {

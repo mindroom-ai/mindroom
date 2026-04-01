@@ -276,12 +276,19 @@ function normalizeCompactionConfig(
     return compaction;
   }
 
+  const normalizedModel =
+    compaction.model === null
+      ? null
+      : compaction.model?.trim()
+        ? compaction.model.trim()
+        : undefined;
+  const hasExplicitNullClear = Object.values(compaction).some(value => value === null);
   const normalizedCompaction: CompactionConfig = {
     ...compaction,
-    model: compaction.model?.trim() ? compaction.model.trim() : undefined,
+    model: normalizedModel,
   };
 
-  if (Object.values(normalizedCompaction).every(value => value == null)) {
+  if (Object.values(normalizedCompaction).every(value => value == null) && !hasExplicitNullClear) {
     return undefined;
   }
 

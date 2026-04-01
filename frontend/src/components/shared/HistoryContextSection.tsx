@@ -397,7 +397,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
 
               <FieldGroup
                 label="Compaction Model"
-                helperText="Optional model config name used only for summary generation during compaction."
+                helperText="Optional model config name used only for summary generation during compaction. Leave blank to clear an inherited compaction model."
                 htmlFor="compaction_model"
               >
                 <Input
@@ -408,7 +408,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                     const value = e.target.value.trim();
                     mutateCompaction(current => ({
                       ...(current ?? {}),
-                      model: value === '' ? undefined : value,
+                      model: value === '' ? null : value,
                     }));
                   }}
                 />

@@ -33,6 +33,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.history import PreparedHistoryState, prepare_bound_agents_for_run, prepare_history_for_run
 from mindroom.history.compaction import (
     _build_summary_input,
+    _estimate_session_summary_tokens,
     estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_static_tokens,
@@ -40,6 +41,7 @@ from mindroom.history.compaction import (
 )
 from mindroom.history.policy import resolve_history_execution_plan, select_history_preparation_action
 from mindroom.history.runtime import (
+    _apply_implicit_context_window_guard,
     estimate_preparation_static_tokens,
     estimate_preparation_static_tokens_for_team,
     load_scope_session_context,
@@ -1829,6 +1831,43 @@ async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summar
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].runs_after == 0
     assert prepared.compaction_outcomes[0].summary == "final summary"
+
+
+def test_context_window_guard_disables_summary_only_when_wrapped_summary_exceeds_budget() -> None:
+    summary_text = "s" * 360
+    available_history_budget = estimate_text_tokens(summary_text)
+    assert _estimate_session_summary_tokens(summary_text) > available_history_budget
+
+    agent = _agent()
+    session = _session(
+        "session-1",
+        summary=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC)),
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 600),
+                    Message(role="assistant", content="a" * 600),
+                ],
+            ),
+        ],
+    )
+
+    _apply_implicit_context_window_guard(
+        target=agent,
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+        ),
+        available_history_budget=available_history_budget,
+    )
+
+    assert agent.add_history_to_context is False
+    assert agent.add_session_summary_to_context is False
+    assert agent.num_history_runs is None
+    assert agent.num_history_messages is None
 
 
 def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:

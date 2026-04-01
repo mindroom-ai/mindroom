@@ -16,6 +16,7 @@ from agno.session.team import TeamSession
 
 from mindroom.agents import create_session_storage, create_state_storage_db, get_agent_session, get_team_session
 from mindroom.history.compaction import (
+    _estimate_session_summary_tokens,
     compact_scope_history,
     estimate_prompt_visible_history_tokens,
     estimate_static_tokens,
@@ -801,7 +802,9 @@ def _apply_implicit_context_window_guard(
     target.add_history_to_context = False
     target.num_history_runs = None
     target.num_history_messages = None
-    summary_tokens = _estimate_summary_tokens(session)
+    summary_tokens = _estimate_session_summary_tokens(
+        session.summary.summary if session.summary is not None else None,
+    )
     target.add_session_summary_to_context = 0 < summary_tokens <= available_history_budget
     logger.warning(
         "Context window guard disabled persisted replay for this run",
@@ -875,15 +878,6 @@ def _scope_completed_top_level_runs(
     if scope.kind == "team":
         return [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id]
     return [run for run in runs if isinstance(run, RunOutput) and run.agent_id == scope.scope_id]
-
-
-def _estimate_summary_tokens(session: AgentSession | TeamSession) -> int:
-    if session.summary is None:
-        return 0
-    summary_text = session.summary.summary
-    if not isinstance(summary_text, str):
-        return 0
-    return estimate_text_tokens(summary_text.strip())
 
 
 def _has_persisted_history(session: AgentSession | TeamSession, scope: HistoryScope) -> bool:

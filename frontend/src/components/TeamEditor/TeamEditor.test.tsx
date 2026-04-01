@@ -422,6 +422,13 @@ describe('TeamEditor', () => {
     });
   });
 
+  it('preserves explicit team compaction model clears during normalization', () => {
+    expect(normalizeTeamUpdates(mockTeam, { compaction: { model: null } }).compaction).toEqual({
+      enabled: true,
+      model: null,
+    });
+  });
+
   it('displays team members with checkboxes', () => {
     render(<TeamEditor />);
 
