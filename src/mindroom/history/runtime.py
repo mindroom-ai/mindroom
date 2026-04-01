@@ -121,6 +121,7 @@ async def prepare_history_for_run(
     available_history_budget: int | None = None,
     scope: HistoryScope | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
+    apply_implicit_context_window_guard: bool = True,
 ) -> PreparedHistoryState:
     """Prepare one scope by compacting its persisted session before the run."""
     resolved_scope = scope or resolve_history_scope(agent)
@@ -245,7 +246,7 @@ async def prepare_history_for_run(
                     runs_compacted=outcome.compacted_run_count,
                 )
 
-    if action == "implicit_guard":
+    if action == "implicit_guard" and apply_implicit_context_window_guard:
         assert history_budget is not None
         _apply_implicit_context_window_guard(
             target=agent,
@@ -351,6 +352,7 @@ async def prepare_bound_agents_for_run(
         available_history_budget=available_history_budget,
         scope=bound_scope.scope,
         execution_plan=execution_plan,
+        apply_implicit_context_window_guard=False,
     )
     if (
         team is not None

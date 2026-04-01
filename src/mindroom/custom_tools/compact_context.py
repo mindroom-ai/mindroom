@@ -133,6 +133,8 @@ class CompactContextTools(Toolkit):
             runtime_model = self._config.resolve_runtime_model(
                 entity_name=self._agent_name,
                 active_model_name=active_model_name,
+                room_id=runtime_context.room_id if runtime_context is not None else None,
+                runtime_paths=self._runtime_paths if runtime_context is not None else None,
             )
             return runtime_model, self._config.get_entity_compaction_config(self._agent_name)
 

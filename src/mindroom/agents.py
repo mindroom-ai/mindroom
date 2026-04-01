@@ -761,6 +761,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     runtime_paths: constants.RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,
+    active_model_name: str | None = None,
     hook_registry: HookRegistry | None = None,
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
@@ -774,6 +775,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         runtime_paths: Explicit runtime context for paths, env, and credentials.
         execution_identity: Request execution identity used to resolve scoped
             state, workspaces, worker routing, and requester-local storage.
+        active_model_name: Optional resolved runtime model name for this run.
+            When omitted, the agent's configured model is used.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
@@ -867,7 +870,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     )
 
     # Get model config for identity context
-    model_name = agent_config.model or "default"
+    model_name = active_model_name or agent_config.model or "default"
     if model_name in config.models:
         model_config = config.models[model_name]
         model_provider = model_config.provider.title()  # Capitalize provider name
@@ -913,7 +916,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
-    model = get_model_instance(config, runtime_paths, agent_config.model)
+    model = get_model_instance(config, runtime_paths, model_name)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
 
     skills = build_agent_skills(agent_name, config, runtime_paths)

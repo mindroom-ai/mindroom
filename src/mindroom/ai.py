@@ -890,6 +890,7 @@ async def _prepare_agent_and_prompt(
     runtime_paths: RuntimePaths,
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
+    room_id: str | None = None,
     knowledge: Knowledge | None = None,
     include_interactive_questions: bool = True,
     session_id: str | None = None,
@@ -928,10 +929,17 @@ async def _prepare_agent_and_prompt(
         )
         session = get_agent_session(storage, session_id)
 
+    runtime_model = config.resolve_runtime_model(
+        entity_name=agent_name,
+        room_id=room_id,
+        runtime_paths=runtime_paths,
+    )
+
     agent = create_agent(
         agent_name,
         config,
         runtime_paths,
+        active_model_name=runtime_model.model_name,
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
         execution_identity=execution_identity,
@@ -972,6 +980,8 @@ async def _prepare_agent_and_prompt(
         compaction_outcomes_collector=compaction_outcomes_collector,
         storage=storage,
         session=session,
+        active_model_name=runtime_model.model_name,
+        active_context_window=runtime_model.context_window,
         static_prompt_tokens=estimate_preparation_static_tokens(
             agent,
             full_prompt=prompt_with_unseen,
@@ -1073,6 +1083,7 @@ async def ai_response(  # noqa: C901
             runtime_paths,
             config,
             thread_history,
+            room_id,
             knowledge,
             include_interactive_questions=include_interactive_questions,
             session_id=session_id,
@@ -1334,6 +1345,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             runtime_paths,
             config,
             thread_history,
+            room_id,
             knowledge,
             include_interactive_questions=include_interactive_questions,
             session_id=session_id,

@@ -1278,14 +1278,14 @@ class Config(BaseModel):
         msg = f"Unknown entity: {entity_name}. Available entities: {', '.join(available)}"
         raise ValueError(msg)
 
-    def get_effective_team_model_name(
+    def get_effective_entity_model_name(
         self,
-        team_name: str,
+        entity_name: str,
         room_id: str | None,
         runtime_paths: RuntimePaths,
     ) -> str:
-        """Return the effective team model for one room context."""
-        if team_name not in self.teams:
+        """Return the effective model for one entity in one room context."""
+        if entity_name not in self.agents and entity_name not in self.teams and entity_name != ROUTER_AGENT_NAME:
             return "default"
         if room_id is not None:
             from mindroom.matrix.rooms import get_room_alias_from_id  # noqa: PLC0415
@@ -1293,8 +1293,7 @@ class Config(BaseModel):
             room_alias = get_room_alias_from_id(room_id, runtime_paths)
             if room_alias and room_alias in self.room_models:
                 return self.room_models[room_alias]
-        team_model = self.teams[team_name].model
-        return team_model or "default"
+        return self.get_entity_model_name(entity_name)
 
     def resolve_runtime_model(
         self,
@@ -1311,11 +1310,11 @@ class Config(BaseModel):
         if resolved_model_name is None:
             if entity_name is None:
                 resolved_model_name = default_model_name
-            elif entity_name in self.teams and room_id is not None:
+            elif room_id is not None:
                 if runtime_paths is None:
-                    msg = "runtime_paths are required to resolve a room-specific team model"
+                    msg = "runtime_paths are required to resolve a room-specific runtime model"
                     raise ValueError(msg)
-                resolved_model_name = self.get_effective_team_model_name(entity_name, room_id, runtime_paths)
+                resolved_model_name = self.get_effective_entity_model_name(entity_name, room_id, runtime_paths)
             else:
                 resolved_model_name = self.get_entity_model_name(entity_name)
 

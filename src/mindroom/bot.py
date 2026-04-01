@@ -2343,6 +2343,14 @@ class AgentBot:
             hook_message_sender=self._hook_message_sender(),
         )
 
+    def _resolve_runtime_model_for_room(self, room_id: str) -> str:
+        """Return the effective configured model name for this bot in one room."""
+        return self.config.resolve_runtime_model(
+            entity_name=self.agent_name,
+            room_id=room_id,
+            runtime_paths=self.runtime_paths,
+        ).model_name
+
     def _history_scope(self) -> HistoryScope:
         """Return the persisted history scope backing this bot's runs."""
         if self.agent_name in self.config.teams:
@@ -3120,11 +3128,13 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
         )
+        active_model_name = self._resolve_runtime_model_for_room(room_id)
         tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
+            active_model_name=active_model_name,
             session_id=session_id,
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
@@ -3590,11 +3600,13 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
         )
+        active_model_name = self._resolve_runtime_model_for_room(room_id)
         tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
+            active_model_name=active_model_name,
             session_id=session_id,
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,

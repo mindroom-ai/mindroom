@@ -382,6 +382,33 @@ def test_create_agent_enables_agno_native_history_replay(tmp_path: Path) -> None
     assert agent.store_history_messages is False
 
 
+def test_create_agent_uses_active_model_override(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(provider="openai", id="default-model"),
+                "large": ModelConfig(provider="openai", id="large-model"),
+            },
+        ),
+        runtime_paths,
+    )
+    with patch("mindroom.ai.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")) as mock_get:
+        create_agent(
+            "test_agent",
+            config,
+            runtime_paths,
+            execution_identity=None,
+            active_model_name="large",
+            include_interactive_questions=False,
+        )
+
+    assert mock_get.call_args is not None
+    assert mock_get.call_args.args[2] == "large"
+
+
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
@@ -1109,6 +1136,7 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert mock_prepare.await_args.kwargs["agent"] is owner_agent
     assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
     assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+beta")
+    assert mock_prepare.await_args.kwargs["apply_implicit_context_window_guard"] is False
     assert (
         estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
     )
@@ -1445,6 +1473,35 @@ def test_resolve_runtime_model_uses_room_override_for_team(
     assert runtime_model.context_window == 32_000
 
 
+def test_resolve_runtime_model_uses_room_override_for_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
+            defaults=DefaultsConfig(tools=[]),
+            room_models={"lobby": "large"},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model", context_window=None),
+                "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
+            },
+        ),
+        runtime_paths,
+    )
+    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+
+    runtime_model = config.resolve_runtime_model(
+        entity_name="test_agent",
+        room_id="!room:localhost",
+        runtime_paths=runtime_paths,
+    )
+
+    assert runtime_model.model_name == "large"
+    assert runtime_model.context_window == 48_000
+
+
 def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavailable(tmp_path: Path) -> None:
     config, _runtime_paths_value = _make_config(
         tmp_path,
@@ -1573,6 +1630,50 @@ async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(
         full_prompt="Current prompt",
         fallback_full_prompt=expected_fallback_prompt,
     )
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execution_and_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
+            defaults=DefaultsConfig(tools=[]),
+            room_models={"lobby": "large"},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model", context_window=None),
+                "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
+            },
+        ),
+        runtime_paths,
+    )
+    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+    live_agent = _agent()
+
+    with (
+        patch("mindroom.ai.create_agent", return_value=live_agent) as mock_create_agent,
+        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch(
+            "mindroom.ai.prepare_history_for_run",
+            new=AsyncMock(return_value=PreparedHistoryState()),
+        ) as mock_prepare,
+    ):
+        await _prepare_agent_and_prompt(
+            "test_agent",
+            "Current prompt",
+            runtime_paths,
+            config,
+            room_id="!room:localhost",
+        )
+
+    assert mock_create_agent.call_args is not None
+    assert mock_create_agent.call_args.kwargs["active_model_name"] == "large"
+    assert mock_prepare.await_args is not None
+    assert mock_prepare.await_args.kwargs["active_model_name"] == "large"
+    assert mock_prepare.await_args.kwargs["active_context_window"] == 48_000
 
 
 @pytest.mark.asyncio
