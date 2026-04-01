@@ -24,7 +24,7 @@ from mindroom.history.compaction import (
 from mindroom.history.policy import (
     describe_compaction_unavailability,
     resolve_history_execution_plan,
-    select_history_preparation_action,
+    should_attempt_destructive_compaction,
 )
 from mindroom.history.storage import (
     clear_force_compaction_state,
@@ -39,6 +39,7 @@ from mindroom.history.types import (
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
+    ResolvedReplayPlan,
 )
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_text_tokens
@@ -121,9 +122,9 @@ async def prepare_history_for_run(
     available_history_budget: int | None = None,
     scope: HistoryScope | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
-    apply_implicit_context_window_guard: bool = True,
+    replay_target: Agent | Team | None = None,
 ) -> PreparedHistoryState:
-    """Prepare one scope by compacting its persisted session before the run."""
+    """Prepare one scope by compacting durable history and planning safe replay for the run."""
     resolved_scope = scope or resolve_history_scope(agent)
     scope_context = load_scope_session_context(
         agent=agent,
@@ -156,10 +157,12 @@ async def prepare_history_for_run(
     history_budget = available_history_budget
     if history_budget is None:
         history_budget = execution_plan.replay_budget_tokens
-        if execution_plan.authored_compaction_enabled and execution_plan.unavailable_reason == "no_context_window":
+        if execution_plan.authored_compaction_enabled and execution_plan.unavailable_reason is not None:
+            description = describe_compaction_unavailability(execution_plan)
             logger.warning(
-                "Compaction budget unavailable: no context_window configured for compaction model",
+                "Compaction unavailable for this run",
                 compaction_model=execution_plan.compaction_model_name,
+                reason=description,
             )
 
     session = scope_context.session
@@ -176,30 +179,28 @@ async def prepare_history_for_run(
             scope=scope_context.scope,
             history_settings=resolved_inputs.history_settings,
         )
-        if history_budget is not None
+        if execution_plan.replay_budget_tokens is not None
         else None
     )
-    action = select_history_preparation_action(
+    should_compact = should_attempt_destructive_compaction(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
         current_history_tokens=current_history_tokens,
         replay_budget_tokens=history_budget,
     )
     logger.info(
-        "Compaction check",
+        "History preparation check",
         agent=agent_name,
         auto_enabled=execution_plan.authored_compaction_enabled and execution_plan.destructive_compaction_available,
         compaction_available=execution_plan.destructive_compaction_available,
-        budget=history_budget,
+        replay_budget=history_budget,
         current_tokens=current_history_tokens,
         force=state.force_compact_before_next_run,
-        action=action,
+        compaction_requested=should_compact,
         unavailable_reason=execution_plan.unavailable_reason,
     )
 
-    if action == "compact":
-        compaction_budget = history_budget
-        assert compaction_budget is not None
+    if should_compact:
         assert execution_plan.summary_input_budget_tokens is not None
         from mindroom.ai import get_model_instance  # noqa: PLC0415
 
@@ -215,13 +216,13 @@ async def prepare_history_for_run(
                 scope=scope_context.scope,
                 state=state,
                 history_settings=resolved_inputs.history_settings,
-                available_history_budget=compaction_budget,
+                available_history_budget=history_budget,
                 summary_input_budget=execution_plan.summary_input_budget_tokens,
                 summary_model=summary_model,
                 summary_model_name=execution_plan.compaction_model_name,
                 active_context_window=resolved_inputs.active_context_window,
                 replay_window_tokens=execution_plan.replay_window_tokens,
-                threshold_tokens=execution_plan.threshold_tokens,
+                threshold_tokens=execution_plan.trigger_threshold_tokens,
                 reserve_tokens=execution_plan.reserve_tokens,
                 notify=resolved_inputs.compaction_config.notify,
             )
@@ -246,14 +247,24 @@ async def prepare_history_for_run(
                     runs_compacted=outcome.compacted_run_count,
                 )
 
-    if action == "implicit_guard" and apply_implicit_context_window_guard:
-        assert history_budget is not None
-        _apply_implicit_context_window_guard(
-            target=agent,
+    resolved_replay_target = replay_target or agent
+    if history_budget is not None:
+        replay_plan = plan_replay_that_fits(
             session=session,
             scope=scope_context.scope,
             history_settings=resolved_inputs.history_settings,
             available_history_budget=history_budget,
+        )
+        apply_replay_plan(target=resolved_replay_target, replay_plan=replay_plan)
+        _log_replay_plan(
+            replay_plan=replay_plan,
+            scope=scope_context.scope,
+            available_history_budget=history_budget,
+            current_history_tokens=estimate_prompt_visible_history_tokens(
+                session=session,
+                scope=scope_context.scope,
+                history_settings=resolved_inputs.history_settings,
+            ),
         )
 
     prepared = PreparedHistoryState(
@@ -333,7 +344,7 @@ async def prepare_bound_agents_for_run(
     )
     available_history_budget = execution_plan.replay_budget_tokens
 
-    prepared = await prepare_history_for_run(
+    return await prepare_history_for_run(
         agent=bound_scope.owner_agent,
         agent_name=bound_scope.owner_agent_name,
         full_prompt=full_prompt,
@@ -352,48 +363,8 @@ async def prepare_bound_agents_for_run(
         available_history_budget=available_history_budget,
         scope=bound_scope.scope,
         execution_plan=execution_plan,
-        apply_implicit_context_window_guard=False,
+        replay_target=team,
     )
-    if (
-        team is not None
-        and execution_plan.implicit_context_window_guard_enabled
-        and available_history_budget is not None
-    ):
-        scope_context = load_scope_session_context(
-            agent=bound_scope.owner_agent,
-            agent_name=bound_scope.owner_agent_name,
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            storage=bound_scope.storage,
-            scope=bound_scope.scope,
-        )
-        if scope_context is not None and scope_context.session is not None:
-            current_history_tokens = estimate_prompt_visible_history_tokens(
-                session=scope_context.session,
-                scope=bound_scope.scope,
-                history_settings=history_settings,
-            )
-            action = select_history_preparation_action(
-                plan=execution_plan,
-                force_compact_before_next_run=read_scope_state(
-                    scope_context.session,
-                    bound_scope.scope,
-                ).force_compact_before_next_run,
-                current_history_tokens=current_history_tokens,
-                replay_budget_tokens=available_history_budget,
-            )
-            if action != "implicit_guard":
-                return prepared
-            _apply_implicit_context_window_guard(
-                target=team,
-                session=scope_context.session,
-                scope=bound_scope.scope,
-                history_settings=history_settings,
-                available_history_budget=available_history_budget,
-            )
-    return prepared
 
 
 def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str | None]:
@@ -735,9 +706,7 @@ def _prepare_scope_state_for_run(
         state = replace(state, force_compact_before_next_run=True)
         write_scope_state(session, scope, state)
         storage.upsert_session(session)
-    if state.force_compact_before_next_run and (
-        not execution_plan.destructive_compaction_available or execution_plan.replay_budget_tokens is None
-    ):
+    if state.force_compact_before_next_run and not execution_plan.destructive_compaction_available:
         state = clear_force_compaction_state(session, scope, state)
         storage.upsert_session(session)
         description = describe_compaction_unavailability(execution_plan)
@@ -750,28 +719,31 @@ def _prepare_scope_state_for_run(
     return state
 
 
-def _apply_implicit_context_window_guard(
+def plan_replay_that_fits(
     *,
-    target: Agent | Team,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
-) -> None:
+) -> ResolvedReplayPlan:
+    """Return the safest persisted-replay plan that fits the current run budget."""
     current_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         scope=scope,
         history_settings=history_settings,
     )
     if current_tokens <= available_history_budget:
-        return
+        return _configured_replay_plan(
+            history_settings=history_settings,
+            estimated_tokens=current_tokens,
+        )
 
     limit_mode, max_limit = _context_window_guard_limit_bounds(
         session=session,
         scope=scope,
         history_settings=history_settings,
     )
-    fitting_limit = _find_fitting_history_limit_for_budget(
+    fitting_limit, fitting_tokens = _find_fitting_history_limit_for_budget(
         session=session,
         scope=scope,
         history_settings=history_settings,
@@ -780,38 +752,46 @@ def _apply_implicit_context_window_guard(
         max_limit=max_limit,
     )
     if fitting_limit > 0:
-        target.add_history_to_context = True
-        target.add_session_summary_to_context = True
-        if limit_mode == "messages":
-            target.num_history_runs = None
-            target.num_history_messages = fitting_limit
-        else:
-            target.num_history_runs = fitting_limit
-            target.num_history_messages = None
-        logger.warning(
-            "Context window guard reduced replay for this run",
-            scope=scope.key,
-            limit_mode=limit_mode,
-            new_limit=fitting_limit,
-            estimated_tokens=current_tokens,
-            available_history_budget=available_history_budget,
+        return ResolvedReplayPlan(
+            mode="limited",
+            estimated_tokens=fitting_tokens,
+            add_history_to_context=True,
+            add_session_summary_to_context=True,
+            num_history_runs=fitting_limit if limit_mode == "runs" else None,
+            num_history_messages=fitting_limit if limit_mode == "messages" else None,
+            history_limit_mode=limit_mode,
+            history_limit=fitting_limit,
         )
-        return
 
-    target.add_history_to_context = False
-    target.num_history_runs = None
-    target.num_history_messages = None
     summary_tokens = _estimate_session_summary_tokens(
         session.summary.summary if session.summary is not None else None,
     )
-    target.add_session_summary_to_context = 0 < summary_tokens <= available_history_budget
-    logger.warning(
-        "Context window guard disabled persisted replay for this run",
-        scope=scope.key,
-        keep_summary_only=target.add_session_summary_to_context,
-        estimated_tokens=current_tokens,
-        available_history_budget=available_history_budget,
+    if 0 < summary_tokens <= available_history_budget:
+        return ResolvedReplayPlan(
+            mode="summary_only",
+            estimated_tokens=summary_tokens,
+            add_history_to_context=False,
+            add_session_summary_to_context=True,
+        )
+
+    return ResolvedReplayPlan(
+        mode="disabled",
+        estimated_tokens=0,
+        add_history_to_context=False,
+        add_session_summary_to_context=False,
     )
+
+
+def apply_replay_plan(
+    *,
+    target: Agent | Team,
+    replay_plan: ResolvedReplayPlan,
+) -> None:
+    """Apply one resolved persisted-replay plan to a live Agent or Team."""
+    target.add_history_to_context = replay_plan.add_history_to_context
+    target.add_session_summary_to_context = replay_plan.add_session_summary_to_context
+    target.num_history_runs = replay_plan.num_history_runs
+    target.num_history_messages = replay_plan.num_history_messages
 
 
 def _context_window_guard_limit_bounds(
@@ -837,13 +817,14 @@ def _find_fitting_history_limit_for_budget(
     available_history_budget: int,
     limit_mode: Literal["runs", "messages"],
     max_limit: int,
-) -> int:
+) -> tuple[int, int]:
     if max_limit <= 0 or available_history_budget <= 0:
-        return 0
+        return 0, 0
 
     low = 1
     high = max_limit
     best = 0
+    best_tokens = 0
     while low <= high:
         mid = (low + high) // 2
         candidate_tokens = estimate_prompt_visible_history_tokens(
@@ -858,10 +839,76 @@ def _find_fitting_history_limit_for_budget(
         )
         if candidate_tokens <= available_history_budget:
             best = mid
+            best_tokens = candidate_tokens
             low = mid + 1
         else:
             high = mid - 1
-    return best
+    return best, best_tokens
+
+
+def _log_replay_plan(
+    *,
+    replay_plan: ResolvedReplayPlan,
+    scope: HistoryScope,
+    available_history_budget: int,
+    current_history_tokens: int,
+) -> None:
+    if replay_plan.mode == "configured":
+        return
+
+    if replay_plan.mode == "limited":
+        logger.warning(
+            "Replay planner reduced persisted replay for this run",
+            scope=scope.key,
+            limit_mode=replay_plan.history_limit_mode,
+            new_limit=replay_plan.history_limit,
+            estimated_tokens=current_history_tokens,
+            fitted_tokens=replay_plan.estimated_tokens,
+            available_history_budget=available_history_budget,
+        )
+        return
+
+    logger.warning(
+        "Replay planner disabled raw persisted replay for this run",
+        scope=scope.key,
+        keep_summary_only=replay_plan.mode == "summary_only",
+        estimated_tokens=current_history_tokens,
+        fitted_tokens=replay_plan.estimated_tokens,
+        available_history_budget=available_history_budget,
+    )
+
+
+def _configured_replay_plan(
+    *,
+    history_settings: ResolvedHistorySettings,
+    estimated_tokens: int,
+) -> ResolvedReplayPlan:
+    if history_settings.policy.mode == "messages":
+        return ResolvedReplayPlan(
+            mode="configured",
+            estimated_tokens=estimated_tokens,
+            add_history_to_context=True,
+            add_session_summary_to_context=True,
+            num_history_runs=None,
+            num_history_messages=history_settings.policy.limit,
+        )
+    if history_settings.policy.mode == "runs":
+        return ResolvedReplayPlan(
+            mode="configured",
+            estimated_tokens=estimated_tokens,
+            add_history_to_context=True,
+            add_session_summary_to_context=True,
+            num_history_runs=history_settings.policy.limit,
+            num_history_messages=None,
+        )
+    return ResolvedReplayPlan(
+        mode="configured",
+        estimated_tokens=estimated_tokens,
+        add_history_to_context=True,
+        add_session_summary_to_context=True,
+        num_history_runs=None,
+        num_history_messages=None,
+    )
 
 
 def _has_persisted_history(session: AgentSession | TeamSession, scope: HistoryScope) -> bool:

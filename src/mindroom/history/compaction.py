@@ -40,7 +40,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _WRAPPER_OVERHEAD_TOKENS = 200
-_SUMMARY_TRUNCATION_RATIO = 0.5
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 type _ToolDefinition = dict[str, object]
@@ -107,7 +106,7 @@ async def compact_scope_history(
     scope: HistoryScope,
     state: HistoryScopeState,
     history_settings: ResolvedHistorySettings,
-    available_history_budget: int,
+    available_history_budget: int | None,
     summary_input_budget: int,
     summary_model: Model,
     summary_model_name: str,
@@ -211,7 +210,7 @@ async def _rewrite_working_session_for_compaction(
     scope: HistoryScope,
     state: HistoryScopeState,
     history_settings: ResolvedHistorySettings,
-    available_history_budget: int,
+    available_history_budget: int | None,
     summary_input_budget: int,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
@@ -260,6 +259,9 @@ async def _rewrite_working_session_for_compaction(
         working_session.runs = _remove_runs_by_id(working_session.runs or [], compacted_run_ids)
         total_compacted_run_count += len(included_runs)
 
+        if available_history_budget is None:
+            break
+
         after_tokens = estimate_prompt_visible_history_tokens(
             session=working_session,
             scope=scope,
@@ -270,19 +272,6 @@ async def _rewrite_working_session_for_compaction(
 
     if total_compacted_run_count == 0:
         return None
-    final_tokens = estimate_prompt_visible_history_tokens(
-        session=working_session,
-        scope=scope,
-        history_settings=history_settings,
-    )
-    if final_tokens > available_history_budget:
-        logger.warning(
-            "Compacted history still exceeds budget after falling back to summary-only replay",
-            session_id=session_id,
-            scope=scope.key,
-            final_tokens=final_tokens,
-            available_history_budget=available_history_budget,
-        )
     return _CompactionRewriteResult(
         summary_text=final_summary_text,
         compacted_run_count=total_compacted_run_count,
@@ -557,20 +546,9 @@ def _build_summary_input(
         summary_block = f"<previous_summary>\n{escaped_summary}\n</previous_summary>"
 
     remaining = max_input_tokens - estimate_text_tokens(summary_block) - _WRAPPER_OVERHEAD_TOKENS
-    if remaining <= 0 and summary_block:
-        max_summary_tokens = int((max_input_tokens - _WRAPPER_OVERHEAD_TOKENS) * _SUMMARY_TRUNCATION_RATIO)
-        max_summary_chars = max(0, max_summary_tokens * 4)
-        truncated_summary = previous_summary[:max_summary_chars] if previous_summary is not None else ""
-        escaped_summary = _escape_xml_content(truncated_summary)
-        summary_block = f"<previous_summary>\n{escaped_summary}\n</previous_summary>"
-        remaining = max_input_tokens - estimate_text_tokens(summary_block) - _WRAPPER_OVERHEAD_TOKENS
 
     if remaining <= 0:
-        return _build_oversized_summary_input(
-            summary_block=summary_block,
-            compacted_runs=compacted_runs,
-            max_input_tokens=max_input_tokens,
-        )
+        return summary_block, []
 
     included_runs: list[RunOutput | TeamRunOutput] = []
     for run in compacted_runs:
@@ -607,13 +585,6 @@ def _build_oversized_summary_input(
         index=0,
         max_tokens=_remaining_excerpt_budget(max_input_tokens, summary_block),
     )
-    if oversized_excerpt is None and summary_block:
-        summary_block = ""
-        oversized_excerpt = _serialize_oversized_run_excerpt(
-            first_run,
-            index=0,
-            max_tokens=_remaining_excerpt_budget(max_input_tokens, summary_block),
-        )
     if oversized_excerpt is None:
         return summary_block, []
     return _compose_summary_input(summary_block, oversized_excerpt), [first_run]
@@ -852,7 +823,7 @@ def _select_runs_to_compact(
     scope: HistoryScope,
     state: HistoryScopeState,
     history_settings: ResolvedHistorySettings,
-    available_history_budget: int,
+    available_history_budget: int | None,
 ) -> list[RunOutput | TeamRunOutput]:
     run_count = len(visible_runs)
     if run_count == 0:
@@ -862,6 +833,8 @@ def _select_runs_to_compact(
     if state.force_compact_before_next_run:
         keep_count = 2 if run_count > 2 else 1
     else:
+        if available_history_budget is None:
+            return []
         current_tokens = estimate_prompt_visible_history_tokens(
             session=session,
             scope=scope,

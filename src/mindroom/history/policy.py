@@ -1,4 +1,4 @@
-"""Shared history budgeting and action selection policy."""
+"""Shared history budgeting and compaction-trigger policy."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from mindroom.token_budget import compute_compaction_input_budget
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
-    from mindroom.history.types import _HistoryPreparationAction
 
 
 def resolve_history_execution_plan(
@@ -35,11 +34,7 @@ def resolve_history_execution_plan(
         active_context_window=active_context_window,
     )
     compaction_context_window = compaction_runtime.context_window
-    replay_window_tokens = (
-        active_context_window
-        if not has_authored_compaction_config
-        else active_context_window or compaction_context_window
-    )
+    replay_window_tokens = active_context_window
     summary_input_budget_tokens, unavailable_reason = _resolve_summary_input_budget(
         compaction_context_window=compaction_context_window,
         reserve_tokens=compaction_config.reserve_tokens,
@@ -64,12 +59,11 @@ def resolve_history_execution_plan(
         authored_compaction_config=has_authored_compaction_config,
         authored_compaction_enabled=has_authored_compaction_config and compaction_config.enabled,
         destructive_compaction_available=unavailable_reason is None,
-        implicit_context_window_guard_enabled=not has_authored_compaction_config and replay_budget_tokens is not None,
         explicit_compaction_model=compaction_config.model is not None,
         compaction_model_name=compaction_runtime.model_name,
         compaction_context_window=compaction_context_window,
         replay_window_tokens=replay_window_tokens,
-        threshold_tokens=threshold_tokens,
+        trigger_threshold_tokens=threshold_tokens,
         reserve_tokens=compaction_config.reserve_tokens,
         static_prompt_tokens=static_prompt_tokens,
         replay_budget_tokens=replay_budget_tokens,
@@ -78,35 +72,25 @@ def resolve_history_execution_plan(
     )
 
 
-def select_history_preparation_action(
+def should_attempt_destructive_compaction(
     *,
     plan: ResolvedHistoryExecutionPlan,
     force_compact_before_next_run: bool,
     current_history_tokens: int | None,
     replay_budget_tokens: int | None = None,
-) -> _HistoryPreparationAction:
-    """Choose the single history-preparation action for this run."""
+) -> bool:
+    """Return whether durable session compaction should run before replay planning."""
+    if force_compact_before_next_run and plan.destructive_compaction_available:
+        return True
+
+    if not plan.authored_compaction_enabled or not plan.destructive_compaction_available:
+        return False
+
     effective_replay_budget_tokens = plan.replay_budget_tokens if replay_budget_tokens is None else replay_budget_tokens
-    if (
-        force_compact_before_next_run
-        and plan.destructive_compaction_available
-        and effective_replay_budget_tokens is not None
-    ):
-        return "compact"
-
     if effective_replay_budget_tokens is None or current_history_tokens is None:
-        return "none"
+        return False
 
-    if current_history_tokens <= effective_replay_budget_tokens:
-        return "none"
-
-    if plan.authored_compaction_enabled and plan.destructive_compaction_available:
-        return "compact"
-
-    if plan.implicit_context_window_guard_enabled:
-        return "implicit_guard"
-
-    return "none"
+    return current_history_tokens > effective_replay_budget_tokens
 
 
 def manual_compaction_unavailable_message(plan: ResolvedHistoryExecutionPlan) -> str | None:

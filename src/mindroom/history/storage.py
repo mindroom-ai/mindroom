@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
 
-_COMPACTION_METADATA_VERSION = 1
+_COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
 _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
 
@@ -32,32 +32,48 @@ def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -
 def read_scope_states(session: AgentSession | TeamSession) -> dict[str, HistoryScopeState]:
     """Return all parsed compaction states from session metadata."""
     metadata = session.metadata
-    if not isinstance(metadata, dict):
-        return {}
+    if isinstance(metadata, dict):
+        raw_value = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
+        if isinstance(raw_value, dict):
+            if raw_value.get("version") == 1:
+                return {"*": _parse_state(raw_value)}
 
-    raw_value = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
-    if not isinstance(raw_value, dict):
-        return {}
-
-    if raw_value.get("version") == _COMPACTION_METADATA_VERSION:
-        return {"*": _parse_state(raw_value)}
-
+            if raw_value.get("version") == _COMPACTION_METADATA_VERSION:
+                raw_states = raw_value.get("states")
+                if isinstance(raw_states, dict):
+                    parsed_states: dict[str, HistoryScopeState] = {}
+                    for scope_key, raw_state in raw_states.items():
+                        if not isinstance(scope_key, str) or not scope_key or not isinstance(raw_state, dict):
+                            continue
+                        parsed_states[scope_key] = _parse_state(raw_state)
+                    return parsed_states
     return {}
 
 
 def write_scope_state(
     session: AgentSession | TeamSession,
-    _scope: HistoryScope,
+    scope: HistoryScope,
     state: HistoryScopeState,
 ) -> None:
     """Persist compaction control/audit state back into session metadata."""
-    session_metadata = dict(session.metadata or {})
+    states = read_scope_states(session)
     if _state_is_empty(state):
+        states.pop(scope.key, None)
+    else:
+        states[scope.key] = state
+
+    session_metadata = dict(session.metadata or {})
+    serialized_states = {
+        scope_key: _state_to_metadata(scope_state)
+        for scope_key, scope_state in states.items()
+        if not _state_is_empty(scope_state)
+    }
+    if not serialized_states:
         session_metadata.pop(MINDROOM_COMPACTION_METADATA_KEY, None)
     else:
         session_metadata[MINDROOM_COMPACTION_METADATA_KEY] = {
             "version": _COMPACTION_METADATA_VERSION,
-            **_state_to_metadata(state),
+            "states": serialized_states,
         }
     session.metadata = session_metadata
 

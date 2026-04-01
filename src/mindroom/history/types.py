@@ -9,7 +9,7 @@ _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
 _CompactionMode = Literal["auto", "manual"]
 _CompactionAvailabilityReason = Literal["no_context_window", "non_positive_summary_input_budget"]
-_HistoryPreparationAction = Literal["none", "compact", "implicit_guard"]
+_ReplayPlanMode = Literal["configured", "limited", "summary_only", "disabled"]
 
 
 @dataclass(frozen=True)
@@ -60,17 +60,30 @@ class ResolvedHistoryExecutionPlan:
     authored_compaction_config: bool
     authored_compaction_enabled: bool
     destructive_compaction_available: bool
-    implicit_context_window_guard_enabled: bool
     explicit_compaction_model: bool
     compaction_model_name: str
     compaction_context_window: int | None
     replay_window_tokens: int | None
-    threshold_tokens: int | None
+    trigger_threshold_tokens: int | None
     reserve_tokens: int
     static_prompt_tokens: int | None
     replay_budget_tokens: int | None
     summary_input_budget_tokens: int | None
     unavailable_reason: _CompactionAvailabilityReason | None = None
+
+
+@dataclass(frozen=True)
+class ResolvedReplayPlan:
+    """Concrete persisted-replay plan for one live model call."""
+
+    mode: _ReplayPlanMode
+    estimated_tokens: int
+    add_history_to_context: bool
+    add_session_summary_to_context: bool
+    num_history_runs: int | None = None
+    num_history_messages: int | None = None
+    history_limit_mode: Literal["runs", "messages"] | None = None
+    history_limit: int | None = None
 
 
 @dataclass(frozen=True)

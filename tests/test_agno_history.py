@@ -39,12 +39,13 @@ from mindroom.history.compaction import (
     estimate_static_tokens,
     estimate_tool_definition_tokens,
 )
-from mindroom.history.policy import resolve_history_execution_plan, select_history_preparation_action
+from mindroom.history.policy import resolve_history_execution_plan, should_attempt_destructive_compaction
 from mindroom.history.runtime import (
-    _apply_implicit_context_window_guard,
+    apply_replay_plan,
     estimate_preparation_static_tokens,
     estimate_preparation_static_tokens_for_team,
     load_scope_session_context,
+    plan_replay_that_fits,
 )
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
@@ -485,6 +486,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
     storage.upsert_session(session)
 
+    agent = _agent(db=storage)
     with (
         patch(
             "mindroom.ai.get_model_instance",
@@ -501,7 +503,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
         ),
     ):
         prepared = await prepare_history_for_run(
-            agent=_agent(db=storage),
+            agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -889,6 +891,65 @@ async def test_prepare_history_for_run_without_context_window_skips_auto_compact
 
 
 @pytest.mark.asyncio
+async def test_prepare_history_for_run_authored_compaction_still_plans_safe_replay_when_compaction_unavailable(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, model="summary-model"),
+        context_window=600,
+        models={
+            "default": ModelConfig(provider="openai", id="default-model", context_window=600),
+            "summary-model": ModelConfig(provider="openai", id="summary-model", context_window=None),
+        },
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    agent = _agent(db=storage)
+    prepared = await prepare_history_for_run(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
+    assert prepared.compaction_outcomes == []
+    assert agent.add_history_to_context is True
+    assert agent.add_session_summary_to_context is True
+    assert agent.num_history_runs == 1
+    assert agent.num_history_messages is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_history_for_run_without_authored_compaction_and_no_window_skips_warning(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, context_window=None)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -975,12 +1036,25 @@ def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
     summary_input, included_runs = _build_summary_input(
         previous_summary=None,
         compacted_runs=[big_run, small_run],
-        max_input_tokens=100,
+        max_input_tokens=220,
     )
 
     assert [run.run_id for run in included_runs] == ["run-big"]
     assert "Run truncated to fit compaction budget." in summary_input
     assert 'run_id="run-big"' in summary_input
+
+
+def test_build_summary_input_skips_when_previous_summary_cannot_be_preserved() -> None:
+    run = _completed_run("run-1")
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary="existing durable summary " * 50,
+        compacted_runs=[run],
+        max_input_tokens=50,
+    )
+
+    assert included_runs == []
+    assert "<previous_summary>" in summary_input
 
 
 def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selection() -> None:
@@ -1151,7 +1225,7 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert mock_prepare.await_args.kwargs["agent"] is owner_agent
     assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
     assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+beta")
-    assert mock_prepare.await_args.kwargs["apply_implicit_context_window_guard"] is False
+    assert mock_prepare.await_args.kwargs["replay_target"] is team
     assert (
         estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
     )
@@ -1406,7 +1480,9 @@ def test_validate_compaction_model_references_skips_disabled_compaction_warning(
     assert mock_warning.call_args_list == []
 
 
-def test_resolve_history_execution_plan_uses_compaction_model_window_for_authored_budget(tmp_path: Path) -> None:
+def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_summary_budget(
+    tmp_path: Path,
+) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -1443,9 +1519,9 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_for_authore
     )
 
     assert execution_plan.compaction_context_window == 32_000
-    assert execution_plan.replay_window_tokens == 32_000
+    assert execution_plan.replay_window_tokens is None
     assert execution_plan.summary_input_budget_tokens is not None
-    assert execution_plan.replay_budget_tokens is not None
+    assert execution_plan.replay_budget_tokens is None
     assert execution_plan.destructive_compaction_available is True
 
 
@@ -1565,80 +1641,87 @@ def test_resolve_history_execution_plan_requires_context_window_on_explicit_comp
     assert execution_plan.unavailable_reason == "no_context_window"
 
 
-def test_select_history_preparation_action_forced_compaction_takes_priority() -> None:
+def test_should_attempt_destructive_compaction_forced_compaction_takes_priority() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_config=True,
         authored_compaction_enabled=True,
         destructive_compaction_available=True,
-        implicit_context_window_guard_enabled=False,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
         compaction_context_window=32_000,
         replay_window_tokens=32_000,
-        threshold_tokens=24_000,
+        trigger_threshold_tokens=24_000,
         reserve_tokens=16_384,
         static_prompt_tokens=2_000,
         replay_budget_tokens=10_000,
         summary_input_budget_tokens=5_000,
     )
 
-    assert (
-        select_history_preparation_action(
-            plan=execution_plan,
-            force_compact_before_next_run=True,
-            current_history_tokens=None,
-        )
-        == "compact"
+    assert should_attempt_destructive_compaction(
+        plan=execution_plan,
+        force_compact_before_next_run=True,
+        current_history_tokens=None,
     )
 
 
-def test_select_history_preparation_action_uses_authored_compaction_when_over_budget() -> None:
+def test_should_attempt_destructive_compaction_uses_authored_compaction_when_over_budget() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_config=True,
         authored_compaction_enabled=True,
         destructive_compaction_available=True,
-        implicit_context_window_guard_enabled=False,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
         compaction_context_window=32_000,
         replay_window_tokens=32_000,
-        threshold_tokens=24_000,
+        trigger_threshold_tokens=24_000,
         reserve_tokens=16_384,
         static_prompt_tokens=2_000,
         replay_budget_tokens=10_000,
         summary_input_budget_tokens=5_000,
     )
 
-    assert (
-        select_history_preparation_action(
-            plan=execution_plan,
-            force_compact_before_next_run=False,
-            current_history_tokens=10_001,
-        )
-        == "compact"
+    assert should_attempt_destructive_compaction(
+        plan=execution_plan,
+        force_compact_before_next_run=False,
+        current_history_tokens=10_001,
     )
 
 
-def test_select_history_preparation_action_uses_implicit_guard_for_non_authored_scope(tmp_path: Path) -> None:
-    config, _runtime_paths_value = _make_config(tmp_path)
-
-    execution_plan = resolve_history_execution_plan(
-        config=config,
-        compaction_config=config.get_default_compaction_config(),
-        has_authored_compaction_config=False,
-        active_model_name="default",
-        active_context_window=48_000,
-        static_prompt_tokens=500,
+def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+        ],
     )
 
-    assert (
-        select_history_preparation_action(
-            plan=execution_plan,
-            force_compact_before_next_run=False,
-            current_history_tokens=(execution_plan.replay_budget_tokens or 0) + 1,
-        )
-        == "implicit_guard"
+    replay_plan = plan_replay_that_fits(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="runs", limit=2),
+            max_tool_calls_from_history=None,
+        ),
+        available_history_budget=250,
     )
+
+    assert replay_plan.mode == "limited"
+    assert replay_plan.history_limit_mode == "runs"
+    assert replay_plan.history_limit == 1
 
 
 @pytest.mark.asyncio
@@ -1790,6 +1873,7 @@ async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summar
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
     storage.upsert_session(session)
 
+    agent = _agent(db=storage)
     with (
         patch(
             "mindroom.ai.get_model_instance",
@@ -1806,7 +1890,7 @@ async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summar
         ),
     ):
         prepared = await prepare_history_for_run(
-            agent=_agent(db=storage),
+            agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1829,9 +1913,11 @@ async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summar
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].runs_after == 0
     assert prepared.compaction_outcomes[0].summary == "final summary"
+    assert agent.add_history_to_context is False
+    assert agent.add_session_summary_to_context is False
 
 
-def test_context_window_guard_disables_summary_only_when_wrapped_summary_exceeds_budget() -> None:
+def test_plan_replay_that_fits_disables_summary_only_when_wrapped_summary_exceeds_budget() -> None:
     summary_text = "s" * 360
     available_history_budget = estimate_text_tokens(summary_text)
     assert _estimate_session_summary_tokens(summary_text) > available_history_budget
@@ -1851,8 +1937,7 @@ def test_context_window_guard_disables_summary_only_when_wrapped_summary_exceeds
         ],
     )
 
-    _apply_implicit_context_window_guard(
-        target=agent,
+    replay_plan = plan_replay_that_fits(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=ResolvedHistorySettings(
@@ -1861,7 +1946,9 @@ def test_context_window_guard_disables_summary_only_when_wrapped_summary_exceeds
         ),
         available_history_budget=available_history_budget,
     )
+    apply_replay_plan(target=agent, replay_plan=replay_plan)
 
+    assert replay_plan.mode == "disabled"
     assert agent.add_history_to_context is False
     assert agent.add_session_summary_to_context is False
     assert agent.num_history_runs is None
@@ -1877,6 +1964,21 @@ def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
 
     assert read_scope_seen_event_ids(session, scope) == {"event-1"}
+
+
+def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
+    team_scope = HistoryScope(kind="team", scope_id="team-123")
+    session = _session("session-1")
+
+    write_scope_state(session, agent_scope, HistoryScopeState(force_compact_before_next_run=True))
+    write_scope_state(session, team_scope, HistoryScopeState(last_summary_model="summary-model"))
+
+    assert read_scope_state(session, agent_scope).force_compact_before_next_run is True
+    assert read_scope_state(session, agent_scope).last_summary_model is None
+    assert read_scope_state(session, team_scope).force_compact_before_next_run is False
+    assert read_scope_state(session, team_scope).last_summary_model == "summary-model"
 
 
 def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> None:
