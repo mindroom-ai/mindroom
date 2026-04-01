@@ -322,7 +322,7 @@ class Config(BaseModel):
         "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
     }
     IMPLIED_TOOLS: ClassVar[dict[str, tuple[str, ...]]] = {
-        "matrix_message": ("attachments",),
+        "matrix_message": ("attachments", "matrix_room"),
     }
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
