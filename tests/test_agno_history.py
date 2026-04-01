@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent
@@ -1264,18 +1264,17 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
         ),
         runtime_paths,
     )
-    orchestrator = MagicMock()
-    orchestrator.config = config
-    orchestrator.runtime_paths = runtime_paths
     alpha = _agent(agent_id="alpha", name="Alpha")
     zeta = _agent(agent_id="zeta", name="Zeta")
 
     with patch("mindroom.teams.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
         team = _create_team_instance(
-            [alpha, zeta],
-            ["alpha", "zeta"],
-            TeamMode.COORDINATE,
-            orchestrator,
+            agents=[alpha, zeta],
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_display_name="Team-alpha-zeta",
+            fallback_team_id="Team-alpha-zeta",
             configured_team_name="pair",
         )
 
@@ -1315,18 +1314,17 @@ def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None
         ),
         runtime_paths,
     )
-    orchestrator = MagicMock()
-    orchestrator.config = config
-    orchestrator.runtime_paths = runtime_paths
     alpha = _agent(agent_id="alpha", name="Alpha")
     zeta = _agent(agent_id="zeta", name="Zeta")
 
     with patch("mindroom.teams.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
         team = _create_team_instance(
-            [alpha, zeta],
-            ["alpha", "zeta"],
-            TeamMode.COORDINATE,
-            orchestrator,
+            agents=[alpha, zeta],
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_display_name="Team-alpha-zeta",
+            fallback_team_id="Team-alpha-zeta",
             configured_team_name="pair",
         )
 

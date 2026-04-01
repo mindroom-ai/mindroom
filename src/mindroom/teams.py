@@ -1092,10 +1092,13 @@ async def _ensure_request_team_knowledge_managers(
 
 
 def _create_team_instance(
+    *,
     agents: list[Agent],
-    agent_names: list[str],
     mode: TeamMode,
-    orchestrator: MultiAgentOrchestrator,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    team_display_name: str,
+    fallback_team_id: str,
     model_name: str | None = None,
     configured_team_name: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -1104,9 +1107,11 @@ def _create_team_instance(
 
     Args:
         agents: List of Agent instances for the team
-        agent_names: List of agent names (for team name)
         mode: Team collaboration mode
-        orchestrator: The orchestrator containing configuration
+        config: Active runtime configuration
+        runtime_paths: Active runtime paths
+        team_display_name: Human-readable Team name passed to Agno
+        fallback_team_id: Stable fallback id when no team scope storage is available
         model_name: Optional model name override
         configured_team_name: Optional configured team id for stable team-scope history
         execution_identity: Optional request execution identity for private/runtime storage resolution
@@ -1115,20 +1120,19 @@ def _create_team_instance(
         Configured Team instance
 
     """
-    assert orchestrator.config is not None
-    model = get_model_instance(orchestrator.config, orchestrator.runtime_paths, model_name or "default")
-    if configured_team_name is not None and configured_team_name in orchestrator.config.teams:
-        history_settings = orchestrator.config.get_entity_history_settings(configured_team_name)
+    model = get_model_instance(config, runtime_paths, model_name or "default")
+    if configured_team_name is not None and configured_team_name in config.teams:
+        history_settings = config.get_entity_history_settings(configured_team_name)
     else:
-        history_settings = orchestrator.config.get_default_history_settings()
+        history_settings = config.get_default_history_settings()
     scope_context = resolve_bound_team_scope_context(
         agents=agents,
-        runtime_paths=orchestrator.runtime_paths,
-        config=orchestrator.config,
+        runtime_paths=runtime_paths,
+        config=config,
         execution_identity=execution_identity,
         team_name=configured_team_name,
     )
-    team_id = scope_context.scope.scope_id if scope_context is not None else f"Team-{'-'.join(agent_names)}"
+    team_id = scope_context.scope.scope_id if scope_context is not None else fallback_team_id
 
     for agent in agents:
         # Team-owned replay should come from the shared TeamSession, not from
@@ -1139,7 +1143,7 @@ def _create_team_instance(
     team = Team(
         members=agents,  # type: ignore[arg-type]
         id=team_id,
-        name=f"Team-{'-'.join(agent_names)}",
+        name=team_display_name,
         model=model,
         db=scope_context.storage if scope_context is not None else None,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
@@ -1229,14 +1233,17 @@ async def _prepare_materialized_team_execution(
         active_model_name=model_name,
     )
     resolved_team_model_name = resolved_team_runtime_model.model_name
+    team_label = f"Team-{'-'.join(team_members.requested_agent_names)}"
     team = _create_team_instance(
-        team_members.agents,
-        team_members.requested_agent_names,
-        mode,
-        orchestrator,
-        resolved_team_model_name,
-        configured_team_name,
-        execution_identity,
+        agents=team_members.agents,
+        mode=mode,
+        config=orchestrator.config,
+        runtime_paths=orchestrator.runtime_paths,
+        team_display_name=team_label,
+        fallback_team_id=team_label,
+        model_name=resolved_team_model_name,
+        configured_team_name=configured_team_name,
+        execution_identity=execution_identity,
     )
     seen_event_ids = _collect_bound_seen_event_ids(
         agents=team_members.agents,

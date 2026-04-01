@@ -8,15 +8,14 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.agents import create_session_storage, create_state_storage_db, get_agent_session, get_team_session
 from mindroom.history.compaction import (
+    _completed_top_level_runs,
     _estimate_session_summary_tokens,
+    _runs_for_scope,
     compact_scope_history,
     estimate_prompt_visible_history_tokens,
     estimate_static_tokens,
@@ -824,7 +823,7 @@ def _context_window_guard_limit_bounds(
     if history_settings.policy.mode == "messages":
         return "messages", history_settings.policy.limit or 0
 
-    visible_run_count = len(_scope_completed_top_level_runs(session, scope))
+    visible_run_count = len(_runs_for_scope(_completed_top_level_runs(session), scope))
     if history_settings.policy.mode == "all":
         return "runs", visible_run_count
     return "runs", min(history_settings.policy.limit or 0, visible_run_count)
@@ -865,34 +864,9 @@ def _find_fitting_history_limit_for_budget(
     return best
 
 
-def _scope_completed_top_level_runs(
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-) -> list[RunOutput | TeamRunOutput]:
-    skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
-    runs = [
-        run
-        for run in session.runs or []
-        if isinstance(run, (RunOutput, TeamRunOutput)) and run.parent_run_id is None and run.status not in skip_statuses
-    ]
-    if scope.kind == "team":
-        return [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id]
-    return [run for run in runs if isinstance(run, RunOutput) and run.agent_id == scope.scope_id]
-
-
 def _has_persisted_history(session: AgentSession | TeamSession, scope: HistoryScope) -> bool:
     summary = session.summary.summary if session.summary is not None else None
     if isinstance(summary, str) and summary.strip():
         return True
 
-    skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
-    for run in session.runs or []:
-        if not isinstance(run, (RunOutput, TeamRunOutput)):
-            continue
-        if run.parent_run_id is not None or run.status in skip_statuses:
-            continue
-        if scope.kind == "team" and isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id:
-            return True
-        if scope.kind == "agent" and isinstance(run, RunOutput) and run.agent_id == scope.scope_id:
-            return True
-    return False
+    return bool(_runs_for_scope(_completed_top_level_runs(session), scope))

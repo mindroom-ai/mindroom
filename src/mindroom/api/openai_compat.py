@@ -21,31 +21,23 @@ from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
-from agno.team import Team
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from mindroom.agents import create_agent, enable_all_history_replay
-from mindroom.ai import (
-    AIStreamChunk,
-    ai_response,
-    build_prompt_with_thread_history,
-    get_model_instance,
-    stream_agent_response,
-)
+from mindroom.agents import create_agent
+from mindroom.ai import AIStreamChunk, ai_response, build_prompt_with_thread_history, stream_agent_response
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.history import (
     prepare_bound_agents_for_run,
 )
-from mindroom.history.runtime import resolve_bound_team_scope_context
 from mindroom.knowledge.manager import initialize_shared_knowledge_managers
 from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.team_runtime_resolution import materialize_exact_requested_team_members
-from mindroom.teams import TeamMode, TeamOutcome, format_team_response, resolve_configured_team
+from mindroom.teams import TeamMode, TeamOutcome, _create_team_instance, format_team_response, resolve_configured_team
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -66,6 +58,7 @@ if TYPE_CHECKING:
     from agno.models.response import ToolExecution
     from agno.run.agent import RunOutput, RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
+    from agno.team import Team
 
 logger = get_logger(__name__)
 
@@ -1104,7 +1097,6 @@ def _build_team(
     config_ids = config.get_ids(runtime_paths)
     requested_members = [config_ids[member_name] for member_name in team_config.agents]
     model_name = team_config.model or "default"
-    model = get_model_instance(config, runtime_paths, model_name)
 
     def _build_member(member_name: str) -> Agent:
         return create_agent(
@@ -1138,35 +1130,17 @@ def _build_team(
     if final_resolution.outcome is not TeamOutcome.TEAM:
         raise ValueError(final_resolution.reason or f"Team '{team_name}' cannot be materialized")
 
-    history_settings = config.get_entity_history_settings(team_name)
-    scope_context = resolve_bound_team_scope_context(
+    team = _create_team_instance(
         agents=team_members.agents,
-        runtime_paths=runtime_paths,
+        mode=mode,
         config=config,
+        runtime_paths=runtime_paths,
+        team_display_name=f"Team-{team_name}",
+        fallback_team_id=team_name,
+        model_name=model_name,
+        configured_team_name=team_name,
         execution_identity=execution_identity,
-        team_name=team_name,
     )
-    for agent in team_members.agents:
-        agent.add_history_to_context = False
-        agent.add_session_summary_to_context = False
-    team = Team(
-        members=team_members.agents,  # type: ignore[arg-type]
-        id=scope_context.scope.scope_id if scope_context is not None else team_name,
-        name=f"Team-{team_name}",
-        model=model,
-        db=scope_context.storage if scope_context is not None else None,
-        delegate_to_all_members=mode == TeamMode.COLLABORATE,
-        add_history_to_context=True,
-        add_session_summary_to_context=True,
-        num_history_runs=history_settings.policy.limit if history_settings.policy.mode == "runs" else None,
-        num_history_messages=history_settings.policy.limit if history_settings.policy.mode == "messages" else None,
-        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
-        store_history_messages=False,
-        show_members_responses=True,
-        debug_mode=False,
-    )
-    if history_settings.policy.mode == "all":
-        enable_all_history_replay(team)
     return team_members.agents, team, mode
 
 
