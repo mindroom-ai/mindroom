@@ -124,6 +124,17 @@ function isPureCompactionModelClear(compaction: CompactionConfig): boolean {
   );
 }
 
+function isEmptyCompactionOverride(compaction: CompactionConfig): boolean {
+  return (
+    compaction.enabled === undefined &&
+    compaction.model === undefined &&
+    compaction.threshold_tokens === undefined &&
+    compaction.threshold_percent === undefined &&
+    compaction.reserve_tokens === undefined &&
+    compaction.notify === undefined
+  );
+}
+
 export function resolveEffectiveCompactionEnabled(
   compaction: CompactionConfig | null | undefined,
   defaultCompaction: CompactionConfig | null | undefined
@@ -134,7 +145,7 @@ export function resolveEffectiveCompactionEnabled(
   if (compaction.enabled !== undefined) {
     return compaction.enabled;
   }
-  if (isPureCompactionModelClear(compaction)) {
+  if (isEmptyCompactionOverride(compaction) || isPureCompactionModelClear(compaction)) {
     return defaultCompaction?.enabled ?? false;
   }
   return true;
