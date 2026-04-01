@@ -22,11 +22,6 @@ This is the wrong boundary.
 History preparation should produce a decision.
 The caller should apply that decision at the execution edge.
 
-The current prepared-history state also overloads one boolean.
-`PreparedHistoryState.replays_persisted_history` is currently used for prompt fallback decisions and cache bypass decisions.
-Those are different questions.
-A run may decide not to replay persisted history while still needing to append a new durable turn to the session.
-
 The current compaction warning path in `Config` also reconstructs runtime behavior from raw config pieces.
 That duplicates runtime model resolution and can diverge from the actual planning code.
 It is especially fragile around inherited `compaction.model`, explicit `null` clears, and room-specific runtime model overrides.
@@ -42,7 +37,6 @@ The caller applies.
 The live runtime object is mutated only at the execution edge.
 
 To support that contract, `PreparedHistoryState` should carry the resolved replay decision explicitly.
-It should also carry a separate fact for whether the current run must still participate in persisted session state.
 
 The intended shape is:
 
@@ -52,16 +46,10 @@ class PreparedHistoryState:
     compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
     replay_plan: ResolvedReplayPlan | None = None
     replays_persisted_history: bool = False
-    requires_session_persistence: bool = False
 ```
 
 `replays_persisted_history` answers a per-run question.
 It is used for prompt fallback behavior.
-
-`requires_session_persistence` answers a run-participation question.
-It is used for cache bypass and any other behavior that depends on whether a new turn must still be recorded in session history.
-This is intentionally narrower than "prior durable state exists".
-The cache decision is about whether the current run can be satisfied purely from cache without skipping required session persistence.
 
 ## Runtime Contract
 
@@ -126,7 +114,7 @@ The first regression should prove that when replay budgeting is unavailable, his
 
 The second regression should prove that the OpenAI-compatible team path explicitly applies the returned replay plan, rather than depending on hidden mutation inside history preparation.
 
-The third regression should prove that `replays_persisted_history` is derived from `replay_plan` plus actual scoped session contents, while cache bypass keys off `requires_session_persistence` instead.
+The third regression should prove that `replays_persisted_history` is derived from `replay_plan` plus actual scoped session contents, rather than from mutated live-object flags.
 
 ## Why This Is Better
 
@@ -136,7 +124,6 @@ The caller applies.
 
 It also removes a recurring source of bugs.
 Per-run replay behavior stops being hidden inside long-lived object mutation.
-Cache bypass logic stops depending on the wrong boolean.
 Config validation stops trying to predict runtime behavior from partial static information.
 
 This is a smaller change than another full architecture rewrite.

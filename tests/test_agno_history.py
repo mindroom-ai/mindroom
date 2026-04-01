@@ -1925,7 +1925,6 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
         num_history_messages=None,
     )
     assert prepared.replays_persisted_history is True
-    assert prepared.requires_session_persistence is True
 
 
 @pytest.mark.asyncio
@@ -1974,7 +1973,6 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.mode == "disabled"
     assert prepared.replays_persisted_history is False
-    assert prepared.requires_session_persistence is True
 
 
 @pytest.mark.asyncio

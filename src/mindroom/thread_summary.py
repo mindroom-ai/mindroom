@@ -10,7 +10,7 @@ import nio
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom.ai import _cached_agent_run, get_model_instance
+from mindroom.ai import _run_agent_turn, get_model_instance
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import fetch_thread_history
 
@@ -138,12 +138,10 @@ async def _generate_summary(
         f"{conversation}"
     )
     session_hash = hashlib.sha256(conversation.encode()).hexdigest()[:8]
-    response = await _cached_agent_run(
+    response = await _run_agent_turn(
         agent=agent,
         full_prompt=prompt,
         session_id=f"thread_summary_{session_hash}",
-        agent_name="ThreadSummarizer",
-        runtime_paths=runtime_paths,
     )
     content = response.content
     if isinstance(content, _ThreadSummary):

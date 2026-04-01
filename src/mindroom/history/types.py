@@ -131,4 +131,3 @@ class PreparedHistoryState:
     compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
     replay_plan: ResolvedReplayPlan | None = None
     replays_persisted_history: bool = False
-    requires_session_persistence: bool = False

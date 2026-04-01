@@ -2669,10 +2669,9 @@ class AgentBot:
             payload.model_prompt or payload.prompt,
             thread_history,
         )
-        # Team flows call Agno's team APIs directly instead of ai_response()/stream_agent_response(),
-        # so there is no MindRoom-local text cache keyed by enrichment_digest on this path.
-        # The digest is still used to decide whether transient enrichment must be scrubbed
-        # back out of persisted team session history after the response finishes.
+        # Team flows call Agno's team APIs directly instead of ai_response()/stream_agent_response().
+        # The enrichment digest is only used to decide whether transient enrichment
+        # must be scrubbed back out of persisted team session history after the response finishes.
 
         # Get the appropriate model for this team and room
         model_name = select_model_for_team(self.agent_name, room_id, self.config, self.runtime_paths)

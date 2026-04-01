@@ -274,14 +274,15 @@ The `message:enrich` event powers a full enrichment pipeline that injects live c
 3. **AI sees it**: The model receives the enrichment block as part of the current user message, so it has live context for its response.
 4. **Strip from history**: After the response completes, MindRoom strips enrichment blocks from the persisted Agno session history so volatile data does not leak into future conversations.
 
-### Cache policy
+### Enrichment policy
 
 Each enrichment item has a `cache_policy`:
 
 - `"volatile"` (default): The item may change on every message (e.g., weather, time).
 - `"stable"`: The item changes rarely (e.g., user profile, timezone).
 
-The enrichment digest (a SHA-256 hash of all items) is included in the AI response cache key, preventing stale-cache hits when volatile context changes.
+MindRoom still computes a stable digest for the merged enrichment set.
+That digest is used internally to track whether hook enrichment was attached to a run so the persisted session can be cleaned up after the response completes.
 
 ### Adding enrichment items
 

@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import importlib
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
-import diskcache
 from agno.models.anthropic import Claude
 from agno.models.cerebras import Cerebras
 from agno.models.deepseek import DeepSeek
@@ -44,7 +42,6 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     RuntimePaths,
-    runtime_ai_cache_enabled,
     runtime_env_path,
 )
 from mindroom.credentials import get_runtime_shared_credentials_manager
@@ -71,7 +68,6 @@ from mindroom.tool_system.events import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection
-    from pathlib import Path
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
@@ -332,12 +328,6 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     if len(payload) == 1:
         return None
     return {AI_RUN_METADATA_KEY: payload}
-
-
-@functools.cache
-def _get_cache(storage_path: Path, enabled: bool) -> diskcache.Cache | None:
-    """Get or create a cache instance for the given storage path."""
-    return diskcache.Cache(storage_path / ".ai_cache") if enabled else None
 
 
 def _create_model_for_provider(  # noqa: C901, PLR0912
@@ -712,25 +702,6 @@ def build_matrix_run_metadata(reply_to_event_id: str | None, unseen_event_ids: l
     }
 
 
-def _build_cache_key(
-    agent: Agent,
-    full_prompt: str,
-    session_id: str,
-    *,
-    show_tool_calls: bool | None = None,
-    enrichment_digest: str | None = None,
-) -> str:
-    model = agent.model
-    assert model is not None
-    key = f"{agent.name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
-    if enrichment_digest is not None:
-        key = f"{key}:enrichment={enrichment_digest}"
-    if show_tool_calls is None:
-        return key
-    visibility = "show" if show_tool_calls else "hide"
-    return f"{key}:tool_calls={visibility}"
-
-
 def _request_stream_retry(
     state: _StreamingAttemptState,
     *,
@@ -834,71 +805,31 @@ def _track_model_request_metrics(
         state.first_token_latency = float(event.time_to_first_token)
 
 
-async def _cached_agent_run(
+async def _run_agent_turn(
     agent: Agent,
     full_prompt: str,
     session_id: str,
-    agent_name: str,
     *,
-    runtime_paths: RuntimePaths,
     user_id: str | None = None,
     run_id: str | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
-    prepared_history: PreparedHistoryState | None = None,
-    enrichment_digest: str | None = None,
 ) -> RunOutput:
-    """Cached wrapper for agent.arun() calls."""
+    """Shared wrapper for one `agent.arun()` call."""
     media_inputs = media or MediaInputs()
-    storage_path = runtime_paths.storage_root
-    requires_session_persistence = prepared_history is not None and prepared_history.requires_session_persistence
-    cache = (
-        None
-        if media_inputs.has_any() or requires_session_persistence
-        else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
-    )
-    if cache is None:
-        _note_attempt_run_id(run_id_callback, run_id)
-        return await agent.arun(
-            full_prompt,
-            session_id=session_id,
-            user_id=user_id,
-            run_id=run_id,
-            audio=media_inputs.audio,
-            images=media_inputs.images,
-            files=media_inputs.files,
-            videos=media_inputs.videos,
-            metadata=metadata,
-        )
-
-    model = agent.model
-    assert model is not None
-    cache_key = _build_cache_key(
-        agent,
-        full_prompt,
-        session_id,
-        enrichment_digest=enrichment_digest,
-    )
-    cached_result = cache.get(cache_key)
-    if cached_result is not None:
-        logger.info("Cache hit", agent=agent_name)
-        return cast("RunOutput", cached_result)
-
     _note_attempt_run_id(run_id_callback, run_id)
-    response = await agent.arun(
+    return await agent.arun(
         full_prompt,
         session_id=session_id,
         user_id=user_id,
         run_id=run_id,
+        audio=media_inputs.audio,
+        images=media_inputs.images,
+        files=media_inputs.files,
+        videos=media_inputs.videos,
         metadata=metadata,
     )
-
-    if response.status not in {RunStatus.cancelled, RunStatus.error}:
-        cache.set(cache_key, response)
-        logger.info("Response cached", agent=agent_name)
-
-    return response
 
 
 async def _prepare_agent_and_prompt(
@@ -1083,7 +1014,7 @@ async def ai_response(  # noqa: C901
         compaction_outcomes_collector: Optional list that receives completed
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
-        enrichment_digest: Optional digest of hook-provided enrichment used to vary the local cache key.
+        enrichment_digest: Optional digest of hook-provided enrichment attached to this run.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
 
     Returns:
@@ -1091,6 +1022,7 @@ async def ai_response(  # noqa: C901
 
     """
     logger.info("AI request", agent=agent_name, room_id=room_id)
+    _ = enrichment_digest
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
     prepared_history = PreparedHistoryState()
@@ -1126,19 +1058,15 @@ async def ai_response(  # noqa: C901
 
         for retried_without_inline_media in (False, True):
             try:
-                response = await _cached_agent_run(
+                response = await _run_agent_turn(
                     agent,
                     attempt_prompt,
                     session_id,
-                    agent_name,
-                    runtime_paths=runtime_paths,
                     user_id=user_id,
                     run_id=attempt_run_id,
                     run_id_callback=run_id_callback,
                     media=attempt_media_inputs,
                     metadata=metadata,
-                    prepared_history=prepared_history,
-                    enrichment_digest=enrichment_digest,
                 )
             except Exception as e:
                 if not retried_without_inline_media and should_retry_without_inline_media(e, attempt_media_inputs):
@@ -1314,9 +1242,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
-    Checks cache first - if found, yields the cached response immediately.
-    Otherwise streams the new response and caches it.
-
     Args:
         agent_name: Name of the agent to use
         prompt: User prompt
@@ -1346,7 +1271,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         compaction_outcomes_collector: Optional list that receives completed
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
-        enrichment_digest: Optional digest of hook-provided enrichment used to vary the local cache key.
+        enrichment_digest: Optional digest of hook-provided enrichment attached to this run.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
 
     Yields:
@@ -1354,8 +1279,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
     """
     logger.info("AI streaming request", agent=agent_name, room_id=room_id)
+    _ = enrichment_digest
     media_inputs = media or MediaInputs()
-    storage_path = runtime_paths.storage_root
     agent: Agent | None = None
     prepared_history = PreparedHistoryState()
 
@@ -1383,48 +1308,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
     try:
         metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
-
-        requires_session_persistence = prepared_history.requires_session_persistence
-        cache = (
-            None
-            if media_inputs.has_any() or requires_session_persistence
-            else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
-        )
-        if cache is not None:
-            model = agent.model
-            assert model is not None
-            cache_key = _build_cache_key(
-                agent,
-                full_prompt,
-                session_id,
-                show_tool_calls=show_tool_calls,
-                enrichment_digest=enrichment_digest,
-            )
-            cached_result = cache.get(cache_key)
-            if cached_result is not None:
-                cached_run = cast("RunOutput", cached_result)
-                logger.info("Cache hit", agent=agent_name)
-                response_text = cached_run.content or ""
-                if run_metadata_collector is not None:
-                    cached_metadata = _build_ai_run_metadata_content(
-                        agent_name=agent_name,
-                        config=config,
-                        runtime_paths=runtime_paths,
-                        run_id=cached_run.run_id,
-                        session_id=cached_run.session_id or session_id,
-                        status="cached",
-                        model=cached_run.model,
-                        model_provider=cached_run.model_provider,
-                        room_id=room_id,
-                        metrics=cached_run.metrics,
-                        tool_count=len(cached_run.tools) if cached_run.tools else 0,
-                    )
-                    if cached_metadata:
-                        run_metadata_collector.update(cached_metadata)
-                yield response_text
-                return
-        else:
-            cache_key = None
 
         attempt_prompt = full_prompt
         attempt_media_inputs = media_inputs
@@ -1544,11 +1427,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             )
             if run_metadata:
                 run_metadata_collector.update(run_metadata)
-
-        if cache is not None and cache_key is not None and state.full_response:
-            cached_response = RunOutput(content=state.full_response)
-            cache.set(cache_key, cached_response)
-            logger.info("Response cached", agent=agent_name)
     finally:
         # Native Agno replay no longer binds transient per-run history state.
         pass

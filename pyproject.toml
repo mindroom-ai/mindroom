@@ -24,7 +24,6 @@ dependencies = [
   "chromadb>=1.0.15",
   "cron-descriptor>=1.4.5",
   "croniter>=6",
-  "diskcache>=5.6.3",
   "fastapi[standard]>=0.116.1",
   "filetype>=1.2",
   "google-genai",

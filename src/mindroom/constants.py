@@ -477,11 +477,6 @@ def runtime_mindroom_namespace(runtime_paths: RuntimePaths) -> str | None:
     return normalized or None
 
 
-def runtime_ai_cache_enabled(runtime_paths: RuntimePaths) -> bool:
-    """Return whether the AI response cache is enabled for one runtime context."""
-    return runtime_env_flag("MINDROOM_ENABLE_AI_CACHE", default=True, runtime_paths=runtime_paths)
-
-
 def matrix_state_file(runtime_paths: RuntimePaths) -> Path:
     """Return the matrix-state file for one runtime context."""
     return runtime_paths.storage_root / "matrix_state.yaml"

@@ -20,7 +20,6 @@ from agno.run.agent import (
 from agno.run.base import RunStatus
 
 from mindroom.ai import (
-    _cached_agent_run,
     _prepare_agent_and_prompt,
     ai_response,
     append_inline_media_fallback_prompt,
@@ -209,7 +208,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
@@ -240,7 +238,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
@@ -292,7 +289,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+            patch("mindroom.ai._run_agent_turn", new_callable=AsyncMock, return_value=mock_run_output),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
@@ -320,7 +317,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
@@ -353,7 +349,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
@@ -389,7 +384,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
@@ -424,7 +418,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+            patch("mindroom.ai._run_agent_turn", new_callable=AsyncMock, return_value=mock_run_output),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
@@ -448,7 +442,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+            patch("mindroom.ai._run_agent_turn", new_callable=AsyncMock, return_value=mock_run_output),
             patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly-error") as mock_friendly_error,
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -482,7 +476,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             await ai_response(
@@ -516,7 +509,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             _chunks = [
@@ -566,7 +558,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             response = await ai_response(
@@ -604,7 +595,7 @@ class TestUserIdPassthrough:
         callback_run_ids: list[str] = []
         responses = [error_output, success_output]
 
-        async def fake_cached_run(*_args: object, **kwargs: object) -> MagicMock:
+        async def fake_run(*_args: object, **kwargs: object) -> MagicMock:
             seen_run_ids.append(kwargs["run_id"])
             run_id_callback = kwargs["run_id_callback"]
             if run_id_callback is not None and kwargs["run_id"] is not None:
@@ -613,7 +604,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._cached_agent_run", side_effect=fake_cached_run),
+            patch("mindroom.ai._run_agent_turn", side_effect=fake_run),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             response = await ai_response(
@@ -664,7 +655,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             chunks = [
@@ -708,7 +698,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             chunks = [
@@ -779,7 +768,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
             patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly") as mock_friendly_error,
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -829,7 +817,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
             patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly-error") as mock_friendly_error,
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -869,7 +856,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
@@ -884,43 +870,6 @@ class TestUserIdPassthrough:
 
             mock_agent.arun.assert_called_once()
             assert mock_agent.arun.call_args.kwargs["user_id"] is None
-
-    @pytest.mark.asyncio
-    async def test_stream_cache_key_respects_show_tool_calls(self, tmp_path: Path) -> None:
-        """Streaming cache key should include tool-call visibility mode."""
-        mock_agent = MagicMock()
-        mock_agent.model = MagicMock()
-        mock_agent.model.__class__.__name__ = "OpenAIChat"
-        mock_agent.model.id = "test-model"
-        mock_agent.name = "GeneralAgent"
-        mock_agent.add_history_to_context = False
-        mock_agent.add_session_summary_to_context = False
-        mock_agent.arun = MagicMock()
-
-        mock_cache = MagicMock()
-        mock_cache.get.return_value = MagicMock(content="cached-response")
-
-        with (
-            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=mock_cache),
-            patch("mindroom.ai._build_cache_key", return_value="cache-key") as mock_build_cache_key,
-        ):
-            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
-
-            chunks = [
-                chunk
-                async for chunk in stream_agent_response(
-                    agent_name="general",
-                    prompt="test",
-                    session_id="session1",
-                    runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
-                    show_tool_calls=False,
-                )
-            ]
-
-        assert chunks == ["cached-response"]
-        assert mock_build_cache_key.call_args.kwargs["show_tool_calls"] is False
 
     @pytest.mark.asyncio
     async def test_ai_response_collects_tool_trace_when_tool_calls_hidden(self, tmp_path: Path) -> None:
@@ -944,7 +893,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             tool_trace: list[object] = []
@@ -996,7 +944,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             run_metadata: dict[str, object] = {}
@@ -1059,7 +1006,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             run_metadata: dict[str, object] = {}
@@ -1109,7 +1055,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+            patch("mindroom.ai._run_agent_turn", new_callable=AsyncMock, return_value=mock_run_output),
             patch("mindroom.matrix.rooms.get_room_alias_from_id", return_value="lobby"),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -1176,7 +1122,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
             patch("mindroom.matrix.rooms.get_room_alias_from_id", return_value="lobby"),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -1231,7 +1176,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             run_metadata: dict[str, object] = {}
@@ -1282,7 +1226,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             run_metadata: dict[str, object] = {}
@@ -1305,44 +1248,3 @@ class TestUserIdPassthrough:
         assert payload["context"]["input_tokens"] == 12
         assert payload["context"]["window_tokens"] == 100
         assert "utilization_pct" not in payload["context"]
-
-
-class TestSessionCaching:
-    """Test cache bypass decisions for persisted session state."""
-
-    @pytest.mark.asyncio
-    async def test_cached_agent_run_bypasses_cache_when_session_persistence_required(self, tmp_path: Path) -> None:
-        """Persisted-session runs must bypass cache even when replay is disabled for this call."""
-        runtime_paths = _runtime_paths(tmp_path)
-        agent = MagicMock()
-        agent.name = "general"
-        agent.model = MagicMock()
-        agent.model.id = "test-model"
-        cached_response = MagicMock()
-        cached_response.status = RunStatus.completed
-        cached_response.content = "ok"
-        agent.arun = AsyncMock(return_value=cached_response)
-
-        prepared_history = PreparedHistoryState(
-            replays_persisted_history=False,
-            requires_session_persistence=True,
-        )
-
-        await _cached_agent_run(
-            agent,
-            "same prompt",
-            "session-1",
-            "general",
-            runtime_paths=runtime_paths,
-            prepared_history=prepared_history,
-        )
-        await _cached_agent_run(
-            agent,
-            "same prompt",
-            "session-1",
-            "general",
-            runtime_paths=runtime_paths,
-            prepared_history=prepared_history,
-        )
-
-        assert agent.arun.await_count == 2

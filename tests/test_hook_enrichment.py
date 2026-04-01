@@ -1,4 +1,4 @@
-"""Tests for hook enrichment rendering, stripping, and caching."""
+"""Tests for hook enrichment rendering, stripping, and digests."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.ai import _build_cache_key
 from mindroom.hooks import (
     EnrichmentItem,
     compute_enrichment_digest,
@@ -161,26 +160,3 @@ def test_strip_enrichment_from_session_storage_updates_team_runs() -> None:
     team_message = session.runs[0].messages[0]
     assert team_message.content == "Question"
     assert team_message.compressed_content == "Question"
-
-
-def test_enrichment_digest_changes_ai_cache_key() -> None:
-    """The local AI cache key should vary when enrichment changes."""
-
-    class _Model:
-        id = "test-model"
-
-    class _Agent:
-        name = "calculator"
-        model = _Model()
-
-    base_key = _build_cache_key(_Agent(), "prompt", "session-1", show_tool_calls=True)
-    enriched_key = _build_cache_key(
-        _Agent(),
-        "prompt",
-        "session-1",
-        show_tool_calls=True,
-        enrichment_digest="abc123",
-    )
-
-    assert base_key != enriched_key
-    assert enriched_key.endswith(":enrichment=abc123:tool_calls=show")

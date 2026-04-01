@@ -274,10 +274,6 @@ async def prepare_history_for_run(
             scope=scope_context.scope,
             replay_plan=replay_plan,
         ),
-        requires_session_persistence=_requires_session_persistence(
-            session=session,
-            scope=scope_context.scope,
-        ),
     )
     if compaction_outcomes_collector is not None:
         compaction_outcomes_collector.extend(compaction_outcomes)
@@ -939,15 +935,3 @@ def _has_effective_persisted_replay(
         runs_for_scope(completed_top_level_runs(session), scope),
     )
     return has_replayed_summary or has_replayed_runs
-
-
-def _requires_session_persistence(
-    *,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-) -> bool:
-    summary = session.summary.summary if session.summary is not None else None
-    has_summary = isinstance(summary, str) and bool(summary.strip())
-    has_runs = bool(runs_for_scope(completed_top_level_runs(session), scope))
-    has_scope_state = read_scope_state(session, scope) != HistoryScopeState()
-    return has_summary or has_runs or has_scope_state
