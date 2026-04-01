@@ -361,6 +361,7 @@ class TestRouterHandoffThreadMode:
         event.sender = "@user:localhost"
         event.body = "Help me"
         event.event_id = "$user_event"
+        event.server_timestamp = 1000
         event.source = {
             "event_id": "$user_event",
             "sender": "@user:localhost",
@@ -485,6 +486,7 @@ class TestExtractMessageContextRoomMode:
 
         event = MagicMock(spec=nio.RoomMessageText)
         event.event_id = "$event123"
+        event.server_timestamp = 1000
         event.sender = "@user:localhost"
         event.source = {
             "event_id": "$event123",
@@ -537,6 +539,7 @@ class TestExtractMessageContextRoomMode:
 
         event = MagicMock(spec=nio.RoomMessageText)
         event.event_id = "$event123"
+        event.server_timestamp = 1000
         event.sender = "@user:localhost"
         event.source = {
             "event_id": "$event123",

@@ -489,15 +489,18 @@ class TestAgentBot:
         elif handler_name == "image":
             event = MagicMock(spec=nio.RoomMessageImage)
             event.body = "image.jpg"
+            event.server_timestamp = 1000
             event.source = {"content": {"body": "image.jpg"}}
         elif handler_name == "voice":
             event = MagicMock(spec=nio.RoomMessageAudio)
             event.body = "voice"
+            event.server_timestamp = 1000
             event.source = {"content": {"body": "voice"}}
         elif handler_name == "file":
             event = MagicMock(spec=nio.RoomMessageFile)
             event.body = "report.pdf"
             event.url = "mxc://localhost/report"
+            event.server_timestamp = 1000
             event.source = {"content": {"body": "report.pdf", "msgtype": "m.file"}}
         elif handler_name == "reaction":
             event = MagicMock(spec=nio.ReactionEvent)
@@ -3562,6 +3565,7 @@ class TestAgentBot:
         event.sender = "@user:localhost"
         event.event_id = "$img_event"
         event.body = "photo.jpg"
+        event.server_timestamp = 1000
         event.source = {"content": {"body": "photo.jpg"}}  # no filename → body is filename
 
         image = MagicMock()
@@ -3653,6 +3657,7 @@ class TestAgentBot:
         event.sender = "@user:localhost"
         event.event_id = "$img_event_history"
         event.body = "photo.png"
+        event.server_timestamp = 1000
         event.source = {
             "content": {
                 "body": "photo.png",
@@ -3739,6 +3744,7 @@ class TestAgentBot:
         event.sender = "@user:localhost"
         event.event_id = "$img_event_fail"
         event.body = "please analyze"
+        event.server_timestamp = 1000
         event.source = {"content": {"body": "please analyze"}}
 
         with (
@@ -3792,6 +3798,7 @@ class TestAgentBot:
         event.event_id = "$file_event"
         event.body = "report.pdf"
         event.url = "mxc://localhost/report"
+        event.server_timestamp = 1000
         event.source = {"content": {"body": "report.pdf", "msgtype": "m.file"}}
 
         local_media_path = tmp_path / "incoming_media" / "file.pdf"
@@ -3880,6 +3887,7 @@ class TestAgentBot:
         event.event_id = "$file_event_fail"
         event.body = "report.pdf"
         event.url = "mxc://localhost/report"
+        event.server_timestamp = 1000
         event.source = {"content": {"body": "report.pdf", "msgtype": "m.file"}}
 
         with (
@@ -3957,7 +3965,7 @@ class TestAgentBot:
             patch("mindroom.bot.has_multiple_non_agent_users_in_thread", return_value=False),
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.bot.extract_media_caption", return_value="[Attached image]"),
+            patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
         ):
             mock_get_available.return_value = [
                 config.get_ids(runtime_paths_for(config))["general"],
@@ -4419,7 +4427,7 @@ class TestAgentBot:
             ),
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.bot.extract_media_caption", return_value="[Attached image]"),
+            patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
             patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         ):
             await bot._on_message(room, text_event)
@@ -4488,7 +4496,7 @@ class TestAgentBot:
             ),
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.bot.extract_media_caption", return_value="[Attached image]"),
+            patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
             patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         ):
             await bot._on_message(room, text_event)
@@ -5238,7 +5246,6 @@ class TestAgentBot:
                 unused_payload_builder,
                 processing_log="processing",
                 dispatch_started_monotonic=0.0,
-                context_ready_monotonic=0.0,
             )
 
         mock_send_response.assert_awaited_once()
@@ -5289,19 +5296,18 @@ class TestAgentBot:
                 unused_payload_builder,
                 processing_log="processing",
                 dispatch_started_monotonic=0.0,
-                context_ready_monotonic=0.0,
             )
 
         mock_send_response.assert_awaited_once()
         bot.response_tracker.mark_responded.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_derives_thread_target_without_prefetching_history(
+    async def test_extract_dispatch_context_derives_thread_target_and_prefetches_preview_history(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Dispatch startup should derive thread identity without reconstructing thread history."""
+        """Dispatch startup should fetch preview history for thread-aware action selection."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -5322,14 +5328,24 @@ class TestAgentBot:
             },
         )
 
-        with patch("mindroom.bot.fetch_thread_history", new=AsyncMock()) as mock_history:
+        preview_history = [
+            _visible_message(
+                event_id="$thread_root",
+                sender="@user:localhost",
+                body="Root",
+                timestamp=1234567889,
+                content={"body": "Root"},
+            ),
+        ]
+
+        with patch("mindroom.bot.fetch_thread_history", new=AsyncMock(return_value=preview_history)) as mock_history:
             context = await bot._extract_dispatch_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
-        assert context.thread_history == []
-        assert context.requires_full_thread_history is True
-        mock_history.assert_not_awaited()
+        assert context.thread_history == preview_history
+        assert context.requires_full_thread_history is False
+        mock_history.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
         bot.client.room_get_event.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -5387,12 +5403,12 @@ class TestAgentBot:
         bot.client.room_get_event.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_dispatch_text_message_hydrates_full_history_before_action_selection(
+    async def test_dispatch_text_message_hydrates_full_history_only_after_action_selection(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Dispatch should hydrate full thread history before action selection uses it."""
+        """Dispatch should defer full thread hydration until a real reply action exists."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -5488,17 +5504,17 @@ class TestAgentBot:
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
 
-        assert call_order == ["hydrate", "action", "placeholder", "payload", "generate"]
+        assert call_order == ["action", "placeholder", "hydrate", "payload", "generate"]
         assert dispatch.context.thread_history == full_history
         assert dispatch.context.requires_full_thread_history is False
 
     @pytest.mark.asyncio
-    async def test_dispatch_text_message_skip_path_hydrates_before_action_selection(
+    async def test_dispatch_text_message_skip_path_does_not_hydrate_full_history(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Skip paths still hydrate before any action-selection logic reads thread history."""
+        """Skip paths should not pay for full history hydration."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -5526,29 +5542,10 @@ class TestAgentBot:
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
         )
 
-        call_order: list[str] = []
-
-        async def fake_hydrate(_room: nio.MatrixRoom, _event: nio.RoomMessageText, context: _MessageContext) -> None:
-            call_order.append("hydrate")
-            context.thread_history = [
-                _visible_message(
-                    event_id="$thread_root",
-                    sender="@user:localhost",
-                    body="Full root",
-                    timestamp=1,
-                    content={"body": "Full root"},
-                ),
-            ]
-            context.requires_full_thread_history = False
-
-        async def fake_resolve_action(*_args: object, **_kwargs: object) -> _ResponseAction | None:
-            call_order.append("action")
-            return None
-
         with (
             patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-            patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock(side_effect=fake_hydrate)),
-            patch.object(bot, "_resolve_dispatch_action", new=AsyncMock(side_effect=fake_resolve_action)),
+            patch.object(bot, "_resolve_dispatch_action", new=AsyncMock(return_value=None)),
+            patch("mindroom.bot.fetch_thread_history", new=AsyncMock()) as mock_fetch_history,
             patch.object(bot, "_build_dispatch_payload_with_attachments", new=AsyncMock()) as mock_build_payload,
             patch.object(bot, "_execute_dispatch_action", new=AsyncMock()) as mock_execute,
         ):
@@ -5557,7 +5554,7 @@ class TestAgentBot:
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
 
-        assert call_order == ["hydrate", "action"]
+        mock_fetch_history.assert_not_awaited()
         mock_build_payload.assert_not_awaited()
         mock_execute.assert_not_awaited()
 
@@ -5624,7 +5621,6 @@ class TestAgentBot:
                 payload_builder,
                 processing_log="processing",
                 dispatch_started_monotonic=0.0,
-                context_ready_monotonic=0.0,
             )
 
         team_kwargs = mock_generate_team_response.await_args.kwargs
@@ -5684,7 +5680,6 @@ class TestAgentBot:
                 payload_builder,
                 processing_log="processing",
                 dispatch_started_monotonic=0.0,
-                context_ready_monotonic=0.0,
             )
 
         bot.response_tracker.mark_responded.assert_not_called()
@@ -5737,7 +5732,6 @@ class TestAgentBot:
                 payload_builder,
                 processing_log="processing",
                 dispatch_started_monotonic=0.0,
-                context_ready_monotonic=0.0,
             )
 
         bot.response_tracker.mark_responded.assert_not_called()
@@ -5764,6 +5758,7 @@ class TestAgentBot:
         event.sender = "@user:localhost"
         event.event_id = "$img_event_fail"
         event.body = "photo.jpg"
+        event.server_timestamp = 1000
         event.source = {"content": {"body": "photo.jpg"}}
 
         bot._extract_message_context = AsyncMock(
@@ -5897,7 +5892,6 @@ class TestAgentBot:
                 payload_builder,
                 processing_log="processing",
                 dispatch_started_monotonic=0.0,
-                context_ready_monotonic=0.0,
             )
 
         assert mock_edit.await_args.args[3] == "$resolved_thread_root"
@@ -5951,7 +5945,6 @@ class TestAgentBot:
                 payload_builder,
                 processing_log="processing",
                 dispatch_started_monotonic=0.0,
-                context_ready_monotonic=0.0,
             )
 
         mock_edit.assert_awaited_once()
@@ -6006,7 +5999,6 @@ class TestAgentBot:
                 payload_builder,
                 processing_log="processing",
                 dispatch_started_monotonic=0.0,
-                context_ready_monotonic=0.0,
             )
 
         bot.response_tracker.mark_responded.assert_not_called()
@@ -6061,7 +6053,6 @@ class TestAgentBot:
                 payload_builder,
                 processing_log="processing",
                 dispatch_started_monotonic=9.5,
-                context_ready_monotonic=9.7,
             )
 
         latency_logs = [
@@ -6070,10 +6061,10 @@ class TestAgentBot:
         assert latency_logs
         latency_kwargs = latency_logs[-1].kwargs
         assert latency_kwargs["placeholder_event_id"] == "$placeholder"
-        assert latency_kwargs["placeholder_visible_ms"] == 300.0
+        assert latency_kwargs["placeholder_visible_ms"] == 500.0
         assert latency_kwargs["context_hydration_ms"] == 200.0
-        assert latency_kwargs["payload_hydration_ms"] == 200.0
-        assert latency_kwargs["startup_total_ms"] == 700.0
+        assert latency_kwargs["payload_hydration_ms"] == 300.0
+        assert latency_kwargs["startup_total_ms"] == 1000.0
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
