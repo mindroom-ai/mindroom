@@ -346,55 +346,45 @@ class Config(BaseModel):
 
         return invalid_references
 
-    def _compaction_enabled_model_names(self) -> set[str]:
-        """Return the effective models used when compaction is enabled anywhere."""
-        compaction_models: set[str] = set()
+    def _compaction_models_missing_context_window(self) -> list[str]:
+        """Return explicit compaction.model references whose target model lacks context_window."""
+        invalid_references: list[str] = []
         defaults_compaction = self.defaults.compaction
-        if defaults_compaction is not None and defaults_compaction.enabled:
-            compaction_models.add(defaults_compaction.model or "default")
+        if defaults_compaction is not None and defaults_compaction.model is not None:
+            model_config = self.models[defaults_compaction.model]
+            if model_config.context_window is None:
+                invalid_references.append(f"defaults.compaction.model -> {defaults_compaction.model}")
 
         for agent_name, agent_config in self.agents.items():
-            if agent_config.compaction is None and defaults_compaction is None:
+            model_name = agent_config.compaction.model if agent_config.compaction is not None else None
+            if model_name is None:
                 continue
-            if not self.get_entity_compaction_config(agent_name).enabled:
-                continue
-            model_name = (
-                (agent_config.compaction.model if agent_config.compaction else None)
-                or (defaults_compaction.model if defaults_compaction else None)
-                or agent_config.model
-            )
-            compaction_models.add(model_name)
+            if self.models[model_name].context_window is None:
+                invalid_references.append(f"agents.{agent_name}.compaction.model -> {model_name}")
 
         for team_name, team_config in self.teams.items():
-            if team_config.compaction is None and defaults_compaction is None:
+            model_name = team_config.compaction.model if team_config.compaction is not None else None
+            if model_name is None:
                 continue
-            if not self.get_entity_compaction_config(team_name).enabled:
-                continue
-            model_name = (
-                (team_config.compaction.model if team_config.compaction else None)
-                or (defaults_compaction.model if defaults_compaction else None)
-                or team_config.model
-                or "default"
-            )
-            compaction_models.add(model_name)
+            if self.models[model_name].context_window is None:
+                invalid_references.append(f"teams.{team_name}.compaction.model -> {model_name}")
 
-        return compaction_models
+        return invalid_references
 
     @model_validator(mode="after")
     def validate_compaction_model_references(self) -> Config:
-        """Ensure compaction.model references a configured model name."""
+        """Ensure explicit compaction.model references are statically valid."""
         invalid_references = self._invalid_compaction_model_references()
         if invalid_references:
             msg = "Compaction model references unknown models: " + ", ".join(sorted(invalid_references))
             raise ValueError(msg)
 
-        # Warn when compaction is enabled but the resolved model lacks context_window
-        for model_name in sorted(self._compaction_enabled_model_names()):
-            if self.get_model_context_window(model_name) is None:
-                logger.warning(
-                    "Compaction enabled but model has no context_window configured; auto-compaction will not trigger",
-                    model=model_name,
-                )
+        missing_context_windows = self._compaction_models_missing_context_window()
+        if missing_context_windows:
+            msg = "Explicit compaction.model requires a model with context_window: " + ", ".join(
+                sorted(missing_context_windows),
+            )
+            raise ValueError(msg)
 
         return self
 

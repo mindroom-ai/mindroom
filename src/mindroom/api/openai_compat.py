@@ -32,6 +32,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.history import (
     prepare_bound_agents_for_run,
 )
+from mindroom.history.runtime import apply_replay_plan
 from mindroom.knowledge.manager import initialize_shared_knowledge_managers
 from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -1178,6 +1179,8 @@ async def _prepare_openai_team_prompt(
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
     )
+    if prepared_history.replay_plan is not None:
+        apply_replay_plan(target=team, replay_plan=prepared_history.replay_plan)
     return prompt if prepared_history.replays_persisted_history else fallback_prompt
 
 

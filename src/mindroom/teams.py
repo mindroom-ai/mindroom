@@ -38,7 +38,11 @@ from mindroom.history import (
     CompactionOutcome,
     prepare_bound_agents_for_run,
 )
-from mindroom.history.runtime import load_bound_scope_session_context, resolve_bound_team_scope_context
+from mindroom.history.runtime import (
+    apply_replay_plan,
+    load_bound_scope_session_context,
+    resolve_bound_team_scope_context,
+)
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -1275,6 +1279,8 @@ async def _prepare_materialized_team_execution(
         active_model_name=resolved_team_runtime_model.model_name,
         active_context_window=resolved_team_runtime_model.context_window,
     )
+    if prepared_history.replay_plan is not None:
+        apply_replay_plan(target=team, replay_plan=prepared_history.replay_plan)
     if reply_to_event_id and thread_history:
         prepared_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
             message,

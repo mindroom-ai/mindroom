@@ -59,6 +59,7 @@ from mindroom.history.types import (
     HistoryScopeState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
+    ResolvedReplayPlan,
 )
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
@@ -734,10 +735,12 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
     assert prepared.compaction_outcomes == []
-    assert agent.add_history_to_context is True
-    assert agent.add_session_summary_to_context is True
-    assert agent.num_history_runs == 2
-    assert agent.num_history_messages is None
+    assert prepared.replay_plan is not None
+    assert prepared.replay_plan.mode == "limited"
+    assert prepared.replay_plan.add_history_to_context is True
+    assert prepared.replay_plan.add_session_summary_to_context is True
+    assert prepared.replay_plan.num_history_runs == 2
+    assert prepared.replay_plan.num_history_messages is None
 
 
 @pytest.mark.asyncio
@@ -770,7 +773,7 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
     storage.upsert_session(session)
     agent = _agent(db=storage)
 
-    await prepare_history_for_run(
+    prepared = await prepare_history_for_run(
         agent=agent,
         agent_name="test_agent",
         full_prompt="Current prompt",
@@ -789,10 +792,12 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
         available_history_budget=10,
     )
 
-    assert agent.add_history_to_context is True
-    assert agent.add_session_summary_to_context is True
-    assert agent.num_history_runs == 1
-    assert agent.num_history_messages is None
+    assert prepared.replay_plan is not None
+    assert prepared.replay_plan.mode == "limited"
+    assert prepared.replay_plan.add_history_to_context is True
+    assert prepared.replay_plan.add_session_summary_to_context is True
+    assert prepared.replay_plan.num_history_runs == 1
+    assert prepared.replay_plan.num_history_messages is None
 
 
 @pytest.mark.asyncio
@@ -896,12 +901,8 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
 ) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
-        compaction=CompactionOverrideConfig(enabled=True, model="summary-model"),
+        compaction=CompactionOverrideConfig(enabled=True),
         context_window=600,
-        models={
-            "default": ModelConfig(provider="openai", id="default-model", context_window=600),
-            "summary-model": ModelConfig(provider="openai", id="summary-model", context_window=None),
-        },
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
@@ -943,10 +944,12 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
     assert prepared.compaction_outcomes == []
-    assert agent.add_history_to_context is True
-    assert agent.add_session_summary_to_context is True
-    assert agent.num_history_runs == 1
-    assert agent.num_history_messages is None
+    assert prepared.replay_plan is not None
+    assert prepared.replay_plan.mode == "limited"
+    assert prepared.replay_plan.add_history_to_context is True
+    assert prepared.replay_plan.add_session_summary_to_context is True
+    assert prepared.replay_plan.num_history_runs == 1
+    assert prepared.replay_plan.num_history_messages is None
 
 
 @pytest.mark.asyncio
@@ -1225,7 +1228,6 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert mock_prepare.await_args.kwargs["agent"] is owner_agent
     assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
     assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+beta")
-    assert mock_prepare.await_args.kwargs["replay_target"] is team
     assert (
         estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
     )
@@ -1454,7 +1456,7 @@ def test_get_entity_compaction_config_merges_authored_overrides(tmp_path: Path) 
     assert resolved.notify is True
 
 
-def test_validate_compaction_model_references_skips_disabled_compaction_warning(tmp_path: Path) -> None:
+def test_validate_compaction_model_references_does_not_emit_availability_warnings(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     with patch("mindroom.config.main.logger.warning") as mock_warning:
         bind_runtime_paths(
@@ -1462,7 +1464,7 @@ def test_validate_compaction_model_references_skips_disabled_compaction_warning(
                 agents={
                     "test_agent": AgentConfig(
                         display_name="Test Agent",
-                        compaction=CompactionOverrideConfig(enabled=False),
+                        compaction=CompactionOverrideConfig(enabled=True),
                     ),
                 },
                 defaults=DefaultsConfig(tools=[]),
@@ -1478,6 +1480,41 @@ def test_validate_compaction_model_references_skips_disabled_compaction_warning(
         )
 
     assert mock_warning.call_args_list == []
+
+
+def test_validate_compaction_model_references_rejects_explicit_model_without_context_window(
+    tmp_path: Path,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+
+    with pytest.raises(
+        ValueError,
+        match=r"Explicit compaction\.model requires a model with context_window: agents\.test_agent\.compaction\.model -> summary-model",
+    ):
+        bind_runtime_paths(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        compaction=CompactionOverrideConfig(enabled=True, model="summary-model"),
+                    ),
+                },
+                defaults=DefaultsConfig(tools=[]),
+                models={
+                    "default": ModelConfig(
+                        provider="openai",
+                        id="test-model",
+                        context_window=48_000,
+                    ),
+                    "summary-model": ModelConfig(
+                        provider="openai",
+                        id="summary-model-id",
+                        context_window=None,
+                    ),
+                },
+            ),
+            runtime_paths,
+        )
 
 
 def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_summary_budget(
@@ -1610,35 +1647,6 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
     assert execution_plan.summary_input_budget_tokens == 0
     assert execution_plan.destructive_compaction_available is False
     assert execution_plan.unavailable_reason == "non_positive_summary_input_budget"
-
-
-def test_resolve_history_execution_plan_requires_context_window_on_explicit_compaction_model(
-    tmp_path: Path,
-) -> None:
-    config, _runtime_paths_value = _make_config(
-        tmp_path,
-        compaction=CompactionOverrideConfig(enabled=True, model="summary-model"),
-        context_window=48_000,
-        models={
-            "default": ModelConfig(provider="openai", id="default-model", context_window=48_000),
-            "summary-model": ModelConfig(provider="openai", id="summary-model", context_window=None),
-        },
-    )
-
-    execution_plan = resolve_history_execution_plan(
-        config=config,
-        compaction_config=config.get_entity_compaction_config("test_agent"),
-        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
-        active_model_name="default",
-        active_context_window=48_000,
-        static_prompt_tokens=500,
-    )
-
-    assert execution_plan.compaction_model_name == "summary-model"
-    assert execution_plan.compaction_context_window is None
-    assert execution_plan.destructive_compaction_available is False
-    assert execution_plan.summary_input_budget_tokens is None
-    assert execution_plan.unavailable_reason == "no_context_window"
 
 
 def test_should_attempt_destructive_compaction_forced_compaction_takes_priority() -> None:
@@ -1873,6 +1881,103 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
 
 
 @pytest.mark.asyncio
+async def test_prepare_history_for_run_without_budget_returns_configured_replay_plan(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        num_history_runs=2,
+        context_window=None,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage, num_history_runs=2),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+
+    assert prepared.replay_plan == ResolvedReplayPlan(
+        mode="configured",
+        estimated_tokens=estimate_prompt_visible_history_tokens(
+            session=session,
+            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="runs", limit=2),
+                max_tool_calls_from_history=None,
+            ),
+        ),
+        add_history_to_context=True,
+        add_session_summary_to_context=True,
+        num_history_runs=2,
+        num_history_messages=None,
+    )
+    assert prepared.replays_persisted_history is True
+    assert prepared.requires_session_persistence is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_session_persistence(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        num_history_runs=2,
+        context_window=500,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 800),
+                    Message(role="assistant", content="a" * 800),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 800),
+                    Message(role="assistant", content="a" * 800),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage, num_history_runs=2),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+
+    assert prepared.replay_plan is not None
+    assert prepared.replay_plan.mode == "disabled"
+    assert prepared.replays_persisted_history is False
+    assert prepared.requires_session_persistence is True
+
+
+@pytest.mark.asyncio
 async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summary_only(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
@@ -1943,8 +2048,10 @@ async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summar
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].runs_after == 0
     assert prepared.compaction_outcomes[0].summary == "final summary"
-    assert agent.add_history_to_context is False
-    assert agent.add_session_summary_to_context is False
+    assert prepared.replay_plan is not None
+    assert prepared.replay_plan.mode == "disabled"
+    assert prepared.replay_plan.add_history_to_context is False
+    assert prepared.replay_plan.add_session_summary_to_context is False
 
 
 def test_plan_replay_that_fits_disables_summary_only_when_wrapped_summary_exceeds_budget() -> None:

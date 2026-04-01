@@ -20,6 +20,7 @@ from agno.run.agent import (
 from agno.run.base import RunStatus
 
 from mindroom.ai import (
+    _cached_agent_run,
     _prepare_agent_and_prompt,
     ai_response,
     append_inline_media_fallback_prompt,
@@ -1304,3 +1305,44 @@ class TestUserIdPassthrough:
         assert payload["context"]["input_tokens"] == 12
         assert payload["context"]["window_tokens"] == 100
         assert "utilization_pct" not in payload["context"]
+
+
+class TestSessionCaching:
+    """Test cache bypass decisions for persisted session state."""
+
+    @pytest.mark.asyncio
+    async def test_cached_agent_run_bypasses_cache_when_session_persistence_required(self, tmp_path: Path) -> None:
+        """Persisted-session runs must bypass cache even when replay is disabled for this call."""
+        runtime_paths = _runtime_paths(tmp_path)
+        agent = MagicMock()
+        agent.name = "general"
+        agent.model = MagicMock()
+        agent.model.id = "test-model"
+        cached_response = MagicMock()
+        cached_response.status = RunStatus.completed
+        cached_response.content = "ok"
+        agent.arun = AsyncMock(return_value=cached_response)
+
+        prepared_history = PreparedHistoryState(
+            replays_persisted_history=False,
+            requires_session_persistence=True,
+        )
+
+        await _cached_agent_run(
+            agent,
+            "same prompt",
+            "session-1",
+            "general",
+            runtime_paths=runtime_paths,
+            prepared_history=prepared_history,
+        )
+        await _cached_agent_run(
+            agent,
+            "same prompt",
+            "session-1",
+            "general",
+            runtime_paths=runtime_paths,
+            prepared_history=prepared_history,
+        )
+
+        assert agent.arun.await_count == 2

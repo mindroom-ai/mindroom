@@ -122,7 +122,6 @@ async def prepare_history_for_run(
     available_history_budget: int | None = None,
     scope: HistoryScope | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
-    replay_target: Agent | Team | None = None,
 ) -> PreparedHistoryState:
     """Prepare one scope by compacting durable history and planning safe replay for the run."""
     resolved_scope = scope or resolve_history_scope(agent)
@@ -173,14 +172,10 @@ async def prepare_history_for_run(
         execution_plan=execution_plan,
     )
     compaction_outcomes: list[CompactionOutcome] = []
-    current_history_tokens = (
-        estimate_prompt_visible_history_tokens(
-            session=session,
-            scope=scope_context.scope,
-            history_settings=resolved_inputs.history_settings,
-        )
-        if execution_plan.replay_budget_tokens is not None
-        else None
+    current_history_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope_context.scope,
+        history_settings=resolved_inputs.history_settings,
     )
     should_compact = should_attempt_destructive_compaction(
         plan=execution_plan,
@@ -247,7 +242,11 @@ async def prepare_history_for_run(
                     runs_compacted=outcome.compacted_run_count,
                 )
 
-    resolved_replay_target = replay_target or agent
+    current_history_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope_context.scope,
+        history_settings=resolved_inputs.history_settings,
+    )
     if history_budget is not None:
         replay_plan = plan_replay_that_fits(
             session=session,
@@ -255,24 +254,29 @@ async def prepare_history_for_run(
             history_settings=resolved_inputs.history_settings,
             available_history_budget=history_budget,
         )
-        apply_replay_plan(target=resolved_replay_target, replay_plan=replay_plan)
         _log_replay_plan(
             replay_plan=replay_plan,
             scope=scope_context.scope,
             available_history_budget=history_budget,
-            current_history_tokens=estimate_prompt_visible_history_tokens(
-                session=session,
-                scope=scope_context.scope,
-                history_settings=resolved_inputs.history_settings,
-            ),
+            current_history_tokens=current_history_tokens,
+        )
+    else:
+        replay_plan = _configured_replay_plan(
+            history_settings=resolved_inputs.history_settings,
+            estimated_tokens=current_history_tokens,
         )
 
     prepared = PreparedHistoryState(
         compaction_outcomes=compaction_outcomes,
+        replay_plan=replay_plan,
         replays_persisted_history=_has_effective_persisted_replay(
             session=session,
             scope=scope_context.scope,
-            target=resolved_replay_target,
+            replay_plan=replay_plan,
+        ),
+        requires_session_persistence=_requires_session_persistence(
+            session=session,
+            scope=scope_context.scope,
         ),
     )
     if compaction_outcomes_collector is not None:
@@ -346,7 +350,6 @@ async def prepare_bound_agents_for_run(
         available_history_budget=available_history_budget,
         scope=bound_scope.scope,
         execution_plan=resolved_inputs.execution_plan,
-        replay_target=team,
     )
 
 
@@ -926,11 +929,25 @@ def _has_effective_persisted_replay(
     *,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
-    target: Agent | Team,
+    replay_plan: ResolvedReplayPlan,
 ) -> bool:
     summary = session.summary.summary if session.summary is not None else None
-    has_replayed_summary = target.add_session_summary_to_context and isinstance(summary, str) and bool(summary.strip())
-    has_replayed_runs = target.add_history_to_context and bool(
+    has_replayed_summary = (
+        replay_plan.add_session_summary_to_context and isinstance(summary, str) and bool(summary.strip())
+    )
+    has_replayed_runs = replay_plan.add_history_to_context and bool(
         runs_for_scope(completed_top_level_runs(session), scope),
     )
     return has_replayed_summary or has_replayed_runs
+
+
+def _requires_session_persistence(
+    *,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+) -> bool:
+    summary = session.summary.summary if session.summary is not None else None
+    has_summary = isinstance(summary, str) and bool(summary.strip())
+    has_runs = bool(runs_for_scope(completed_top_level_runs(session), scope))
+    has_scope_state = read_scope_state(session, scope) != HistoryScopeState()
+    return has_summary or has_runs or has_scope_state

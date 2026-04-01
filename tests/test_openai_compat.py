@@ -29,6 +29,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.history import PreparedHistoryState
+from mindroom.history.types import ResolvedReplayPlan
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -2401,6 +2402,10 @@ class TestTeamCompletion:
 
         mock_team = MagicMock()
         mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="ok"))
+        mock_team.add_history_to_context = True
+        mock_team.add_session_summary_to_context = True
+        mock_team.num_history_runs = 3
+        mock_team.num_history_messages = None
         mock_agents = [MagicMock(name="GeneralAgent"), MagicMock(name="CodeAgent")]
 
         with patch(
@@ -2449,7 +2454,19 @@ class TestTeamCompletion:
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
-            mock_prepare.return_value = PreparedHistoryState(replays_persisted_history=True)
+            mock_prepare.return_value = PreparedHistoryState(
+                replay_plan=ResolvedReplayPlan(
+                    mode="limited",
+                    estimated_tokens=100,
+                    add_history_to_context=True,
+                    add_session_summary_to_context=True,
+                    num_history_runs=1,
+                    num_history_messages=None,
+                    history_limit_mode="runs",
+                    history_limit=1,
+                ),
+                replays_persisted_history=True,
+            )
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -2472,6 +2489,7 @@ class TestTeamCompletion:
         assert "Previous conversation in this thread:" not in prompt
         assert "user: Start" not in prompt
         assert "assistant: Ack" not in prompt
+        assert mock_team.num_history_runs == 1
 
     def test_team_streaming_prefers_persisted_history_over_thread_history(self, team_app_client: TestClient) -> None:
         """Persisted team history should suppress request-history stuffing in the streaming path too."""

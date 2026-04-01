@@ -55,7 +55,7 @@ from mindroom.history import (
     PreparedHistoryState,
     prepare_history_for_run,
 )
-from mindroom.history.runtime import estimate_preparation_static_tokens, resolve_history_scope
+from mindroom.history.runtime import apply_replay_plan, estimate_preparation_static_tokens, resolve_history_scope
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
@@ -852,10 +852,10 @@ async def _cached_agent_run(
     """Cached wrapper for agent.arun() calls."""
     media_inputs = media or MediaInputs()
     storage_path = runtime_paths.storage_root
-    history_state_requires_bypass = prepared_history is not None and prepared_history.replays_persisted_history
+    requires_session_persistence = prepared_history is not None and prepared_history.requires_session_persistence
     cache = (
         None
-        if media_inputs.has_any() or history_state_requires_bypass
+        if media_inputs.has_any() or requires_session_persistence
         else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
     )
     if cache is None:
@@ -1005,6 +1005,8 @@ async def _prepare_agent_and_prompt(
             fallback_full_prompt=fallback_prompt,
         ),
     )
+    if prepared_history.replay_plan is not None:
+        apply_replay_plan(target=agent, replay_plan=prepared_history.replay_plan)
     if reply_to_event_id and thread_history:
         matrix_id = config.get_ids(runtime_paths).get(agent_name)
         full_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
@@ -1382,10 +1384,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     try:
         metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
 
-        history_state_requires_bypass = prepared_history.replays_persisted_history
+        requires_session_persistence = prepared_history.requires_session_persistence
         cache = (
             None
-            if media_inputs.has_any() or history_state_requires_bypass
+            if media_inputs.has_any() or requires_session_persistence
             else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
         )
         if cache is not None:
