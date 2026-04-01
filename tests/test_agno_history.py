@@ -1894,7 +1894,7 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
     assert execution_plan.unavailable_reason == "non_positive_summary_input_budget"
 
 
-def test_resolve_history_execution_plan_does_not_apply_compaction_thresholds_when_disabled(
+def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_disabled(
     tmp_path: Path,
 ) -> None:
     config, _runtime_paths_value = _make_config(
@@ -1916,7 +1916,7 @@ def test_resolve_history_execution_plan_does_not_apply_compaction_thresholds_whe
     )
 
     assert execution_plan.trigger_threshold_tokens is None
-    assert execution_plan.replay_budget_tokens == 990
+    assert execution_plan.replay_budget_tokens == 490
 
 
 def test_should_attempt_destructive_compaction_forced_compaction_takes_priority() -> None:

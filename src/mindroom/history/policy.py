@@ -56,7 +56,11 @@ def resolve_history_execution_plan(
                 static_prompt_tokens=static_prompt_tokens,
             )
         else:
-            replay_budget_tokens = max(0, replay_window_tokens - static_prompt_tokens)
+            replay_budget_tokens = _resolve_replay_budget_without_compaction(
+                compaction_config=compaction_config,
+                replay_window_tokens=replay_window_tokens,
+                static_prompt_tokens=static_prompt_tokens,
+            )
 
     return ResolvedHistoryExecutionPlan(
         authored_compaction_config=has_authored_compaction_config,
@@ -164,3 +168,16 @@ def _resolve_replay_budget_tokens(
         )
         ceiling_tokens = min(ceiling_tokens, max(0, replay_window_tokens - normalized_reserve_tokens))
     return max(0, ceiling_tokens - static_prompt_tokens)
+
+
+def _resolve_replay_budget_without_compaction(
+    *,
+    compaction_config: CompactionConfig,
+    replay_window_tokens: int,
+    static_prompt_tokens: int,
+) -> int:
+    normalized_reserve_tokens = normalize_compaction_budget_tokens(
+        compaction_config.reserve_tokens,
+        replay_window_tokens,
+    )
+    return max(0, replay_window_tokens - normalized_reserve_tokens - static_prompt_tokens)
