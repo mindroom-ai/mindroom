@@ -105,10 +105,13 @@ class CompactionOutcome:
     compacted_run_count: int
     compacted_at: str
     notify: bool
+    role_instructions_tokens: int | None = None
+    tool_definition_tokens: int | None = None
+    current_prompt_tokens: int | None = None
 
     def to_notice_metadata(self) -> dict[str, object]:
         """Return serialized notice metadata for Matrix compaction messages."""
-        return {
+        meta: dict[str, object] = {
             "version": 1,
             "mode": self.mode,
             "session_id": self.session_id,
@@ -122,6 +125,27 @@ class CompactionOutcome:
             "compacted_run_count": self.compacted_run_count,
             "compacted_at": self.compacted_at,
         }
+        if self.role_instructions_tokens is not None:
+            meta["role_instructions_tokens"] = self.role_instructions_tokens
+        if self.tool_definition_tokens is not None:
+            meta["tool_definition_tokens"] = self.tool_definition_tokens
+        if self.current_prompt_tokens is not None:
+            meta["current_prompt_tokens"] = self.current_prompt_tokens
+        return meta
+
+    def format_notice(self) -> str:
+        """Format a human-readable compaction notice line."""
+        parts = [
+            f"~{self.before_tokens:,} \u2192 ~{self.after_tokens:,} / {self.window_tokens:,} tokens",
+        ]
+        if self.role_instructions_tokens is not None:
+            parts.append(f"role/instructions ~{self.role_instructions_tokens:,}")
+        if self.tool_definition_tokens is not None:
+            parts.append(f"tools ~{self.tool_definition_tokens:,}")
+        if self.current_prompt_tokens is not None:
+            parts.append(f"current prompt ~{self.current_prompt_tokens:,}")
+        parts.append(f"{self.compacted_run_count} runs summarized")
+        return f"Conversation compacted ({'; '.join(parts)})."
 
 
 @dataclass(frozen=True)
