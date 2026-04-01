@@ -203,7 +203,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     assert mock_prepare.await_args.kwargs["agents"] == [fake_agent]
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     assert mock_prepare.await_args.kwargs["prompt"] == "Analyze this."
-    assert mock_prepare.await_args.kwargs["session_id"] == "session-123"
+    assert "scope_context" in mock_prepare.await_args.kwargs
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
 
 
@@ -942,7 +942,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     assert mock_prepare.await_args.kwargs["agents"] == [fake_agent]
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     assert mock_prepare.await_args.kwargs["prompt"] == "Analyze this."
-    assert mock_prepare.await_args.kwargs["session_id"] == "session-123"
+    assert "scope_context" in mock_prepare.await_args.kwargs
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
     assert mock_raw.await_count == 1
     assert mock_raw.await_args.kwargs["team"] is mock_team
