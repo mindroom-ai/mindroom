@@ -2368,6 +2368,36 @@ class AgentBot:
         ]
         return HistoryScope(kind="team", scope_id=f"team_{'+'.join(sorted(team_member_names))}")
 
+    def _strip_transient_enrichment_from_history(
+        self,
+        *,
+        scope: HistoryScope,
+        session_id: str,
+        session_type: SessionType,
+        execution_identity: ToolExecutionIdentity | None,
+        failure_message: str,
+    ) -> None:
+        """Remove hook-provided transient enrichment from one persisted session."""
+        try:
+            with open_scope_storage(
+                agent_name=self.agent_name,
+                scope=scope,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                execution_identity=execution_identity,
+            ) as storage:
+                strip_enrichment_from_session_storage(
+                    storage,
+                    session_id,
+                    session_type=session_type,
+                )
+        except Exception:
+            self.logger.exception(
+                failure_message,
+                agent_name=self.agent_name,
+                session_id=session_id,
+            )
+
     def _build_tool_execution_identity(
         self,
         *,
@@ -2893,25 +2923,13 @@ class AgentBot:
             user_id=requester_user_id,
             run_id=response_run_id,
         )
-        try:
-            if strip_transient_enrichment_after_run:
-                with open_scope_storage(
-                    agent_name=self.agent_name,
-                    scope=self._team_history_scope(team_agents),
-                    config=self.config,
-                    runtime_paths=self.runtime_paths,
-                    execution_identity=execution_identity,
-                ) as storage:
-                    strip_enrichment_from_session_storage(
-                        storage,
-                        session_id,
-                        session_type=SessionType.TEAM,
-                    )
-        except Exception:
-            self.logger.exception(
-                "Failed to strip hook enrichment from team session history",
-                agent_name=self.agent_name,
+        if strip_transient_enrichment_after_run:
+            self._strip_transient_enrichment_from_history(
+                scope=self._team_history_scope(team_agents),
                 session_id=session_id,
+                session_type=SessionType.TEAM,
+                execution_identity=execution_identity,
+                failure_message="Failed to strip hook enrichment from team session history",
             )
         if (
             delivery_result is not None
@@ -3961,25 +3979,13 @@ class AgentBot:
             run_id=response_run_id,
         )
 
-        try:
-            if strip_transient_enrichment_after_run:
-                with open_scope_storage(
-                    agent_name=self.agent_name,
-                    scope=self._history_scope(),
-                    config=self.config,
-                    runtime_paths=self.runtime_paths,
-                    execution_identity=execution_identity,
-                ) as storage:
-                    strip_enrichment_from_session_storage(
-                        storage,
-                        session_id,
-                        session_type=self._history_session_type(),
-                    )
-        except Exception:
-            self.logger.exception(
-                "Failed to strip hook enrichment from session history",
-                agent_name=self.agent_name,
+        if strip_transient_enrichment_after_run:
+            self._strip_transient_enrichment_from_history(
+                scope=self._history_scope(),
                 session_id=session_id,
+                session_type=self._history_session_type(),
+                execution_identity=execution_identity,
+                failure_message="Failed to strip hook enrichment from session history",
             )
 
         # Store memory after response generation.

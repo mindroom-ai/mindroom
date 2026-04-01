@@ -26,7 +26,7 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from mindroom.agents import create_agent, get_agent_runtime_sqlite_dbs
+from mindroom.agents import create_agent
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
@@ -37,7 +37,7 @@ from mindroom.execution_preparation import (
 from mindroom.history.runtime import (
     ScopeSessionContext,
     apply_replay_plan,
-    close_unique_sqlite_dbs,
+    close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
 )
 from mindroom.knowledge.manager import initialize_shared_knowledge_managers
@@ -1276,16 +1276,10 @@ async def _non_stream_team_completion(
             )
             return JSONResponse(content=result.model_dump())
     finally:
-        close_unique_sqlite_dbs(
-            *(
-                storage
-                for agent in agents
-                for storage in get_agent_runtime_sqlite_dbs(agent)
-                if scope_context is None or storage is not scope_context.storage
-            ),
-            cast("SqliteDb | None", team.db)
-            if team is not None and (scope_context is None or team.db is not scope_context.storage)
-            else None,
+        close_team_runtime_sqlite_dbs(
+            agents=agents,
+            team_db=cast("SqliteDb | None", team.db) if team is not None else None,
+            shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
 
 
@@ -1311,16 +1305,10 @@ async def _stream_team_completion(  # noqa: C901
         if stream is not None:
             await stream.aclose()
         stack.close()
-        close_unique_sqlite_dbs(
-            *(
-                storage
-                for agent in agents
-                for storage in get_agent_runtime_sqlite_dbs(agent)
-                if scope_context is None or storage is not scope_context.storage
-            ),
-            cast("SqliteDb | None", team.db)
-            if team is not None and (scope_context is None or team.db is not scope_context.storage)
-            else None,
+        close_team_runtime_sqlite_dbs(
+            agents=agents,
+            team_db=cast("SqliteDb | None", team.db) if team is not None else None,
+            shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
 
     try:
@@ -1416,16 +1404,10 @@ async def _stream_team_completion(  # noqa: C901
         return StreamingResponse(_event_generator(), media_type="text/event-stream")
     except Exception:
         stack.close()
-        close_unique_sqlite_dbs(
-            *(
-                storage
-                for agent in agents
-                for storage in get_agent_runtime_sqlite_dbs(agent)
-                if scope_context is None or storage is not scope_context.storage
-            ),
-            cast("SqliteDb | None", team.db)
-            if team is not None and (scope_context is None or team.db is not scope_context.storage)
-            else None,
+        close_team_runtime_sqlite_dbs(
+            agents=agents,
+            team_db=cast("SqliteDb | None", team.db) if team is not None else None,
+            shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
         raise
 

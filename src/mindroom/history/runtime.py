@@ -12,7 +12,13 @@ from typing import TYPE_CHECKING, Literal
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.agents import create_session_storage, create_state_storage_db, get_agent_session, get_team_session
+from mindroom.agents import (
+    create_session_storage,
+    create_state_storage_db,
+    get_agent_runtime_sqlite_dbs,
+    get_agent_session,
+    get_team_session,
+)
 from mindroom.history.compaction import (
     compact_scope_history,
     completed_top_level_runs,
@@ -500,49 +506,6 @@ async def prepare_bound_scope_history(
     )
 
 
-async def prepare_bound_agents_for_run(
-    *,
-    agents: list[Agent],
-    team: Team | None = None,
-    full_prompt: str,
-    fallback_full_prompt: str | None = None,
-    session_id: str | None,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    team_name: str | None = None,
-    active_model_name: str | None = None,
-    active_context_window: int | None = None,
-) -> PreparedHistoryState:
-    """Prepare one team-owned scope by compacting its persisted session before the run."""
-    with open_bound_scope_session_context(
-        agents=agents,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        team_name=team_name,
-    ) as scope_context:
-        prepared_scope_history = await prepare_bound_scope_history(
-            agents=agents,
-            team=team,
-            full_prompt=full_prompt,
-            fallback_full_prompt=fallback_full_prompt,
-            runtime_paths=runtime_paths,
-            config=config,
-            compaction_outcomes_collector=compaction_outcomes_collector,
-            scope_context=scope_context,
-            team_name=team_name,
-            active_model_name=active_model_name,
-            active_context_window=active_context_window,
-        )
-    return finalize_history_preparation(
-        prepared_scope_history=prepared_scope_history,
-        config=config,
-    )
-
-
 def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str | None]:
     """Return the canonical storage owner for one bound team run."""
     candidates = [(agent_id, agent) for agent in agents if isinstance((agent_id := agent.id), str) and agent_id]
@@ -819,6 +782,37 @@ def close_unique_sqlite_dbs(*storages: SqliteDb | None) -> None:
             continue
         seen.add(storage_id)
         storage.close()
+
+
+def close_agent_runtime_sqlite_dbs(
+    agent: Agent | None,
+    *,
+    shared_scope_storage: SqliteDb | None = None,
+) -> None:
+    """Close one agent's runtime-owned SQLite handles except a shared scope storage."""
+    if agent is None:
+        return
+    close_unique_sqlite_dbs(
+        *(storage for storage in get_agent_runtime_sqlite_dbs(agent) if storage is not shared_scope_storage),
+    )
+
+
+def close_team_runtime_sqlite_dbs(
+    *,
+    agents: list[Agent],
+    team_db: SqliteDb | None,
+    shared_scope_storage: SqliteDb | None = None,
+) -> None:
+    """Close all runtime-owned SQLite handles for one team request."""
+    close_unique_sqlite_dbs(
+        *(
+            storage
+            for agent in agents
+            for storage in get_agent_runtime_sqlite_dbs(agent)
+            if storage is not shared_scope_storage
+        ),
+        team_db if team_db is not shared_scope_storage else None,
+    )
 
 
 def _scope_session_storage_name(scope: HistoryScope) -> str:

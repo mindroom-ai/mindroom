@@ -32,7 +32,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, RuntimePaths, resolve_runtime_paths
-from mindroom.history import PreparedHistoryState, prepare_bound_agents_for_run, prepare_history_for_run
+from mindroom.history import PreparedHistoryState, prepare_history_for_run
 from mindroom.history.compaction import (
     _build_summary_input,
     estimate_history_messages_tokens,
@@ -46,8 +46,11 @@ from mindroom.history.runtime import (
     apply_replay_plan,
     estimate_preparation_static_tokens,
     estimate_preparation_static_tokens_for_team,
+    finalize_history_preparation,
+    open_bound_scope_session_context,
     open_scope_session_context,
     plan_replay_that_fits,
+    prepare_bound_scope_history,
 )
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
@@ -1296,21 +1299,32 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
             new=AsyncMock(return_value=MagicMock()),
         ) as mock_prepare,
         patch(
-            "mindroom.history.runtime.finalize_history_preparation",
+            "tests.test_agno_history.finalize_history_preparation",
             return_value=PreparedHistoryState(replays_persisted_history=True),
-        ),
-    ):
-        prepared = await prepare_bound_agents_for_run(
+        ) as mock_finalize,
+        open_bound_scope_session_context(
             agents=[peer_agent, owner_agent],
-            team=team,
-            full_prompt="Current prompt",
             session_id="session-1",
             runtime_paths=runtime_paths,
             config=config,
             execution_identity=None,
+        ) as scope_context,
+    ):
+        prepared_scope_history = await prepare_bound_scope_history(
+            agents=[peer_agent, owner_agent],
+            team=team,
+            full_prompt="Current prompt",
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=scope_context,
+        )
+        prepared = finalize_history_preparation(
+            prepared_scope_history=prepared_scope_history,
+            config=config,
         )
 
     assert prepared.replays_persisted_history is True
+    assert mock_finalize.call_count == 1
     assert mock_prepare.await_count == 1
     assert mock_prepare.await_args.kwargs["agent"] is owner_agent
     assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"

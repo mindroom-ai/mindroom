@@ -30,7 +30,7 @@ from agno.run.agent import (
 )
 from agno.run.base import RunStatus
 
-from mindroom.agents import create_agent, get_agent_runtime_sqlite_dbs
+from mindroom.agents import create_agent
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ROUTER_AGENT_NAME,
@@ -51,7 +51,7 @@ from mindroom.history import (
 from mindroom.history.runtime import (
     ScopeSessionContext,
     apply_replay_plan,
-    close_unique_sqlite_dbs,
+    close_agent_runtime_sqlite_dbs,
     open_resolved_scope_session_context,
 )
 from mindroom.history.types import HistoryScope
@@ -857,12 +857,9 @@ async def ai_response(  # noqa: C901
 
             return _extract_response_content(response, show_tool_calls=show_tool_calls)
     finally:
-        close_unique_sqlite_dbs(
-            *(
-                storage
-                for storage in (get_agent_runtime_sqlite_dbs(agent) if agent is not None else ())
-                if scope_context is None or storage is not scope_context.storage
-            ),
+        close_agent_runtime_sqlite_dbs(
+            agent,
+            shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
 
 
@@ -1162,10 +1159,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 if run_metadata:
                     run_metadata_collector.update(run_metadata)
     finally:
-        close_unique_sqlite_dbs(
-            *(
-                storage
-                for storage in (get_agent_runtime_sqlite_dbs(agent) if agent is not None else ())
-                if scope_context is None or storage is not scope_context.storage
-            ),
+        close_agent_runtime_sqlite_dbs(
+            agent,
+            shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )

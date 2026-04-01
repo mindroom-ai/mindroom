@@ -26,7 +26,7 @@ from agno.session.team import TeamSession
 from agno.team import Team
 from pydantic import BaseModel, Field
 
-from mindroom.agents import create_agent, enable_all_history_replay, get_agent_runtime_sqlite_dbs, get_team_session
+from mindroom.agents import create_agent, enable_all_history_replay, get_team_session
 from mindroom.ai import (
     build_matrix_run_metadata,
     get_model_instance,
@@ -41,7 +41,7 @@ from mindroom.execution_preparation import (
 from mindroom.history.runtime import (
     ScopeSessionContext,
     apply_replay_plan,
-    close_unique_sqlite_dbs,
+    close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
     resolve_bound_team_scope_context,
 )
@@ -1436,16 +1436,10 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         logger.exception("Error preparing team members", agents=agent_list)
         return get_user_friendly_error_message(e, team_name)
     finally:
-        close_unique_sqlite_dbs(
-            *(
-                storage
-                for agent in agents
-                for storage in get_agent_runtime_sqlite_dbs(agent)
-                if scope_context is None or storage is not scope_context.storage
-            ),
-            cast("SqliteDb | None", team.db)
-            if team is not None and (scope_context is None or team.db is not scope_context.storage)
-            else None,
+        close_team_runtime_sqlite_dbs(
+            agents=agents,
+            team_db=cast("SqliteDb | None", team.db) if team is not None else None,
+            shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
 
 
@@ -1887,14 +1881,8 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
         yield get_user_friendly_error_message(e, team_label)
         return
     finally:
-        close_unique_sqlite_dbs(
-            *(
-                storage
-                for agent in team_members.agents
-                for storage in get_agent_runtime_sqlite_dbs(agent)
-                if scope_context is None or storage is not scope_context.storage
-            ),
-            cast("SqliteDb | None", team.db)
-            if team is not None and (scope_context is None or team.db is not scope_context.storage)
-            else None,
+        close_team_runtime_sqlite_dbs(
+            agents=team_members.agents,
+            team_db=cast("SqliteDb | None", team.db) if team is not None else None,
+            shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )

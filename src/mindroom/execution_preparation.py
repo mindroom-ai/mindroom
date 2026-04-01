@@ -28,13 +28,14 @@ from mindroom.logging_config import get_logger
 from mindroom.streaming import clean_partial_reply_text, is_in_progress_message, is_interrupted_partial_reply
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Awaitable, Callable, Collection
 
     from agno.agent import Agent
     from agno.team import Team
 
     from mindroom.config.main import Config
     from mindroom.history import CompactionOutcome
+    from mindroom.history.runtime import PreparedScopeHistory
     from mindroom.history.types import ResolvedReplayPlan
 
 logger = get_logger(__name__)
@@ -271,6 +272,72 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
     return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
 
 
+async def _prepare_execution_context_common(
+    *,
+    scope_context: ScopeSessionContext | None,
+    prompt: str,
+    fallback_prompt: str | None,
+    thread_history: list[dict[str, Any]] | None,
+    reply_to_event_id: str | None,
+    active_event_ids: Collection[str],
+    response_sender_id: str | None,
+    config: Config,
+    prepare_scope_history_fn: Callable[[str, str | None], Awaitable[PreparedScopeHistory]],
+    estimate_static_tokens_fn: Callable[[str, str | None], int],
+) -> PreparedExecutionContext:
+    """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
+    seen_event_ids = _scope_seen_event_ids(scope_context)
+    replay_fallback_prompt = None if reply_to_event_id and thread_history else fallback_prompt
+
+    provisional_prompt = prompt
+    if reply_to_event_id and thread_history:
+        provisional_prompt, _ = build_prompt_with_unseen_thread_context(
+            prompt,
+            thread_history,
+            seen_event_ids=seen_event_ids,
+            current_event_id=reply_to_event_id,
+            active_event_ids=active_event_ids,
+            response_sender_id=response_sender_id,
+        )
+
+    prepared_scope_history = await prepare_scope_history_fn(
+        provisional_prompt,
+        replay_fallback_prompt,
+    )
+
+    if reply_to_event_id and thread_history:
+        final_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
+            prompt,
+            thread_history,
+            seen_event_ids=_scope_seen_event_ids(scope_context),
+            current_event_id=reply_to_event_id,
+            active_event_ids=active_event_ids,
+            response_sender_id=response_sender_id,
+        )
+    else:
+        final_prompt = prompt
+        unseen_event_ids = []
+
+    prepared_history = finalize_history_preparation(
+        prepared_scope_history=prepared_scope_history,
+        config=config,
+        static_prompt_tokens=estimate_static_tokens_fn(
+            final_prompt,
+            replay_fallback_prompt,
+        ),
+    )
+    if replay_fallback_prompt is not None:
+        final_prompt = prompt if prepared_history.replays_persisted_history else replay_fallback_prompt
+
+    return PreparedExecutionContext(
+        final_prompt=final_prompt,
+        replay_plan=prepared_history.replay_plan,
+        unseen_event_ids=unseen_event_ids,
+        replays_persisted_history=prepared_history.replays_persisted_history,
+        compaction_outcomes=prepared_history.compaction_outcomes,
+    )
+
+
 async def prepare_agent_execution_context(
     *,
     scope_context: ScopeSessionContext | None,
@@ -286,24 +353,8 @@ async def prepare_agent_execution_context(
     compaction_outcomes_collector: list[CompactionOutcome] | None,
 ) -> PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
-    seen_ids = (
-        read_scope_seen_event_ids(scope_context.session, scope_context.scope)
-        if scope_context is not None and scope_context.session is not None
-        else set()
-    )
     response_sender_id = config.get_ids(runtime_paths).get(agent_name)
     response_sender = response_sender_id.full_id if response_sender_id is not None else None
-    provisional_prompt = prompt
-    if reply_to_event_id and thread_history:
-        provisional_prompt, _ = build_prompt_with_unseen_thread_context(
-            prompt,
-            thread_history,
-            seen_event_ids=seen_ids,
-            current_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
-            response_sender_id=response_sender,
-        )
-
     fallback_prompt = (
         None
         if reply_to_event_id and thread_history
@@ -317,54 +368,43 @@ async def prepare_agent_execution_context(
         room_id=room_id,
         runtime_paths=runtime_paths,
     )
-    prepared_scope_history = await prepare_scope_history(
-        agent=agent,
-        agent_name=agent_name,
-        full_prompt=provisional_prompt,
-        runtime_paths=runtime_paths,
-        config=config,
-        compaction_outcomes_collector=compaction_outcomes_collector,
-        scope_context=scope_context,
-        active_model_name=runtime_model.model_name,
-        active_context_window=runtime_model.context_window,
-        static_prompt_tokens=estimate_preparation_static_tokens(
-            agent,
-            full_prompt=provisional_prompt,
-            fallback_full_prompt=fallback_prompt,
-        ),
-    )
 
-    if reply_to_event_id and thread_history:
-        final_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
-            prompt,
-            thread_history,
-            seen_event_ids=_scope_seen_event_ids(scope_context),
-            current_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
-            response_sender_id=response_sender,
+    async def _prepare_agent_scope_history(
+        prepared_prompt: str,
+        replay_fallback_prompt: str | None,
+    ) -> PreparedScopeHistory:
+        return await prepare_scope_history(
+            agent=agent,
+            agent_name=agent_name,
+            full_prompt=prepared_prompt,
+            runtime_paths=runtime_paths,
+            config=config,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+            scope_context=scope_context,
+            active_model_name=runtime_model.model_name,
+            active_context_window=runtime_model.context_window,
+            static_prompt_tokens=estimate_preparation_static_tokens(
+                agent,
+                full_prompt=prepared_prompt,
+                fallback_full_prompt=replay_fallback_prompt,
+            ),
         )
-    else:
-        final_prompt = prompt
-        unseen_event_ids = []
 
-    prepared_history = finalize_history_preparation(
-        prepared_scope_history=prepared_scope_history,
+    return await _prepare_execution_context_common(
+        scope_context=scope_context,
+        prompt=prompt,
+        fallback_prompt=fallback_prompt,
+        thread_history=thread_history,
+        reply_to_event_id=reply_to_event_id,
+        active_event_ids=active_event_ids,
+        response_sender_id=response_sender,
         config=config,
-        static_prompt_tokens=estimate_preparation_static_tokens(
+        prepare_scope_history_fn=_prepare_agent_scope_history,
+        estimate_static_tokens_fn=lambda prepared_prompt, replay_fallback_prompt: estimate_preparation_static_tokens(
             agent,
-            full_prompt=final_prompt,
-            fallback_full_prompt=fallback_prompt,
+            full_prompt=prepared_prompt,
+            fallback_full_prompt=replay_fallback_prompt,
         ),
-    )
-    if not reply_to_event_id or not thread_history:
-        final_prompt = prompt if prepared_history.replays_persisted_history else (fallback_prompt or prompt)
-
-    return PreparedExecutionContext(
-        final_prompt=final_prompt,
-        replay_plan=prepared_history.replay_plan,
-        unseen_event_ids=unseen_event_ids,
-        replays_persisted_history=prepared_history.replays_persisted_history,
-        compaction_outcomes=prepared_history.compaction_outcomes,
     )
 
 
@@ -387,66 +427,39 @@ async def prepare_bound_team_execution_context(
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
-    seen_event_ids = (
-        read_scope_seen_event_ids(scope_context.session, scope_context.scope)
-        if scope_context is not None and scope_context.session is not None
-        else set()
-    )
 
-    provisional_prompt = prompt
-    if reply_to_event_id and thread_history:
-        provisional_prompt, _ = build_prompt_with_unseen_thread_context(
-            prompt,
-            thread_history,
-            seen_event_ids=seen_event_ids,
-            current_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
-            response_sender_id=response_sender_id,
+    async def _prepare_team_scope_history(
+        prepared_prompt: str,
+        replay_fallback_prompt: str | None,
+    ) -> PreparedScopeHistory:
+        return await prepare_bound_scope_history(
+            agents=agents,
+            team=team,
+            full_prompt=prepared_prompt,
+            fallback_full_prompt=replay_fallback_prompt,
+            runtime_paths=runtime_paths,
+            config=config,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+            scope_context=scope_context,
+            team_name=team_name,
+            active_model_name=active_model_name,
+            active_context_window=active_context_window,
         )
 
-    prepared_scope_history = await prepare_bound_scope_history(
-        agents=agents,
-        team=team,
-        full_prompt=provisional_prompt,
-        fallback_full_prompt=None if reply_to_event_id and thread_history else fallback_prompt,
-        runtime_paths=runtime_paths,
-        config=config,
-        compaction_outcomes_collector=compaction_outcomes_collector,
+    return await _prepare_execution_context_common(
         scope_context=scope_context,
-        team_name=team_name,
-        active_model_name=active_model_name,
-        active_context_window=active_context_window,
-    )
-
-    if reply_to_event_id and thread_history:
-        final_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
-            prompt,
-            thread_history,
-            seen_event_ids=_scope_seen_event_ids(scope_context),
-            current_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
-            response_sender_id=response_sender_id,
-        )
-    else:
-        final_prompt = prompt
-        unseen_event_ids = []
-
-    prepared_history = finalize_history_preparation(
-        prepared_scope_history=prepared_scope_history,
+        prompt=prompt,
+        fallback_prompt=fallback_prompt,
+        thread_history=thread_history,
+        reply_to_event_id=reply_to_event_id,
+        active_event_ids=active_event_ids,
+        response_sender_id=response_sender_id,
         config=config,
-        static_prompt_tokens=estimate_preparation_static_tokens_for_team(
+        prepare_scope_history_fn=_prepare_team_scope_history,
+        estimate_static_tokens_fn=lambda prepared_prompt,
+        replay_fallback_prompt: estimate_preparation_static_tokens_for_team(
             team,
-            full_prompt=final_prompt,
-            fallback_full_prompt=None if reply_to_event_id and thread_history else fallback_prompt,
+            full_prompt=prepared_prompt,
+            fallback_full_prompt=replay_fallback_prompt,
         ),
-    )
-    if not reply_to_event_id or not thread_history:
-        final_prompt = prompt if prepared_history.replays_persisted_history else fallback_prompt
-
-    return PreparedExecutionContext(
-        final_prompt=final_prompt,
-        replay_plan=prepared_history.replay_plan,
-        unseen_event_ids=unseen_event_ids,
-        replays_persisted_history=prepared_history.replays_persisted_history,
-        compaction_outcomes=prepared_history.compaction_outcomes,
     )
