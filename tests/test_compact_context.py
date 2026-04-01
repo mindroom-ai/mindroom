@@ -560,3 +560,84 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
     team_state = read_scope_state(reloaded_team_context.session, HistoryScope(kind="team", scope_id="team_123"))
     assert team_state.force_compact_before_next_run is True
     assert result == "Compaction scheduled for the next reply in this conversation scope."
+
+
+@pytest.mark.asyncio
+async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Team-scoped compaction should reuse the room-aware team model resolver."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            teams={
+                "team_123": TeamConfig(
+                    display_name="Test Team",
+                    role="Coordinate work",
+                    agents=["test_agent"],
+                    model="default",
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            room_models={"lobby": "large"},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model", context_window=None),
+                "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
+            },
+        ),
+        runtime_paths,
+    )
+    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=SimpleNamespace(session_id="session-1"),
+    )
+    team_agent = _agent(team_id="team_123")
+    team_context = load_scope_session_context(
+        agent=team_agent,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    )
+    assert team_context is not None
+    assert team_context.session is not None
+    team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
+    team_context.storage.upsert_session(team_context.session)
+
+    runtime_context = ToolRuntimeContext(
+        agent_name="test_agent",
+        room_id="!room:localhost",
+        thread_id="thread-1",
+        resolved_thread_id="thread-1",
+        requester_id="@alice:localhost",
+        client=SimpleNamespace(),
+        config=config,
+        runtime_paths=runtime_paths,
+        active_model_name=None,
+        session_id="session-1",
+    )
+
+    with tool_runtime_context(runtime_context):
+        result = await tool.compact_context(agent=team_agent)
+
+    reloaded_team_context = load_scope_session_context(
+        agent=team_agent,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
+    assert reloaded_team_context is not None
+    assert reloaded_team_context.session is not None
+    team_state = read_scope_state(reloaded_team_context.session, HistoryScope(kind="team", scope_id="team_123"))
+    assert team_state.force_compact_before_next_run is True
+    assert result == "Compaction scheduled for the next reply in this conversation scope."

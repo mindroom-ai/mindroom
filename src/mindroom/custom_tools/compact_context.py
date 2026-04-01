@@ -10,7 +10,7 @@ from agno.agent import Agent
 from agno.run import RunContext
 from agno.tools import Toolkit
 
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ResolvedRuntimeModel
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import RuntimePaths
 from mindroom.history.policy import manual_compaction_unavailable_message, resolve_history_execution_plan
@@ -34,6 +34,7 @@ class _CompactionRequest:
     session_id: str
     scope_context: ScopeSessionContext
     active_model_name: str
+    active_context_window: int | None
     compaction_config: CompactionConfig
 
 
@@ -64,6 +65,7 @@ class CompactContextTools(Toolkit):
 
         budget_error = self._validate_compaction_budget(
             active_model_name=request.active_model_name,
+            active_context_window=request.active_context_window,
             compaction_config=request.compaction_config,
         )
         if budget_error is not None:
@@ -111,11 +113,12 @@ class CompactContextTools(Toolkit):
         if scope_context.session is None:
             return "Error: No stored session available. Cannot compact context."
 
-        active_model_name, compaction_config = self._resolve_active_compaction_settings(agent, runtime_context)
+        runtime_model, compaction_config = self._resolve_active_compaction_settings(agent, runtime_context)
         return _CompactionRequest(
             session_id=session_id,
             scope_context=scope_context,
-            active_model_name=active_model_name,
+            active_model_name=runtime_model.model_name,
+            active_context_window=runtime_model.context_window,
             compaction_config=compaction_config,
         )
 
@@ -123,31 +126,36 @@ class CompactContextTools(Toolkit):
         self,
         agent: Agent,
         runtime_context: ToolRuntimeContext | None,
-    ) -> tuple[str, CompactionConfig]:
+    ) -> tuple[ResolvedRuntimeModel, CompactionConfig]:
         """Resolve the active model and compaction config for the current scope."""
         active_model_name = runtime_context.active_model_name if runtime_context is not None else None
         if agent.team_id is None:
-            return (
-                active_model_name or self._config.get_entity_model_name(self._agent_name),
-                self._config.get_entity_compaction_config(self._agent_name),
+            runtime_model = self._config.resolve_runtime_model(
+                entity_name=self._agent_name,
+                active_model_name=active_model_name,
             )
+            return runtime_model, self._config.get_entity_compaction_config(self._agent_name)
 
         if agent.team_id not in self._config.teams:
-            return active_model_name or "default", self._config.get_default_compaction_config()
-
-        if active_model_name is None:
-            room_id = runtime_context.room_id if runtime_context is not None else None
-            active_model_name = self._config.get_effective_team_model_name(
-                agent.team_id,
-                room_id,
-                self._runtime_paths,
+            runtime_model = self._config.resolve_runtime_model(
+                entity_name=None,
+                active_model_name=active_model_name,
             )
-        return active_model_name, self._config.get_entity_compaction_config(agent.team_id)
+            return runtime_model, self._config.get_default_compaction_config()
+
+        runtime_model = self._config.resolve_runtime_model(
+            entity_name=agent.team_id,
+            active_model_name=active_model_name,
+            room_id=runtime_context.room_id if runtime_context is not None else None,
+            runtime_paths=self._runtime_paths,
+        )
+        return runtime_model, self._config.get_entity_compaction_config(agent.team_id)
 
     def _validate_compaction_budget(
         self,
         *,
         active_model_name: str,
+        active_context_window: int | None,
         compaction_config: CompactionConfig,
     ) -> str | None:
         """Return a user-facing error when destructive compaction is unavailable."""
@@ -156,7 +164,7 @@ class CompactContextTools(Toolkit):
             compaction_config=compaction_config,
             has_authored_compaction_config=True,
             active_model_name=active_model_name,
-            active_context_window=self._config.get_model_context_window(active_model_name),
+            active_context_window=active_context_window,
             static_prompt_tokens=None,
         )
         return manual_compaction_unavailable_message(execution_plan)

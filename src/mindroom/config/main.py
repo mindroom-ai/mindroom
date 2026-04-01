@@ -81,6 +81,14 @@ class ResolvedToolConfig:
     tool_config_overrides: dict[str, object]
 
 
+@dataclass(frozen=True)
+class ResolvedRuntimeModel:
+    """Resolved active runtime model and context window for one execution context."""
+
+    model_name: str
+    context_window: int | None
+
+
 def _history_policy_from_limits(
     *,
     num_history_runs: int | None,
@@ -1287,6 +1295,38 @@ class Config(BaseModel):
                 return self.room_models[room_alias]
         team_model = self.teams[team_name].model
         return team_model or "default"
+
+    def resolve_runtime_model(
+        self,
+        *,
+        entity_name: str | None,
+        active_model_name: str | None = None,
+        active_context_window: int | None = None,
+        room_id: str | None = None,
+        runtime_paths: RuntimePaths | None = None,
+        default_model_name: str = "default",
+    ) -> ResolvedRuntimeModel:
+        """Resolve the active runtime model plus its configured context window."""
+        resolved_model_name = active_model_name
+        if resolved_model_name is None:
+            if entity_name is None:
+                resolved_model_name = default_model_name
+            elif entity_name in self.teams and room_id is not None:
+                if runtime_paths is None:
+                    msg = "runtime_paths are required to resolve a room-specific team model"
+                    raise ValueError(msg)
+                resolved_model_name = self.get_effective_team_model_name(entity_name, room_id, runtime_paths)
+            else:
+                resolved_model_name = self.get_entity_model_name(entity_name)
+
+        resolved_context_window = active_context_window
+        if resolved_context_window is None:
+            resolved_context_window = self.get_model_context_window(resolved_model_name)
+
+        return ResolvedRuntimeModel(
+            model_name=resolved_model_name,
+            context_window=resolved_context_window,
+        )
 
     def get_configured_bots_for_room(
         self,

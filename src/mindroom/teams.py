@@ -1181,7 +1181,11 @@ def select_model_for_team(
         Model name to use
 
     """
-    model_name = config.get_effective_team_model_name(team_name, room_id, runtime_paths)
+    model_name = config.resolve_runtime_model(
+        entity_name=team_name,
+        room_id=room_id,
+        runtime_paths=runtime_paths,
+    ).model_name
     room_alias = get_room_alias_from_id(room_id, runtime_paths)
     if room_alias and room_alias in config.room_models:
         logger.info(f"Using room-specific model for {team_name} in {room_alias}: {model_name}")
@@ -1220,9 +1224,11 @@ async def _prepare_materialized_team_execution(
         max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
         missing_sender_label="Unknown",
     )
-    resolved_team_model_name = model_name
-    if resolved_team_model_name is None and configured_team_name is not None:
-        resolved_team_model_name = orchestrator.config.get_entity_model_name(configured_team_name)
+    resolved_team_runtime_model = orchestrator.config.resolve_runtime_model(
+        entity_name=configured_team_name,
+        active_model_name=model_name,
+    )
+    resolved_team_model_name = resolved_team_runtime_model.model_name
     team = _create_team_instance(
         team_members.agents,
         team_members.requested_agent_names,
@@ -1248,8 +1254,6 @@ async def _prepare_materialized_team_execution(
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,
     )
-    active_team_model_name = resolved_team_model_name or "default"
-    active_team_context_window = orchestrator.config.get_model_context_window(active_team_model_name)
     prepared_history = await prepare_bound_agents_for_run(
         agents=team_members.agents,
         team=team,
@@ -1261,8 +1265,8 @@ async def _prepare_materialized_team_execution(
         execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
         team_name=configured_team_name,
-        active_model_name=active_team_model_name,
-        active_context_window=active_team_context_window,
+        active_model_name=resolved_team_runtime_model.model_name,
+        active_context_window=resolved_team_runtime_model.context_window,
     )
     if reply_to_event_id and thread_history:
         prepared_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(

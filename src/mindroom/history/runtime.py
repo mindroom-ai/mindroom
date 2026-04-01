@@ -293,16 +293,22 @@ async def prepare_bound_agents_for_run(
         history_settings = config.get_entity_history_settings(team_name)
         compaction_config = config.get_entity_compaction_config(team_name)
         has_authored_compaction_config = config.has_authored_entity_compaction_config(team_name)
-        resolved_active_model_name = active_model_name or config.get_entity_model_name(team_name)
+        runtime_model = config.resolve_runtime_model(
+            entity_name=team_name,
+            active_model_name=active_model_name,
+            active_context_window=active_context_window,
+        )
     else:
         history_settings = config.get_default_history_settings()
         compaction_config = config.get_default_compaction_config()
         has_authored_compaction_config = config.has_authored_default_compaction_config()
-        resolved_active_model_name = active_model_name or "default"
-
-    resolved_active_context_window = active_context_window
-    if resolved_active_context_window is None:
-        resolved_active_context_window = config.get_model_context_window(resolved_active_model_name)
+        runtime_model = config.resolve_runtime_model(
+            entity_name=None,
+            active_model_name=active_model_name,
+            active_context_window=active_context_window,
+        )
+    resolved_active_model_name = runtime_model.model_name
+    resolved_active_context_window = runtime_model.context_window
     static_prompt_tokens = (
         estimate_preparation_static_tokens_for_team(
             team,
@@ -684,10 +690,13 @@ def _resolve_preparation_inputs(
         else:
             resolved_has_authored_compaction_config = config.has_authored_default_compaction_config()
 
-    resolved_active_model_name = active_model_name or config.get_entity_model_name(agent_name)
-    resolved_active_context_window = active_context_window
-    if resolved_active_context_window is None:
-        resolved_active_context_window = config.get_model_context_window(resolved_active_model_name)
+    runtime_model = config.resolve_runtime_model(
+        entity_name=agent_name if agent_name in config.agents else None,
+        active_model_name=active_model_name,
+        active_context_window=active_context_window,
+    )
+    resolved_active_model_name = runtime_model.model_name
+    resolved_active_context_window = runtime_model.context_window
     resolved_static_prompt_tokens = static_prompt_tokens
     if resolved_static_prompt_tokens is None:
         resolved_static_prompt_tokens = estimate_static_tokens(agent, full_prompt)

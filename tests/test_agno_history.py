@@ -1402,6 +1402,43 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_for_authore
     assert execution_plan.destructive_compaction_available is True
 
 
+def test_resolve_runtime_model_uses_room_override_for_team(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            teams={
+                "team_123": TeamConfig(
+                    display_name="Test Team",
+                    role="Coordinate work",
+                    agents=["test_agent"],
+                    model="default",
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            room_models={"lobby": "large"},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model", context_window=None),
+                "large": ModelConfig(provider="openai", id="large-model", context_window=32_000),
+            },
+        ),
+        runtime_paths,
+    )
+    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+
+    runtime_model = config.resolve_runtime_model(
+        entity_name="team_123",
+        room_id="!room:localhost",
+        runtime_paths=runtime_paths,
+    )
+
+    assert runtime_model.model_name == "large"
+    assert runtime_model.context_window == 32_000
+
+
 def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavailable(tmp_path: Path) -> None:
     config, _runtime_paths_value = _make_config(
         tmp_path,

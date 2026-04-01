@@ -1190,8 +1190,7 @@ async def _prepare_openai_team_prompt(
 ) -> str:
     """Prepare the final prompt for one OpenAI-compatible team run."""
     fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
-    active_team_model_name = config.get_entity_model_name(team_name)
-    active_team_context_window = config.get_model_context_window(active_team_model_name)
+    runtime_model = config.resolve_runtime_model(entity_name=team_name)
     prepared_history = await prepare_bound_agents_for_run(
         agents=agents,
         team=team,
@@ -1202,8 +1201,8 @@ async def _prepare_openai_team_prompt(
         config=config,
         execution_identity=execution_identity,
         team_name=team_name,
-        active_model_name=active_team_model_name,
-        active_context_window=active_team_context_window,
+        active_model_name=runtime_model.model_name,
+        active_context_window=runtime_model.context_window,
     )
     return prompt if prepared_history.has_persisted_history else fallback_prompt
 
