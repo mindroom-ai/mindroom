@@ -343,8 +343,8 @@ class TestScheduledTaskRestoration:
         drain_task = asyncio.create_task(asyncio.sleep(60))
         router_bot._deferred_overdue_task_drain_task = drain_task
 
-        async def wait_for_background_tasks_side_effect(*, timeout: float) -> None:
-            del timeout
+        async def wait_for_background_tasks_side_effect(**kwargs: float) -> None:
+            assert "timeout" in kwargs
             assert drain_task.cancelled()
 
         with (

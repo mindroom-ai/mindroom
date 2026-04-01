@@ -19,20 +19,22 @@ from mindroom.tool_system.events import (
     format_tool_completed_event,
 )
 
+TEST_CURSOR = "cursor_1234567890"
+
 
 def _room_threads_result(
     *,
     thread_count: int,
     body_len: int,
     has_more: bool = True,
-    next_token: str | None = "NEXT_TOKEN_1234567890",
+    cursor: str | None = TEST_CURSOR,
 ) -> tuple[str, list[str]]:
     thread_ids = [f"$thread_{i}_{'X' * 40}:localhost" for i in range(thread_count)]
     payload = {
         "action": "room-threads",
         "count": thread_count,
         "has_more": has_more,
-        "next_token": next_token,
+        "next_token": cursor,
         "status": "ok",
         "tool": "matrix_message",
         "threads": [
@@ -71,7 +73,7 @@ def _exact_limit_room_threads_result() -> tuple[str, list[str]]:
         thread_count=1,
         body_len=0,
         has_more=False,
-        next_token=None,
+        cursor=None,
     )
     body_len = _MAX_TOOL_RESULT_DISPLAY_CHARS - len(base_result)
     assert body_len >= 0
@@ -80,7 +82,7 @@ def _exact_limit_room_threads_result() -> tuple[str, list[str]]:
         thread_count=1,
         body_len=body_len,
         has_more=False,
-        next_token=None,
+        cursor=None,
     )
     assert len(result) == _MAX_TOOL_RESULT_DISPLAY_CHARS
     return result, thread_ids
@@ -154,7 +156,7 @@ def test_format_tool_combined_truncates_structured_room_threads_by_entry() -> No
     preview = json.loads(trace.result_preview)
     assert preview["count"] == 4
     assert preview["has_more"] is True
-    assert preview["next_token"] == "NEXT_TOKEN_1234567890"
+    assert preview["next_token"] == TEST_CURSOR
     assert preview["truncated"] is True
     assert preview["threads"]
     assert len(preview["threads"]) < 4
@@ -168,7 +170,7 @@ def test_format_tool_combined_truncates_body_preview_without_dropping_only_entry
         thread_count=1,
         body_len=400,
         has_more=False,
-        next_token=None,
+        cursor=None,
     )
 
     _text, trace = format_tool_combined("matrix_message", {"action": "room-threads"}, result)
