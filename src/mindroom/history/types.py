@@ -8,6 +8,8 @@ from typing import Literal
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
 _CompactionMode = Literal["auto", "manual"]
+_CompactionAvailabilityReason = Literal["no_context_window", "non_positive_summary_input_budget"]
+_HistoryPreparationAction = Literal["none", "compact", "implicit_guard"]
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,25 @@ class HistoryScopeState:
     last_summary_model: str | None = None
     last_compacted_run_count: int | None = None
     force_compact_before_next_run: bool = False
+
+
+@dataclass(frozen=True)
+class ResolvedHistoryExecutionPlan:
+    """Single source of truth for history-budget policy in one run scope."""
+
+    authored_compaction_config: bool
+    authored_compaction_enabled: bool
+    destructive_compaction_available: bool
+    implicit_context_window_guard_enabled: bool
+    compaction_model_name: str
+    compaction_context_window: int | None
+    replay_window_tokens: int | None
+    threshold_tokens: int | None
+    reserve_tokens: int
+    static_prompt_tokens: int | None
+    replay_budget_tokens: int | None
+    summary_input_budget_tokens: int | None
+    unavailable_reason: _CompactionAvailabilityReason | None = None
 
 
 @dataclass(frozen=True)

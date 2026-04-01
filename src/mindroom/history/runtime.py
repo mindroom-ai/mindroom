@@ -14,15 +14,18 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+import mindroom.history.compaction as history_compaction
 from mindroom.agents import create_session_storage, create_state_storage_db, get_agent_session, get_team_session
 from mindroom.history.compaction import (
     compact_scope_history,
     estimate_prompt_visible_history_tokens,
     estimate_static_tokens,
     estimate_team_static_tokens,
-    normalize_compaction_budget_tokens,
-    resolve_compaction_runtime_settings,
-    resolve_effective_compaction_threshold,
+)
+from mindroom.history.policy import (
+    describe_compaction_unavailability,
+    resolve_history_execution_plan,
+    select_history_preparation_action,
 )
 from mindroom.history.storage import (
     clear_force_compaction_state,
@@ -35,6 +38,7 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
     PreparedHistoryState,
+    ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
 )
 from mindroom.logging_config import get_logger
@@ -80,11 +84,10 @@ class BoundTeamScopeContext:
 class _ResolvedPreparationInputs:
     history_settings: ResolvedHistorySettings
     compaction_config: CompactionConfig
-    has_authored_compaction_config: bool
     active_model_name: str
     active_context_window: int | None
-    compaction_context_window: int | None
     static_prompt_tokens: int
+    execution_plan: ResolvedHistoryExecutionPlan
 
 
 def resolve_history_scope(agent: Agent) -> HistoryScope | None:
@@ -118,6 +121,7 @@ async def prepare_history_for_run(
     static_prompt_tokens: int | None = None,
     available_history_budget: int | None = None,
     scope: HistoryScope | None = None,
+    execution_plan: ResolvedHistoryExecutionPlan | None = None,
 ) -> PreparedHistoryState:
     """Prepare one scope by compacting its persisted session before the run."""
     resolved_scope = scope or resolve_history_scope(agent)
@@ -146,28 +150,26 @@ async def prepare_history_for_run(
         active_model_name=active_model_name,
         active_context_window=active_context_window,
         static_prompt_tokens=static_prompt_tokens,
+        execution_plan=execution_plan,
     )
+    execution_plan = resolved_inputs.execution_plan
     history_budget = available_history_budget
     if history_budget is None:
-        history_budget = _resolve_available_history_budget(
-            compaction_config=resolved_inputs.compaction_config,
-            has_authored_compaction_config=resolved_inputs.has_authored_compaction_config,
-            active_context_window=resolved_inputs.active_context_window,
-            compaction_context_window=resolved_inputs.compaction_context_window,
-            static_prompt_tokens=resolved_inputs.static_prompt_tokens,
-        )
+        history_budget = execution_plan.replay_budget_tokens
+        if execution_plan.authored_compaction_enabled and execution_plan.unavailable_reason == "no_context_window":
+            logger.warning(
+                "Compaction budget unavailable: no context_window configured for compaction model",
+                compaction_model=execution_plan.compaction_model_name,
+            )
 
     session = scope_context.session
     state = _prepare_scope_state_for_run(
         storage=scope_context.storage,
         session=session,
         scope=scope_context.scope,
-        history_budget=history_budget,
+        execution_plan=execution_plan,
     )
     compaction_outcomes: list[CompactionOutcome] = []
-    auto_compaction_enabled = (
-        resolved_inputs.has_authored_compaction_config and resolved_inputs.compaction_config.enabled
-    )
     current_history_tokens = (
         estimate_prompt_visible_history_tokens(
             session=session,
@@ -177,38 +179,49 @@ async def prepare_history_for_run(
         if history_budget is not None
         else None
     )
-    should_attempt_compaction = (state.force_compact_before_next_run and history_budget is not None) or (
-        auto_compaction_enabled
-        and history_budget is not None
-        and current_history_tokens is not None
-        and current_history_tokens > history_budget
+    action = select_history_preparation_action(
+        plan=execution_plan,
+        force_compact_before_next_run=state.force_compact_before_next_run,
+        current_history_tokens=current_history_tokens,
+        replay_budget_tokens=history_budget,
     )
     logger.info(
         "Compaction check",
         agent=agent_name,
-        auto_enabled=auto_compaction_enabled,
+        auto_enabled=execution_plan.authored_compaction_enabled and execution_plan.destructive_compaction_available,
+        compaction_available=execution_plan.destructive_compaction_available,
         budget=history_budget,
         current_tokens=current_history_tokens,
         force=state.force_compact_before_next_run,
-        will_compact=should_attempt_compaction,
+        action=action,
+        unavailable_reason=execution_plan.unavailable_reason,
     )
 
-    if should_attempt_compaction:
+    if action == "compact":
         compaction_budget = history_budget
         assert compaction_budget is not None
+        assert execution_plan.summary_input_budget_tokens is not None
+        summary_model = history_compaction.load_compaction_model(
+            config=config,
+            runtime_paths=runtime_paths,
+            model_name=execution_plan.compaction_model_name,
+        )
         try:
             _next_state, outcome = await compact_scope_history(
                 storage=scope_context.storage,
                 session=session,
                 scope=scope_context.scope,
                 state=state,
-                config=config,
-                runtime_paths=runtime_paths,
-                compaction_config=resolved_inputs.compaction_config,
                 history_settings=resolved_inputs.history_settings,
                 available_history_budget=compaction_budget,
-                active_model_name=resolved_inputs.active_model_name,
+                summary_input_budget=execution_plan.summary_input_budget_tokens,
+                summary_model=summary_model,
+                summary_model_name=execution_plan.compaction_model_name,
                 active_context_window=resolved_inputs.active_context_window,
+                replay_window_tokens=execution_plan.replay_window_tokens,
+                threshold_tokens=execution_plan.threshold_tokens,
+                reserve_tokens=execution_plan.reserve_tokens,
+                notify=resolved_inputs.compaction_config.notify,
             )
         except Exception:
             clear_force_compaction_state(session, scope_context.scope, state)
@@ -231,7 +244,8 @@ async def prepare_history_for_run(
                     runs_compacted=outcome.compacted_run_count,
                 )
 
-    if not resolved_inputs.has_authored_compaction_config and history_budget is not None:
+    if action == "implicit_guard":
+        assert history_budget is not None
         _apply_implicit_context_window_guard(
             target=agent,
             session=session,
@@ -289,12 +303,6 @@ async def prepare_bound_agents_for_run(
     resolved_active_context_window = active_context_window
     if resolved_active_context_window is None:
         resolved_active_context_window = config.get_model_context_window(resolved_active_model_name)
-    resolved_compaction_context_window = resolve_compaction_runtime_settings(
-        config=config,
-        compaction_config=compaction_config,
-        active_model_name=resolved_active_model_name,
-        active_context_window=resolved_active_context_window,
-    ).context_window
     static_prompt_tokens = (
         estimate_preparation_static_tokens_for_team(
             team,
@@ -307,13 +315,15 @@ async def prepare_bound_agents_for_run(
             fallback_full_prompt=fallback_full_prompt,
         )
     )
-    available_history_budget = _resolve_available_history_budget(
+    execution_plan = resolve_history_execution_plan(
+        config=config,
         compaction_config=compaction_config,
         has_authored_compaction_config=has_authored_compaction_config,
+        active_model_name=resolved_active_model_name,
         active_context_window=resolved_active_context_window,
-        compaction_context_window=resolved_compaction_context_window,
         static_prompt_tokens=static_prompt_tokens,
     )
+    available_history_budget = execution_plan.replay_budget_tokens
 
     prepared = await prepare_history_for_run(
         agent=bound_scope.owner_agent,
@@ -333,8 +343,13 @@ async def prepare_bound_agents_for_run(
         static_prompt_tokens=static_prompt_tokens,
         available_history_budget=available_history_budget,
         scope=bound_scope.scope,
+        execution_plan=execution_plan,
     )
-    if team is not None and not has_authored_compaction_config and available_history_budget is not None:
+    if (
+        team is not None
+        and execution_plan.implicit_context_window_guard_enabled
+        and available_history_budget is not None
+    ):
         scope_context = load_scope_session_context(
             agent=bound_scope.owner_agent,
             agent_name=bound_scope.owner_agent_name,
@@ -346,6 +361,22 @@ async def prepare_bound_agents_for_run(
             scope=bound_scope.scope,
         )
         if scope_context is not None and scope_context.session is not None:
+            current_history_tokens = estimate_prompt_visible_history_tokens(
+                session=scope_context.session,
+                scope=bound_scope.scope,
+                history_settings=history_settings,
+            )
+            action = select_history_preparation_action(
+                plan=execution_plan,
+                force_compact_before_next_run=read_scope_state(
+                    scope_context.session,
+                    bound_scope.scope,
+                ).force_compact_before_next_run,
+                current_history_tokens=current_history_tokens,
+                replay_budget_tokens=available_history_budget,
+            )
+            if action != "implicit_guard":
+                return prepared
             _apply_implicit_context_window_guard(
                 target=team,
                 session=scope_context.session,
@@ -630,6 +661,7 @@ def _resolve_preparation_inputs(
     active_model_name: str | None,
     active_context_window: int | None,
     static_prompt_tokens: int | None,
+    execution_plan: ResolvedHistoryExecutionPlan | None,
 ) -> _ResolvedPreparationInputs:
     resolved_history_settings = history_settings
     if resolved_history_settings is None:
@@ -656,59 +688,27 @@ def _resolve_preparation_inputs(
     resolved_active_context_window = active_context_window
     if resolved_active_context_window is None:
         resolved_active_context_window = config.get_model_context_window(resolved_active_model_name)
-    resolved_compaction_context_window = resolve_compaction_runtime_settings(
-        config=config,
-        compaction_config=resolved_compaction_config,
-        active_model_name=resolved_active_model_name,
-        active_context_window=resolved_active_context_window,
-    ).context_window
-
     resolved_static_prompt_tokens = static_prompt_tokens
     if resolved_static_prompt_tokens is None:
         resolved_static_prompt_tokens = estimate_static_tokens(agent, full_prompt)
 
-    return _ResolvedPreparationInputs(
-        history_settings=resolved_history_settings,
+    resolved_execution_plan = execution_plan or resolve_history_execution_plan(
+        config=config,
         compaction_config=resolved_compaction_config,
         has_authored_compaction_config=resolved_has_authored_compaction_config,
         active_model_name=resolved_active_model_name,
         active_context_window=resolved_active_context_window,
-        compaction_context_window=resolved_compaction_context_window,
         static_prompt_tokens=resolved_static_prompt_tokens,
     )
 
-
-def _resolve_available_history_budget(
-    *,
-    compaction_config: CompactionConfig,
-    has_authored_compaction_config: bool,
-    active_context_window: int | None,
-    compaction_context_window: int | None,
-    static_prompt_tokens: int,
-) -> int | None:
-    if compaction_context_window is None:
-        if has_authored_compaction_config and compaction_config.enabled:
-            logger.warning(
-                "Compaction budget unavailable: no context_window configured for compaction model",
-                compaction_model=compaction_config.model,
-            )
-        return None
-    threshold_tokens = compaction_config.threshold_tokens
-    if threshold_tokens is None:
-        threshold_window = active_context_window
-        if threshold_window is None:
-            if not has_authored_compaction_config:
-                return None
-            threshold_window = compaction_context_window
-        threshold_tokens = resolve_effective_compaction_threshold(compaction_config, threshold_window)
-
-    ceiling = threshold_tokens
-    if has_authored_compaction_config:
-        ceiling_window = active_context_window if active_context_window is not None else compaction_context_window
-        reserve_tokens = normalize_compaction_budget_tokens(compaction_config.reserve_tokens, ceiling_window)
-        ceiling = min(ceiling, max(0, ceiling_window - reserve_tokens))
-
-    return max(0, ceiling - static_prompt_tokens)
+    return _ResolvedPreparationInputs(
+        history_settings=resolved_history_settings,
+        compaction_config=resolved_compaction_config,
+        active_model_name=resolved_active_model_name,
+        active_context_window=resolved_active_context_window,
+        static_prompt_tokens=resolved_static_prompt_tokens,
+        execution_plan=resolved_execution_plan,
+    )
 
 
 def _prepare_scope_state_for_run(
@@ -716,20 +716,24 @@ def _prepare_scope_state_for_run(
     storage: SqliteDb,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
-    history_budget: int | None,
+    execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
     state = read_scope_state(session, scope)
     if consume_pending_force_compaction_scope(session, scope):
         state = replace(state, force_compact_before_next_run=True)
         write_scope_state(session, scope, state)
         storage.upsert_session(session)
-    if state.force_compact_before_next_run and history_budget is None:
+    if state.force_compact_before_next_run and (
+        not execution_plan.destructive_compaction_available or execution_plan.replay_budget_tokens is None
+    ):
         state = clear_force_compaction_state(session, scope, state)
         storage.upsert_session(session)
+        description = describe_compaction_unavailability(execution_plan.unavailable_reason)
         logger.warning(
-            "Forced compaction skipped because no history budget could be resolved",
+            "Forced compaction skipped because destructive compaction is unavailable",
             session_id=session.session_id,
             scope=scope.key,
+            reason=description,
         )
     return state
 

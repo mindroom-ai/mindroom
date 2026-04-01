@@ -259,8 +259,8 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
 
     with (
         patch(
-            "mindroom.history.compaction.resolve_compaction_model",
-            return_value=(FakeModel(id="summary-model", provider="fake"), 32_000),
+            "mindroom.history.compaction.load_compaction_model",
+            return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
             "mindroom.history.compaction._generate_compaction_summary",
@@ -413,8 +413,8 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
 
     with (
         patch(
-            "mindroom.history.compaction.resolve_compaction_model",
-            return_value=(FakeModel(id="summary-model", provider="fake"), 48_000),
+            "mindroom.history.compaction.load_compaction_model",
+            return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
             "mindroom.history.compaction._generate_compaction_summary",

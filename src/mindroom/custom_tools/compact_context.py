@@ -13,11 +13,10 @@ from agno.tools import Toolkit
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import RuntimePaths
-from mindroom.history.compaction import normalize_compaction_budget_tokens, resolve_compaction_runtime_settings
+from mindroom.history.policy import manual_compaction_unavailable_message, resolve_history_execution_plan
 from mindroom.history.runtime import ScopeSessionContext, load_scope_session_context
 from mindroom.history.storage import add_pending_force_compaction_scope, read_scope_state, write_scope_state
 from mindroom.logging_config import get_logger
-from mindroom.token_budget import compute_compaction_input_budget
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -151,30 +150,13 @@ class CompactContextTools(Toolkit):
         active_model_name: str,
         compaction_config: CompactionConfig,
     ) -> str | None:
-        """Return a user-facing error when the active compaction runtime cannot summarize history."""
-        active_context_window = self._config.get_model_context_window(active_model_name)
-        compaction_runtime = resolve_compaction_runtime_settings(
+        """Return a user-facing error when destructive compaction is unavailable."""
+        execution_plan = resolve_history_execution_plan(
             config=self._config,
             compaction_config=compaction_config,
+            has_authored_compaction_config=True,
             active_model_name=active_model_name,
-            active_context_window=active_context_window,
+            active_context_window=self._config.get_model_context_window(active_model_name),
+            static_prompt_tokens=None,
         )
-        if compaction_runtime.context_window is None:
-            return (
-                "Error: Compaction is unavailable for this scope because no context_window is configured on the "
-                "active model or the selected compaction model."
-            )
-        reserve_tokens = normalize_compaction_budget_tokens(
-            compaction_config.reserve_tokens,
-            compaction_runtime.context_window,
-        )
-        summary_input_budget = compute_compaction_input_budget(
-            compaction_runtime.context_window,
-            reserve_tokens=reserve_tokens,
-        )
-        if summary_input_budget <= 0:
-            return (
-                "Error: Compaction is unavailable for this scope because the active compaction model leaves no "
-                "usable summary input budget after reserve and prompt overhead."
-            )
-        return None
+        return manual_compaction_unavailable_message(execution_plan)

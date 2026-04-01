@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from mindroom.history.storage import clear_force_compaction_state, update_scope_seen_event_ids, write_scope_state
 from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
 from mindroom.logging_config import get_logger
-from mindroom.token_budget import compute_compaction_input_budget, estimate_text_tokens, stable_serialize
+from mindroom.token_budget import estimate_text_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -107,13 +107,16 @@ async def compact_scope_history(
     session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: HistoryScopeState,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    compaction_config: CompactionConfig,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
-    active_model_name: str,
+    summary_input_budget: int,
+    summary_model: Model,
+    summary_model_name: str,
     active_context_window: int | None,
+    replay_window_tokens: int | None,
+    threshold_tokens: int | None,
+    reserve_tokens: int,
+    notify: bool,
 ) -> tuple[HistoryScopeState, CompactionOutcome | None]:
     """Compact one scope by rewriting session.summary and session.runs."""
     visible_runs = _runs_for_scope(_completed_top_level_runs(session), scope)
@@ -130,34 +133,6 @@ async def compact_scope_history(
         if cleared_state != state:
             write_scope_state(session, scope, cleared_state)
             storage.upsert_session(session)
-        return cleared_state, None
-
-    summary_model, effective_window = resolve_compaction_model(
-        config=config,
-        runtime_paths=runtime_paths,
-        compaction_config=compaction_config,
-        active_model_name=active_model_name,
-        active_context_window=active_context_window,
-    )
-    window_tokens = effective_window or 0
-    reserve_tokens = normalize_compaction_budget_tokens(
-        compaction_config.reserve_tokens,
-        window_tokens or None,
-    )
-    summary_input_budget = compute_compaction_input_budget(
-        window_tokens,
-        reserve_tokens=reserve_tokens,
-    )
-    if summary_input_budget <= 0:
-        logger.warning(
-            "Compaction budget is non-positive; skipping compaction",
-            session_id=session.session_id,
-            scope=scope.key,
-            effective_window=window_tokens,
-            reserve_tokens=reserve_tokens,
-        )
-        cleared_state = clear_force_compaction_state(session, scope, state)
-        storage.upsert_session(session)
         return cleared_state, None
 
     before_tokens = estimate_prompt_visible_history_tokens(
@@ -208,24 +183,23 @@ async def compact_scope_history(
         scope=scope,
         history_settings=history_settings,
     )
-    active_window = active_context_window or 0
-    threshold_tokens = resolve_effective_compaction_threshold(compaction_config, active_window) if active_window else 0
+    resolved_window_tokens = replay_window_tokens or active_context_window or 0
     outcome = CompactionOutcome(
         mode="manual" if state.force_compact_before_next_run else "auto",
         session_id=session.session_id,
         scope=scope.key,
         summary=rewrite_result.summary_text,
-        summary_model=_model_identifier(summary_model),
+        summary_model=summary_model_name,
         before_tokens=before_tokens,
         after_tokens=after_tokens,
-        window_tokens=active_window,
-        threshold_tokens=threshold_tokens,
-        reserve_tokens=compaction_config.reserve_tokens,
+        window_tokens=resolved_window_tokens,
+        threshold_tokens=threshold_tokens or 0,
+        reserve_tokens=reserve_tokens,
         runs_before=before_run_count,
         runs_after=len(after_visible_runs),
         compacted_run_count=rewrite_result.compacted_run_count,
         compacted_at=compacted_at,
-        notify=compaction_config.notify,
+        notify=notify,
     )
     return new_state, outcome
 
@@ -520,25 +494,16 @@ def normalize_compaction_budget_tokens(tokens: int, context_window: int | None) 
     return min(tokens, context_window // 2)
 
 
-def resolve_compaction_model(
+def load_compaction_model(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    compaction_config: CompactionConfig,
-    active_model_name: str,
-    active_context_window: int | None,
-) -> tuple[Model, int | None]:
-    """Resolve the summary model used for single-pass compaction."""
+    model_name: str,
+) -> Model:
+    """Load the summary model used for single-pass compaction."""
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
-    runtime = resolve_compaction_runtime_settings(
-        config=config,
-        compaction_config=compaction_config,
-        active_model_name=active_model_name,
-        active_context_window=active_context_window,
-    )
-    model = get_model_instance(config, runtime_paths, runtime.model_name)
-    return model, runtime.context_window
+    return get_model_instance(config, runtime_paths, model_name)
 
 
 def resolve_compaction_runtime_settings(
