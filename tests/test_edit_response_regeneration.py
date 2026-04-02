@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+import json
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
@@ -22,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_utils import create_session_id
@@ -74,11 +75,6 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
         },
     )
     return bind_runtime_paths(config, runtime_paths)
-
-
-@contextmanager
-def _open_storage(storage: object) -> object:
-    yield storage
 
 
 def _team_test_config(tmp_path: Path) -> Config:
@@ -240,11 +236,202 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
             "The answer is 6",
             None,  # thread_id
             tool_trace=[],
-            extra_content=None,
+            extra_content={},
         )
 
         # Verify that the response tracker still maps to the same response
         assert bot.response_tracker.get_response_event_id(original_event.event_id) == response_event_id
+
+
+@pytest.mark.asyncio
+async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> None:
+    """Edit regeneration should use the resolved edited body from a v2 sidecar."""
+    _clear_mxc_cache()
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path)
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "body": "* @test_agent what is 99+1?",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "@test_agent what is 99+1?",
+                        "msgtype": "m.text",
+                    },
+                    "m.relates_to": {
+                        "event_id": "$original:example.com",
+                        "rel_type": "m.replace",
+                    },
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+    bot.logger = MagicMock()
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    bot.response_tracker.mark_responded("$original:example.com", "$response:example.com")
+
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* Preview edit",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "Preview edit",
+                    "msgtype": "m.file",
+                    "info": {"mimetype": "application/json"},
+                    "io.mindroom.long_text": {
+                        "version": 2,
+                        "encoding": "matrix_event_content_json",
+                    },
+                    "url": "mxc://server/edit-sidecar-regeneration",
+                },
+                "m.relates_to": {
+                    "event_id": "$original:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = edit_event.__dict__["source"]
+
+    with (
+        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot, "_emit_message_received_hooks", new_callable=AsyncMock) as mock_emit_hooks,
+        patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+    ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
+            has_non_agent_mentions=False,
+        )
+        mock_emit_hooks.return_value = False
+
+        await bot._on_message(room, edit_event)
+
+    mock_should_respond.assert_called_once()
+    emitted_envelope = mock_emit_hooks.await_args.kwargs["envelope"]
+    assert emitted_envelope.body == "@test_agent what is 99+1?"
+
+
+@pytest.mark.asyncio
+async def test_bot_edit_regeneration_uses_hydrated_mentions_for_response_gating(tmp_path: Path) -> None:
+    """Edit regeneration should route mention detection through canonical hydrated edit content."""
+    _clear_mxc_cache()
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path, agent_names=("test_agent", "other_agent"))
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "body": "* @test_agent what is 99+1?",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "@test_agent what is 99+1?",
+                        "msgtype": "m.text",
+                        "m.mentions": {
+                            "user_ids": ["@mindroom_test_agent:example.com"],
+                        },
+                    },
+                    "m.relates_to": {
+                        "event_id": "$original:example.com",
+                        "rel_type": "m.replace",
+                    },
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+    bot.logger = MagicMock()
+    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    bot.response_tracker.mark_responded("$original:example.com", "$response:example.com")
+
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* Preview edit",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "Preview edit",
+                    "msgtype": "m.file",
+                    "info": {"mimetype": "application/json"},
+                    "io.mindroom.long_text": {
+                        "version": 2,
+                        "encoding": "matrix_event_content_json",
+                    },
+                    "url": "mxc://server/edit-sidecar-gating",
+                },
+                "m.relates_to": {
+                    "event_id": "$original:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = edit_event.__dict__["source"]
+
+    with (
+        patch.object(bot, "_emit_message_received_hooks", new_callable=AsyncMock) as mock_emit_hooks,
+        patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+    ):
+        mock_emit_hooks.return_value = False
+
+        await bot._on_message(room, edit_event)
+
+    mock_should_respond.assert_called_once()
+    assert mock_should_respond.call_args.kwargs["am_i_mentioned"] is True
+    assert mock_should_respond.call_args.kwargs["mentioned_agents"] == [
+        MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config)),
+    ]
 
 
 def test_remove_run_by_event_id_removes_team_runs() -> None:
@@ -351,10 +538,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=True),
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate,
-        patch(
-            "mindroom.bot.open_scope_storage",
-            side_effect=lambda **_: _open_storage(storage),
-        ) as mock_scope_storage,
+        patch.object(bot, "_create_history_scope_storage", return_value=storage) as mock_create_storage,
         patch("mindroom.bot.remove_run_by_event_id", return_value=True) as mock_remove_run,
     ):
         mock_context.return_value = MagicMock(
@@ -367,7 +551,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
 
         await bot._on_message(room, edit_event)
 
-    assert mock_scope_storage.call_count == 2
+    assert mock_create_storage.call_count == 2
     assert mock_remove_run.call_args_list == [
         call(
             storage,
@@ -707,8 +891,8 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         assert call_kwargs["existing_event_id"] == "$response:example.com"
         assert call_kwargs["existing_event_is_placeholder"] is False
         assert bot.response_tracker.get_response_event_id("$original:example.com") == "$response:example.com"
-        mock_create_storage.assert_called_once()
-        mock_remove_run.assert_called_once()
+        assert mock_create_storage.call_count == 2
+        assert mock_remove_run.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -802,7 +986,6 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
         patch("mindroom.bot.fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
-        patch("mindroom.bot.has_user_responded_after_message", return_value=False),
     ):
         # Setup mocks
         mock_handle_reaction.return_value = ("Option 1", "thread_id")  # selected_value, thread_id

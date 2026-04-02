@@ -192,6 +192,7 @@ class TestStreamingBehavior:
         initial_event.sender = "@mindroom_helper:localhost"
         initial_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ⋯"
         initial_event.event_id = "$helper_response_123"
+        initial_event.server_timestamp = 1234567890
         initial_event.source = {
             "content": {
                 "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ⋯",
@@ -221,6 +222,7 @@ class TestStreamingBehavior:
         final_event.sender = "@mindroom_helper:localhost"
         final_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?"
         final_event.event_id = "$helper_final"
+        final_event.server_timestamp = 1234567891
         final_event.source = {
             "content": {
                 "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?",

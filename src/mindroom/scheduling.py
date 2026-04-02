@@ -172,9 +172,6 @@ def _parse_scheduled_task_record(
     content: dict[str, object],
 ) -> ScheduledTaskRecord | None:
     """Parse a Matrix state event content payload into a scheduled task record."""
-    if not content:
-        return None
-
     status = str(content.get("status", "pending"))
     workflow_data_raw = content.get("workflow")
     if isinstance(workflow_data_raw, str):
@@ -491,57 +488,6 @@ async def _save_one_time_task_status(
         created_at=task.created_at,
         restart_task=False,
     )
-
-    if task.workflow.schedule_type != "once" or status not in {"completed", "failed"}:
-        return
-
-    await _tombstone_terminal_one_time_task_state(
-        client=client,
-        room_id=task.room_id,
-        task_id=task.task_id,
-        status=status,
-    )
-
-
-async def _tombstone_terminal_one_time_task_state(
-    client: nio.AsyncClient,
-    room_id: str,
-    task_id: str,
-    status: str,
-) -> None:
-    """Remove terminal one-time task state from current Matrix room state."""
-    logger.debug(
-        "Tombstoning terminal one-time scheduled task state",
-        room_id=room_id,
-        task_id=task_id,
-        status=status,
-    )
-
-    try:
-        response = await client.room_put_state(
-            room_id=room_id,
-            event_type=_SCHEDULED_TASK_EVENT_TYPE,
-            content={},
-            state_key=task_id,
-        )
-    except Exception:
-        logger.warning(
-            "Failed to tombstone terminal one-time scheduled task state",
-            room_id=room_id,
-            task_id=task_id,
-            status=status,
-            exc_info=True,
-        )
-        return
-
-    if isinstance(response, nio.RoomPutStateError):
-        logger.warning(
-            "Failed to tombstone terminal one-time scheduled task state",
-            room_id=room_id,
-            task_id=task_id,
-            status=status,
-            response=str(response),
-        )
 
 
 async def _save_scheduled_task(
@@ -1483,17 +1429,16 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
 
     restored_count = 0
     for event in response.events:
-        if event.get("type") != _SCHEDULED_TASK_EVENT_TYPE:
+        if event["type"] != _SCHEDULED_TASK_EVENT_TYPE:
             continue
 
-        task_id = event.get("state_key")
-        content = event.get("content")
-        if not isinstance(task_id, str) or not isinstance(content, dict) or not content:
-            continue
+        content = event["content"]
         if content.get("status") != "pending":
             continue
 
         try:
+            task_id: str = event["state_key"]
+
             # Parse the workflow
             workflow_data = json.loads(content["workflow"])
             workflow = ScheduledWorkflow(**workflow_data)
@@ -1513,18 +1458,16 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
                             missed_by_seconds=missed_by,
                         )
                         try:
-                            await _save_one_time_task_status(
+                            await _save_scheduled_task(
                                 client=client,
-                                task=ScheduledTaskRecord(
-                                    task_id=task_id,
-                                    room_id=room_id,
-                                    status="pending",
-                                    created_at=_parse_datetime(content.get("created_at")),
-                                    workflow=workflow,
-                                ),
+                                room_id=room_id,
+                                task_id=task_id,
+                                workflow=workflow,
                                 config=config,
                                 runtime_paths=runtime_paths,
                                 status="failed",
+                                created_at=content.get("created_at"),
+                                restart_task=False,
                             )
                         except Exception:
                             logger.exception("Failed to mark ancient task as failed", task_id=task_id)

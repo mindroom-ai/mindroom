@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -156,9 +157,9 @@ class TestThreadHistory:
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert [message["event_id"] for message in history] == ["$thread_root", "$reply"]
-        assert history[0]["body"] == "Root message"
-        assert history[1]["body"] == "Reply in thread"
+        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert history[0].body == "Root message"
+        assert history[1].body == "Reply in thread"
         client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -209,8 +210,8 @@ class TestThreadHistory:
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert history[0]["event_id"] == "$thread_root"
-        assert history[0]["body"] == "Updated root"
+        assert history[0].event_id == "$thread_root"
+        assert history[0].body == "Updated root"
         replacement_calls = [
             call
             for call in client.room_get_event_relations.call_args_list
@@ -280,10 +281,10 @@ class TestThreadHistory:
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert [message["event_id"] for message in history] == ["$thread_root", "$reply"]
-        assert history[1]["body"] == "Final answer"
-        assert history[1]["content"]["body"] == "Final answer"
-        assert history[1]["stream_status"] == "completed"
+        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert history[1].body == "Final answer"
+        assert history[1].content["body"] == "Final answer"
+        assert history[1].stream_status == "completed"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_falls_back_when_relations_lookup_fails(self) -> None:
@@ -406,7 +407,8 @@ class TestThreadHistory:
             nonlocal second_event_requested
             yield newest_thread_event
             second_event_requested = True
-            raise AssertionError("should not request more than one relation event")
+            msg = "should not request more than one relation event"
+            raise AssertionError(msg)
 
         client.room_get_event_relations = MagicMock(return_value=room_get_event_relations())
 
@@ -521,13 +523,13 @@ class TestThreadHistory:
         assert len(history) == 2
 
         # Verify they're in chronological order (root first, then router)
-        assert history[0]["event_id"] == "$thread_root"
-        assert history[0]["body"] == "look up Feynman on Wikipedia"
-        assert history[0]["sender"] == "@user:localhost"
+        assert history[0].event_id == "$thread_root"
+        assert history[0].body == "look up Feynman on Wikipedia"
+        assert history[0].sender == "@user:localhost"
 
-        assert history[1]["event_id"] == "$router_msg"
-        assert history[1]["body"] == "@mindroom_research:localhost could you help with this?"
-        assert history[1]["sender"] == "@mindroom_news:localhost"
+        assert history[1].event_id == "$router_msg"
+        assert history[1].body == "@mindroom_research:localhost could you help with this?"
+        assert history[1].sender == "@mindroom_news:localhost"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_only_thread_messages(self) -> None:
@@ -587,11 +589,11 @@ class TestThreadHistory:
 
         # Should only include thread1 messages
         assert len(history) == 2
-        assert history[0]["event_id"] == "$thread1"
-        assert history[1]["event_id"] == "$msg1"
+        assert history[0].event_id == "$thread1"
+        assert history[1].event_id == "$msg1"
 
         # Should not include other thread or room messages
-        event_ids = [msg["event_id"] for msg in history]
+        event_ids = [msg.event_id for msg in history]
         assert "$msg2" not in event_ids
         assert "$room_msg" not in event_ids
 
@@ -620,8 +622,8 @@ class TestThreadHistory:
 
         # Should only include the root message
         assert len(history) == 1
-        assert history[0]["event_id"] == "$thread_root"
-        assert history[0]["body"] == "New thread"
+        assert history[0].event_id == "$thread_root"
+        assert history[0].body == "New thread"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_applies_edits(self) -> None:
@@ -676,9 +678,161 @@ class TestThreadHistory:
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
-        assert history[1]["body"] == "Final answer"
-        assert history[1]["content"]["body"] == "Final answer"
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Final answer"
+        assert history[1].content["body"] == "Final answer"
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_applies_v2_sidecar_edits(self) -> None:
+        """Thread history should hydrate canonical edit content from v2 sidecars."""
+        client = AsyncMock()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"body": "root"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$agent_msg",
+            sender="@agent:localhost",
+            body="Thinking...",
+            server_timestamp=2000,
+            source_content={
+                "body": "Thinking...",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+        edit_event = self._make_text_event(
+            event_id="$edit1",
+            sender="@agent:localhost",
+            body="* Preview edit",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Preview edit",
+                "m.new_content": {
+                    "msgtype": "m.file",
+                    "body": "Preview edit",
+                    "info": {"mimetype": "application/json"},
+                    "io.mindroom.long_text": {
+                        "version": 2,
+                        "encoding": "matrix_event_content_json",
+                    },
+                    "url": "mxc://server/edit-sidecar",
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$agent_msg",
+                },
+            },
+        )
+
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [edit_event, thread_message, root_event]
+        response.end = None
+        client.room_messages.return_value = response
+        client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(
+                    {
+                        "msgtype": "m.text",
+                        "body": "* Full edit body",
+                        "m.new_content": {
+                            "msgtype": "m.text",
+                            "body": "Full final answer",
+                            "m.relates_to": {
+                                "rel_type": "m.thread",
+                                "event_id": "$thread_root",
+                            },
+                            "io.mindroom.tool_trace": {
+                                "version": 1,
+                                "events": [{"tool": "shell"}],
+                            },
+                        },
+                        "m.relates_to": {
+                            "rel_type": "m.replace",
+                            "event_id": "$agent_msg",
+                        },
+                    },
+                ).encode("utf-8"),
+            ),
+        )
+
+        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Full final answer"
+        assert history[1].content["body"] == "Full final answer"
+        assert history[1].content["io.mindroom.tool_trace"] == {
+            "version": 1,
+            "events": [{"tool": "shell"}],
+        }
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_leaves_legacy_v1_edit_preview_untouched(self) -> None:
+        """Unsupported v1 edit sidecars should keep preview body/content coherent."""
+        client = AsyncMock()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"body": "root"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$agent_msg",
+            sender="@agent:localhost",
+            body="Thinking...",
+            server_timestamp=2000,
+            source_content={
+                "body": "Thinking...",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+        edit_event = self._make_text_event(
+            event_id="$edit1",
+            sender="@agent:localhost",
+            body="* Preview edit",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Preview edit",
+                "m.new_content": {
+                    "msgtype": "m.file",
+                    "body": "Preview edit",
+                    "io.mindroom.long_text": {
+                        "version": 1,
+                        "original_size": 100000,
+                    },
+                    "url": "mxc://server/legacy-edit-sidecar",
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$agent_msg",
+                },
+            },
+        )
+
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [edit_event, thread_message, root_event]
+        response.end = None
+        client.room_messages.return_value = response
+        client.download = AsyncMock()
+
+        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Preview edit"
+        assert history[1].content["body"] == "Preview edit"
+        client.download.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_multiple_edits_keeps_latest(self) -> None:
@@ -753,8 +907,8 @@ class TestThreadHistory:
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
-        assert history[1]["body"] == "Final answer"
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Final answer"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_edit_without_thread_updates_existing_message(self) -> None:
@@ -805,8 +959,8 @@ class TestThreadHistory:
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
-        assert history[1]["body"] == "Updated answer"
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Updated answer"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_edit_without_thread_does_not_synthesize_missing_original(self) -> None:
@@ -906,8 +1060,8 @@ class TestThreadHistory:
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
         assert len(history) == 1
-        assert history[0]["event_id"] == "$missing_original"
-        assert history[0]["body"] == "Final answer"
+        assert history[0].event_id == "$missing_original"
+        assert history[0].body == "Final answer"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_does_not_stop_after_edit_only_page(self) -> None:
@@ -968,8 +1122,8 @@ class TestThreadHistory:
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
         assert client.room_messages.call_count == 2
-        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
-        assert history[1]["body"] == "Final answer"
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Final answer"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_stops_when_root_is_found(self) -> None:
@@ -1006,4 +1160,4 @@ class TestThreadHistory:
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
         assert client.room_messages.call_count == 1
-        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]

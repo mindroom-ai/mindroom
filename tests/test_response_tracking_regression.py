@@ -94,6 +94,7 @@ class TestResponseTrackingRegression:
         command_event.sender = "@user:localhost"
         command_event.body = "!help"
         command_event.event_id = "$command_123"
+        command_event.server_timestamp = 1234567890
         command_event.source = {
             "content": {
                 "body": "!help",
@@ -162,6 +163,7 @@ class TestResponseTrackingRegression:
         unknown_command_event.sender = "@user:localhost"
         unknown_command_event.body = "!unknowncommand"
         unknown_command_event.event_id = "$unknown_cmd_123"
+        unknown_command_event.server_timestamp = 1234567890
         unknown_command_event.source = {
             "content": {
                 "body": "!unknowncommand",
@@ -245,6 +247,7 @@ class TestResponseTrackingRegression:
         message_event.sender = "@user:localhost"
         message_event.body = "What is quantum computing?"
         message_event.event_id = "$user_msg_789"
+        message_event.server_timestamp = 1234567890
         message_event.source = {
             "content": {
                 "body": "What is quantum computing?",

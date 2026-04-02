@@ -13,21 +13,29 @@ from nio.api import RelationshipType
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
+    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
+    ResolvedVisibleMessage,
     build_threaded_edit_content,
     edit_message,
     get_joined_rooms,
     resolve_latest_visible_messages,
     send_message,
+    visible_message_content,
+    visible_message_reply_to_event_id,
+    visible_message_sender,
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
 from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
@@ -43,18 +51,24 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _ROOM_HISTORY_PAGE_SIZE = 100
-_MAX_ROOM_HISTORY_PAGES = 2
 # Startup cleanup runs before this process starts its Matrix sync loop, so it cannot
 # clobber streams created by the same process. The remaining race is another
 # concurrently running instance cleaning up a message during a long provider/tool stall
 # where no new chunks arrive for a while, so keep a generous recency guard here.
 _STALE_STREAM_RECENCY_GUARD_MS = 10_000
+# Restart cleanup should only touch messages from the current outage window.
+# Older interrupted replies are better left untouched than unexpectedly edited
+# and auto-resumed on some later restart.
+_STALE_STREAM_LOOKBACK_MS = 6 * 60 * 60 * 1000
 _RATE_LIMIT_DELAY_SECONDS = 0.15
 _STOP_REACTION_KEYS = frozenset({"🛑", "⏹️"})
 _MAX_REQUESTER_RESOLUTION_DEPTH = 10
 _INTERRUPTED_PARTIAL_TEXT_LIMIT = 280
 _AUTO_RESUME_MESSAGE = (
     "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
+)
+_TERMINAL_STREAM_STATUSES = frozenset(
+    {STREAM_STATUS_CANCELLED, STREAM_STATUS_COMPLETED, STREAM_STATUS_ERROR},
 )
 
 
@@ -68,6 +82,7 @@ class InterruptedThread:
     partial_text: str
     agent_name: str
     original_sender_id: str | None = None
+    timestamp_ms: int = field(default=0, compare=False)
 
 
 @dataclass
@@ -75,10 +90,9 @@ class _MessageState:
     """Latest visible state for one original Matrix message."""
 
     latest_body: str | None = None
-    custom_content: dict[str, Any] = field(default_factory=dict)
     latest_timestamp: int = 0
     latest_event_id: str = ""
-    latest_content: dict[str, object] | None = None
+    latest_content: dict[str, Any] | None = None
     thread_id: str | None = None
     stream_status: str | None = None
     requester_user_id: str | None = None
@@ -193,19 +207,21 @@ async def _cleanup_room_stale_streaming_messages(
     runtime_paths: RuntimePaths,
 ) -> tuple[int, list[InterruptedThread]]:
     """Clean stale bot messages in one room."""
+    current_time_ms = int(time.time() * 1000)
     message_states = await _scan_room_message_states(
         client,
         room_id=room_id,
         bot_user_id=bot_user_id,
         config=config,
         runtime_paths=runtime_paths,
+        now_ms=current_time_ms,
     )
     if not message_states:
         return 0, []
 
     cleaned_count = 0
     prior_edit_succeeded = False
-    interrupted_threads_by_key: dict[tuple[str, str], InterruptedThread] = {}
+    interrupted_threads: list[InterruptedThread] = []
     agent_name = _agent_name_for_bot_user_id(bot_user_id, config, runtime_paths)
     if agent_name is None:
         return 0, []
@@ -216,9 +232,12 @@ async def _cleanup_room_stale_streaming_messages(
 
     for target_event_id, state in candidate_items:
         assert state.latest_body is not None  # guaranteed by filter above
+        if _is_recent_timestamp(state.latest_timestamp, now_ms=current_time_ms) or _is_older_than_cleanup_window(
+            state.latest_timestamp,
+            now_ms=current_time_ms,
+        ):
+            continue
         if _is_cleanup_candidate(state):
-            if _is_recent_timestamp(state.latest_timestamp):
-                continue
             edited, interrupted = await _cleanup_candidate_message(
                 client,
                 room_id=room_id,
@@ -237,10 +256,23 @@ async def _cleanup_room_stale_streaming_messages(
             cleaned_count += 1
             prior_edit_succeeded = True
             if interrupted is not None:
-                interrupted_threads_by_key[(interrupted.thread_id or "", interrupted.agent_name)] = interrupted
+                interrupted_threads.append(interrupted)
             continue
 
         if _has_restart_interrupted_note(state.latest_body):
+            repaired = await _repair_restart_marked_message_metadata(
+                client,
+                room_id=room_id,
+                target_event_id=target_event_id,
+                state=state,
+                sender_domain=sender_domain,
+                config=config,
+                runtime_paths=runtime_paths,
+                prior_edit_succeeded=prior_edit_succeeded,
+            )
+            if repaired:
+                cleaned_count += 1
+                prior_edit_succeeded = True
             await _redact_stop_reactions(
                 client,
                 room_id=room_id,
@@ -249,7 +281,47 @@ async def _cleanup_room_stale_streaming_messages(
                 bot_user_ids=bot_user_ids,
             )
 
-    return cleaned_count, list(interrupted_threads_by_key.values())
+    return cleaned_count, interrupted_threads
+
+
+async def _repair_restart_marked_message_metadata(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    target_event_id: str,
+    state: _MessageState,
+    sender_domain: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    prior_edit_succeeded: bool,
+) -> bool:
+    """Repair non-terminal stream metadata on already restart-marked messages."""
+    assert state.latest_body is not None
+    if not _has_non_terminal_stream_status(state.latest_content):
+        return False
+
+    try:
+        if prior_edit_succeeded:
+            await asyncio.sleep(_RATE_LIMIT_DELAY_SECONDS)
+        return await _edit_stale_message(
+            client,
+            room_id=room_id,
+            target_event_id=target_event_id,
+            new_text=state.latest_body,
+            preserved_content=_terminal_stream_content(state.latest_content),
+            thread_id=state.thread_id,
+            sender_domain=sender_domain,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed stale message metadata repair",
+            room_id=room_id,
+            event_id=target_event_id,
+            error=str(exc),
+        )
+        return False
 
 
 async def _cleanup_one_stale_message(
@@ -271,12 +343,11 @@ async def _cleanup_one_stale_message(
         room_id=room_id,
         target_event_id=target_event_id,
         new_text=build_restart_interrupted_body(state.latest_body),
-        custom_content=state.custom_content,
+        preserved_content=_terminal_stream_content(state.latest_content),
         thread_id=state.thread_id,
         sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
-        preserved_content=state.latest_content,
     )
     if not edit_succeeded:
         return False, None
@@ -290,6 +361,7 @@ async def _cleanup_one_stale_message(
             partial_text=_truncate_partial_text(_extract_partial_text(state.latest_body)),
             agent_name=agent_name,
             original_sender_id=state.requester_user_id,
+            timestamp_ms=state.latest_timestamp,
         )
     await _redact_stop_reactions(
         client,
@@ -346,18 +418,22 @@ async def _scan_room_message_states(
     bot_user_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    now_ms: int,
 ) -> dict[str, _MessageState]:
     """Scan recent room history and return latest state by original event ID."""
     message_states, message_events = await _collect_room_history_events(
         client,
         room_id=room_id,
         bot_user_id=bot_user_id,
+        now_ms=now_ms,
     )
 
-    resolved_messages = await resolve_latest_visible_messages(message_events, client)
+    resolved_messages = await resolve_latest_visible_messages(message_events, client, sender=bot_user_id)
+    scanned_message_data_by_event_id = _scanned_message_data_by_event_id(message_events)
     requester_ids_by_event_id = await _derive_requester_ids_for_bot_messages(
         client,
         resolved_messages=resolved_messages,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         room_id=room_id,
         bot_user_id=bot_user_id,
         config=config,
@@ -378,13 +454,14 @@ async def _collect_room_history_events(
     *,
     room_id: str,
     bot_user_id: str,
+    now_ms: int,
 ) -> tuple[dict[str, _MessageState], list[nio.RoomMessageText]]:
     """Return room history text events plus tracked stop reactions."""
     message_states: dict[str, _MessageState] = {}
     message_events: list[nio.RoomMessageText] = []
     from_token: str | None = None
 
-    for _ in range(_MAX_ROOM_HISTORY_PAGES):
+    while True:
         response = await client.room_messages(
             room_id,
             start=from_token,
@@ -423,6 +500,8 @@ async def _collect_room_history_events(
 
         if not response.end:
             break
+        if _chunk_reaches_cleanup_lookback_limit(response.chunk, now_ms=now_ms):
+            break
         from_token = response.end
 
     return message_states, message_events
@@ -430,24 +509,21 @@ async def _collect_room_history_events(
 
 def _merge_bot_resolved_message_states(
     message_states: dict[str, _MessageState],
-    resolved_messages: dict[str, dict[str, object]],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
     *,
     bot_user_id: str,
     requester_ids_by_event_id: dict[str, str],
 ) -> None:
     """Merge resolved bot-authored messages into cleanup state."""
-    for target_event_id, message_data in resolved_messages.items():
-        if message_data.get("sender") != bot_user_id:
+    for target_event_id, message in resolved_messages.items():
+        if message.sender != bot_user_id:
             continue
         requester_user_id = requester_ids_by_event_id.get(target_event_id)
-        enriched_message_data = message_data
-        if requester_user_id is not None:
-            enriched_message_data = dict(message_data)
-            enriched_message_data["requester_user_id"] = requester_user_id
         _merge_resolved_message_state(
             message_states,
             target_event_id=target_event_id,
-            message_data=enriched_message_data,
+            message=message,
+            requester_user_id=requester_user_id,
         )
 
 
@@ -455,49 +531,53 @@ def _merge_resolved_message_state(
     message_states: dict[str, _MessageState],
     *,
     target_event_id: str,
-    message_data: dict[str, object],
+    message: ResolvedVisibleMessage,
+    requester_user_id: str | None,
 ) -> None:
     """Store one resolved message if it has the fields cleanup needs."""
-    body = message_data.get("body")
-    timestamp = message_data.get("timestamp")
-    latest_event_id = message_data.get("latest_event_id", message_data.get("event_id", ""))
-    if not isinstance(body, str) or not isinstance(timestamp, int) or not isinstance(latest_event_id, str):
-        return
-
-    thread_id = message_data.get("thread_id")
-    if thread_id is not None and not isinstance(thread_id, str):
-        thread_id = None
-
-    stream_status = message_data.get("stream_status")
-    if stream_status is not None and not isinstance(stream_status, str):
-        stream_status = None
-    requester_user_id = message_data.get("requester_user_id")
-    if requester_user_id is not None and not isinstance(requester_user_id, str):
-        requester_user_id = None
-    latest_content = message_data.get("content")
-    normalized_latest_content: dict[str, object] | None = None
-    if isinstance(latest_content, dict):
-        normalized_latest_content = {}
-        for key, value in latest_content.items():
-            if isinstance(key, str):
-                normalized_latest_content[key] = value
-
-    custom_content = _extract_mindroom_custom_content(normalized_latest_content)
-
+    normalized_latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
     state = message_states.setdefault(target_event_id, _MessageState())
-    state.latest_body = body
-    state.custom_content = dict(custom_content)
-    state.latest_timestamp = timestamp
-    state.latest_event_id = latest_event_id
+    state.latest_body = message.body
+    state.latest_timestamp = message.timestamp
+    state.latest_event_id = message.visible_event_id
     state.latest_content = normalized_latest_content
-    state.thread_id = thread_id
-    state.stream_status = stream_status
+    state.thread_id = message.thread_id
+    state.stream_status = message.stream_status
     state.requester_user_id = requester_user_id
+
+
+def _scanned_message_data_by_event_id(message_events: list[nio.RoomMessageText]) -> dict[str, dict[str, object]]:
+    """Return raw scanned room-history messages keyed by exact event ID."""
+    message_data_by_event_id: dict[str, dict[str, object]] = {}
+    for event in message_events:
+        event_id = event.event_id
+        sender = event.sender
+        if not isinstance(event_id, str) or not isinstance(sender, str):
+            continue
+
+        raw_content = _as_string_keyed_dict(event.source.get("content")) or {}
+        message_data_by_event_id[event_id] = {
+            "event_id": event_id,
+            "sender": sender,
+            "content": raw_content,
+            "body": event.body,
+            "timestamp": event.server_timestamp,
+        }
+    return message_data_by_event_id
+
+
+def _scanned_message_requires_exact_requester_fetch(message_data: dict[str, object]) -> bool:
+    """Return whether requester resolution must fetch the exact event for this scanned message."""
+    content = _as_string_keyed_dict(message_data.get("content"))
+    if content is None or "m.new_content" not in content:
+        return False
+    return _reply_to_event_id_for_message(message_data) is None
 
 
 async def _derive_requester_ids_for_bot_messages(
     client: nio.AsyncClient,
-    resolved_messages: dict[str, dict[str, object]],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
+    scanned_message_data_by_event_id: dict[str, dict[str, object]],
     *,
     room_id: str,
     bot_user_id: str,
@@ -510,16 +590,11 @@ async def _derive_requester_ids_for_bot_messages(
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None] = {}
     sorted_messages = sorted(
         resolved_messages.items(),
-        key=lambda item: (
-            item[1].get("timestamp", 0) if isinstance(item[1].get("timestamp"), int) else 0,
-            item[0],
-        ),
+        key=lambda item: (item[1].timestamp, item[0]),
     )
 
     for target_event_id, message_data in sorted_messages:
-        sender = message_data.get("sender")
-        if not isinstance(sender, str):
-            continue
+        sender = message_data.sender
         if sender != bot_user_id:
             continue
 
@@ -530,6 +605,7 @@ async def _derive_requester_ids_for_bot_messages(
                 target_event_id=target_event_id,
                 message_data=message_data,
                 resolved_messages=resolved_messages,
+                scanned_message_data_by_event_id=scanned_message_data_by_event_id,
                 requester_cache=requester_cache,
                 fetched_message_data_by_event_id=fetched_message_data_by_event_id,
                 config=config,
@@ -555,8 +631,9 @@ async def _resolve_requester_for_bot_message(
     *,
     room_id: str,
     target_event_id: str,
-    message_data: dict[str, object],
-    resolved_messages: dict[str, dict[str, object]],
+    message_data: ResolvedVisibleMessage | dict[str, object],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
+    scanned_message_data_by_event_id: dict[str, dict[str, object]],
     requester_cache: dict[str, str | None],
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
     config: Config,
@@ -565,10 +642,11 @@ async def _resolve_requester_for_bot_message(
     """Resolve the requester for one bot-authored message from its exact reply target."""
     reply_to_event_id = _reply_to_event_id_for_message(message_data)
     if reply_to_event_id is None:
-        original_message_data = await _fetch_message_data_for_event_id(
+        original_message_data = await _load_scanned_or_fetched_message_data(
             client,
             room_id=room_id,
             event_id=target_event_id,
+            scanned_message_data_by_event_id=scanned_message_data_by_event_id,
             fetched_message_data_by_event_id=fetched_message_data_by_event_id,
         )
         if original_message_data is None:
@@ -581,6 +659,7 @@ async def _resolve_requester_for_bot_message(
         room_id=room_id,
         event_id=reply_to_event_id,
         resolved_messages=resolved_messages,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         requester_cache=requester_cache,
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
         config=config,
@@ -594,7 +673,8 @@ async def _resolve_requester_for_event_id(
     *,
     room_id: str,
     event_id: str,
-    resolved_messages: dict[str, dict[str, object]],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
+    scanned_message_data_by_event_id: dict[str, dict[str, object]],
     requester_cache: dict[str, str | None],
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
     config: Config,
@@ -616,6 +696,7 @@ async def _resolve_requester_for_event_id(
         room_id=room_id,
         event_id=event_id,
         resolved_messages=resolved_messages,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
     )
     if message_data is not None and sender is not None:
@@ -635,6 +716,7 @@ async def _resolve_requester_for_event_id(
                 event_id=event_id,
                 message_data=message_data,
                 resolved_messages=resolved_messages,
+                scanned_message_data_by_event_id=scanned_message_data_by_event_id,
                 requester_cache=requester_cache,
                 fetched_message_data_by_event_id=fetched_message_data_by_event_id,
                 config=config,
@@ -651,19 +733,21 @@ async def _load_message_data_for_requester_resolution(
     *,
     room_id: str,
     event_id: str,
-    resolved_messages: dict[str, dict[str, object]],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
+    scanned_message_data_by_event_id: dict[str, dict[str, object]],
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
-) -> tuple[dict[str, object] | None, str | None]:
+) -> tuple[ResolvedVisibleMessage | dict[str, object] | None, str | None]:
     """Load one message from scanned history or the Matrix API with its sender ID."""
     message_data = resolved_messages.get(event_id)
     sender = _sender_id_for_message(message_data)
     if sender is not None:
         return message_data, sender
 
-    message_data = await _fetch_message_data_for_event_id(
+    message_data = await _load_scanned_or_fetched_message_data(
         client,
         room_id=room_id,
         event_id=event_id,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
     )
     return message_data, _sender_id_for_message(message_data)
@@ -674,8 +758,9 @@ async def _resolve_requester_from_internal_reply(
     *,
     room_id: str,
     event_id: str,
-    message_data: dict[str, object],
-    resolved_messages: dict[str, dict[str, object]],
+    message_data: ResolvedVisibleMessage | dict[str, object],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
+    scanned_message_data_by_event_id: dict[str, dict[str, object]],
     requester_cache: dict[str, str | None],
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
     config: Config,
@@ -686,10 +771,11 @@ async def _resolve_requester_from_internal_reply(
     """Follow an internal sender's reply edge until a real requester is found."""
     reply_to_event_id = _reply_to_event_id_for_message(message_data)
     if reply_to_event_id is None:
-        original_message_data = await _fetch_message_data_for_event_id(
+        original_message_data = await _load_scanned_or_fetched_message_data(
             client,
             room_id=room_id,
             event_id=event_id,
+            scanned_message_data_by_event_id=scanned_message_data_by_event_id,
             fetched_message_data_by_event_id=fetched_message_data_by_event_id,
         )
         if original_message_data is not None:
@@ -702,6 +788,7 @@ async def _resolve_requester_from_internal_reply(
         room_id=room_id,
         event_id=reply_to_event_id,
         resolved_messages=resolved_messages,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         requester_cache=requester_cache,
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
         config=config,
@@ -709,6 +796,30 @@ async def _resolve_requester_from_internal_reply(
         visited_event_ids=visited_event_ids | {event_id},
         max_depth=max_depth - 1,
     )
+
+
+async def _load_scanned_or_fetched_message_data(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    event_id: str,
+    scanned_message_data_by_event_id: dict[str, dict[str, object]],
+    fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
+) -> dict[str, object] | None:
+    """Load one message from scanned room history before falling back to the Matrix API."""
+    scanned_message_data = scanned_message_data_by_event_id.get(event_id)
+    if scanned_message_data is not None and not _scanned_message_requires_exact_requester_fetch(scanned_message_data):
+        return scanned_message_data
+
+    fetched_message_data = await _fetch_message_data_for_event_id(
+        client,
+        room_id=room_id,
+        event_id=event_id,
+        fetched_message_data_by_event_id=fetched_message_data_by_event_id,
+    )
+    if fetched_message_data is not None:
+        return fetched_message_data
+    return scanned_message_data
 
 
 async def _fetch_message_data_for_event_id(
@@ -734,6 +845,24 @@ async def _fetch_message_data_for_event_id(
         fetched_message_data_by_event_id[event_id] = None
         return None
 
+    event_info = EventInfo.from_event(event_source)
+    if isinstance(event, nio.RoomMessageText):
+        if event_info.is_edit:
+            edited_body, edited_content = await extract_edit_body(event_source, client)
+            if edited_body is not None and edited_content is not None:
+                message_data = {
+                    "event_id": event_id,
+                    "sender": sender,
+                    "content": edited_content,
+                    "body": edited_body,
+                }
+                fetched_message_data_by_event_id[event_id] = message_data
+                return message_data
+
+        message_data = await extract_and_resolve_message(event, client)
+        fetched_message_data_by_event_id[event_id] = message_data
+        return message_data
+
     content = event_source.get("content")
     body: str | None = None
     if isinstance(content, dict):
@@ -751,10 +880,11 @@ async def _fetch_message_data_for_event_id(
     return message_data
 
 
-def _sender_id_for_message(message_data: dict[str, object] | None) -> str | None:
+def _sender_id_for_message(message_data: ResolvedVisibleMessage | dict[str, object] | None) -> str | None:
     """Return the sender ID from one parsed message if available."""
-    sender = message_data.get("sender") if message_data is not None else None
-    return sender if isinstance(sender, str) else None
+    if message_data is None:
+        return None
+    return visible_message_sender(message_data)
 
 
 def _as_string_keyed_dict(value: object) -> dict[str, object] | None:
@@ -770,19 +900,9 @@ def _as_string_keyed_dict(value: object) -> dict[str, object] | None:
     return normalized
 
 
-def _reply_to_event_id_for_message(message_data: dict[str, object]) -> str | None:
+def _reply_to_event_id_for_message(message_data: ResolvedVisibleMessage | dict[str, object]) -> str | None:
     """Return the exact replied-to event ID encoded on one message."""
-    content = _as_string_keyed_dict(message_data.get("content"))
-    if content is None:
-        return None
-    relates_to = _as_string_keyed_dict(content.get("m.relates_to"))
-    if relates_to is None:
-        return None
-    in_reply_to = _as_string_keyed_dict(relates_to.get("m.in_reply_to"))
-    if in_reply_to is None:
-        return None
-    reply_to_event_id = in_reply_to.get("event_id")
-    return reply_to_event_id if isinstance(reply_to_event_id, str) else None
+    return visible_message_reply_to_event_id(message_data)
 
 
 def _is_internal_sender(
@@ -797,17 +917,17 @@ def _is_internal_sender(
 
 
 def _effective_requester_for_message(
-    message_data: dict[str, object],
+    message_data: ResolvedVisibleMessage | dict[str, object],
     *,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Resolve the effective requester for one visible message."""
-    sender = message_data.get("sender")
+    sender = visible_message_sender(message_data)
     if not isinstance(sender, str):
         return None
 
-    content = message_data.get("content")
+    content = visible_message_content(message_data)
     event_source = {"content": content} if isinstance(content, dict) else None
     return get_effective_sender_id_for_reply_permissions(sender, event_source, config, runtime_paths)
 
@@ -839,28 +959,20 @@ def _record_stop_reaction(
     message_states.setdefault(target_event_id, _MessageState()).stop_reaction_event_ids.add(reaction_event_id)
 
 
-def _extract_mindroom_custom_content(content: object) -> dict[str, Any]:
-    """Return io.mindroom.* keys from the canonical content payload."""
-    if not isinstance(content, dict):
-        return {}
-
-    return {key: value for key, value in content.items() if isinstance(key, str) and key.startswith("io.mindroom.")}
-
-
 async def _edit_stale_message(
     client: nio.AsyncClient,
     *,
     room_id: str,
     target_event_id: str,
     new_text: str,
-    custom_content: dict[str, Any] | None = None,
+    preserved_content: dict[str, Any] | None,
     thread_id: str | None,
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    preserved_content: dict[str, object] | None,
 ) -> bool:
     """Edit a stale message while preserving thread context when present."""
+    extra_content = _preserved_cleanup_content(preserved_content)
     content = await build_threaded_edit_content(
         client,
         room_id=room_id,
@@ -870,7 +982,7 @@ async def _edit_stale_message(
         config=config,
         runtime_paths=runtime_paths,
         sender_domain=sender_domain,
-        extra_content=_preserved_cleanup_content(preserved_content),
+        extra_content=extra_content,
     )
 
     response_event_id = await edit_message(
@@ -879,7 +991,7 @@ async def _edit_stale_message(
         target_event_id,
         content,
         new_text,
-        extra_content=custom_content or None,
+        extra_content=extra_content,
     )
     if response_event_id:
         return True
@@ -892,19 +1004,37 @@ async def _edit_stale_message(
     return False
 
 
-def _preserved_cleanup_content(content: dict[str, object] | None) -> dict[str, object] | None:
+def _preserved_cleanup_content(content: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return the metadata fields that should survive a restart cleanup edit."""
     if content is None:
         return None
 
-    preserved: dict[str, object] = {}
+    preserved: dict[str, Any] = {}
     for key, value in content.items():
         if not isinstance(key, str):
             continue
-        if key.startswith("io.mindroom.") or key in {ORIGINAL_SENDER_KEY, "m.mentions"}:
+        if (key.startswith("io.mindroom.") and key != "io.mindroom.long_text") or key in {
+            ORIGINAL_SENDER_KEY,
+            "m.mentions",
+        }:
             preserved[key] = value
 
     return preserved or None
+
+
+def _has_non_terminal_stream_status(content: dict[str, Any] | None) -> bool:
+    """Return whether the message still advertises an active stream state."""
+    if content is None:
+        return False
+    stream_status = content.get(STREAM_STATUS_KEY)
+    return isinstance(stream_status, str) and stream_status not in _TERMINAL_STREAM_STATUSES
+
+
+def _terminal_stream_content(content: dict[str, Any] | None) -> dict[str, Any]:
+    """Return metadata with a terminal stream status for cleanup edits."""
+    if content is None:
+        return {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
+    return {**content, STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
 
 
 async def _redact_stop_reactions(
@@ -1032,19 +1162,29 @@ def _select_threads_to_resume(
     *,
     max_resumes: int,
 ) -> list[InterruptedThread]:
-    """Return the first unique threaded interruptions up to the resume cap."""
-    selected_by_key: dict[tuple[str, str, str], InterruptedThread] = {}
+    """Return the newest unique threaded interruptions up to the resume cap."""
+    latest_by_key: dict[tuple[str, str, str], InterruptedThread] = {}
 
     for interrupted_thread in interrupted:
         if interrupted_thread.thread_id is None:
             continue
-        selected_by_key[(interrupted_thread.room_id, interrupted_thread.thread_id, interrupted_thread.agent_name)] = (
-            interrupted_thread
-        )
-        if len(selected_by_key) >= max_resumes:
-            return list(selected_by_key.values())
+        key = (interrupted_thread.room_id, interrupted_thread.thread_id, interrupted_thread.agent_name)
+        existing = latest_by_key.get(key)
+        if existing is None or interrupted_thread.timestamp_ms >= existing.timestamp_ms:
+            latest_by_key[key] = interrupted_thread
 
-    return list(selected_by_key.values())
+    unique_threads = sorted(
+        latest_by_key.values(),
+        key=lambda interrupted_thread: (
+            interrupted_thread.timestamp_ms,
+            interrupted_thread.room_id,
+            interrupted_thread.thread_id or "",
+            interrupted_thread.agent_name,
+        ),
+    )
+    if max_resumes >= len(unique_threads):
+        return unique_threads
+    return unique_threads[-max_resumes:]
 
 
 def _has_restart_interrupted_note(body: str) -> bool:
@@ -1068,6 +1208,25 @@ def _is_recent_timestamp(timestamp_ms: int, *, now_ms: int | None = None) -> boo
     """Return whether a timestamp is still within the startup recency guard."""
     current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
     return current_time_ms - timestamp_ms < _STALE_STREAM_RECENCY_GUARD_MS
+
+
+def _is_older_than_cleanup_window(timestamp_ms: int, *, now_ms: int | None = None) -> bool:
+    """Return whether a timestamp is older than the restart cleanup lookback window."""
+    current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    return current_time_ms - timestamp_ms > _STALE_STREAM_LOOKBACK_MS
+
+
+def _chunk_reaches_cleanup_lookback_limit(events: list[object], *, now_ms: int) -> bool:
+    """Return whether the oldest event in this page is beyond the cleanup lookback window."""
+    oldest_timestamp = min(
+        (
+            event.server_timestamp
+            for event in events
+            if isinstance(event, nio.Event) and isinstance(event.server_timestamp, int)
+        ),
+        default=None,
+    )
+    return oldest_timestamp is not None and _is_older_than_cleanup_window(oldest_timestamp, now_ms=now_ms)
 
 
 def _build_auto_resume_content(

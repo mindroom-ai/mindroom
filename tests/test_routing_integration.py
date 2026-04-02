@@ -125,6 +125,7 @@ class TestRoutingIntegration:
         user_message.sender = "@user:localhost"
         user_message.body = "@mindroom_research:localhost what can you do?"
         user_message.event_id = "$user_question"
+        user_message.server_timestamp = 1_710_000_000_000
         user_message.source = {
             "content": {
                 "body": "@mindroom_research:localhost what can you do?",

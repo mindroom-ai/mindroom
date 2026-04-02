@@ -7,10 +7,18 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom import authorization
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.client import (
+    VisibleMessageLike,
+    visible_message_content,
+    visible_message_event_id,
+    visible_message_sender,
+)
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.rooms import resolve_room_aliases
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import nio
 
     from mindroom.config.main import Config
@@ -42,6 +50,14 @@ def _extract_mentioned_user_ids(content: dict[str, Any]) -> list[str]:
     return []
 
 
+def _visible_message_content(content: dict[str, Any]) -> dict[str, Any]:
+    """Return the visible message content layer for mention detection."""
+    new_content = content.get("m.new_content")
+    if isinstance(new_content, dict):
+        return new_content
+    return content
+
+
 def _is_bot_or_agent(sender: str, config: Config, runtime_paths: RuntimePaths) -> bool:
     """Return True when *sender* is a MindRoom agent **or** listed in ``bot_accounts``."""
     return bool(extract_agent_name(sender, config, runtime_paths)) or sender in config.bot_accounts
@@ -60,7 +76,8 @@ def check_agent_mentioned(
     user who is *not* a configured agent and not in ``config.bot_accounts``
     (i.e. a real human user).
     """
-    content = event_source.get("content", {})
+    raw_content = event_source.get("content", {})
+    content = _visible_message_content(raw_content) if isinstance(raw_content, dict) else {}
     all_mentioned_ids = _extract_mentioned_user_ids(content)
     mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config, runtime_paths)
     am_i_mentioned = agent_id in mentioned_agents
@@ -76,7 +93,7 @@ def create_session_id(room_id: str, thread_id: str | None) -> str:
 
 
 def get_agents_in_thread(
-    thread_history: list[dict[str, Any]],
+    thread_history: Sequence[VisibleMessageLike],
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
@@ -91,7 +108,7 @@ def get_agents_in_thread(
     seen_ids: set[str] = set()
 
     for msg in thread_history:
-        sender: str = msg.get("sender", "")
+        sender = visible_message_sender(msg) or ""
         agent_name = extract_agent_name(sender, config, runtime_paths)
 
         # Skip router agent and invalid senders
@@ -125,14 +142,14 @@ def _agents_from_user_ids(
 
 
 def has_user_responded_after_message(
-    thread_history: list[dict],
+    thread_history: Sequence[VisibleMessageLike],
     target_event_id: str,
     user_id: MatrixID,
 ) -> bool:
     """Check if a user has sent any messages after a specific message in the thread.
 
     Args:
-        thread_history: List of messages in the thread
+        thread_history: Visible messages in the thread
         target_event_id: The event ID to check after
         user_id: The user ID to check for
 
@@ -143,15 +160,17 @@ def has_user_responded_after_message(
     # Find the target message and check for user responses after it
     found_target = False
     for msg in thread_history:
-        if msg["event_id"] == target_event_id:
+        event_id = visible_message_event_id(msg)
+        sender = visible_message_sender(msg)
+        if event_id == target_event_id:
             found_target = True
-        elif found_target and msg["sender"] == user_id.full_id:
+        elif found_target and sender == user_id.full_id:
             return True
     return False
 
 
 def has_multiple_non_agent_users_in_thread(
-    thread_history: list[dict[str, Any]],
+    thread_history: Sequence[VisibleMessageLike],
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> bool:
@@ -162,7 +181,7 @@ def has_multiple_non_agent_users_in_thread(
     """
     non_agent_senders: set[str] = set()
     for msg in thread_history:
-        sender: str = msg.get("sender", "")
+        sender = visible_message_sender(msg) or ""
         if sender and not _is_bot_or_agent(sender, config, runtime_paths):
             non_agent_senders.add(sender)
             if len(non_agent_senders) > 1:
@@ -196,13 +215,13 @@ def get_configured_agents_for_room(
 
 
 def _has_any_agent_mentions_in_thread(
-    thread_history: list[dict[str, Any]],
+    thread_history: Sequence[VisibleMessageLike],
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Check if any agents are mentioned anywhere in the thread."""
     for msg in thread_history:
-        content = msg.get("content", {})
+        content = visible_message_content(msg) or {}
         user_ids = _extract_mentioned_user_ids(content)
         if _agents_from_user_ids(user_ids, config, runtime_paths):
             return True
@@ -210,7 +229,7 @@ def _has_any_agent_mentions_in_thread(
 
 
 def get_all_mentioned_agents_in_thread(
-    thread_history: list[dict[str, Any]],
+    thread_history: Sequence[VisibleMessageLike],
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
@@ -222,7 +241,7 @@ def get_all_mentioned_agents_in_thread(
     seen_ids: set[str] = set()
 
     for msg in thread_history:
-        content = msg.get("content", {})
+        content = visible_message_content(msg) or {}
         user_ids = _extract_mentioned_user_ids(content)
         agents = _agents_from_user_ids(user_ids, config, runtime_paths)
 
@@ -239,7 +258,7 @@ def should_agent_respond(  # noqa: PLR0911
     am_i_mentioned: bool,
     is_thread: bool,
     room: nio.MatrixRoom,
-    thread_history: list[dict],
+    thread_history: Sequence[VisibleMessageLike],
     config: Config,
     runtime_paths: RuntimePaths,
     mentioned_agents: list[MatrixID] | None = None,

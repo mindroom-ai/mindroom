@@ -259,7 +259,9 @@ class TestBotScheduleCommands:
 
         event = MagicMock()
         event.event_id = "$event123"
+        event.sender = "@user:server"
         event.body = "!schedule in 5 minutes Test"
+        event.server_timestamp = 1234567890
         event.source = {"content": {}}  # No thread relation
 
         command = Command(type=CommandType.SCHEDULE, args={"full_text": "in 5 minutes Test"}, raw_text=event.body)
@@ -275,7 +277,11 @@ class TestBotScheduleCommands:
         assert "✅" in call_args[0][2] or "Task ID" in call_args[0][2]
         # The thread_id should be None (will be handled by _send_response)
         # and the event should be passed for thread creation
-        assert call_args[1].get("reply_to_event") == event
+        reply_to_event = call_args[1].get("reply_to_event")
+        assert reply_to_event is not None
+        assert reply_to_event.event_id == event.event_id
+        assert reply_to_event.body == event.body
+        assert reply_to_event.source == event.source
 
 
 class TestBotTaskRestoration:
@@ -1319,15 +1325,20 @@ class TestRouterSkipsSingleAgent:
             await bot._on_message(room, event)
 
         # Verify router DID attempt to route
-        bot._handle_ai_routing.assert_called_once_with(
-            room,
-            event,
-            [],
-            None,
-            message=None,
-            requester_user_id="@user:localhost",
-            extra_content=None,
-        )
+        bot._handle_ai_routing.assert_called_once()
+        routed_call = bot._handle_ai_routing.call_args
+        assert routed_call.args[0] is room
+        routed_event = routed_call.args[1]
+        assert routed_event.event_id == event.event_id
+        assert routed_event.body == event.body
+        assert routed_event.source == event.source
+        assert routed_call.args[2] == []
+        assert routed_call.args[3] is None
+        assert routed_call.kwargs == {
+            "message": None,
+            "requester_user_id": "@user:localhost",
+            "extra_content": None,
+        }
 
         # Verify it didn't log about skipping
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]

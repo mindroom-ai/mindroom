@@ -11,14 +11,18 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import nio
 
 from .constants import ATTACHMENT_IDS_KEY
 from .logging_config import get_logger
+from .matrix.client import VisibleMessageLike, visible_message_content
 from .matrix.media import download_media_bytes, media_mime_type, resolve_image_mime_type
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 logger = get_logger(__name__)
 
@@ -93,13 +97,14 @@ def parse_attachment_ids_from_event_source(event_source: dict[str, Any] | None) 
     return normalized
 
 
-def parse_attachment_ids_from_thread_history(thread_history: list[dict[str, Any]]) -> list[str]:
+def parse_attachment_ids_from_thread_history(thread_history: Sequence[VisibleMessageLike]) -> list[str]:
     """Extract attachment IDs referenced by message metadata in thread history."""
     attachment_ids: list[str] = []
     for message in thread_history:
-        if not isinstance(message, dict):
+        content = visible_message_content(message)
+        if content is None:
             continue
-        message_attachment_ids = parse_attachment_ids_from_event_source(message)
+        message_attachment_ids = parse_attachment_ids_from_event_source({"content": content})
         for attachment_id in message_attachment_ids:
             if attachment_id not in attachment_ids:
                 attachment_ids.append(attachment_id)

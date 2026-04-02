@@ -5,7 +5,11 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from mindroom.matrix.client import VisibleMessageLike, visible_message_body, visible_message_sender
+
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ._shared import MemoryResult
 
 _USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
@@ -30,14 +34,14 @@ def strip_user_turn_time_prefix(text: str) -> str:
 
 
 def _build_conversation_messages(
-    thread_history: list[dict],
+    thread_history: Sequence[VisibleMessageLike],
     current_prompt: str,
     user_id: str,
 ) -> list[dict]:
     messages: list[dict] = []
     for message in thread_history:
-        role = "user" if message.get("sender", "") == user_id else "assistant"
-        body = message.get("body", "").strip()
+        role = "user" if visible_message_sender(message) == user_id else "assistant"
+        body = (visible_message_body(message) or "").strip()
         if not body:
             continue
         messages.append({"role": role, "content": body})
@@ -45,7 +49,11 @@ def _build_conversation_messages(
     return messages
 
 
-def build_memory_messages(prompt: str, thread_history: list[dict] | None, user_id: str | None) -> list[dict]:
+def build_memory_messages(
+    prompt: str,
+    thread_history: Sequence[VisibleMessageLike] | None,
+    user_id: str | None,
+) -> list[dict]:
     """Convert prompt and optional thread history into memory-save messages."""
     if thread_history and user_id:
         return _build_conversation_messages(thread_history, prompt, user_id)

@@ -42,11 +42,12 @@ from ._prompting import (
 from ._shared import MemoryResult, new_memory_id
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.client import VisibleMessageLike
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
     from ._shared import ScopedMemoryCrud
@@ -321,7 +322,7 @@ async def store_conversation_memory(
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: list[dict] | None = None,
+    thread_history: Sequence[VisibleMessageLike] | None = None,
     user_id: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:

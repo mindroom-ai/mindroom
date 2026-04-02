@@ -59,7 +59,7 @@ _TEAM_MODEL_PREFIX = "team/"
 _RESERVED_MODEL_NAMES = {_AUTO_MODEL_NAME}
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
@@ -68,6 +68,8 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput, RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
     from agno.team import Team
+
+    from mindroom.matrix.client import VisibleMessageLike
 
 logger = get_logger(__name__)
 
@@ -586,7 +588,7 @@ async def _resolve_auto_route(
     prompt: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: list[dict[str, Any]] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
 ) -> str | JSONResponse:
     """Resolve auto-routing to a specific agent name.
 
@@ -844,7 +846,7 @@ async def _non_stream_completion(
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: list[dict[str, Any]] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -1024,7 +1026,7 @@ async def _stream_completion(
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: list[dict[str, Any]] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -1170,7 +1172,7 @@ async def _prepare_openai_team_prompt(
     prompt: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: list[dict[str, Any]] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
 ) -> str:
     """Prepare the final prompt for one OpenAI-compatible team run."""
     fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
@@ -1200,7 +1202,7 @@ async def _non_stream_team_completion(
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: list[dict[str, Any]] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> JSONResponse:
@@ -1290,7 +1292,7 @@ async def _stream_team_completion(  # noqa: C901
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: list[dict[str, Any]] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> StreamingResponse | JSONResponse:

@@ -46,7 +46,7 @@ logger = get_logger(__name__)
 
 
 class CommandEvent(Protocol):
-    """Minimal event shape required by command handling."""
+    """Minimal canonical text-event shape required by command handling."""
 
     sender: str
     event_id: str

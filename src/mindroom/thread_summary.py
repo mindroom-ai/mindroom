@@ -12,9 +12,16 @@ from pydantic import BaseModel, Field
 
 from mindroom.ai import cached_agent_run, get_model_instance
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import fetch_thread_history
+from mindroom.matrix.client import (
+    VisibleMessageLike,
+    fetch_thread_history,
+    visible_message_body,
+    visible_message_sender,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -81,7 +88,7 @@ async def _recover_last_summary_count(
 
 
 async def _generate_summary(
-    thread_history: list[dict[str, Any]],
+    thread_history: Sequence[VisibleMessageLike],
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> str | None:
@@ -97,8 +104,8 @@ async def _generate_summary(
 
     lines = []
     for msg in thread_history:
-        sender = msg.get("sender", "unknown")
-        body = msg.get("body", "")
+        sender = visible_message_sender(msg) or "unknown"
+        body = visible_message_body(msg) or ""
         if body:
             lines.append(f"{sender}: {body}")
     conversation = "\n".join(lines)

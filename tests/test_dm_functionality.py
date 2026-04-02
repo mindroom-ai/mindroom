@@ -426,6 +426,7 @@ class TestDMIntegration:
             event.body = "Hello researcher, can you help?"
             event.sender = "@user:localhost"
             event.event_id = "test_event"
+            event.server_timestamp = 1234567890
             event.source = {
                 "content": {
                     "body": "Hello researcher, can you help?",
@@ -517,6 +518,7 @@ class TestDMIntegration:
             event.body = "Hello agent!"
             event.sender = "@user:localhost"
             event.event_id = "test_event"
+            event.server_timestamp = 1234567890
             event.source = {
                 "content": {
                     "body": "Hello agent!",
