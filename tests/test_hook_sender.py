@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
-from mindroom.bot import AgentBot, _MessageContext
+from mindroom.bot import AgentBot, _DispatchPayload, _MessageContext, _ResponseAction
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -110,7 +111,7 @@ def _message_received_context_with_sender(
 
 def _hook_bot(tmp_path: Path) -> AgentBot:
     config = _config(tmp_path)
-    return AgentBot(
+    bot = AgentBot(
         agent_user=AgentMatrixUser(
             agent_name="router",
             password=TEST_PASSWORD,
@@ -121,11 +122,13 @@ def _hook_bot(tmp_path: Path) -> AgentBot:
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    return bot
 
 
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     config = _config(tmp_path)
-    return AgentBot(
+    bot = AgentBot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
             password=TEST_PASSWORD,
@@ -136,6 +139,8 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    return bot
 
 
 def _dispatch_context(bot: AgentBot) -> _MessageContext:
@@ -476,6 +481,70 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     assert hook_calls == ["called"]
     bot._handle_command.assert_not_awaited()
     bot.response_tracker.mark_responded.assert_called_once_with(event.event_id)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(tmp_path: Path) -> None:
+    """Inbound dispatch should use the canonical sidecar body everywhere downstream."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "msgtype": "m.text",
+                    "body": "@mindroom_code:localhost what is 99+1?",
+                    "m.mentions": {"user_ids": ["@mindroom_code:localhost"]},
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._resolve_dispatch_action = AsyncMock(return_value=_ResponseAction(kind="individual"))
+    bot._build_dispatch_payload_with_attachments = AsyncMock(return_value=_DispatchPayload(prompt="unused"))
+    bot._execute_dispatch_action = AsyncMock()
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.Event.parse_event(
+        {
+            "event_id": "$sidecar-message",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.file",
+                "body": "@mindroom_code:localhost [Message continues in attached file]",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/inbound-sidecar",
+            },
+        },
+    )
+    captured_bodies: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def received(ctx: MessageReceivedContext) -> None:
+        captured_bodies.append(ctx.envelope.body)
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+
+    assert isinstance(event, nio.RoomMessageFile)
+    await bot._on_media_message(room, event)
+
+    assert captured_bodies == ["@mindroom_code:localhost what is 99+1?"]
+    assert (
+        bot._resolve_dispatch_action.await_args.kwargs["message_for_decision"]
+        == "@mindroom_code:localhost what is 99+1?"
+    )
+    assert (
+        bot._build_dispatch_payload_with_attachments.await_args.kwargs["prompt"]
+        == "@mindroom_code:localhost what is 99+1?"
+    )
 
 
 @pytest.mark.asyncio

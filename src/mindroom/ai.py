@@ -68,7 +68,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
@@ -76,6 +76,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
+    from mindroom.matrix.client import VisibleMessageLike
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -606,7 +607,7 @@ async def _prepare_agent_and_prompt(
     runtime_paths: RuntimePaths,
     config: Config,
     scope_context: ScopeSessionContext | None = None,
-    thread_history: list[dict[str, Any]] | None = None,
+    thread_history: Sequence[VisibleMessageLike] | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
     include_interactive_questions: bool = True,
@@ -693,7 +694,7 @@ async def ai_response(  # noqa: C901
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    thread_history: list[dict[str, Any]] | None = None,
+    thread_history: Sequence[VisibleMessageLike] | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
@@ -960,7 +961,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    thread_history: list[dict[str, Any]] | None = None,
+    thread_history: Sequence[VisibleMessageLike] | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
     user_id: str | None = None,

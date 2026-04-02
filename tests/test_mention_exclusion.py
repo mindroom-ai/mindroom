@@ -66,6 +66,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
     event.event_id = "$test_event"
     event.sender = "@user:localhost"  # User, not an agent
     event.body = "@research find the latest news"
+    event.server_timestamp = 1234567890
     event.source = {
         "content": {
             "body": "@research find the latest news",
@@ -141,6 +142,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
     event.event_id = "$test_event"
     event.sender = "@user:localhost"  # User, not an agent
     event.body = "@general @research help me with this"
+    event.server_timestamp = 1234567890
     event.source = {
         "content": {
             "body": "@general @research help me with this",

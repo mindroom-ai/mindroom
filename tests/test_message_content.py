@@ -12,6 +12,7 @@ from mindroom.matrix.message_content import (
     extract_and_resolve_message,
     extract_edit_body,
     resolve_event_source_content,
+    visible_body_from_event_source,
 )
 
 
@@ -276,6 +277,21 @@ class TestResolvedMessageExtraction:
         )
 
         assert event_source["content"] == canonical_content
+
+    def test_visible_body_from_event_source_prefers_visible_edit_content(self) -> None:
+        """Visible-body extraction should use m.new_content when present."""
+        event_source = {
+            "content": {
+                "msgtype": "m.text",
+                "body": "* Preview edit",
+                "m.new_content": {
+                    "msgtype": "m.text",
+                    "body": "Full edit body",
+                },
+            },
+        }
+
+        assert visible_body_from_event_source(event_source, "* Preview edit") == "Full edit body"
 
 
 class TestDownloadMxcText:

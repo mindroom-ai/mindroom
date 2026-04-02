@@ -232,6 +232,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         user_event.body = "@mindroom_helper:localhost can you help with math?"
         user_event.sender = "@user:localhost"
         user_event.event_id = "$user_123"
+        user_event.server_timestamp = 1234567890
         user_event.source = {
             "event_id": "$user_123",
             "sender": "@user:localhost",
@@ -297,6 +298,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
             calc_edit_event.body = content_dict.get("body", "") if isinstance(content_dict, dict) else ""
             calc_edit_event.sender = "@mindroom_helper:localhost"
             calc_edit_event.event_id = f"$edit_{helper_events.index(edit_event)}"
+            calc_edit_event.server_timestamp = 1234567891
             calc_edit_event.source = {
                 "event_id": f"$edit_{helper_events.index(edit_event)}",
                 "sender": "@mindroom_helper:localhost",
@@ -316,6 +318,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         final_event.body = "I can help! Let me ask @mindroom_calculator:localhost what's 2+2?"
         final_event.sender = "@mindroom_helper:localhost"
         final_event.event_id = "$helper_final"
+        final_event.server_timestamp = 1234567892
         final_event.source = {
             "event_id": "$helper_final",
             "sender": "@mindroom_helper:localhost",
@@ -432,6 +435,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
         initial_event.body = "What's the sum?"
         initial_event.sender = "@user:localhost"
         initial_event.event_id = "$user_initial"
+        initial_event.server_timestamp = 1234567890
         initial_event.source = {
             "event_id": "$user_initial",
             "sender": "@user:localhost",
@@ -452,6 +456,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
         edit_event.body = "* @mindroom_calculator:localhost what's 2+2?"
         edit_event.sender = "@user:localhost"
         edit_event.event_id = "$user_edit"
+        edit_event.server_timestamp = 1234567891
         edit_event.source = {
             "event_id": "$user_edit",
             "sender": "@user:localhost",

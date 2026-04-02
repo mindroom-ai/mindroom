@@ -59,7 +59,12 @@ from mindroom.matrix.identity import (
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.matrix.message_content import extract_edit_body, resolve_event_source_content
+from mindroom.matrix.message_content import (
+    extract_edit_body,
+    is_v2_sidecar_text_preview,
+    resolve_event_source_content,
+    visible_body_from_event_source,
+)
 from mindroom.matrix.presence import (
     build_agent_status_message,
     is_user_online,
@@ -168,13 +173,20 @@ from .logging_config import emoji, get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
     PermanentMatrixStartupError,
+    VisibleMessageLike,
     build_threaded_edit_content,
     edit_message,
     fetch_thread_history,
     get_joined_rooms,
     get_latest_thread_event_id_if_needed,
     join_room,
+    replace_visible_message,
     send_message,
+    visible_message_body,
+    visible_message_content,
+    visible_message_event_id,
+    visible_message_sender,
+    visible_message_timestamp,
 )
 from .media_inputs import MediaInputs
 from .response_tracker import ResponseTracker
@@ -188,7 +200,7 @@ from .scheduling import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
     import structlog
@@ -382,7 +394,7 @@ class _MessageContext:
     am_i_mentioned: bool
     is_thread: bool
     thread_id: str | None
-    thread_history: list[dict]
+    thread_history: Sequence[VisibleMessageLike]
     mentioned_agents: list[MatrixID]
     has_non_agent_mentions: bool
 
@@ -441,8 +453,8 @@ class _PreparedHookedPayload:
 
 
 @dataclass(frozen=True)
-class _SyntheticTextEvent:
-    """Minimal text-event shape for internal normalized-media dispatch.
+class _PreparedTextEvent:
+    """Normalized inbound text event with canonical body/source for dispatch.
 
     This intentionally satisfies the ``CommandEvent`` protocol used by command handling.
     """
@@ -451,9 +463,11 @@ class _SyntheticTextEvent:
     event_id: str
     body: str
     source: dict[str, Any]
+    server_timestamp: int | None = None
+    is_synthetic: bool = False
 
 
-type _TextDispatchEvent = nio.RoomMessageText | _SyntheticTextEvent
+type _TextDispatchEvent = nio.RoomMessageText | _PreparedTextEvent
 
 type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
 
@@ -625,7 +639,7 @@ class AgentBot:
         resolved_source_kind = source_kind
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = content.get("com.mindroom.source_kind")
-            source_kind_sender_is_trusted = isinstance(event, _SyntheticTextEvent) or (
+            source_kind_sender_is_trusted = (isinstance(event, _PreparedTextEvent) and event.is_synthetic) or (
                 extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
             )
             if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
@@ -1289,8 +1303,9 @@ class AgentBot:
             await self._handle_message_edit(room, event, event_info)
             return
 
-        await interactive.handle_text_response(self.client, room, event, self.agent_name)
-        await self._dispatch_text_message(room, event, requester_user_id)
+        prepared_event = await self._resolve_text_dispatch_event(event)
+        await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
+        await self._dispatch_text_message(room, prepared_event, requester_user_id)
 
     async def _dispatch_text_message(
         self,
@@ -1299,7 +1314,7 @@ class AgentBot:
         requester_user_id: str,
     ) -> None:
         """Run the normal text/command dispatch pipeline for a prepared text event."""
-        assert isinstance(event.body, str)
+        event = await self._resolve_text_dispatch_event(event)
 
         dispatch = await self._prepare_dispatch(
             room,
@@ -1316,7 +1331,7 @@ class AgentBot:
             if self.agent_name == ROUTER_AGENT_NAME:
                 # Router always handles commands, even in single-agent rooms
                 # Commands like !schedule, !help, etc. need to work regardless
-                await self._handle_command(room, event, command)
+                await self._handle_command(room, event, command, requester_user_id=requester_user_id)
             return
         if self._has_newer_unresponded_in_scope(event, dispatch.context):
             self.response_tracker.mark_responded(event.event_id)
@@ -1571,7 +1586,7 @@ class AgentBot:
 
         await self._dispatch_text_message(
             room,
-            _SyntheticTextEvent(
+            _PreparedTextEvent(
                 sender=event.sender,
                 event_id=event.event_id,
                 body=prepared_voice.text,
@@ -1582,6 +1597,8 @@ class AgentBot:
                         "com.mindroom.source_kind": "voice",
                     },
                 },
+                server_timestamp=None,
+                is_synthetic=True,
             ),
             requester_user_id,
         )
@@ -1620,6 +1637,15 @@ class AgentBot:
     ) -> None:
         """Handle image/file/video/audio events and dispatch media-aware responses."""
         assert self.client is not None
+
+        if isinstance(
+            event,
+            nio.RoomMessageFile | nio.RoomEncryptedFile,
+        ) and await self._dispatch_file_sidecar_text_preview(
+            room,
+            event,
+        ):
+            return
 
         if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
             await self._on_audio_media_message(room, event)
@@ -1760,14 +1786,52 @@ class AgentBot:
 
         return None
 
+    async def _dispatch_file_sidecar_text_preview(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageFile | nio.RoomEncryptedFile,
+    ) -> bool:
+        """Dispatch one sidecar-backed file preview through the normal text pipeline."""
+        if not is_v2_sidecar_text_preview(event.source):
+            return False
+
+        requester_user_id = self._precheck_event(room, event)
+        if requester_user_id is None:
+            return True
+
+        prepared_text_event = await self._prepare_file_sidecar_text_event(event)
+        assert prepared_text_event is not None
+        assert self.client is not None
+        await interactive.handle_text_response(self.client, room, prepared_text_event, self.agent_name)
+        await self._dispatch_text_message(room, prepared_text_event, requester_user_id)
+        return True
+
+    async def _prepare_file_sidecar_text_event(
+        self,
+        event: nio.RoomMessageFile | nio.RoomEncryptedFile,
+    ) -> _PreparedTextEvent | None:
+        """Return a prepared text event when a file event is really a long-text preview."""
+        if not is_v2_sidecar_text_preview(event.source):
+            return None
+
+        assert self.client is not None
+        resolved_source = await resolve_event_source_content(event.source, self.client)
+        return _PreparedTextEvent(
+            sender=event.sender,
+            event_id=event.event_id,
+            body=visible_body_from_event_source(resolved_source, event.body),
+            source=resolved_source,
+            server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
+        )
+
     async def _derive_conversation_context(
         self,
         room_id: str,
         event_info: EventInfo,
-    ) -> tuple[bool, str | None, list[dict[str, Any]]]:
+    ) -> tuple[bool, str | None, list[VisibleMessageLike]]:
         """Derive conversation context from threads or reply chains."""
         assert self.client is not None
-        return await derive_conversation_context(
+        is_thread, thread_id, thread_history = await derive_conversation_context(
             self.client,
             room_id,
             event_info,
@@ -1775,6 +1839,7 @@ class AgentBot:
             self.logger,
             fetch_thread_history,
         )
+        return is_thread, thread_id, cast("list[VisibleMessageLike]", thread_history)
 
     def _requester_user_id_for_event(
         self,
@@ -1868,7 +1933,7 @@ class AgentBot:
             return False
 
         for msg in context.thread_history:
-            if msg.get("event_id") == event.event_id:
+            if visible_message_event_id(msg) == event.event_id:
                 continue
             newer_event_id = self._coalescing_replacement_event_id(
                 msg,
@@ -1887,9 +1952,14 @@ class AgentBot:
         return False
 
     def _coalescing_candidate_timestamp(self, event: _DispatchEvent) -> int | None:
-        if isinstance(event, _SyntheticTextEvent):
-            return None
-        current_ts = event.server_timestamp
+        if isinstance(event, _PreparedTextEvent):
+            if event.is_synthetic:
+                return None
+            current_ts = event.server_timestamp
+            if current_ts is None:
+                return None
+        else:
+            current_ts = event.server_timestamp
         if not isinstance(current_ts, int):
             return None
         # Automation messages (scheduled tasks, hooks) are one-shot synthetic events
@@ -1900,22 +1970,22 @@ class AgentBot:
 
     def _coalescing_replacement_event_id(
         self,
-        msg: dict,
+        msg: VisibleMessageLike,
         *,
         sender: str,
         current_ts: int,
     ) -> str | None:
-        event_id = msg.get("event_id")
+        event_id = visible_message_event_id(msg)
         if not isinstance(event_id, str):
             return None
-        if msg.get("sender") != sender:
+        if visible_message_sender(msg) != sender:
             return None
-        msg_ts = msg.get("timestamp")
+        msg_ts = visible_message_timestamp(msg)
         if not isinstance(msg_ts, int) or msg_ts <= current_ts:
             return None
         # Skip commands — they exit early without generating an AI response,
         # so coalescing against them would permanently lose the older message.
-        msg_body = msg.get("body", "")
+        msg_body = visible_message_body(msg) or ""
         if isinstance(msg_body, str) and msg_body.lstrip().startswith("!"):
             return None
         if self.response_tracker.has_responded(event_id):
@@ -1960,6 +2030,21 @@ class AgentBot:
             context=context,
             correlation_id=correlation_id,
             envelope=envelope,
+        )
+
+    async def _resolve_text_dispatch_event(self, event: _TextDispatchEvent) -> _PreparedTextEvent:
+        """Return one canonical text event for hooks, routing, and command handling."""
+        if isinstance(event, _PreparedTextEvent):
+            return event
+
+        assert self.client is not None
+        resolved_source = await resolve_event_source_content(event.source, self.client)
+        return _PreparedTextEvent(
+            sender=event.sender,
+            event_id=event.event_id,
+            body=visible_body_from_event_source(resolved_source, event.body),
+            source=resolved_source,
+            server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
         )
 
     async def _resolve_dispatch_action(
@@ -2329,7 +2414,7 @@ class AgentBot:
         if self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room.room_id) == "room":
             is_thread = False
             thread_id = None
-            thread_history: list[dict[str, Any]] = []
+            thread_history: list[VisibleMessageLike] = []
         else:
             is_thread, thread_id, thread_history = await self._derive_conversation_context(
                 room.room_id,
@@ -2513,13 +2598,16 @@ class AgentBot:
         timezone_abbrev = current.tzname() or self.config.timezone
         return f"[{current.strftime('%Y-%m-%d %H:%M')} {timezone_abbrev}] {prompt}"
 
-    def _timestamp_thread_history_user_turns(self, thread_history: list[dict]) -> list[dict]:
+    def _timestamp_thread_history_user_turns(
+        self,
+        thread_history: Sequence[VisibleMessageLike],
+    ) -> list[VisibleMessageLike]:
         """Add time prefixes to user-authored thread-history entries."""
-        timestamped_history: list[dict] = []
+        timestamped_history: list[VisibleMessageLike] = []
         for message in thread_history:
-            body = message.get("body")
-            content = message.get("content")
-            sender = message.get("sender")
+            body = visible_message_body(message)
+            content = visible_message_content(message)
+            sender = visible_message_sender(message)
             is_user_turn = (isinstance(content, dict) and isinstance(content.get(ORIGINAL_SENDER_KEY), str)) or (
                 isinstance(sender, str) and not is_agent_id(sender, self.config, self.runtime_paths)
             )
@@ -2527,24 +2615,27 @@ class AgentBot:
                 timestamped_history.append(message)
                 continue
 
-            message_timestamp = message.get("timestamp")
+            message_timestamp = visible_message_timestamp(message)
             timestamp_ms = message_timestamp if isinstance(message_timestamp, int | float) else None
-            updated_message = dict(message)
-            updated_message["body"] = self._prefix_user_turn_time(body, timestamp_ms=timestamp_ms)
-            timestamped_history.append(updated_message)
+            timestamped_body = self._prefix_user_turn_time(body, timestamp_ms=timestamp_ms)
+            timestamped_history.append(replace_visible_message(message, body=timestamped_body))
         return timestamped_history
 
-    def _timestamp_model_user_context(self, prompt: str, thread_history: list[dict]) -> tuple[str, list[dict]]:
+    def _timestamp_model_user_context(
+        self,
+        prompt: str,
+        thread_history: Sequence[VisibleMessageLike],
+    ) -> tuple[str, list[VisibleMessageLike]]:
         """Return model-facing prompt/history with local timestamps added to user turns."""
         return self._prefix_user_turn_time(prompt), self._timestamp_thread_history_user_turns(thread_history)
 
     def _prepare_memory_and_model_context(
         self,
         prompt: str,
-        thread_history: list[dict],
+        thread_history: Sequence[VisibleMessageLike],
         *,
         model_prompt: str | None = None,
-    ) -> tuple[str, list[dict], str, list[dict]]:
+    ) -> tuple[str, Sequence[VisibleMessageLike], str, list[VisibleMessageLike]]:
         """Return raw memory inputs alongside timestamped model-facing context."""
         model_prompt_text, model_thread_history = self._timestamp_model_user_context(
             model_prompt or prompt,
@@ -2664,7 +2755,7 @@ class AgentBot:
         thread_id: str | None,
         team_agents: list[MatrixID],
         team_mode: str,
-        thread_history: list[dict],
+        thread_history: Sequence[VisibleMessageLike],
         requester_user_id: str,
         existing_event_id: str | None = None,
         *,
@@ -2703,7 +2794,7 @@ class AgentBot:
         thread_id: str | None,
         team_agents: list[MatrixID],
         team_mode: str,
-        thread_history: list[dict],
+        thread_history: Sequence[VisibleMessageLike],
         requester_user_id: str,
         existing_event_id: str | None = None,
         *,
@@ -3146,7 +3237,7 @@ class AgentBot:
         prompt: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: list[dict],
+        thread_history: Sequence[VisibleMessageLike],
         existing_event_id: str | None = None,
         user_id: str | None = None,
         run_id: str | None = None,
@@ -3311,7 +3402,7 @@ class AgentBot:
         room_id: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: list[dict],
+        thread_history: Sequence[VisibleMessageLike],
         prompt: str,
         agent_name: str,
         user_id: str | None,
@@ -3337,7 +3428,7 @@ class AgentBot:
         room_id: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: list[dict],
+        thread_history: Sequence[VisibleMessageLike],
         prompt: str,
         agent_name: str,
         user_id: str | None,
@@ -3621,7 +3712,7 @@ class AgentBot:
         prompt: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: list[dict],
+        thread_history: Sequence[VisibleMessageLike],
         existing_event_id: str | None = None,
         *,
         adopt_existing_placeholder: bool = False,
@@ -3882,7 +3973,7 @@ class AgentBot:
         prompt: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: list[dict],
+        thread_history: Sequence[VisibleMessageLike],
         existing_event_id: str | None = None,
         user_id: str | None = None,
         media: MediaInputs | None = None,
@@ -3939,7 +4030,7 @@ class AgentBot:
         prompt: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: list[dict],
+        thread_history: Sequence[VisibleMessageLike],
         existing_event_id: str | None = None,
         user_id: str | None = None,
         media: MediaInputs | None = None,
@@ -4350,7 +4441,7 @@ class AgentBot:
         self,
         room: nio.MatrixRoom,
         event: _DispatchEvent,
-        thread_history: list[dict],
+        thread_history: Sequence[VisibleMessageLike],
         thread_id: str | None = None,
         message: str | None = None,
         requester_user_id: str | None = None,
@@ -4579,8 +4670,23 @@ class AgentBot:
         self.response_tracker.mark_responded(event_info.original_event_id, response_event_id)
         self.logger.info("Successfully regenerated response for edited message")
 
-    async def _handle_command(self, room: nio.MatrixRoom, event: _TextDispatchEvent, command: Command) -> None:
+    async def _handle_command(
+        self,
+        room: nio.MatrixRoom,
+        event: _TextDispatchEvent,
+        command: Command,
+        *,
+        requester_user_id: str | None = None,
+    ) -> None:
         assert self.client is not None
+        event = await self._resolve_text_dispatch_event(event)
+        requester_user_id_for_event = self._requester_user_id_for_event
+        if requester_user_id is not None:
+
+            def _fixed_requester_user_id_for_event(_event: CommandEvent) -> str:
+                return requester_user_id
+
+            requester_user_id_for_event = _fixed_requester_user_id_for_event
         context = CommandHandlerContext(
             client=self.client,
             config=self.config,
@@ -4589,7 +4695,7 @@ class AgentBot:
             logger=self.logger,
             response_tracker=self.response_tracker,
             derive_conversation_context=self._derive_conversation_context,
-            requester_user_id_for_event=self._requester_user_id_for_event,
+            requester_user_id_for_event=requester_user_id_for_event,
             resolve_reply_thread_id=self._resolve_reply_thread_id,
             send_response=self._send_response,
             send_skill_command_response=self._send_skill_command_response,
@@ -4621,7 +4727,7 @@ class TeamBot(AgentBot):
         prompt: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: list[dict],
+        thread_history: Sequence[VisibleMessageLike],
         existing_event_id: str | None = None,
         user_id: str | None = None,
         media: MediaInputs | None = None,

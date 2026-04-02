@@ -440,6 +440,7 @@ class TestAgentBot:
         if handler_name == "message":
             event = MagicMock(spec=nio.RoomMessageText)
             event.body = "hello"
+            event.server_timestamp = 1234567890
             event.source = {"content": {"body": "hello"}}
         elif handler_name == "image":
             event = MagicMock(spec=nio.RoomMessageImage)

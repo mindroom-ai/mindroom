@@ -22,11 +22,15 @@ from mindroom.constants import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
+    ResolvedVisibleMessage,
     build_threaded_edit_content,
     edit_message,
     get_joined_rooms,
     resolve_latest_visible_messages,
     send_message,
+    visible_message_content,
+    visible_message_reply_to_event_id,
+    visible_message_sender,
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
@@ -505,24 +509,21 @@ async def _collect_room_history_events(
 
 def _merge_bot_resolved_message_states(
     message_states: dict[str, _MessageState],
-    resolved_messages: dict[str, dict[str, object]],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
     *,
     bot_user_id: str,
     requester_ids_by_event_id: dict[str, str],
 ) -> None:
     """Merge resolved bot-authored messages into cleanup state."""
-    for target_event_id, message_data in resolved_messages.items():
-        if message_data.get("sender") != bot_user_id:
+    for target_event_id, message in resolved_messages.items():
+        if message.sender != bot_user_id:
             continue
         requester_user_id = requester_ids_by_event_id.get(target_event_id)
-        enriched_message_data = message_data
-        if requester_user_id is not None:
-            enriched_message_data = dict(message_data)
-            enriched_message_data["requester_user_id"] = requester_user_id
         _merge_resolved_message_state(
             message_states,
             target_event_id=target_event_id,
-            message_data=enriched_message_data,
+            message=message,
+            requester_user_id=requester_user_id,
         )
 
 
@@ -530,37 +531,18 @@ def _merge_resolved_message_state(
     message_states: dict[str, _MessageState],
     *,
     target_event_id: str,
-    message_data: dict[str, object],
+    message: ResolvedVisibleMessage,
+    requester_user_id: str | None,
 ) -> None:
     """Store one resolved message if it has the fields cleanup needs."""
-    body = message_data.get("body")
-    timestamp = message_data.get("timestamp")
-    latest_event_id = message_data.get("latest_event_id", message_data.get("event_id", ""))
-    if not isinstance(body, str) or not isinstance(timestamp, int) or not isinstance(latest_event_id, str):
-        return
-
-    thread_id = message_data.get("thread_id")
-    if thread_id is not None and not isinstance(thread_id, str):
-        thread_id = None
-
-    stream_status = message_data.get("stream_status")
-    if stream_status is not None and not isinstance(stream_status, str):
-        stream_status = None
-    requester_user_id = message_data.get("requester_user_id")
-    if requester_user_id is not None and not isinstance(requester_user_id, str):
-        requester_user_id = None
-    latest_content = message_data.get("content")
-    normalized_latest_content: dict[str, Any] | None = None
-    if isinstance(latest_content, dict):
-        normalized_latest_content = {key: value for key, value in latest_content.items() if isinstance(key, str)}
-
+    normalized_latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
     state = message_states.setdefault(target_event_id, _MessageState())
-    state.latest_body = body
-    state.latest_timestamp = timestamp
-    state.latest_event_id = latest_event_id
+    state.latest_body = message.body
+    state.latest_timestamp = message.timestamp
+    state.latest_event_id = message.visible_event_id
     state.latest_content = normalized_latest_content
-    state.thread_id = thread_id
-    state.stream_status = stream_status
+    state.thread_id = message.thread_id
+    state.stream_status = message.stream_status
     state.requester_user_id = requester_user_id
 
 
@@ -594,7 +576,7 @@ def _scanned_message_requires_exact_requester_fetch(message_data: dict[str, obje
 
 async def _derive_requester_ids_for_bot_messages(
     client: nio.AsyncClient,
-    resolved_messages: dict[str, dict[str, object]],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
     scanned_message_data_by_event_id: dict[str, dict[str, object]],
     *,
     room_id: str,
@@ -608,16 +590,11 @@ async def _derive_requester_ids_for_bot_messages(
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None] = {}
     sorted_messages = sorted(
         resolved_messages.items(),
-        key=lambda item: (
-            item[1].get("timestamp", 0) if isinstance(item[1].get("timestamp"), int) else 0,
-            item[0],
-        ),
+        key=lambda item: (item[1].timestamp, item[0]),
     )
 
     for target_event_id, message_data in sorted_messages:
-        sender = message_data.get("sender")
-        if not isinstance(sender, str):
-            continue
+        sender = message_data.sender
         if sender != bot_user_id:
             continue
 
@@ -654,8 +631,8 @@ async def _resolve_requester_for_bot_message(
     *,
     room_id: str,
     target_event_id: str,
-    message_data: dict[str, object],
-    resolved_messages: dict[str, dict[str, object]],
+    message_data: ResolvedVisibleMessage | dict[str, object],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
     scanned_message_data_by_event_id: dict[str, dict[str, object]],
     requester_cache: dict[str, str | None],
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
@@ -696,7 +673,7 @@ async def _resolve_requester_for_event_id(
     *,
     room_id: str,
     event_id: str,
-    resolved_messages: dict[str, dict[str, object]],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
     scanned_message_data_by_event_id: dict[str, dict[str, object]],
     requester_cache: dict[str, str | None],
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
@@ -756,10 +733,10 @@ async def _load_message_data_for_requester_resolution(
     *,
     room_id: str,
     event_id: str,
-    resolved_messages: dict[str, dict[str, object]],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
     scanned_message_data_by_event_id: dict[str, dict[str, object]],
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
-) -> tuple[dict[str, object] | None, str | None]:
+) -> tuple[ResolvedVisibleMessage | dict[str, object] | None, str | None]:
     """Load one message from scanned history or the Matrix API with its sender ID."""
     message_data = resolved_messages.get(event_id)
     sender = _sender_id_for_message(message_data)
@@ -781,8 +758,8 @@ async def _resolve_requester_from_internal_reply(
     *,
     room_id: str,
     event_id: str,
-    message_data: dict[str, object],
-    resolved_messages: dict[str, dict[str, object]],
+    message_data: ResolvedVisibleMessage | dict[str, object],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
     scanned_message_data_by_event_id: dict[str, dict[str, object]],
     requester_cache: dict[str, str | None],
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
@@ -903,10 +880,11 @@ async def _fetch_message_data_for_event_id(
     return message_data
 
 
-def _sender_id_for_message(message_data: dict[str, object] | None) -> str | None:
+def _sender_id_for_message(message_data: ResolvedVisibleMessage | dict[str, object] | None) -> str | None:
     """Return the sender ID from one parsed message if available."""
-    sender = message_data.get("sender") if message_data is not None else None
-    return sender if isinstance(sender, str) else None
+    if message_data is None:
+        return None
+    return visible_message_sender(message_data)
 
 
 def _as_string_keyed_dict(value: object) -> dict[str, object] | None:
@@ -922,19 +900,9 @@ def _as_string_keyed_dict(value: object) -> dict[str, object] | None:
     return normalized
 
 
-def _reply_to_event_id_for_message(message_data: dict[str, object]) -> str | None:
+def _reply_to_event_id_for_message(message_data: ResolvedVisibleMessage | dict[str, object]) -> str | None:
     """Return the exact replied-to event ID encoded on one message."""
-    content = _as_string_keyed_dict(message_data.get("content"))
-    if content is None:
-        return None
-    relates_to = _as_string_keyed_dict(content.get("m.relates_to"))
-    if relates_to is None:
-        return None
-    in_reply_to = _as_string_keyed_dict(relates_to.get("m.in_reply_to"))
-    if in_reply_to is None:
-        return None
-    reply_to_event_id = in_reply_to.get("event_id")
-    return reply_to_event_id if isinstance(reply_to_event_id, str) else None
+    return visible_message_reply_to_event_id(message_data)
 
 
 def _is_internal_sender(
@@ -949,17 +917,17 @@ def _is_internal_sender(
 
 
 def _effective_requester_for_message(
-    message_data: dict[str, object],
+    message_data: ResolvedVisibleMessage | dict[str, object],
     *,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Resolve the effective requester for one visible message."""
-    sender = message_data.get("sender")
+    sender = visible_message_sender(message_data)
     if not isinstance(sender, str):
         return None
 
-    content = message_data.get("content")
+    content = visible_message_content(message_data)
     event_source = {"content": content} if isinstance(content, dict) else None
     return get_effective_sender_id_for_reply_permissions(sender, event_source, config, runtime_paths)
 
