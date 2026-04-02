@@ -28,6 +28,8 @@ from mindroom.hooks import (
     ReactionReceivedContext,
     ResponseDraft,
     ResponseResult,
+    build_hook_room_state_putter,
+    build_hook_room_state_querier,
     emit,
     emit_collect,
     emit_transform,
@@ -657,6 +659,8 @@ class AgentBot:
             "logger": self.logger.bind(event_name=event_name),
             "correlation_id": correlation_id,
             "message_sender": self._hook_message_sender(),
+            "room_state_querier": build_hook_room_state_querier(self.client) if self.client is not None else None,
+            "room_state_putter": build_hook_room_state_putter(self.client) if self.client is not None else None,
         }
 
     def _hook_message_sender(self) -> HookMessageSender | None:
@@ -2241,7 +2245,7 @@ class AgentBot:
             return None
 
         sender_agent_name = extract_agent_name(effective_requester_user_id, self.config, self.runtime_paths)
-        if sender_agent_name and not context.am_i_mentioned:
+        if sender_agent_name and not context.am_i_mentioned and envelope.source_kind != "hook_dispatch":
             self.logger.debug(f"Ignoring {event_label} from other agent (not mentioned)")
             return None
 

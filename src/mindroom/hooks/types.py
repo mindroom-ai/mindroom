@@ -59,6 +59,14 @@ type HookMessageSender = Callable[
     [str, str, str | None, str, dict[str, Any] | None],
     Awaitable[str | None],
 ]
+type HookRoomStateQuerier = Callable[
+    [str, str, str | None],
+    Awaitable[dict[str, Any] | None],
+]
+type HookRoomStatePutter = Callable[
+    [str, str, str, dict[str, Any]],
+    Awaitable[bool],
+]
 
 
 class HookCallback(Protocol):

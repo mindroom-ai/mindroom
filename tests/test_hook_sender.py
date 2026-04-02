@@ -574,3 +574,114 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
 
     assert captured_content["com.mindroom.source_kind"] == "hook"
     assert captured_content["com.mindroom.hook_source"] == "hook-plugin:agent:started"
+
+
+@pytest.mark.asyncio
+async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -> None:
+    """trigger_dispatch=True should set source_kind to hook_dispatch instead of hook."""
+    bot = _hook_bot(tmp_path)
+    bot.client = AsyncMock()
+
+    captured_content: dict[str, object] = {}
+
+    async def mock_send(_client: object, _room_id: str, content: dict[str, object]) -> str:
+        captured_content.update(content)
+        return "$hook-event"
+
+    @hook(EVENT_AGENT_STARTED)
+    async def started(ctx: AgentLifecycleContext) -> None:
+        await ctx.send_message("!room:localhost", "dispatch me", trigger_dispatch=True)
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.agent_bots = {"router": bot}
+    bot.orchestrator = orchestrator
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
+
+    with (
+        patch("mindroom.hooks.sender.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
+        patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
+    ):
+        await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
+
+    assert captured_content["com.mindroom.source_kind"] == "hook_dispatch"
+    assert "com.mindroom._trigger_dispatch" not in captured_content
+
+
+@pytest.mark.asyncio
+async def test_prepare_dispatch_allows_hook_dispatch_without_mention(tmp_path: Path) -> None:
+    """hook_dispatch messages from agents should bypass the agent-not-mentioned filter."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$hook-dispatch-msg",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "restart notification",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "restart-notify:bot:ready",
+            },
+        },
+    )
+
+    # No mentions — am_i_mentioned is False
+    no_mention_context = _MessageContext(
+        am_i_mentioned=False,
+        is_thread=False,
+        thread_id=None,
+        thread_history=[],
+        mentioned_agents=[],
+        has_non_agent_mentions=False,
+    )
+    bot._extract_message_context = AsyncMock(return_value=no_mention_context)
+
+    dispatch = await bot._prepare_dispatch(
+        room,
+        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        event_label="message",
+    )
+
+    # Should NOT be filtered despite sender being an agent and no mention
+    assert dispatch is not None
+    assert dispatch.envelope.source_kind == "hook_dispatch"
+
+
+@pytest.mark.asyncio
+async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_path: Path) -> None:
+    """Plain hook messages from agents without mentions should still be filtered."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$plain-hook-msg",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "plain hook message",
+                "com.mindroom.source_kind": "hook",
+                "com.mindroom.hook_source": "some-plugin:message:received",
+            },
+        },
+    )
+
+    no_mention_context = _MessageContext(
+        am_i_mentioned=False,
+        is_thread=False,
+        thread_id=None,
+        thread_history=[],
+        mentioned_agents=[],
+        has_non_agent_mentions=False,
+    )
+    bot._extract_message_context = AsyncMock(return_value=no_mention_context)
+
+    dispatch = await bot._prepare_dispatch(
+        room,
+        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        event_label="message",
+    )
+
+    # Plain hook messages without mention should still be filtered
+    assert dispatch is None

@@ -141,6 +141,7 @@ async def block_secret_reads(ctx):
 | `message:after_response` | Observer | `AfterResponseContext` | After final Matrix send or edit | None (frozen) |
 | `agent:started` | Observer | `AgentLifecycleContext` | After bot starts (Matrix login, presence, callbacks registered) | None (frozen) |
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None (frozen) |
+| `bot:ready` | Observer | `AgentLifecycleContext` | After bot completes room joins and initial sync | None (frozen) |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
 | `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
@@ -159,6 +160,7 @@ async def block_secret_reads(ctx):
 | `schedule:fired` | 1000 |
 | `agent:started` | 5000 |
 | `agent:stopped` | 5000 |
+| `bot:ready` | 5000 |
 | `config:reloaded` | 5000 |
 | `tool:before_call` | 200 |
 | `tool:after_call` | 300 |
@@ -428,11 +430,22 @@ Every hook context includes these fields:
 | `correlation_id` | `str` | Unique ID per inbound event |
 | `state_root` | `Path` | Plugin state directory (property) |
 
-Every hook context also exposes `await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None)`.
-When a runtime sender is available, it sends a hook-originated Matrix message and returns the event ID when available.
-When no sender is bound for the current runtime, it returns `None`.
+Every hook context also exposes the following async helpers:
+
+**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None)`**
+Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
 For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
 For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while passing `thread_id=None` explicitly posts at room level.
+
+**`await ctx.query_room_state(room_id, event_type, state_key=None)`**
+Queries Matrix room state events.
+When `state_key` is provided, returns the content `dict` for that single state event, or `None` on error/not-found.
+When `state_key` is `None`, returns a `{state_key: content}` dict of all state events matching `event_type`, or `None` on error.
+Returns `None` when no room state querier is available (e.g. no Matrix client bound).
+
+**`await ctx.put_room_state(room_id, event_type, state_key, content)`**
+Writes a single Matrix room state event and returns `True` on success, `False` on error.
+Returns `False` when no room state putter is available.
 
 ### Transport objects
 

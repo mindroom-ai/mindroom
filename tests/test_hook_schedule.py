@@ -156,3 +156,33 @@ async def test_schedule_hook_send_message_allows_explicit_room_level_opt_out(tmp
     content = mock_hook_send.await_args.args[2]
     assert content["body"] == "room-level"
     assert "m.relates_to" not in content
+
+
+@pytest.mark.asyncio
+async def test_schedule_hook_send_message_can_trigger_dispatch(tmp_path: Path) -> None:
+    """schedule:fired hooks should be able to request dispatch-triggering sends."""
+
+    @hook(EVENT_SCHEDULE_FIRED)
+    async def notify(ctx: ScheduleFiredContext) -> None:
+        await ctx.send_message(ctx.room_id, "dispatch", trigger_dispatch=True)
+        ctx.suppress = True
+
+    config = _config(tmp_path)
+    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [notify])]))
+    client = AsyncMock()
+    client.user_id = "@mindroom_router:localhost"
+
+    with (
+        patch(
+            "mindroom.hooks.sender.get_latest_thread_event_id_if_needed",
+            new=AsyncMock(return_value="$latest"),
+        ),
+        patch("mindroom.hooks.sender.send_message", new=AsyncMock(return_value="$hook-event")) as mock_hook_send,
+        patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_schedule_send,
+    ):
+        await _execute_scheduled_workflow(client, _workflow("Resume work"), config, runtime_paths_for(config))
+
+    mock_schedule_send.assert_not_called()
+    content = mock_hook_send.await_args.args[2]
+    assert content["body"] == "dispatch"
+    assert content["com.mindroom.source_kind"] == "hook_dispatch"

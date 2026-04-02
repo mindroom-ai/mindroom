@@ -54,7 +54,8 @@ async def send_hook_message(
         return None
 
     content_extra = dict(extra_content or {})
-    content_extra["com.mindroom.source_kind"] = "hook"
+    trigger_dispatch = bool(content_extra.pop("com.mindroom._trigger_dispatch", False))
+    content_extra["com.mindroom.source_kind"] = "hook_dispatch" if trigger_dispatch else "hook"
     content_extra["com.mindroom.hook_source"] = source_hook
 
     latest_thread_event_id = await get_latest_thread_event_id_if_needed(client, room_id, thread_id)

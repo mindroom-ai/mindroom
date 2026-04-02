@@ -25,6 +25,7 @@ from .enrichment import (
 )
 from .execution import emit, emit_collect, emit_gate, emit_transform
 from .registry import HookRegistry
+from .state import build_hook_room_state_putter, build_hook_room_state_querier
 from .types import (
     BUILTIN_EVENT_NAMES,
     EVENT_AGENT_STARTED,
@@ -41,6 +42,8 @@ from .types import (
     EVENT_TOOL_BEFORE_CALL,
     EnrichmentItem,
     HookMessageSender,
+    HookRoomStatePutter,
+    HookRoomStateQuerier,
     RegisteredHook,
 )
 
@@ -67,6 +70,8 @@ __all__ = [
     "HookContext",
     "HookMessageSender",
     "HookRegistry",
+    "HookRoomStatePutter",
+    "HookRoomStateQuerier",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
@@ -77,6 +82,8 @@ __all__ = [
     "ScheduleFiredContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
+    "build_hook_room_state_putter",
+    "build_hook_room_state_querier",
     "emit",
     "emit_collect",
     "emit_gate",

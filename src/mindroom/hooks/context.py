@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
 
     from .sender import HookMessageSender
+    from .types import HookRoomStatePutter, HookRoomStateQuerier
 
 
 def _resolve_plugin_state_root(
@@ -59,6 +60,7 @@ async def _send_bound_message(
     thread_id: str | None = None,
     extra_content: dict[str, Any] | None = None,
     requester_id: str | None = None,
+    trigger_dispatch: bool = False,
 ) -> str | None:
     """Send one hook-originated Matrix message through a bound sender."""
     if message_sender is None:
@@ -68,7 +70,18 @@ async def _send_bound_message(
     resolved_extra_content = dict(extra_content or {})
     if requester_id:
         resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
+    if trigger_dispatch:
+        resolved_extra_content["com.mindroom._trigger_dispatch"] = True
     return await message_sender(room_id, text, thread_id, source_hook, resolved_extra_content or None)
+
+
+@dataclass(frozen=True, slots=True)
+class _EnvelopeTargetView:
+    """Compatibility view exposing thread targeting as one object."""
+
+    room_id: str
+    thread_id: str | None
+    resolved_thread_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +99,15 @@ class MessageEnvelope:
     mentioned_agents: tuple[str, ...]
     agent_name: str
     source_kind: str
+
+    @property
+    def target(self) -> _EnvelopeTargetView:
+        """Return a compatibility target view for newer plugin code."""
+        return _EnvelopeTargetView(
+            room_id=self.room_id,
+            thread_id=self.thread_id,
+            resolved_thread_id=self.resolved_thread_id,
+        )
 
 
 @dataclass(slots=True)
@@ -123,11 +145,38 @@ class HookContext:
     logger: structlog.stdlib.BoundLogger
     correlation_id: str
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
+    room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
+    room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
 
     @property
     def state_root(self) -> Path:
         """Return the plugin state root, creating it on first access."""
         return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
+
+    async def query_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Query Matrix room state and return the result when a querier is available."""
+        if self.room_state_querier is None:
+            self.logger.warning("No room state querier available")
+            return None
+        return await self.room_state_querier(room_id, event_type, state_key)
+
+    async def put_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+        content: dict[str, Any],
+    ) -> bool:
+        """Write a Matrix room state event and return ``True`` on success."""
+        if self.room_state_putter is None:
+            self.logger.warning("No room state putter available")
+            return False
+        return await self.room_state_putter(room_id, event_type, state_key, content)
 
     async def send_message(
         self,
@@ -136,8 +185,14 @@ class HookContext:
         *,
         thread_id: str | None = None,
         extra_content: dict[str, Any] | None = None,
+        trigger_dispatch: bool = False,
     ) -> str | None:
-        """Send a Matrix message from a hook and return the event ID when available."""
+        """Send a Matrix message from a hook and return the event ID when available.
+
+        When *trigger_dispatch* is True the message uses source_kind
+        ``hook_dispatch`` so that receiving agents process it as if it
+        came from a user (bypassing the agent-not-mentioned filter).
+        """
         return await _send_bound_message(
             self.logger,
             self.message_sender,
@@ -148,6 +203,7 @@ class HookContext:
             thread_id=thread_id,
             extra_content=extra_content,
             requester_id=_requester_id_for_hook_send(self),
+            trigger_dispatch=trigger_dispatch,
         )
 
 
@@ -223,6 +279,7 @@ class ScheduleFiredContext(HookContext):
         *,
         thread_id: str | None | _UnsetType = _UNSET,
         extra_content: dict[str, Any] | None = None,
+        trigger_dispatch: bool = False,
     ) -> str | None:
         """Send a Matrix message from a schedule hook and return the event ID when available."""
         resolved_thread_id = self.thread_id if isinstance(thread_id, _UnsetType) else thread_id
@@ -236,6 +293,7 @@ class ScheduleFiredContext(HookContext):
             thread_id=resolved_thread_id,
             extra_content=extra_content,
             requester_id=_requester_id_for_hook_send(self),
+            trigger_dispatch=trigger_dispatch,
         )
 
 
