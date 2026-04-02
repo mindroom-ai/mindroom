@@ -22,6 +22,7 @@ from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_utils import create_session_id
@@ -250,6 +251,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> None:
     """Edit regeneration should use the resolved edited body from a v2 sidecar."""
+    _clear_mxc_cache()
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -305,7 +307,7 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
                         "version": 2,
                         "encoding": "matrix_event_content_json",
                     },
-                    "url": "mxc://server/edit-sidecar",
+                    "url": "mxc://server/edit-sidecar-regeneration",
                 },
                 "m.relates_to": {
                     "event_id": "$original:example.com",
