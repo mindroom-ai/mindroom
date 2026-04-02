@@ -1251,3 +1251,61 @@ class TestUserIdPassthrough:
         assert payload["context"]["input_tokens"] == 12
         assert payload["context"]["window_tokens"] == 100
         assert "utilization_pct" not in payload["context"]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_uses_latest_request_tokens_for_context(self, tmp_path: Path) -> None:
+        """Streaming context metadata should reflect the latest request, not cumulative run usage."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="step one")
+            yield ModelRequestCompletedEvent(
+                model="test-model",
+                model_provider="openai",
+                input_tokens=700,
+                output_tokens=50,
+                total_tokens=750,
+            )
+            yield RunContentEvent(content="step two")
+            yield ModelRequestCompletedEvent(
+                model="test-model",
+                model_provider="openai",
+                input_tokens=120,
+                output_tokens=20,
+                total_tokens=140,
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        config = Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
+        )
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            run_metadata: dict[str, object] = {}
+            async for _chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=config,
+                run_metadata_collector=run_metadata,
+            ):
+                pass
+
+        payload = run_metadata["io.mindroom.ai_run"]
+        assert payload["status"] == "completed"
+        assert payload["usage"]["input_tokens"] == 820
+        assert payload["usage"]["output_tokens"] == 70
+        assert payload["usage"]["total_tokens"] == 890
+        assert payload["context"]["input_tokens"] == 120
+        assert payload["context"]["window_tokens"] == 1000
