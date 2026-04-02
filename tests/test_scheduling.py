@@ -17,7 +17,6 @@ from mindroom.scheduling import (
     CronSchedule,
     ScheduledTaskRecord,
     ScheduledWorkflow,
-    _parse_scheduled_task_record,
     _run_cron_task,
     _run_once_task,
     cancel_all_scheduled_tasks,
@@ -713,9 +712,9 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
 
 @pytest.mark.asyncio
 async def test_run_once_task_marks_completed_after_success() -> None:
-    """One-time tasks should save completion before tombstoning their state."""
+    """One-time tasks should overwrite pending state with completed after firing."""
     client = AsyncMock()
-    client.room_put_state = AsyncMock(side_effect=[object(), object()])
+    client.room_put_state = AsyncMock()
     config = AsyncMock()
     workflow = ScheduledWorkflow(
         schedule_type="once",
@@ -737,28 +736,21 @@ async def test_run_once_task_marks_completed_after_success() -> None:
         await _run_once_task(client, "task_once_completed", workflow, config, _runtime_paths())
 
     execute_mock.assert_awaited_once()
-    assert client.room_put_state.await_count == 2
-
-    status_write = client.room_put_state.await_args_list[0].kwargs
-    assert status_write["room_id"] == "!test:server"
-    assert status_write["event_type"] == _SCHEDULED_TASK_EVENT_TYPE
-    assert status_write["state_key"] == "task_once_completed"
-    assert status_write["content"]["status"] == "completed"
-    assert status_write["content"]["workflow"] == workflow.model_dump_json()
-    assert status_write["content"]["created_at"] == pending_record.created_at.isoformat()
-
-    tombstone_write = client.room_put_state.await_args_list[1].kwargs
-    assert tombstone_write["room_id"] == "!test:server"
-    assert tombstone_write["event_type"] == _SCHEDULED_TASK_EVENT_TYPE
-    assert tombstone_write["state_key"] == "task_once_completed"
-    assert tombstone_write["content"] == {}
+    client.room_put_state.assert_awaited_once()
+    put_kwargs = client.room_put_state.await_args.kwargs
+    assert put_kwargs["room_id"] == "!test:server"
+    assert put_kwargs["event_type"] == _SCHEDULED_TASK_EVENT_TYPE
+    assert put_kwargs["state_key"] == "task_once_completed"
+    assert put_kwargs["content"]["status"] == "completed"
+    assert put_kwargs["content"]["workflow"] == workflow.model_dump_json()
+    assert put_kwargs["content"]["created_at"] == pending_record.created_at.isoformat()
 
 
 @pytest.mark.asyncio
 async def test_run_once_task_marks_failed_after_execution_failure() -> None:
-    """One-time tasks should save failure before tombstoning their state."""
+    """One-time tasks should overwrite pending state with failed when firing fails."""
     client = AsyncMock()
-    client.room_put_state = AsyncMock(side_effect=[object(), object()])
+    client.room_put_state = AsyncMock()
     config = AsyncMock()
     workflow = ScheduledWorkflow(
         schedule_type="once",
@@ -780,18 +772,11 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
         await _run_once_task(client, "task_once_failed", workflow, config, _runtime_paths())
 
     execute_mock.assert_awaited_once()
-    assert client.room_put_state.await_count == 2
-
-    status_write = client.room_put_state.await_args_list[0].kwargs
-    assert status_write["state_key"] == "task_once_failed"
-    assert status_write["content"]["status"] == "failed"
-    assert status_write["content"]["workflow"] == workflow.model_dump_json()
-
-    tombstone_write = client.room_put_state.await_args_list[1].kwargs
-    assert tombstone_write["room_id"] == "!test:server"
-    assert tombstone_write["event_type"] == _SCHEDULED_TASK_EVENT_TYPE
-    assert tombstone_write["state_key"] == "task_once_failed"
-    assert tombstone_write["content"] == {}
+    client.room_put_state.assert_awaited_once()
+    put_kwargs = client.room_put_state.await_args.kwargs
+    assert put_kwargs["state_key"] == "task_once_failed"
+    assert put_kwargs["content"]["status"] == "failed"
+    assert put_kwargs["content"]["workflow"] == workflow.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -1025,65 +1010,6 @@ async def test_get_scheduled_tasks_for_room_includes_cancelled_without_workflow(
     assert tasks[0].task_id == "old_cancelled"
     assert tasks[0].status == "cancelled"
     assert tasks[0].workflow.description == "Cancelled task"
-
-
-def test_parse_scheduled_task_record_returns_none_for_empty_content() -> None:
-    """Empty tombstone content should be ignored during task parsing."""
-    assert _parse_scheduled_task_record("!test:server", "task_tombstoned", {}) is None
-
-
-@pytest.mark.asyncio
-async def test_restore_scheduled_tasks_skips_tombstoned_empty_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Restore should ignore tombstoned empty state events."""
-    client = AsyncMock()
-    config = AsyncMock()
-    future_workflow = ScheduledWorkflow(
-        schedule_type="once",
-        execute_at=datetime.now(UTC) + timedelta(minutes=15),
-        message="Future reminder",
-        description="Future reminder",
-        room_id="!test:server",
-        thread_id="$thread123",
-    )
-    state_response = nio.RoomGetStateResponse.from_dict(
-        [
-            {
-                "type": _SCHEDULED_TASK_EVENT_TYPE,
-                "state_key": "task_tombstoned",
-                "content": {},
-                "event_id": "$state_task_tombstoned",
-                "sender": "@system:server",
-                "origin_server_ts": 1234567890,
-            },
-            {
-                "type": _SCHEDULED_TASK_EVENT_TYPE,
-                "state_key": "task_future",
-                "content": {
-                    "workflow": future_workflow.model_dump_json(),
-                    "status": "pending",
-                },
-                "event_id": "$state_task_future",
-                "sender": "@system:server",
-                "origin_server_ts": 1234567891,
-            },
-        ],
-        room_id="!test:server",
-    )
-    client.room_get_state = AsyncMock(return_value=state_response)
-
-    start_mock = MagicMock(return_value=True)
-    monkeypatch.setattr(scheduling, "_start_scheduled_task", start_mock)
-
-    restored = await restore_scheduled_tasks(
-        client=client,
-        room_id="!test:server",
-        config=config,
-        runtime_paths=_runtime_paths(),
-    )
-
-    assert restored == 1
-    start_mock.assert_called_once()
-    client.room_put_state.assert_not_called()
 
 
 @pytest.mark.asyncio
