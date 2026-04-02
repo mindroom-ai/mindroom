@@ -26,7 +26,7 @@ from mindroom.ai import (
     should_retry_without_inline_media,
     stream_agent_response,
 )
-from mindroom.bot import AgentBot
+from mindroom.bot import AgentBot, _PreparedResponseRuntime
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -83,17 +83,21 @@ class TestUserIdPassthrough:
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response_id")
         bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
-        bot._build_tool_runtime_context = MagicMock(
-            return_value=ToolRuntimeContext(
-                agent_name="general",
-                room_id="!test:localhost",
-                thread_id=None,
-                resolved_thread_id=None,
-                requester_id="@alice:localhost",
-                client=bot.client,
-                config=config,
-                runtime_paths=runtime_paths,
-                storage_path=tmp_path,
+        bot._prepare_response_runtime = MagicMock(
+            return_value=_PreparedResponseRuntime(
+                model_prompt="Hello",
+                tool_context=ToolRuntimeContext(
+                    agent_name="general",
+                    room_id="!test:localhost",
+                    thread_id=None,
+                    resolved_thread_id=None,
+                    requester_id="@alice:localhost",
+                    client=bot.client,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    storage_path=tmp_path,
+                ),
+                execution_identity=MagicMock(),
             ),
         )
 
@@ -144,17 +148,21 @@ class TestUserIdPassthrough:
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
         bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
-        bot._build_tool_runtime_context = MagicMock(
-            return_value=ToolRuntimeContext(
-                agent_name="general",
-                room_id="!test:localhost",
-                thread_id=None,
-                resolved_thread_id=None,
-                requester_id="@bob:localhost",
-                client=bot.client,
-                config=config,
-                runtime_paths=runtime_paths,
-                storage_path=tmp_path,
+        bot._prepare_response_runtime = MagicMock(
+            return_value=_PreparedResponseRuntime(
+                model_prompt="Hello",
+                tool_context=ToolRuntimeContext(
+                    agent_name="general",
+                    room_id="!test:localhost",
+                    thread_id=None,
+                    resolved_thread_id=None,
+                    requester_id="@bob:localhost",
+                    client=bot.client,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    storage_path=tmp_path,
+                ),
+                execution_identity=MagicMock(),
             ),
         )
 

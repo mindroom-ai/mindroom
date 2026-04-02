@@ -537,6 +537,8 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
         bot._resolve_dispatch_action.await_args.kwargs["message_for_decision"]
         == "@mindroom_code:localhost what is 99+1?"
     )
+    payload_builder = bot._execute_dispatch_action.await_args.args[4]
+    await payload_builder(_dispatch_context(bot))
     assert (
         bot._build_dispatch_payload_with_attachments.await_args.kwargs["prompt"]
         == "@mindroom_code:localhost what is 99+1?"

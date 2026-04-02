@@ -302,7 +302,7 @@ class StreamingResponse:
         if not self.accumulated_text.strip() and not allow_empty_progress:
             return True
 
-        effective_thread_id = None if self.room_mode else self.thread_id if self.thread_id else self.reply_to_event_id
+        effective_thread_id = None if self.room_mode else self.thread_id
 
         # Add in-progress marker during streaming (not on final update)
         text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
@@ -518,7 +518,7 @@ async def send_streaming_response(
         client: Matrix client
         room_id: Destination room
         reply_to_event_id: Event to reply to (can be None when in a thread)
-        thread_id: Thread root if already in a thread
+        thread_id: Canonical thread root if sending in a thread
         sender_domain: Sender's homeserver domain for mention formatting
         config: App config for mention formatting
         runtime_paths: Explicit runtime context for mention formatting

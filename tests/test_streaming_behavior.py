@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,6 +18,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY
+from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import (
@@ -34,6 +36,20 @@ from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for,
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+
+async def _aiter(*events: object) -> AsyncIterator[object]:
+    for event in events:
+        yield event
+
+
+def _make_matrix_client_mock() -> AsyncMock:
+    client = AsyncMock()
+    client.rooms = {}
+    client.add_event_callback = MagicMock()
+    client.add_response_callback = MagicMock()
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    return client
 
 
 @pytest.fixture
@@ -117,7 +133,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        helper_bot.client = AsyncMock()
+        helper_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -135,7 +151,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        calc_bot.client = AsyncMock()
+        calc_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -260,7 +276,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        calc_bot.client = AsyncMock()
+        calc_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -329,7 +345,7 @@ class TestStreamingBehavior:
     ) -> None:
         """Test the StreamingResponse class behavior."""
         # Create a mock client
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$stream_123"
@@ -492,7 +508,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_throttled_send_uses_ramp_interval(self) -> None:
         """Integration test: _throttled_send respects the ramped interval."""
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
         mock_response = MagicMock()
         mock_response.__class__ = nio.RoomSendResponse
         mock_response.event_id = "$stream_456"
@@ -519,7 +535,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_char_threshold_can_trigger_before_time_interval(self) -> None:
         """Large enough text chunks should trigger an update even before time interval elapses."""
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
         mock_response = MagicMock()
         mock_response.__class__ = nio.RoomSendResponse
         mock_response.event_id = "$stream_char_1"
@@ -547,7 +563,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_progress_hint_uses_shorter_interval(self) -> None:
         """Tool progress hints should allow faster keepalive edits than steady-state interval."""
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
         mock_response = MagicMock()
         mock_response.__class__ = nio.RoomSendResponse
         mock_response.event_id = "$stream_progress_1"
@@ -579,7 +595,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_progress_hint_can_update_existing_message_before_text(self) -> None:
         """Hidden tool calls should keep an existing thinking message visibly alive."""
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
 
         streaming = StreamingResponse(
             room_id="!test:localhost",
@@ -612,7 +628,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_progress_hint_creates_initial_message_on_cold_start(self) -> None:
         """Tool-first streams with hidden tool calls should create an initial placeholder message."""
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
         mock_response = MagicMock()
         mock_response.__class__ = nio.RoomSendResponse
         mock_response.event_id = "$cold_start_1"
@@ -644,7 +660,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_finalize_strips_marker_from_placeholder_only_stream(self) -> None:
         """Finalize should edit out the in-progress marker even when no text was ever emitted."""
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
         mock_response = MagicMock()
         mock_response.__class__ = nio.RoomSendResponse
         mock_response.event_id = "$placeholder_msg"
@@ -689,7 +705,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_finalize_does_not_overwrite_existing_message_without_placeholder(self) -> None:
         """Finalize should not force a placeholder onto arbitrary existing messages."""
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
 
         streaming = StreamingResponse(
             room_id="!test:localhost",
@@ -713,7 +729,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_send_streaming_response_finalizes_adopted_placeholder_without_chunks(self) -> None:
         """Adopted thinking placeholders should still get a terminal edit when no text arrives."""
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
         edited_contents: list[tuple[dict[str, object], str]] = []
 
         async def record_edit(
@@ -755,6 +771,102 @@ class TestStreamingBehavior:
         assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
 
     @pytest.mark.asyncio
+    async def test_streaming_first_send_uses_resolved_thread_root(
+        self,
+        mock_helper_agent: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming without a preexisting placeholder should keep the original thread root."""
+
+        @asynccontextmanager
+        async def noop_typing(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
+            yield
+
+        async def response_stream() -> AsyncIterator[str]:
+            yield "Hello from the original thread"
+
+        async def empty_request_knowledge_managers(
+            _agent_names: list[str],
+            _execution_identity: object,
+        ) -> dict[str, object]:
+            return {}
+
+        async def no_latest_thread_event(
+            _client: object,
+            _room_id: str,
+            _thread_id: str | None,
+            _reply_to_event_id: str | None,
+            _existing_event_id: str | None = None,
+        ) -> None:
+            return None
+
+        sent_contents: list[dict[str, object]] = []
+        config = self.config
+        bot = AgentBot(
+            mock_helper_agent,
+            tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=True,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        bot.client = MagicMock(rooms={})
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._ensure_request_knowledge_managers = empty_request_knowledge_managers
+        envelope = MessageEnvelope(
+            source_event_id="$reply_plain:localhost",
+            room_id="!test:localhost",
+            thread_id=None,
+            resolved_thread_id="$thread_root:localhost",
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="Continue",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="helper",
+            source_kind="message",
+        )
+
+        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> str:
+            sent_contents.append(content)
+            return "$stream_1"
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            _new_text: str,
+        ) -> str:
+            return "$stream_1"
+
+        with (
+            patch("mindroom.bot.stream_agent_response", new=MagicMock(return_value=response_stream())),
+            patch("mindroom.bot.typing_indicator", new=noop_typing),
+            patch("mindroom.streaming.get_latest_thread_event_id_if_needed", new=no_latest_thread_event),
+            patch("mindroom.streaming.send_message", new=record_send),
+            patch("mindroom.streaming.edit_message", new=record_edit),
+        ):
+            delivery = await bot._process_and_respond_streaming(
+                room_id="!test:localhost",
+                prompt="Continue",
+                reply_to_event_id="$reply_plain:localhost",
+                thread_id=None,
+                thread_history=[],
+                existing_event_id=None,
+                user_id="@user:localhost",
+                response_envelope=envelope,
+                correlation_id="$request:localhost",
+            )
+
+        assert delivery.event_id == "$stream_1"
+        assert sent_contents
+        first_content = sent_contents[0]
+        assert first_content["m.relates_to"]["rel_type"] == "m.thread"
+        assert first_content["m.relates_to"]["event_id"] == "$thread_root:localhost"
+        assert first_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply_plain:localhost"
+
+    @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(
         self,
         mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
@@ -762,7 +874,7 @@ class TestStreamingBehavior:
     ) -> None:
         """Test that in-progress marker is shown during streaming but not in final message."""
         # Create a mock client
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$stream_123"
@@ -801,7 +913,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_cancelled_stream_preserves_partial_text_with_suffix(self) -> None:
         """Cancellation should keep streamed text and append a stop marker."""
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
         edited_texts: list[str] = []
 
         async def record_edit(
@@ -842,7 +954,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_stream_error_preserves_partial_text_and_appends_error_hint(self) -> None:
         """Stream failures should remove pending state and append an error hint."""
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
         edited_texts: list[str] = []
 
         async def record_edit(
@@ -887,7 +999,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_stream_error_replaces_placeholder_when_no_text_arrives(self) -> None:
         """Stream failures before first chunk should replace a thinking placeholder with an error hint."""
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
         edited_texts: list[str] = []
 
         async def record_edit(
@@ -954,7 +1066,7 @@ class TestStreamingConfig:
         runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
         config = bind_runtime_paths(config, runtime_paths)
 
-        mock_client = AsyncMock()
+        mock_client = _make_matrix_client_mock()
         mock_response = MagicMock()
         mock_response.__class__ = nio.RoomSendResponse
         mock_response.event_id = "$cfg_test"
