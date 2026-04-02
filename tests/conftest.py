@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import AsyncGenerator, Callable, Generator
+from itertools import count
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,7 @@ from aioresponses import aioresponses
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.matrix.client import ResolvedVisibleMessage
 
 __all__ = [
     "TEST_ACCESS_TOKEN",
@@ -21,12 +23,14 @@ __all__ = [
     "build_private_template_dir",
     "bypass_authorization",
     "create_mock_room",
+    "make_visible_message",
     "orchestrator_runtime_paths",
     "runtime_paths_for",
     "test_runtime_paths",
 ]
 
 _TEST_RUNTIME_PATHS_BY_CONFIG_ID: dict[int, RuntimePaths] = {}
+_VISIBLE_MESSAGE_IDS = count(1)
 
 
 class FakeCredentialsManager:
@@ -160,6 +164,29 @@ def create_mock_room(
     else:
         room.users = {}
     return room
+
+
+def make_visible_message(
+    *,
+    sender: str = "@user:localhost",
+    body: str = "",
+    event_id: str | None = None,
+    timestamp: int = 0,
+    content: dict[str, object] | None = None,
+    thread_id: str | None = None,
+) -> ResolvedVisibleMessage:
+    """Build one typed visible message for thread/history tests."""
+    resolved_content = dict(content) if isinstance(content, dict) else {}
+    if "body" not in resolved_content and body:
+        resolved_content["body"] = body
+    return ResolvedVisibleMessage.synthetic(
+        sender=sender,
+        body=body,
+        event_id=event_id or f"$visible-{next(_VISIBLE_MESSAGE_IDS)}",
+        timestamp=timestamp,
+        content=resolved_content or None,
+        thread_id=thread_id,
+    )
 
 
 @pytest.fixture

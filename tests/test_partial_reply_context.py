@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tempfile
-from dataclasses import dataclass
+from itertools import count
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -41,6 +41,8 @@ from mindroom.streaming import (
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
+_VISIBLE_MESSAGE_IDS = count(1)
+
 
 def _make_config() -> Config:
     """Return a minimal runtime-bound config for partial-reply tests."""
@@ -51,24 +53,6 @@ def _make_config() -> Config:
         },
     )
     return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
-
-
-@dataclass
-class _TestVisibleMessage:
-    """Minimal typed message object for classification-only test cases."""
-
-    sender: str
-    body: object
-    event_id: str | None
-    timestamp: int | None
-    content: dict[str, object]
-    stream_status: str | None
-    thread_id: str | None = None
-    latest_event_id: str | None = None
-
-    @property
-    def visible_event_id(self) -> str | None:
-        return self.latest_event_id or self.event_id
 
 
 def _get_unseen_messages(
@@ -95,31 +79,20 @@ def _get_unseen_messages(
 def _make_visible_message(
     *,
     sender: str = "@user:localhost",
-    body: object = "",
+    body: str = "",
     event_id: str | None = None,
     timestamp: int | None = None,
     stream_status: str | None = None,
     content: dict[str, object] | None = None,
-) -> VisibleMessageLike | _TestVisibleMessage:
+) -> VisibleMessageLike:
     resolved_content = dict(content) if isinstance(content, dict) else {}
     if stream_status is not None:
         resolved_content[STREAM_STATUS_KEY] = stream_status
-    if event_id is None or not isinstance(body, str):
-        return _TestVisibleMessage(
-            sender=sender,
-            body=body,
-            event_id=event_id,
-            timestamp=timestamp,
-            content=resolved_content,
-            stream_status=stream_status,
-            latest_event_id=event_id,
-        )
-
     resolved_content.setdefault("body", body)
     return ResolvedVisibleMessage.synthetic(
         sender=sender,
         body=body,
-        event_id=event_id,
+        event_id=event_id or f"e{next(_VISIBLE_MESSAGE_IDS)}",
         timestamp=timestamp or 0,
         content=resolved_content,
     )
@@ -182,8 +155,12 @@ class TestClassifyPartialReply:
         """Treat initial sent-but-not-finalized messages as still in progress."""
         assert (
             _classify_partial_reply(
-                _make_visible_message(body="Thinking...", stream_status=STREAM_STATUS_PENDING),
-                active_event_ids=set(),
+                _make_visible_message(
+                    event_id="e_pending",
+                    body="Thinking...",
+                    stream_status=STREAM_STATUS_PENDING,
+                ),
+                active_event_ids={"e_pending"},
             )
             is _PartialReplyKind.IN_PROGRESS
         )
@@ -192,8 +169,12 @@ class TestClassifyPartialReply:
         """Treat actively edited streaming messages as still in progress."""
         assert (
             _classify_partial_reply(
-                _make_visible_message(body="Partial answer ⋯", stream_status=STREAM_STATUS_STREAMING),
-                active_event_ids=set(),
+                _make_visible_message(
+                    event_id="e_streaming",
+                    body="Partial answer ⋯",
+                    stream_status=STREAM_STATUS_STREAMING,
+                ),
+                active_event_ids={"e_streaming"},
             )
             is _PartialReplyKind.IN_PROGRESS
         )
@@ -273,16 +254,6 @@ class TestClassifyPartialReply:
         assert (
             _classify_partial_reply(
                 _make_visible_message(body="Completed response"),
-                active_event_ids=set(),
-            )
-            is None
-        )
-
-    def test_non_text_body_without_metadata_is_not_partial(self) -> None:
-        """Ignore malformed legacy bodies when there is no stream-status metadata to trust."""
-        assert (
-            _classify_partial_reply(
-                _make_visible_message(body={"structured": True}),
                 active_event_ids=set(),
             )
             is None

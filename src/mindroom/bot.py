@@ -4761,7 +4761,6 @@ class AgentBot:
             logger=self.logger,
             response_tracker=self.response_tracker,
             derive_conversation_context=self._derive_conversation_context,
-            requester_user_id_for_event=self._requester_user_id_for_event,
             resolve_reply_thread_id=self._resolve_reply_thread_id,
             send_response=self._send_response,
             send_skill_command_response=self._send_skill_command_response,

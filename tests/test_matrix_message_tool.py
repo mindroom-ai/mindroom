@@ -20,7 +20,7 @@ from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
 
 
 @pytest.fixture(autouse=True)
@@ -478,7 +478,7 @@ async def test_matrix_message_edit_skips_interactive_processing() -> None:
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id="$ctx-thread:localhost")
     thread_messages = [
-        {"event_id": "$latest", "timestamp": 1, "sender": "@alice:localhost", "body": "latest"},
+        make_visible_message(event_id="$latest", timestamp=1, sender="@alice:localhost", body="latest"),
     ]
 
     with (
@@ -513,7 +513,9 @@ async def test_matrix_message_read_thread_enforces_max_limit() -> None:
     """Thread reads should be bounded by the configured max limit."""
     tool = MatrixMessageTools()
     ctx = _make_context()
-    thread_messages = [{"event_id": f"${index}", "timestamp": index, "body": f"m{index}"} for index in range(100)]
+    thread_messages = [
+        make_visible_message(event_id=f"${index}", timestamp=index, body=f"m{index}") for index in range(100)
+    ]
 
     with (
         patch(
@@ -538,8 +540,13 @@ async def test_matrix_message_read_thread_includes_edit_options() -> None:
     ctx = _make_context()
     ctx.client.user_id = "@mindroom_general:localhost"
     thread_messages = [
-        {"event_id": "$one", "timestamp": 1, "sender": "@alice:localhost", "body": "earlier message"},
-        {"event_id": "$two", "timestamp": 2, "sender": "@mindroom_general:localhost", "body": "latest message"},
+        make_visible_message(event_id="$one", timestamp=1, sender="@alice:localhost", body="earlier message"),
+        make_visible_message(
+            event_id="$two",
+            timestamp=2,
+            sender="@mindroom_general:localhost",
+            body="latest message",
+        ),
     ]
 
     with (
@@ -583,8 +590,8 @@ async def test_matrix_message_thread_list_returns_thread_messages() -> None:
     ctx = _make_context(thread_id=None)
     ctx.client.user_id = "@mindroom_general:localhost"
     thread_messages = [
-        {"event_id": "$one", "timestamp": 1, "sender": "@mindroom_general:localhost", "body": "first"},
-        {"event_id": "$two", "timestamp": 2, "sender": "@alice:localhost", "body": "second"},
+        make_visible_message(event_id="$one", timestamp=1, sender="@mindroom_general:localhost", body="first"),
+        make_visible_message(event_id="$two", timestamp=2, sender="@alice:localhost", body="second"),
     ]
 
     with (
@@ -605,7 +612,7 @@ async def test_matrix_message_thread_list_returns_thread_messages() -> None:
     assert payload["status"] == "ok"
     assert payload["action"] == "thread-list"
     assert payload["thread_id"] == "$thread-other:localhost"
-    assert payload["messages"] == [thread_messages[-1]]
+    assert payload["messages"] == [thread_messages[-1].to_dict()]
     assert payload["edit_options"][0]["event_id"] == "$two"
     mock_fetch.assert_awaited_once_with(ctx.client, ctx.room_id, "$thread-other:localhost")
 
@@ -711,8 +718,8 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id="$ctx-thread:localhost")
     thread_messages = [
-        {"event_id": "$one", "timestamp": 1, "body": "first"},
-        {"event_id": "$two", "timestamp": 2, "body": "second"},
+        make_visible_message(event_id="$one", timestamp=1, body="first"),
+        make_visible_message(event_id="$two", timestamp=2, body="second"),
     ]
 
     with (
@@ -729,7 +736,7 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
     assert payload["status"] == "ok"
     assert payload["action"] == "read"
     assert payload["thread_id"] == "$thread-other:localhost"
-    assert payload["messages"] == [thread_messages[-1]]
+    assert payload["messages"] == [thread_messages[-1].to_dict()]
     mock_fetch.assert_awaited_once_with(ctx.client, ctx.room_id, "$thread-other:localhost")
     ctx.client.room_messages.assert_not_awaited()
 
@@ -740,8 +747,8 @@ async def test_matrix_message_edit_happy_path() -> None:
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id="$ctx-thread:localhost")
     thread_messages = [
-        {"event_id": "$one", "timestamp": 1, "sender": "@alice:localhost", "body": "first"},
-        {"event_id": "$latest", "timestamp": 2, "sender": "@alice:localhost", "body": "latest"},
+        make_visible_message(event_id="$one", timestamp=1, sender="@alice:localhost", body="first"),
+        make_visible_message(event_id="$latest", timestamp=2, sender="@alice:localhost", body="latest"),
     ]
 
     with (

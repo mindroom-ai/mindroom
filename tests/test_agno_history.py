@@ -71,7 +71,7 @@ from mindroom.history.types import (
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, make_visible_message
 
 
 @dataclass
@@ -2077,8 +2077,8 @@ async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(
     live_agent = _agent()
     live_agent.role = "Verbose role " + ("r" * 200)
     thread_history = [
-        {"sender": "alice", "body": "Earlier context"},
-        {"sender": "bob", "body": "More context"},
+        make_visible_message(sender="alice", body="Earlier context"),
+        make_visible_message(sender="bob", body="More context"),
     ]
 
     with (
@@ -2163,8 +2163,8 @@ async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_repla
     config, runtime_paths = _make_config(tmp_path)
     live_agent = _agent()
     thread_history = [
-        {"sender": "alice", "body": "Earlier context"},
-        {"sender": "bob", "body": "More context"},
+        make_visible_message(sender="alice", body="Earlier context"),
+        make_visible_message(sender="bob", body="More context"),
     ]
 
     with (
@@ -2683,9 +2683,9 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
                 config,
                 scope_context=scope_context,
                 thread_history=[
-                    {"event_id": "event-1", "sender": "alice", "body": "Already seen"},
-                    {"event_id": "event-2", "sender": "alice", "body": "Fresh follow-up"},
-                    {"event_id": "event-3", "sender": "alice", "body": "Current message body"},
+                    make_visible_message(event_id="event-1", sender="alice", body="Already seen"),
+                    make_visible_message(event_id="event-2", sender="alice", body="Fresh follow-up"),
+                    make_visible_message(event_id="event-3", sender="alice", body="Current message body"),
                 ],
                 reply_to_event_id="event-3",
             )

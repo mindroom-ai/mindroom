@@ -69,7 +69,6 @@ class CommandHandlerContext:
         [str, EventInfo],
         Awaitable[tuple[bool, str | None, list[ResolvedVisibleMessage]]],
     ]
-    requester_user_id_for_event: Callable[[CommandEvent], str]
     resolve_reply_thread_id: Callable[..., str | None]
     send_response: Callable[..., Awaitable[str | None]]
     send_skill_command_response: Callable[..., Awaitable[str | None]]

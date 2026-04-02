@@ -22,7 +22,14 @@ from mindroom.constants import (
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamResolution
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_ACCESS_TOKEN,
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    make_visible_message,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -121,16 +128,12 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
 
     # Mock thread history showing HomeAssistant has participated
     thread_history = [
-        {
-            "event_id": "$thread_root",
-            "sender": "@user:example.com",
-            "content": {"body": "@home what lights are on?"},
-        },
-        {
-            "event_id": "$home_response",
-            "sender": "@mindroom_home:localhost",  # HomeAssistant's response
-            "content": {"body": "The living room and kitchen lights are currently on."},
-        },
+        make_visible_message(event_id="$thread_root", sender="@user:example.com", body="@home what lights are on?"),
+        make_visible_message(
+            event_id="$home_response",
+            sender="@mindroom_home:localhost",
+            body="The living room and kitchen lights are currently on.",
+        ),
     ]
 
     # Mock context extraction
@@ -182,16 +185,8 @@ async def test_voice_transcription_permissions_use_original_sender(mock_home_bot
     }
 
     thread_history = [
-        {
-            "event_id": "$thread_root",
-            "sender": "@user:localhost",
-            "content": {"body": "@home status?"},
-        },
-        {
-            "event_id": "$home_response",
-            "sender": "@mindroom_home:localhost",
-            "content": {"body": "All good"},
-        },
+        make_visible_message(event_id="$thread_root", sender="@user:localhost", body="@home status?"),
+        make_visible_message(event_id="$home_response", sender="@mindroom_home:localhost", body="All good"),
     ]
 
     with (
@@ -298,16 +293,8 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
     }
 
     thread_history = [
-        {
-            "event_id": "$thread_root",
-            "sender": "@user:example.com",
-            "content": {"body": "Voice root"},
-        },
-        {
-            "event_id": "$home_response",
-            "sender": "@mindroom_home:localhost",
-            "content": {"body": "Ready"},
-        },
+        make_visible_message(event_id="$thread_root", sender="@user:example.com", body="Voice root"),
+        make_visible_message(event_id="$home_response", sender="@mindroom_home:localhost", body="Ready"),
     ]
 
     with (
@@ -362,16 +349,8 @@ async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_h
     }
 
     thread_history = [
-        {
-            "event_id": "$thread_root",
-            "sender": "@user:example.com",
-            "content": {"body": "Voice root"},
-        },
-        {
-            "event_id": "$home_response",
-            "sender": "@mindroom_home:localhost",
-            "content": {"body": "Ready"},
-        },
+        make_visible_message(event_id="$thread_root", sender="@user:example.com", body="Voice root"),
+        make_visible_message(event_id="$home_response", sender="@mindroom_home:localhost", body="Ready"),
     ]
     attachment_audio = [Audio(content=b"voice-bytes", mime_type="audio/ogg")]
 
@@ -415,21 +394,13 @@ async def test_followup_text_in_voice_thread_recovers_audio(mock_home_bot: Agent
     }
 
     thread_history = [
-        {
-            "event_id": "$voice_root",
-            "sender": "@user:example.com",
-            "content": {"body": "audio.ogg"},
-        },
-        {
-            "event_id": "$fallback_relay",
-            "sender": f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-            "content": {"body": f"{VOICE_PREFIX}[Attached voice message]"},
-        },
-        {
-            "event_id": "$home_response",
-            "sender": "@mindroom_home:localhost",
-            "content": {"body": "I heard you"},
-        },
+        make_visible_message(event_id="$voice_root", sender="@user:example.com", body="audio.ogg"),
+        make_visible_message(
+            event_id="$fallback_relay",
+            sender=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
+            body=f"{VOICE_PREFIX}[Attached voice message]",
+        ),
+        make_visible_message(event_id="$home_response", sender="@mindroom_home:localhost", body="I heard you"),
     ]
 
     # The voice root is an audio event; resolve_thread_attachment_ids should

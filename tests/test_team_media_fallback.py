@@ -38,7 +38,7 @@ from mindroom.teams import (
     team_response_stream,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -239,7 +239,7 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
-            thread_history=[{"sender": "user", "body": "Old thread context"}],
+            thread_history=[make_visible_message(sender="user", body="Old thread context")],
             orchestrator=orchestrator,
             execution_identity=None,
             session_id="session-123",
@@ -285,9 +285,9 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
         scope_context.storage.upsert_session(scope_context.session)
 
     thread_history = [
-        {"event_id": "event-1", "sender": "user", "body": "Already seen"},
-        {"event_id": "event-2", "sender": "user", "body": "Fresh follow-up"},
-        {"event_id": "event-3", "sender": "user", "body": "Current message body"},
+        make_visible_message(event_id="event-1", sender="user", body="Already seen"),
+        make_visible_message(event_id="event-2", sender="user", body="Fresh follow-up"),
+        make_visible_message(event_id="event-3", sender="user", body="Current message body"),
     ]
 
     with (
@@ -368,8 +368,8 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
             thread_history=[
-                {"event_id": "event-1", "sender": "user", "body": "Fresh follow-up"},
-                {"event_id": "event-2", "sender": "user", "body": "Current message body"},
+                make_visible_message(event_id="event-1", sender="user", body="Fresh follow-up"),
+                make_visible_message(event_id="event-2", sender="user", body="Current message body"),
             ],
             orchestrator=orchestrator,
             execution_identity=None,
@@ -990,7 +990,7 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
             async for chunk in team_response_stream(
                 agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
                 message="Analyze this.",
-                thread_history=[{"sender": "user", "body": "Old thread context"}],
+                thread_history=[make_visible_message(sender="user", body="Old thread context")],
                 orchestrator=orchestrator,
                 execution_identity=None,
                 session_id="session-123",
@@ -1060,9 +1060,9 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
                 agent_ids=[config.get_ids(runtime_paths)["general"]],
                 message="Analyze this.",
                 thread_history=[
-                    {"event_id": "event-1", "sender": "user", "body": "Already seen"},
-                    {"event_id": "event-2", "sender": "user", "body": "Fresh follow-up"},
-                    {"event_id": "event-3", "sender": "user", "body": "Current message body"},
+                    make_visible_message(event_id="event-1", sender="user", body="Already seen"),
+                    make_visible_message(event_id="event-2", sender="user", body="Fresh follow-up"),
+                    make_visible_message(event_id="event-3", sender="user", body="Current message body"),
                 ],
                 orchestrator=orchestrator,
                 execution_identity=None,

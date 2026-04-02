@@ -238,7 +238,6 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         logger=MagicMock(),
         response_tracker=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
-        requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         resolve_reply_thread_id=MagicMock(return_value=None),
         send_response=AsyncMock(return_value=None),
         send_skill_command_response=AsyncMock(return_value=None),
