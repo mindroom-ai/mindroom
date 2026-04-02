@@ -1109,7 +1109,7 @@ async def _record_thread_message(
     event: nio.RoomMessageText,
     *,
     event_info: EventInfo,
-    client: nio.AsyncClient,
+    client: nio.AsyncClient | None,
     thread_id: str,
     root_message_found: bool,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
@@ -1142,7 +1142,7 @@ async def _record_thread_message(
 
 
 async def _apply_latest_edits_to_messages(
-    client: nio.AsyncClient,
+    client: nio.AsyncClient | None,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText, str | None]],
@@ -1362,6 +1362,81 @@ async def _resolve_thread_history_edits_via_relations(
     return latest_edits_by_original_event_id
 
 
+async def _fetch_thread_snapshot_via_relations(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+) -> list[ResolvedVisibleMessage]:
+    """Fetch preview-only thread context through relations plus the root event."""
+    try:
+        root_response = await client.room_get_event(room_id, thread_id)
+    except Exception as exc:
+        msg = f"root lookup failed for {thread_id}"
+        raise _ThreadHistoryFastPathUnavailableError(msg) from exc
+    if not isinstance(root_response, nio.RoomGetEventResponse):
+        msg = f"failed to fetch thread root {thread_id}"
+        raise _ThreadHistoryFastPathUnavailableError(msg)
+
+    relation_events = await _collect_related_events(
+        client,
+        room_id,
+        thread_id,
+        rel_type=RelationshipType.thread,
+        event_type="m.room.message",
+    )
+    thread_events: list[nio.RoomMessageText] = []
+    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText, str | None]] = {}
+    for event in relation_events:
+        if not isinstance(event, nio.RoomMessageText):
+            continue
+        event_info = EventInfo.from_event(event.source)
+        if _record_latest_thread_edit(
+            event,
+            event_info=event_info,
+            latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+        ):
+            continue
+        if event_info.thread_id == thread_id:
+            thread_events.append(event)
+    if not thread_events:
+        msg = f"no direct thread children returned for {thread_id}"
+        raise _ThreadHistoryFastPathUnavailableError(msg)
+
+    messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
+    root_event = root_response.event
+    root_message_event = root_event if isinstance(root_event, nio.RoomMessageText) else None
+    if root_message_event is not None:
+        await _record_thread_message(
+            root_message_event,
+            event_info=EventInfo.from_event(root_message_event.source),
+            client=None,
+            thread_id=thread_id,
+            root_message_found=False,
+            messages_by_event_id=messages_by_event_id,
+        )
+
+    root_message_found = root_message_event is not None
+    for thread_event in thread_events:
+        root_message_found = await _record_thread_message(
+            thread_event,
+            event_info=EventInfo.from_event(thread_event.source),
+            client=None,
+            thread_id=thread_id,
+            root_message_found=root_message_found,
+            messages_by_event_id=messages_by_event_id,
+        )
+
+    await _apply_latest_edits_to_messages(
+        None,
+        messages_by_event_id=messages_by_event_id,
+        latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+        required_thread_id=thread_id,
+    )
+    messages = list(messages_by_event_id.values())
+    _sort_thread_history(messages, thread_id=thread_id)
+    return messages
+
+
 async def _fetch_thread_history_via_relations(
     client: nio.AsyncClient,
     room_id: str,
@@ -1516,7 +1591,7 @@ async def fetch_thread_snapshot(
     """Fetch lightweight thread context for dispatch decisions."""
     try:
         return thread_history_result(
-            await _fetch_thread_history_via_relations(client, room_id, thread_id),
+            await _fetch_thread_snapshot_via_relations(client, room_id, thread_id),
             is_full_history=False,
         )
     except _ThreadHistoryFastPathUnavailableError:

@@ -322,7 +322,7 @@ class TestThreadHistory:
 
         with (
             patch(
-                "mindroom.matrix.client._fetch_thread_history_via_relations",
+                "mindroom.matrix.client._fetch_thread_snapshot_via_relations",
                 new=AsyncMock(side_effect=_ThreadHistoryFastPathUnavailableError("unsupported")),
             ),
             patch(
@@ -365,6 +365,58 @@ class TestThreadHistory:
         assert snapshot.is_full_history is True
         mock_room_scan.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
         client.room_messages.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_snapshot_keeps_sidecar_preview_without_download_or_replacement_lookup(self) -> None:
+        """Snapshot fetch should stay preview-only and avoid per-message edit hydration work."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="preview root",
+            server_timestamp=1000,
+            source_content={
+                "body": "preview root",
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/root-sidecar",
+            },
+        )
+        thread_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        client = self._make_relations_client(
+            root_event=root_event,
+            relations={
+                self._relation_key("$thread_root", RelationshipType.thread): [thread_event],
+            },
+        )
+        client.download = AsyncMock()
+
+        snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
+
+        assert isinstance(snapshot, ThreadHistoryResult)
+        assert snapshot.is_full_history is False
+        assert [message.body for message in snapshot] == ["preview root", "reply"]
+        client.download.assert_not_awaited()
+        assert client.room_get_event_relations.call_args_list == [
+            call(
+                "!room:localhost",
+                "$thread_root",
+                rel_type=RelationshipType.thread,
+                event_type="m.room.message",
+                direction=nio.MessageDirection.back,
+                limit=None,
+            ),
+        ]
 
     @pytest.mark.asyncio
     async def test_latest_thread_event_id_uses_relations_fast_path(self) -> None:

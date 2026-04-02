@@ -5082,7 +5082,7 @@ class TestAgentBot:
 
         with (
             patch(
-                "mindroom.matrix.client._fetch_thread_history_via_relations",
+                "mindroom.matrix.client._fetch_thread_snapshot_via_relations",
                 new=AsyncMock(side_effect=_ThreadHistoryFastPathUnavailableError("unsupported")),
             ),
             patch(
