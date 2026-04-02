@@ -231,7 +231,9 @@ defaults:
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
   compress_tool_results: true      # Compress tool results in history to save context
-  # Auto-compaction is disabled until you author a compaction block.
+  # Auto-compaction stays off until you author defaults.compaction
+  # or a non-empty per-agent/per-team compaction override.
+  # A bare compaction: {} only inherits authored defaults.
   # compaction:
   #   enabled: true
   #   threshold_percent: 0.8
