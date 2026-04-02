@@ -1590,44 +1590,7 @@ class AgentBot:
         )
 
         if result:
-            selected_value, thread_id = result
-            # User selected an option from an interactive question
-
-            # Check if we should process this reaction
-            thread_history = []
-            if thread_id:
-                thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-
-            # Send immediate acknowledgment
-            ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
-            # Matrix doesn't allow reply relations to events that already have relations (reactions)
-            # In threads, omit reply_to_event_id; the thread_id ensures correct placement
-            ack_event_id = await self._send_response(
-                room.room_id,
-                None if thread_id else event.reacts_to,
-                ack_text,
-                thread_id,
-            )
-
-            if not ack_event_id:
-                self.logger.error("Failed to send acknowledgment for reaction")
-                return
-
-            # Generate the response, editing the acknowledgment message
-            # Note: existing_event_id is only used for interactive questions to edit the acknowledgment
-            prompt = f"The user selected: {selected_value}"
-            response_event_id = await self._generate_response(
-                room_id=room.room_id,
-                prompt=prompt,
-                reply_to_event_id=event.reacts_to,
-                thread_id=thread_id,
-                thread_history=thread_history,
-                existing_event_id=ack_event_id,  # Edit the acknowledgment instead of creating new message
-                existing_event_is_placeholder=False,
-                user_id=event.sender,
-            )
-            # Mark the original interactive question as responded
-            self.response_tracker.mark_responded(event.reacts_to, response_event_id)
+            await self._handle_interactive_reaction_result(room, event, result)
             return
 
         await self._emit_reaction_received_hooks(
@@ -1635,6 +1598,52 @@ class AgentBot:
             event=event,
             correlation_id=event.event_id,
         )
+
+    async def _handle_interactive_reaction_result(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.ReactionEvent,
+        result: tuple[str, str | None],
+    ) -> None:
+        """Handle one validated interactive reaction selection."""
+        assert self.client is not None
+        selected_value, thread_id = result
+        thread_history = await fetch_thread_history(self.client, room.room_id, thread_id) if thread_id else []
+
+        ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
+        # Matrix doesn't allow reply relations to events that already have relations (reactions).
+        # In threads, omit reply_to_event_id; the thread_id ensures correct placement.
+        ack_event_id = await self._send_response(
+            room.room_id,
+            None if thread_id else event.reacts_to,
+            ack_text,
+            thread_id,
+        )
+        if not ack_event_id:
+            self.logger.error("Failed to send acknowledgment for reaction")
+            return
+
+        prompt = f"The user selected: {selected_value}"
+        try:
+            response_event_id = await self._generate_response(
+                room_id=room.room_id,
+                prompt=prompt,
+                reply_to_event_id=event.reacts_to,
+                thread_id=thread_id,
+                thread_history=thread_history,
+                existing_event_id=ack_event_id,
+                existing_event_is_placeholder=True,
+                user_id=event.sender,
+            )
+        except _SuppressedPlaceholderCleanupError:
+            self.logger.warning(
+                "Suppressed interactive acknowledgment cleanup failed",
+                source_event_id=event.reacts_to,
+                acknowledgment_event_id=ack_event_id,
+            )
+            return
+        if response_event_id is not None:
+            self.response_tracker.mark_responded(event.reacts_to, response_event_id)
 
     async def _build_dispatch_payload_with_attachments(
         self,
@@ -4483,9 +4492,9 @@ class AgentBot:
             thread_id: Thread ID if in a thread
             thread_history: Thread history for context
             existing_event_id: If provided, edit this message instead of sending a new one
-                             (only used for interactive question responses)
-            existing_event_is_placeholder: Whether `existing_event_id` points at the
-                             visible startup placeholder sent before full hydration
+                             (used for placeholders and interactive acknowledgments)
+            existing_event_is_placeholder: Whether `existing_event_id` points at a
+                             provisional visible event that may be cleaned up on suppression
             user_id: User ID of the sender for identifying user messages in history
             media: Optional multimodal inputs (audio/images/files/videos)
             attachment_ids: Attachment IDs available for tool-side file processing

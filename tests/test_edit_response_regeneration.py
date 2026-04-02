@@ -1123,7 +1123,87 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         # Verify that _generate_response was called with the acknowledgment event ID for editing
         call_kwargs = mock_generate_response.call_args.kwargs
         assert call_kwargs["existing_event_id"] == "$ack_event:example.com"
-        assert call_kwargs["existing_event_is_placeholder"] is False
+        assert call_kwargs["existing_event_is_placeholder"] is True
+
+
+@pytest.mark.asyncio
+async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppressed(tmp_path: Path) -> None:
+    """A suppressed interactive response must not mark the original question completed."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    config = _bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": {
+                    "display_name": "Test Agent",
+                    "rooms": ["!test:example.com"],
+                },
+            },
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {"test_agent": ["@user:example.com"]},
+            },
+        ),
+        tmp_path,
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+    bot.logger = MagicMock()
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+    reaction_event = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "event_id": "$question:example.com",
+                    "key": "1️⃣",
+                    "rel_type": "m.annotation",
+                },
+            },
+            "event_id": "$reaction:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": "!test:example.com",
+        },
+    )
+    reaction_event.reacts_to = "$question:example.com"
+    reaction_event.key = "1️⃣"
+
+    with (
+        patch("mindroom.bot.interactive.handle_reaction", new_callable=AsyncMock) as mock_handle_reaction,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
+        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
+        patch("mindroom.bot.fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
+    ):
+        mock_handle_reaction.return_value = ("Option 1", "thread_id")
+        mock_send_response.return_value = "$ack_event:example.com"
+        mock_generate_response.return_value = None
+        mock_fetch_history.return_value = []
+
+        await bot._on_reaction(room, reaction_event)
+
+        assert bot.response_tracker.has_responded("$question:example.com") is False
+        assert bot.response_tracker.get_response_event_id("$question:example.com") is None
+        call_kwargs = mock_generate_response.call_args.kwargs
+        assert call_kwargs["existing_event_id"] == "$ack_event:example.com"
+        assert call_kwargs["existing_event_is_placeholder"] is True
 
 
 @pytest.mark.asyncio
