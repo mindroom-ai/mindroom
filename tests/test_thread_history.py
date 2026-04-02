@@ -367,8 +367,8 @@ class TestThreadHistory:
         client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_keeps_sidecar_preview_without_download_or_replacement_lookup(self) -> None:
-        """Snapshot fetch should stay preview-only and avoid per-message edit hydration work."""
+    async def test_fetch_thread_snapshot_keeps_sidecar_preview_without_download(self) -> None:
+        """Snapshot fetch should stay preview-only even when it checks visible edits."""
         root_event = self._make_text_event(
             event_id="$thread_root",
             sender="@user:localhost",
@@ -416,7 +416,79 @@ class TestThreadHistory:
                 direction=nio.MessageDirection.back,
                 limit=None,
             ),
+            call(
+                "!room:localhost",
+                "$thread_root",
+                rel_type=RelationshipType.replacement,
+                event_type="m.room.message",
+                direction=nio.MessageDirection.back,
+                limit=None,
+            ),
+            call(
+                "!room:localhost",
+                "$reply",
+                rel_type=RelationshipType.replacement,
+                event_type="m.room.message",
+                direction=nio.MessageDirection.back,
+                limit=None,
+            ),
         ]
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_snapshot_applies_latest_visible_reply_edit_without_sidecar_download(self) -> None:
+        """Snapshot fetch should follow latest reply edits while keeping preview-only content resolution."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        thread_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="draft",
+            server_timestamp=2000,
+            source_content={
+                "body": "draft",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        edit_event = self._make_text_event(
+            event_id="$edit",
+            sender="@agent:localhost",
+            body="* final mention @mindroom_calculator:localhost",
+            server_timestamp=3000,
+            source_content={
+                "body": "* final mention @mindroom_calculator:localhost",
+                "m.new_content": {
+                    "body": "final mention @mindroom_calculator:localhost",
+                    "msgtype": "m.text",
+                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+            },
+        )
+        client = self._make_relations_client(
+            root_event=root_event,
+            relations={
+                self._relation_key("$thread_root", RelationshipType.thread): [thread_event],
+                self._relation_key("$thread_root", RelationshipType.replacement): [],
+                self._relation_key("$reply", RelationshipType.replacement): [edit_event],
+            },
+        )
+        client.download = AsyncMock()
+
+        snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
+
+        assert isinstance(snapshot, ThreadHistoryResult)
+        assert snapshot.is_full_history is False
+        assert [(message.event_id, message.body, message.visible_event_id) for message in snapshot] == [
+            ("$thread_root", "Root message", "$thread_root"),
+            ("$reply", "final mention @mindroom_calculator:localhost", "$edit"),
+        ]
+        assert snapshot[1].content["m.mentions"] == {"user_ids": ["@mindroom_calculator:localhost"]}
+        client.download.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_latest_thread_event_id_uses_relations_fast_path(self) -> None:

@@ -1426,6 +1426,14 @@ async def _fetch_thread_snapshot_via_relations(
             messages_by_event_id=messages_by_event_id,
         )
 
+    latest_edits_by_original_event_id.update(
+        await _resolve_thread_history_edits_via_relations(
+            client,
+            room_id,
+            root_event=root_message_event,
+            thread_events=thread_events,
+        ),
+    )
     await _apply_latest_edits_to_messages(
         None,
         messages_by_event_id=messages_by_event_id,

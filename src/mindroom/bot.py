@@ -1397,6 +1397,8 @@ class AgentBot:
                     command,
                 )
             return
+        await self._hydrate_dispatch_context(room, event, dispatch.context)
+        context_ready_monotonic = time.monotonic()
         if self._has_newer_unresponded_in_scope(event, dispatch.context):
             self.response_tracker.mark_responded(event.event_id)
             return
@@ -1441,6 +1443,7 @@ class AgentBot:
             build_payload,
             processing_log="Processing",
             dispatch_started_monotonic=dispatch_started_monotonic,
+            context_ready_monotonic=context_ready_monotonic,
         )
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
@@ -1733,6 +1736,8 @@ class AgentBot:
         )
         if dispatch is None:
             return
+        await self._hydrate_dispatch_context(room, event, dispatch.context)
+        context_ready_monotonic = time.monotonic()
         action = await self._resolve_dispatch_action(
             room,
             event,
@@ -1804,6 +1809,7 @@ class AgentBot:
             build_payload,
             processing_log="Processing image" if is_image_event else "Processing media message",
             dispatch_started_monotonic=dispatch_started_monotonic,
+            context_ready_monotonic=context_ready_monotonic,
         )
 
     async def _dispatch_special_media_as_text(
@@ -2181,6 +2187,9 @@ class AgentBot:
         extra_content: dict[str, Any] | None = None,
     ) -> _ResponseAction | None:
         """Resolve routing + team/individual/skip action for a prepared dispatch."""
+        if dispatch.context.requires_full_thread_history:
+            msg = "dispatch action resolution requires hydrated thread history"
+            raise RuntimeError(msg)
         router_result = await self._handle_router_dispatch(
             room,
             event,
@@ -2222,6 +2231,7 @@ class AgentBot:
         *,
         processing_log: str,
         dispatch_started_monotonic: float,
+        context_ready_monotonic: float,
     ) -> None:
         """Execute resolved dispatch action and mark the source event responded."""
         if action.kind == "reject":
@@ -2259,8 +2269,6 @@ class AgentBot:
         placeholder_ready_monotonic = time.monotonic()
 
         try:
-            await self._hydrate_dispatch_context(room, event, dispatch.context)
-            context_ready_monotonic = time.monotonic()
             payload = await payload_builder(dispatch.context)
             prepared_payload = await self._apply_message_enrichment(
                 dispatch,
@@ -2336,7 +2344,8 @@ class AgentBot:
                 correlation_id=dispatch.correlation_id,
             )
             return
-        self.response_tracker.mark_responded(event.event_id, response_event_id)
+        if response_event_id is not None:
+            self.response_tracker.mark_responded(event.event_id, response_event_id)
 
     async def _finalize_dispatch_failure(
         self,
@@ -2394,9 +2403,9 @@ class AgentBot:
             event_id=event_id,
             action_kind=action_kind,
             placeholder_event_id=placeholder_event_id,
-            placeholder_visible_ms=round((placeholder_ready_monotonic - dispatch_started_monotonic) * 1000, 1),
-            context_hydration_ms=round((context_ready_monotonic - placeholder_ready_monotonic) * 1000, 1),
-            payload_hydration_ms=round((payload_ready_monotonic - context_ready_monotonic) * 1000, 1),
+            context_hydration_ms=round((context_ready_monotonic - dispatch_started_monotonic) * 1000, 1),
+            placeholder_visible_ms=round((placeholder_ready_monotonic - context_ready_monotonic) * 1000, 1),
+            payload_hydration_ms=round((payload_ready_monotonic - placeholder_ready_monotonic) * 1000, 1),
             startup_total_ms=round((payload_ready_monotonic - dispatch_started_monotonic) * 1000, 1),
         )
 
@@ -2685,6 +2694,8 @@ class AgentBot:
                 room.room_id,
                 event_info,
             )
+            if requires_full_thread_history:
+                thread_history = []
 
         return _MessageContext(
             am_i_mentioned=am_i_mentioned,
@@ -3292,16 +3303,13 @@ class AgentBot:
                     extra_content=None,
                 )
                 if draft.suppress:
-                    self.logger.warning(
-                        "Team streaming response was already delivered before a suppressing hook ran",
-                        source_event_id=resolved_response_envelope.source_event_id,
-                        correlation_id=resolved_correlation_id,
-                    )
-                    delivery_result = _ResponseDispatchResult(
+                    delivery_result = await self._cleanup_suppressed_streamed_response(
+                        room_id=room_id,
                         event_id=event_id,
                         response_text=accumulated,
-                        delivery_kind=delivery_kind,
-                        suppressed=True,
+                        response_kind="team",
+                        response_envelope=resolved_response_envelope,
+                        correlation_id=resolved_correlation_id,
                     )
                     return
 
@@ -3444,7 +3452,7 @@ class AgentBot:
         if delivery_result is not None and delivery_result.event_id is not None:
             return delivery_result.event_id
         if delivery_result is not None and delivery_result.suppressed:
-            return delivery_result.event_id
+            return None
         if delivery_result is not None and existing_event_id is not None:
             return existing_event_id
         return tracked_event_id or existing_event_id
@@ -4081,7 +4089,39 @@ class AgentBot:
             options_list=interactive_response.options_list,
         )
 
-    async def _process_and_respond_streaming(  # noqa: C901, PLR0915
+    async def _cleanup_suppressed_streamed_response(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        response_text: str,
+        response_kind: str,
+        response_envelope: MessageEnvelope,
+        correlation_id: str,
+    ) -> _ResponseDispatchResult:
+        """Remove one provisional streamed response after a suppressing hook runs."""
+        self.logger.warning(
+            "Streaming response was already delivered before a suppressing hook ran",
+            response_kind=response_kind,
+            source_event_id=response_envelope.source_event_id,
+            correlation_id=correlation_id,
+        )
+        redacted = await self._redact_message_event(
+            room_id=room_id,
+            event_id=event_id,
+            reason="Suppressed streamed response",
+        )
+        if not redacted:
+            msg = f"failed to redact suppressed streamed response {event_id}"
+            raise _SuppressedPlaceholderCleanupError(msg)
+        return _ResponseDispatchResult(
+            event_id=None,
+            response_text=response_text,
+            delivery_kind=None,
+            suppressed=True,
+        )
+
+    async def _process_and_respond_streaming(  # noqa: C901, PLR0911, PLR0915
         self,
         room_id: str,
         prompt: str,
@@ -4263,8 +4303,18 @@ class AgentBot:
             extra_content=response_extra_content,
         )
         if draft.suppress:
+            if adopt_existing_placeholder or existing_event_id is None:
+                return await self._cleanup_suppressed_streamed_response(
+                    room_id=room_id,
+                    event_id=event_id,
+                    response_text=accumulated,
+                    response_kind=response_kind,
+                    response_envelope=response_envelope,
+                    correlation_id=correlation_id,
+                )
             self.logger.warning(
                 "Streaming response was already delivered before a suppressing hook ran",
+                response_kind=response_kind,
                 source_event_id=response_envelope.source_event_id,
                 correlation_id=correlation_id,
             )
@@ -4347,7 +4397,7 @@ class AgentBot:
         if delivery_result is not None and delivery_result.event_id is not None:
             return delivery_result.event_id
         if delivery_result is not None and delivery_result.suppressed:
-            return delivery_result.event_id
+            return None
         if delivery_result is not None and existing_event_id is not None:
             return existing_event_id
         return tracked_event_id or existing_event_id
