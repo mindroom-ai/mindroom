@@ -55,16 +55,23 @@ def _to_compact_text(value: object) -> str:
         return str(value)
 
 
+def _as_object_dict(value: object) -> dict[str, object] | None:
+    """Return a dict with string keys preserved as `object` values."""
+    if not isinstance(value, dict):
+        return None
+    return {key: item for key, item in value.items() if isinstance(key, str)}
+
+
 def _parse_structured_result(value: object) -> dict[str, object] | None:
     parsed: dict[str, object] | None
     if isinstance(value, dict):
-        parsed = value
+        parsed = _as_object_dict(value)
     elif isinstance(value, str):
         try:
             decoded = json.loads(value)
         except json.JSONDecodeError:
             return None
-        parsed = decoded if isinstance(decoded, dict) else None
+        parsed = _as_object_dict(decoded)
     else:
         return None
 
@@ -74,13 +81,14 @@ def _parse_structured_result(value: object) -> dict[str, object] | None:
     threads = parsed.get("threads")
     if not isinstance(threads, list) or not threads:
         return None
-    if not all(
-        isinstance(item, dict) and isinstance(item.get("thread_id"), str) and isinstance(item.get("body_preview"), str)
-        for item in threads
+    normalized_threads = [_as_object_dict(item) for item in threads]
+    if any(
+        item is None or not isinstance(item.get("thread_id"), str) or not isinstance(item.get("body_preview"), str)
+        for item in normalized_threads
     ):
         return None
 
-    return parsed
+    return {**parsed, "threads": normalized_threads}
 
 
 def _truncate(text: str, limit: int) -> tuple[str, bool]:
@@ -92,10 +100,11 @@ def _truncate(text: str, limit: int) -> tuple[str, bool]:
 
 
 def _truncate_result_item_field(item: object, field_name: str, limit: int) -> tuple[object, bool]:
-    if not isinstance(item, dict):
+    item_dict = _as_object_dict(item)
+    if item_dict is None:
         return item, False
 
-    value = item.get(field_name)
+    value = item_dict.get(field_name)
     if not isinstance(value, str):
         return item, False
 
@@ -103,7 +112,7 @@ def _truncate_result_item_field(item: object, field_name: str, limit: int) -> tu
     if not truncated:
         return item, False
 
-    updated_item = dict(item)
+    updated_item = dict(item_dict)
     updated_item[field_name] = truncated_value
     return updated_item, True
 
@@ -120,13 +129,14 @@ def _fit_structured_result_item(
     if len(_to_compact_text(candidate_payload)) <= limit:
         return item, False
 
-    if not isinstance(item, dict):
+    item_dict = _as_object_dict(item)
+    if item_dict is None:
         return None, False
 
     best_item: object | None = None
     item_truncated = False
     for field_name in _TRUNCATABLE_RESULT_ITEM_FIELDS:
-        field_value = item.get(field_name)
+        field_value = item_dict.get(field_name)
         if not isinstance(field_value, str):
             continue
 
@@ -134,7 +144,7 @@ def _fit_structured_result_item(
         high = len(field_value)
         while low <= high:
             mid = (low + high) // 2
-            candidate_item, field_truncated = _truncate_result_item_field(item, field_name, mid)
+            candidate_item, field_truncated = _truncate_result_item_field(item_dict, field_name, mid)
             candidate_payload[list_key] = [*kept_items, candidate_item]
             if len(_to_compact_text(candidate_payload)) <= limit:
                 best_item = candidate_item
@@ -166,11 +176,12 @@ def _shrink_last_structured_result_item(
             continue
 
         last_item = items[-1]
-        if not isinstance(last_item, dict):
+        last_item_dict = _as_object_dict(last_item)
+        if last_item_dict is None:
             continue
 
         for field_name in _TRUNCATABLE_RESULT_ITEM_FIELDS:
-            field_value = last_item.get(field_name)
+            field_value = last_item_dict.get(field_name)
             if not isinstance(field_value, str):
                 continue
 
@@ -179,8 +190,8 @@ def _shrink_last_structured_result_item(
             best_item: object | None = None
             while low <= high:
                 mid = (low + high) // 2
-                candidate_item, _ = _truncate_result_item_field(last_item, field_name, mid)
-                if candidate_item == last_item:
+                candidate_item, _ = _truncate_result_item_field(last_item_dict, field_name, mid)
+                if candidate_item == last_item_dict:
                     high = mid - 1
                     continue
 
@@ -195,7 +206,9 @@ def _shrink_last_structured_result_item(
                     high = mid - 1
 
             if best_item is not None:
-                items[-1] = best_item
+                updated_items = list(items)
+                updated_items[-1] = best_item
+                preview_payload[list_key] = updated_items
                 return True
 
     return False

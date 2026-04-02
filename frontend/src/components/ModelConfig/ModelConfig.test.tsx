@@ -40,6 +40,7 @@ describe('ModelConfig', () => {
         openai_local: {
           provider: 'openai',
           id: 'gpt-4.1-mini',
+          context_window: 16384,
           extra_kwargs: { base_url: 'http://localhost:9292/v1' },
         },
       },
@@ -219,15 +220,24 @@ describe('ModelConfig', () => {
           element?.textContent?.includes('Endpoint: http://localhost:9292/v1') ?? false
       ).length
     ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(
+        (_, element) => element?.textContent?.includes('Context window: 16,384') ?? false
+      ).length
+    ).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByText('openai_local'));
     const row = screen.getByDisplayValue('openai_local').closest('tr');
     if (!row) throw new Error('row not found');
 
     expect(within(row).getByDisplayValue('http://localhost:9292/v1')).toBeTruthy();
+    expect(within(row).getByDisplayValue('16384')).toBeTruthy();
 
     fireEvent.change(within(row).getByDisplayValue('http://localhost:9292/v1'), {
       target: { value: 'http://localhost:11434/v1' },
+    });
+    fireEvent.change(within(row).getByDisplayValue('16384'), {
+      target: { value: '32768' },
     });
     fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
 
@@ -237,6 +247,7 @@ describe('ModelConfig', () => {
         expect.objectContaining({
           provider: 'openai',
           id: 'gpt-4.1-mini',
+          context_window: 32768,
           extra_kwargs: { base_url: 'http://localhost:11434/v1' },
         })
       );
@@ -360,6 +371,9 @@ describe('ModelConfig', () => {
     fireEvent.change(screen.getByPlaceholderText('provider model id'), {
       target: { value: 'gpt-4o-mini' },
     });
+    fireEvent.change(screen.getByPlaceholderText('optional context window'), {
+      target: { value: '200000' },
+    });
 
     fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
 
@@ -367,6 +381,7 @@ describe('ModelConfig', () => {
       expect(mockStore.updateModel).toHaveBeenCalledWith('new-model', {
         provider: 'openrouter',
         id: 'gpt-4o-mini',
+        context_window: 200000,
       });
     });
   });

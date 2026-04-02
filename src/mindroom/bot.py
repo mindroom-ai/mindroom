@@ -7,11 +7,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal
+from html import escape as html_escape
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import nio
+from agno.db.base import SessionType
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from mindroom.hooks import (
@@ -25,7 +27,6 @@ from mindroom.hooks import (
     ReactionReceivedContext,
     ResponseDraft,
     ResponseResult,
-    compute_enrichment_digest,
     emit,
     emit_collect,
     emit_transform,
@@ -56,6 +57,7 @@ from mindroom.matrix.identity import (
 )
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.presence import (
     build_agent_status_message,
     is_user_online,
@@ -121,7 +123,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 from . import constants, interactive, voice_handler
-from .agents import create_agent, create_session_storage, remove_run_by_event_id
+from .agents import create_agent, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
 from .attachment_media import resolve_attachment_media
 from .attachments import (
@@ -154,6 +156,8 @@ from .constants import (
     RuntimePaths,
     resolve_avatar_path,
 )
+from .history.runtime import open_scope_storage
+from .history.types import HistoryScope
 from .knowledge.utils import (
     MultiKnowledgeVectorDb,
     ensure_request_knowledge_managers,
@@ -192,6 +196,7 @@ if TYPE_CHECKING:
     from agno.media import Image
 
     from mindroom.config.main import Config
+    from mindroom.history import CompactionOutcome
     from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
@@ -206,6 +211,23 @@ _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"scheduled", "hook"})
+
+
+def _get_or_create_lock(locks: dict[object, asyncio.Lock], key: object, *, max_entries: int = 100) -> asyncio.Lock:
+    """Return a cached lock for one key with bounded best-effort eviction."""
+    lock = locks.get(key)
+    if lock is not None:
+        return lock
+    if len(locks) >= max_entries:
+        for candidate, candidate_lock in list(locks.items()):
+            if len(locks) < max_entries:
+                break
+            if candidate_lock.locked():
+                continue
+            locks.pop(candidate, None)
+    lock = asyncio.Lock()
+    locks[key] = lock
+    return lock
 
 
 def _create_task_wrapper(
@@ -408,7 +430,7 @@ class _PreparedHookedPayload:
 
     payload: _DispatchPayload
     envelope: MessageEnvelope
-    enrichment_digest: str | None = None
+    strip_transient_enrichment_after_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -478,6 +500,10 @@ class AgentBot:
     _sync_shutting_down: bool = field(default=False, init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches, init=False)
+    _response_lifecycle_locks: dict[tuple[str, str | None], asyncio.Lock] = field(
+        default_factory=dict,
+        init=False,
+    )
     in_flight_response_count: int = field(default=0, init=False)
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None = field(default=None, init=False)
 
@@ -503,6 +529,54 @@ class AgentBot:
         if self.agent_name in self.config.teams:
             return "team"
         return "agent"
+
+    def _response_lifecycle_lock(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        reply_to_event_id: str | None,
+    ) -> asyncio.Lock:
+        """Return the per-thread lock that serializes one response lifecycle."""
+        resolved_thread_id = self._resolved_conversation_thread_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
+        return _get_or_create_lock(
+            cast("dict[object, asyncio.Lock]", self._response_lifecycle_locks),
+            (room_id, resolved_thread_id),
+        )
+
+    def _resolved_conversation_thread_id(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        reply_to_event_id: str | None,
+    ) -> str | None:
+        """Return the canonical conversation root for locks and persisted sessions."""
+        return self._resolve_reply_thread_id(
+            thread_id,
+            reply_to_event_id,
+            room_id=room_id,
+        )
+
+    def _conversation_session_id(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        reply_to_event_id: str | None,
+    ) -> str:
+        """Return the canonical persisted session ID for one response lifecycle."""
+        return create_session_id(
+            room_id,
+            self._resolved_conversation_thread_id(
+                room_id=room_id,
+                thread_id=thread_id,
+                reply_to_event_id=reply_to_event_id,
+            ),
+        )
 
     def _hook_base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
         """Return shared base fields for hook context construction."""
@@ -1960,7 +2034,7 @@ class AgentBot:
                 requester_user_id=dispatch.requester_user_id,
                 existing_event_id=None,
                 response_envelope=prepared_payload.envelope,
-                enrichment_digest=prepared_payload.enrichment_digest,
+                strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
                 correlation_id=dispatch.correlation_id,
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
@@ -1997,7 +2071,7 @@ class AgentBot:
             media=prepared_payload.payload.media,
             attachment_ids=prepared_payload.payload.attachment_ids,
             model_prompt=prepared_payload.payload.model_prompt,
-            enrichment_digest=prepared_payload.enrichment_digest,
+            strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
             response_envelope=prepared_payload.envelope,
             correlation_id=dispatch.correlation_id,
         )
@@ -2278,8 +2352,10 @@ class AgentBot:
         thread_id: str | None,
         reply_to_event_id: str | None,
         user_id: str | None,
+        session_id: str | None = None,
         *,
         agent_name: str | None = None,
+        active_model_name: str | None = None,
         attachment_ids: list[str] | None = None,
         correlation_id: str | None = None,
     ) -> ToolRuntimeContext | None:
@@ -2295,6 +2371,8 @@ class AgentBot:
             client=self.client,
             config=self.config,
             runtime_paths=self.runtime_paths,
+            active_model_name=active_model_name,
+            session_id=session_id,
             room=self._cached_room(room_id),
             reply_to_event_id=reply_to_event_id,
             storage_path=self.storage_path,
@@ -2303,6 +2381,63 @@ class AgentBot:
             correlation_id=correlation_id,
             hook_message_sender=self._hook_message_sender(),
         )
+
+    def _resolve_runtime_model_for_room(self, room_id: str) -> str:
+        """Return the effective configured model name for this bot in one room."""
+        return self.config.resolve_runtime_model(
+            entity_name=self.agent_name,
+            room_id=room_id,
+            runtime_paths=self.runtime_paths,
+        ).model_name
+
+    def _history_scope(self) -> HistoryScope:
+        """Return the persisted history scope backing this bot's runs."""
+        if self.agent_name in self.config.teams:
+            return HistoryScope(kind="team", scope_id=self.agent_name)
+        return HistoryScope(kind="agent", scope_id=self.agent_name)
+
+    def _history_session_type(self) -> SessionType:
+        """Return the Agno session type used by this bot's persisted history."""
+        return SessionType.TEAM if self.agent_name in self.config.teams else SessionType.AGENT
+
+    def _team_history_scope(self, team_agents: list[MatrixID]) -> HistoryScope:
+        """Return the persisted team-history scope for one team response."""
+        if self.agent_name in self.config.teams:
+            return HistoryScope(kind="team", scope_id=self.agent_name)
+        team_member_names = [
+            matrix_id.agent_name(self.config, self.runtime_paths) or matrix_id.username for matrix_id in team_agents
+        ]
+        return HistoryScope(kind="team", scope_id=f"team_{'+'.join(sorted(team_member_names))}")
+
+    def _strip_transient_enrichment_from_history(
+        self,
+        *,
+        scope: HistoryScope,
+        session_id: str,
+        session_type: SessionType,
+        execution_identity: ToolExecutionIdentity | None,
+        failure_message: str,
+    ) -> None:
+        """Remove hook-provided transient enrichment from one persisted session."""
+        try:
+            with open_scope_storage(
+                agent_name=self.agent_name,
+                scope=scope,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                execution_identity=execution_identity,
+            ) as storage:
+                strip_enrichment_from_session_storage(
+                    storage,
+                    session_id,
+                    session_type=session_type,
+                )
+        except Exception:
+            self.logger.exception(
+                failure_message,
+                agent_name=self.agent_name,
+                session_id=session_id,
+            )
 
     def _build_tool_execution_identity(
         self,
@@ -2438,7 +2573,7 @@ class AgentBot:
             source_kind=dispatch.envelope.source_kind,
         )
         model_prompt: str | None = None
-        enrichment_digest: str | None = None
+        strip_transient_enrichment_after_run = False
         if self.hook_registry.has_hooks(EVENT_MESSAGE_ENRICH):
             context = MessageEnrichContext(
                 **self._hook_base_kwargs(EVENT_MESSAGE_ENRICH, dispatch.correlation_id),
@@ -2450,7 +2585,7 @@ class AgentBot:
             if items:
                 enrichment_block = render_enrichment_block(items)
                 model_prompt = f"{payload.prompt.rstrip()}\n\n{enrichment_block}"
-                enrichment_digest = compute_enrichment_digest(items)
+                strip_transient_enrichment_after_run = True
 
         return _PreparedHookedPayload(
             payload=_DispatchPayload(
@@ -2460,7 +2595,7 @@ class AgentBot:
                 attachment_ids=payload.attachment_ids,
             ),
             envelope=envelope,
-            enrichment_digest=enrichment_digest,
+            strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
         )
 
     async def _apply_before_response_hooks(
@@ -2516,7 +2651,7 @@ class AgentBot:
         )
         await emit(self.hook_registry, EVENT_MESSAGE_AFTER_RESPONSE, context)
 
-    async def _generate_team_response_helper(  # noqa: C901, PLR0915
+    async def _generate_team_response_helper(
         self,
         room_id: str,
         reply_to_event_id: str,
@@ -2529,7 +2664,7 @@ class AgentBot:
         *,
         payload: _DispatchPayload,
         response_envelope: MessageEnvelope | None = None,
-        enrichment_digest: str | None = None,
+        strip_transient_enrichment_after_run: bool = False,
         correlation_id: str | None = None,
         reason_prefix: str = "Team request",
     ) -> str | None:
@@ -2537,15 +2672,50 @@ class AgentBot:
 
         Returns the initial message ID if created, None otherwise.
         """
+        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id, reply_to_event_id)
+        async with lifecycle_lock:
+            return await self._generate_team_response_helper_locked(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                team_agents=team_agents,
+                team_mode=team_mode,
+                thread_history=thread_history,
+                requester_user_id=requester_user_id,
+                existing_event_id=existing_event_id,
+                payload=payload,
+                response_envelope=response_envelope,
+                strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
+                correlation_id=correlation_id,
+                reason_prefix=reason_prefix,
+            )
+
+    async def _generate_team_response_helper_locked(  # noqa: C901, PLR0915
+        self,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        team_agents: list[MatrixID],
+        team_mode: str,
+        thread_history: list[dict],
+        requester_user_id: str,
+        existing_event_id: str | None = None,
+        *,
+        payload: _DispatchPayload,
+        response_envelope: MessageEnvelope | None = None,
+        strip_transient_enrichment_after_run: bool = False,
+        correlation_id: str | None = None,
+        reason_prefix: str = "Team request",
+    ) -> str | None:
+        """Generate a team response once the per-thread lifecycle lock is held."""
         assert self.client is not None
         prompt, thread_history = self._timestamp_model_user_context(
             payload.model_prompt or payload.prompt,
             thread_history,
         )
-        # Team flows call Agno's team APIs directly instead of ai_response()/stream_agent_response(),
-        # so there is no MindRoom-local text cache keyed by enrichment_digest on this path.
-        # The digest is still used to decide whether transient enrichment must be scrubbed
-        # back out of persisted team session history after the response finishes.
+        # Team flows call Agno's team APIs directly instead of ai_response()/stream_agent_response().
+        # This flag is only used to decide whether transient enrichment
+        # must be scrubbed back out of persisted team session history after the response finishes.
 
         # Get the appropriate model for this team and room
         model_name = select_model_for_team(self.agent_name, room_id, self.config, self.runtime_paths)
@@ -2589,12 +2759,18 @@ class AgentBot:
             source_kind="message",
         )
         resolved_correlation_id = correlation_id or reply_to_event_id
-        session_id = create_session_id(room_id, thread_id)
+        session_id = self._conversation_session_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
+            active_model_name=model_name,
+            session_id=session_id,
             attachment_ids=payload.attachment_ids,
             correlation_id=resolved_correlation_id,
         )
@@ -2614,6 +2790,7 @@ class AgentBot:
         # Create async function for team response generation that takes message_id as parameter
         client = self.client
         delivery_result: _ResponseDispatchResult | None = None
+        compaction_outcomes: list[CompactionOutcome] = []
 
         async def generate_team_response(message_id: str | None) -> None:
             nonlocal delivery_result
@@ -2642,6 +2819,11 @@ class AgentBot:
                             run_id=response_run_id,
                             run_id_callback=_note_attempt_run_id,
                             user_id=requester_user_id,
+                            reply_to_event_id=reply_to_event_id,
+                            active_event_ids=self._active_response_event_ids(room_id),
+                            response_sender_id=self.matrix_id.full_id,
+                            compaction_outcomes_collector=compaction_outcomes,
+                            configured_team_name=self.agent_name if self.agent_name in self.config.teams else None,
                             reason_prefix=reason_prefix,
                         )
 
@@ -2744,6 +2926,11 @@ class AgentBot:
                                 run_id=response_run_id,
                                 run_id_callback=_note_attempt_run_id,
                                 user_id=requester_user_id,
+                                reply_to_event_id=reply_to_event_id,
+                                active_event_ids=self._active_response_event_ids(room_id),
+                                response_sender_id=self.matrix_id.full_id,
+                                compaction_outcomes_collector=compaction_outcomes,
+                                configured_team_name=self.agent_name if self.agent_name in self.config.teams else None,
                                 reason_prefix=reason_prefix,
                             )
                 except asyncio.CancelledError:
@@ -2781,20 +2968,13 @@ class AgentBot:
             user_id=requester_user_id,
             run_id=response_run_id,
         )
-        try:
-            if enrichment_digest is not None:
-                storage = create_session_storage(
-                    self.agent_name,
-                    self.config,
-                    self.runtime_paths,
-                    execution_identity=execution_identity,
-                )
-                strip_enrichment_from_session_storage(storage, session_id)
-        except Exception:
-            self.logger.exception(
-                "Failed to strip hook enrichment from team session history",
-                agent_name=self.agent_name,
+        if strip_transient_enrichment_after_run:
+            self._strip_transient_enrichment_from_history(
+                scope=self._team_history_scope(team_agents),
                 session_id=session_id,
+                session_type=SessionType.TEAM,
+                execution_identity=execution_identity,
+                failure_message="Failed to strip hook enrichment from team session history",
             )
         if (
             delivery_result is not None
@@ -2819,6 +2999,15 @@ class AgentBot:
                 room_id,
                 delivery_result.event_id,
                 delivery_result.options_list,
+            )
+
+        if delivery_result is not None:
+            await self._dispatch_compaction_notices(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                main_response_event_id=delivery_result.event_id,
+                thread_id=thread_id,
+                compaction_outcomes=compaction_outcomes,
             )
 
         if delivery_result is not None and delivery_result.event_id is not None:
@@ -2958,7 +3147,6 @@ class AgentBot:
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
-        enrichment_digest: str | None = None,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
         response_kind: str = "ai",
@@ -2969,7 +3157,11 @@ class AgentBot:
             return _ResponseDispatchResult(event_id=existing_event_id, response_text="", delivery_kind=None)
 
         media_inputs = media or MediaInputs()
-        session_id = create_session_id(room_id, thread_id)
+        session_id = self._conversation_session_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         model_prompt = self._append_matrix_prompt_context(
             model_prompt or prompt,
             room_id=room_id,
@@ -2977,11 +3169,14 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
         )
+        active_model_name = self._resolve_runtime_model_for_room(room_id)
         tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
+            active_model_name=active_model_name,
+            session_id=session_id,
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
         )
@@ -2997,6 +3192,7 @@ class AgentBot:
             execution_identity,
         )
         tool_trace: list[ToolTraceEntry] = []
+        compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(room_id)
 
@@ -3033,7 +3229,7 @@ class AgentBot:
                         tool_trace_collector=tool_trace,
                         run_metadata_collector=run_metadata_content,
                         execution_identity=execution_identity,
-                        enrichment_digest=enrichment_digest,
+                        compaction_outcomes_collector=compaction_outcomes,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -3093,6 +3289,14 @@ class AgentBot:
             )
             await interactive.add_reaction_buttons(self.client, room_id, delivery.event_id, delivery.options_list)
 
+        await self._dispatch_compaction_notices(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            main_response_event_id=delivery.event_id,
+            thread_id=thread_id,
+            compaction_outcomes=compaction_outcomes,
+        )
+
         return delivery
 
     async def _send_skill_command_response(
@@ -3108,6 +3312,32 @@ class AgentBot:
         reply_to_event: nio.RoomMessageText | None = None,
     ) -> str | None:
         """Send a skill command response using a specific agent."""
+        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id, reply_to_event_id)
+        async with lifecycle_lock:
+            return await self._send_skill_command_response_locked(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                thread_history=thread_history,
+                prompt=prompt,
+                agent_name=agent_name,
+                user_id=user_id,
+                reply_to_event=reply_to_event,
+            )
+
+    async def _send_skill_command_response_locked(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        thread_history: list[dict],
+        prompt: str,
+        agent_name: str,
+        user_id: str | None,
+        reply_to_event: nio.RoomMessageText | None = None,
+    ) -> str | None:
+        """Send a skill command response after acquiring the per-thread lock."""
         assert self.client is not None
         if not prompt.strip():
             return None
@@ -3116,7 +3346,11 @@ class AgentBot:
             thread_history,
         )
 
-        session_id = create_session_id(room_id, thread_id)
+        session_id = self._conversation_session_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         model_prompt = self._append_matrix_prompt_context(
             prompt,
             room_id=room_id,
@@ -3129,6 +3363,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
+            session_id=session_id,
             agent_name=agent_name,
         )
         execution_identity = self._build_tool_execution_identity(
@@ -3374,7 +3609,7 @@ class AgentBot:
             options_list=interactive_response.options_list,
         )
 
-    async def _process_and_respond_streaming(  # noqa: C901
+    async def _process_and_respond_streaming(  # noqa: C901, PLR0915
         self,
         room_id: str,
         prompt: str,
@@ -3389,7 +3624,6 @@ class AgentBot:
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
-        enrichment_digest: str | None = None,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
         response_kind: str = "ai",
@@ -3400,7 +3634,11 @@ class AgentBot:
             return _ResponseDispatchResult(event_id=existing_event_id, response_text="", delivery_kind=None)
 
         media_inputs = media or MediaInputs()
-        session_id = create_session_id(room_id, thread_id)
+        session_id = self._conversation_session_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         room_mode = self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room_id) == "room"
         model_prompt = self._append_matrix_prompt_context(
             model_prompt or prompt,
@@ -3409,11 +3647,14 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
         )
+        active_model_name = self._resolve_runtime_model_for_room(room_id)
         tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
+            active_model_name=active_model_name,
+            session_id=session_id,
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
         )
@@ -3428,6 +3669,7 @@ class AgentBot:
             [self.agent_name],
             execution_identity,
         )
+        compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(room_id)
         tool_trace: list[ToolTraceEntry] = []
@@ -3464,7 +3706,7 @@ class AgentBot:
                         show_tool_calls=self.show_tool_calls,
                         run_metadata_collector=run_metadata_content,
                         execution_identity=execution_identity,
-                        enrichment_digest=enrichment_digest,
+                        compaction_outcomes_collector=compaction_outcomes,
                     )
                     response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
 
@@ -3606,6 +3848,14 @@ class AgentBot:
                 delivery.options_list,
             )
 
+        await self._dispatch_compaction_notices(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            main_response_event_id=delivery.event_id,
+            thread_id=thread_id,
+            compaction_outcomes=compaction_outcomes,
+        )
+
         return delivery
 
     def _resolve_response_event_id(
@@ -3632,7 +3882,7 @@ class AgentBot:
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
-        enrichment_digest: str | None = None,
+        strip_transient_enrichment_after_run: bool = False,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
     ) -> str | None:
@@ -3650,7 +3900,8 @@ class AgentBot:
             media: Optional multimodal inputs (audio/images/files/videos)
             attachment_ids: Attachment IDs available for tool-side file processing
             model_prompt: Optional model-facing prompt that may include transient enrichment.
-            enrichment_digest: Optional digest for hook-provided enrichment attached to this turn.
+            strip_transient_enrichment_after_run: Whether hook-provided transient enrichment
+                must be scrubbed from persisted session history after this turn.
             response_envelope: Optional normalized inbound envelope for response hooks.
             correlation_id: Optional request correlation ID propagated to hook logging.
 
@@ -3658,6 +3909,41 @@ class AgentBot:
             Event ID of the response message, or None if failed
 
         """
+        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id, reply_to_event_id)
+        async with lifecycle_lock:
+            return await self._generate_response_locked(
+                room_id=room_id,
+                prompt=prompt,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                thread_history=thread_history,
+                existing_event_id=existing_event_id,
+                user_id=user_id,
+                media=media,
+                attachment_ids=attachment_ids,
+                model_prompt=model_prompt,
+                strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
+                response_envelope=response_envelope,
+                correlation_id=correlation_id,
+            )
+
+    async def _generate_response_locked(
+        self,
+        room_id: str,
+        prompt: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        thread_history: list[dict],
+        existing_event_id: str | None = None,
+        user_id: str | None = None,
+        media: MediaInputs | None = None,
+        attachment_ids: list[str] | None = None,
+        model_prompt: str | None = None,
+        strip_transient_enrichment_after_run: bool = False,
+        response_envelope: MessageEnvelope | None = None,
+        correlation_id: str | None = None,
+    ) -> str | None:
+        """Generate one agent response after acquiring the per-thread lock."""
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             self._prepare_memory_and_model_context(
@@ -3669,7 +3955,11 @@ class AgentBot:
         media_inputs = media or MediaInputs()
 
         # Prepare session id for memory storage (store after sending response)
-        session_id = create_session_id(room_id, thread_id)
+        session_id = self._conversation_session_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         execution_identity = self._build_tool_execution_identity(
             room_id=room_id,
             thread_id=thread_id,
@@ -3713,7 +4003,6 @@ class AgentBot:
                     media=media_inputs,
                     attachment_ids=attachment_ids,
                     model_prompt=model_prompt_text,
-                    enrichment_digest=enrichment_digest,
                     response_envelope=response_envelope,
                     correlation_id=correlation_id,
                 )
@@ -3730,7 +4019,6 @@ class AgentBot:
                     media=media_inputs,
                     attachment_ids=attachment_ids,
                     model_prompt=model_prompt_text,
-                    enrichment_digest=enrichment_digest,
                     response_envelope=response_envelope,
                     correlation_id=correlation_id,
                 )
@@ -3752,20 +4040,13 @@ class AgentBot:
             run_id=response_run_id,
         )
 
-        try:
-            if enrichment_digest is not None:
-                storage = create_session_storage(
-                    self.agent_name,
-                    self.config,
-                    self.runtime_paths,
-                    execution_identity=execution_identity,
-                )
-                strip_enrichment_from_session_storage(storage, session_id)
-        except Exception:
-            self.logger.exception(
-                "Failed to strip hook enrichment from session history",
-                agent_name=self.agent_name,
+        if strip_transient_enrichment_after_run:
+            self._strip_transient_enrichment_from_history(
+                scope=self._history_scope(),
                 session_id=session_id,
+                session_type=self._history_session_type(),
+                execution_identity=execution_identity,
+                failure_message="Failed to strip hook enrichment from session history",
             )
 
         # Store memory after response generation.
@@ -3910,6 +4191,75 @@ class AgentBot:
             self.logger.info("Sent response", event_id=event_id, room_id=room_id)
             return event_id
         self.logger.error("Failed to send response to room", room_id=room_id)
+        return None
+
+    async def _dispatch_compaction_notices(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        main_response_event_id: str | None,
+        thread_id: str | None,
+        compaction_outcomes: list[CompactionOutcome],
+    ) -> None:
+        """Send compaction notices for all outcomes that have notify=True."""
+        if main_response_event_id is None:
+            return
+        for outcome in compaction_outcomes:
+            if outcome.notify:
+                await self._send_compaction_notice(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    main_response_event_id=main_response_event_id,
+                    thread_id=thread_id,
+                    outcome=outcome,
+                )
+
+    async def _send_compaction_notice(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        main_response_event_id: str,
+        thread_id: str | None,
+        outcome: CompactionOutcome,
+    ) -> str | None:
+        """Send a compaction notice without mention parsing side effects."""
+        if self.client is None:
+            return None
+
+        summary_line = (
+            "Conversation compacted "
+            f"(~{outcome.before_tokens:,} -> ~{outcome.after_tokens:,} / {outcome.window_tokens:,} tokens, "
+            f"{outcome.compacted_run_count} runs summarized)."
+        )
+        formatted_body = f"<em>{html_escape(summary_line)}</em>"
+        effective_thread_id = self._resolve_reply_thread_id(
+            thread_id,
+            reply_to_event_id,
+            room_id=room_id,
+        )
+        content = build_message_content(
+            summary_line,
+            formatted_body=formatted_body,
+            thread_event_id=effective_thread_id,
+            reply_to_event_id=main_response_event_id,
+            extra_content={
+                "msgtype": "m.notice",
+                constants.COMPACTION_NOTICE_CONTENT_KEY: outcome.to_notice_metadata(),
+                "com.mindroom.skip_mentions": True,
+            },
+        )
+        event_id = await send_message(self.client, room_id, content)
+        if event_id:
+            self.logger.info(
+                "Sent compaction notice",
+                event_id=event_id,
+                room_id=room_id,
+                summary_model=outcome.summary_model,
+            )
+            return event_id
+        self.logger.error("Failed to send compaction notice", room_id=room_id)
         return None
 
     async def _hook_send_message(
@@ -4163,8 +4513,16 @@ class AgentBot:
         # Remove the stale run from Agno history before regenerating.
         # The original run stored reply_to_event_id (= original_event_id) as
         # matrix_event_id in its metadata, so we look up by that key.
+        resolved_thread_id = self._resolved_conversation_thread_id(
+            room_id=room.room_id,
+            thread_id=context.thread_id,
+            reply_to_event_id=event_info.original_event_id,
+        )
         session_contexts = [
-            (context.thread_id, create_session_id(room.room_id, context.thread_id)),
+            (
+                resolved_thread_id,
+                create_session_id(room.room_id, resolved_thread_id),
+            ),
             (None, create_session_id(room.room_id, None)),
         ]
         checked_session_ids: set[str] = set()
@@ -4179,13 +4537,19 @@ class AgentBot:
                 user_id=requester_user_id,
                 session_id=session_id,
             )
-            storage = create_session_storage(
-                self.agent_name,
-                self.config,
-                self.runtime_paths,
+            with open_scope_storage(
+                agent_name=self.agent_name,
+                scope=self._history_scope(),
+                config=self.config,
+                runtime_paths=self.runtime_paths,
                 execution_identity=execution_identity,
-            )
-            removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
+            ) as storage:
+                removed = remove_run_by_event_id(
+                    storage,
+                    session_id,
+                    event_info.original_event_id,
+                    session_type=self._history_session_type(),
+                )
             if removed:
                 self.logger.info(
                     "Removed stale run for edited message",
@@ -4258,7 +4622,7 @@ class TeamBot(AgentBot):
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
-        enrichment_digest: str | None = None,
+        strip_transient_enrichment_after_run: bool = False,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
     ) -> str | None:
@@ -4299,7 +4663,11 @@ class TeamBot(AgentBot):
         assert team_resolution.mode is not None
 
         # Store memory once for the entire team (avoids duplicate LLM processing)
-        session_id = create_session_id(room_id, thread_id)
+        session_id = self._conversation_session_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         execution_identity = self._build_tool_execution_identity(
             room_id=room_id,
             thread_id=thread_id,
@@ -4360,7 +4728,7 @@ class TeamBot(AgentBot):
                 agent_name=self.agent_name,
                 source_kind="message",
             ),
-            enrichment_digest=enrichment_digest,
+            strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
             correlation_id=correlation_id or reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
         )

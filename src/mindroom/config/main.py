@@ -25,7 +25,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
 from mindroom.config.memory import MemoryBackend, MemoryConfig
-from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig, ToolConfigEntry
+from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
@@ -36,6 +36,7 @@ from mindroom.constants import (
     runtime_matrix_homeserver,
     safe_replace,
 )
+from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     agent_username_localpart,
@@ -78,6 +79,43 @@ class ResolvedToolConfig:
 
     name: str
     tool_config_overrides: dict[str, object]
+
+
+@dataclass(frozen=True)
+class ResolvedRuntimeModel:
+    """Resolved active runtime model and context window for one execution context."""
+
+    model_name: str
+    context_window: int | None
+
+
+@dataclass(frozen=True)
+class AuthoredOptionalModel:
+    """Static authored semantics for an optional model override field."""
+
+    kind: Literal["unset", "clear", "value"]
+    value: str | None = None
+
+
+@dataclass(frozen=True)
+class StaticCompactionConfigSemantics:
+    """Static compaction semantics for one config scope."""
+
+    scope_label: str
+    effective_enabled: bool
+    authored_model: AuthoredOptionalModel
+
+
+def _history_policy_from_limits(
+    *,
+    num_history_runs: int | None,
+    num_history_messages: int | None,
+) -> HistoryPolicy:
+    if num_history_messages is not None:
+        return HistoryPolicy(mode="messages", limit=num_history_messages)
+    if num_history_runs is not None:
+        return HistoryPolicy(mode="runs", limit=num_history_runs)
+    return HistoryPolicy(mode="all")
 
 
 def _resolve_agent_thread_mode(
@@ -141,6 +179,43 @@ def _normalized_config_data(data: object) -> object:
     normalized_data = cast("dict[str, object]", data.copy())
     _normalize_optional_config_sections(normalized_data)
     return normalized_data
+
+
+def _authored_optional_model(model_name: str | None, *, field_is_set: bool) -> AuthoredOptionalModel:
+    """Return the authored tri-state semantics for one optional model field."""
+    if not field_is_set:
+        return AuthoredOptionalModel(kind="unset")
+    if model_name is None:
+        return AuthoredOptionalModel(kind="clear")
+    return AuthoredOptionalModel(kind="value", value=model_name)
+
+
+def _strip_empty_root_sections(payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop normalized empty root sections from authored config serialization."""
+    authored_payload = dict(payload)
+    for name in _OPTIONAL_DICT_SECTION_NAMES:
+        if authored_payload.get(name) == {}:
+            authored_payload.pop(name, None)
+    if authored_payload.get("plugins") == []:
+        authored_payload.pop("plugins", None)
+    return authored_payload
+
+
+def _effective_static_compaction_enabled(
+    *,
+    defaults_enabled: bool,
+    override_enabled: bool | None,
+    override_fields_set: set[str],
+    authored_model: AuthoredOptionalModel,
+) -> bool:
+    """Resolve whether one authored override block is statically enabled."""
+    if "enabled" in override_fields_set:
+        return override_enabled is True
+    if authored_model.kind == "clear" and override_fields_set == {"model"}:
+        return defaults_enabled
+    if override_fields_set:
+        return True
+    return defaults_enabled
 
 
 def _relative_paths_overlap(left: Path, right: Path) -> bool:
@@ -300,6 +375,114 @@ class Config(BaseModel):
         """Ensure team members exist and do not use private requester-local state."""
         for team_name, team_config in self.teams.items():
             self.assert_team_agents_supported(team_config.agents, team_name=team_name)
+        return self
+
+    def _invalid_compaction_model_references(self) -> list[str]:
+        """Return any compaction.model references that point at unknown models."""
+        invalid_references: list[str] = []
+        for semantics in self._static_compaction_semantics():
+            if semantics.authored_model.kind != "value":
+                continue
+            assert semantics.authored_model.value is not None
+            if semantics.authored_model.value not in self.models:
+                invalid_references.append(
+                    f"{semantics.scope_label}.compaction.model -> {semantics.authored_model.value}",
+                )
+
+        return invalid_references
+
+    def _compaction_models_missing_context_window(self) -> list[str]:
+        """Return explicit compaction.model references whose target model lacks context_window."""
+        invalid_references: list[str] = []
+        for semantics in self._static_compaction_semantics():
+            if semantics.authored_model.kind != "value":
+                continue
+            assert semantics.authored_model.value is not None
+            if self.models[semantics.authored_model.value].context_window is None:
+                invalid_references.append(
+                    f"{semantics.scope_label}.compaction.model -> {semantics.authored_model.value}",
+                )
+
+        return invalid_references
+
+    def _static_compaction_semantics(self) -> list[StaticCompactionConfigSemantics]:
+        """Return static compaction semantics for defaults, agents, and teams."""
+        semantics: list[StaticCompactionConfigSemantics] = []
+        defaults_compaction = self.defaults.compaction
+        defaults_enabled = defaults_compaction.enabled if defaults_compaction is not None else False
+
+        if defaults_compaction is not None:
+            authored_model = _authored_optional_model(
+                defaults_compaction.model,
+                field_is_set="model" in defaults_compaction.model_fields_set,
+            )
+            semantics.append(
+                StaticCompactionConfigSemantics(
+                    scope_label="defaults",
+                    effective_enabled=defaults_enabled,
+                    authored_model=authored_model,
+                ),
+            )
+
+        for agent_name, agent_config in self.agents.items():
+            override = agent_config.compaction
+            if override is None:
+                continue
+            authored_model = _authored_optional_model(
+                override.model,
+                field_is_set="model" in override.model_fields_set,
+            )
+            semantics.append(
+                StaticCompactionConfigSemantics(
+                    scope_label=f"agents.{agent_name}",
+                    effective_enabled=_effective_static_compaction_enabled(
+                        defaults_enabled=defaults_enabled,
+                        override_enabled=override.enabled,
+                        override_fields_set=override.model_fields_set,
+                        authored_model=authored_model,
+                    ),
+                    authored_model=authored_model,
+                ),
+            )
+
+        for team_name, team_config in self.teams.items():
+            override = team_config.compaction
+            if override is None:
+                continue
+            authored_model = _authored_optional_model(
+                override.model,
+                field_is_set="model" in override.model_fields_set,
+            )
+            semantics.append(
+                StaticCompactionConfigSemantics(
+                    scope_label=f"teams.{team_name}",
+                    effective_enabled=_effective_static_compaction_enabled(
+                        defaults_enabled=defaults_enabled,
+                        override_enabled=override.enabled,
+                        override_fields_set=override.model_fields_set,
+                        authored_model=authored_model,
+                    ),
+                    authored_model=authored_model,
+                ),
+            )
+
+        return semantics
+
+    @model_validator(mode="after")
+    def validate_compaction_model_references(self) -> Config:
+        """Ensure explicit compaction.model references are statically valid."""
+        invalid_references = self._invalid_compaction_model_references()
+        if invalid_references:
+            msg = "Compaction model references unknown models: " + ", ".join(sorted(invalid_references))
+            raise ValueError(msg)
+
+        missing_context_windows = self._compaction_models_missing_context_window()
+        if missing_context_windows:
+            msg = "Explicit compaction.model requires a model with context_window: " + ", ".join(
+                sorted(missing_context_windows),
+            )
+            raise ValueError(msg)
+
         return self
 
     @model_validator(mode="after")
@@ -584,7 +767,7 @@ class Config(BaseModel):
 
     def authored_model_dump(self) -> dict[str, Any]:
         """Serialize authored config."""
-        return self.model_dump(exclude_none=True)
+        return _strip_empty_root_sections(cast("dict[str, Any]", self.model_dump(exclude_unset=True)))
 
     @classmethod
     def from_yaml(
@@ -631,6 +814,122 @@ class Config(BaseModel):
             msg = f"Unknown agent: {agent_name}. Available agents: {available}"
             raise ValueError(msg)
         return self.agents[agent_name]
+
+    def get_team(self, team_name: str) -> TeamConfig:
+        """Get a team configuration by name."""
+        if team_name not in self.teams:
+            available = ", ".join(sorted(self.teams.keys()))
+            msg = f"Unknown team: {team_name}. Available teams: {available}"
+            raise ValueError(msg)
+        return self.teams[team_name]
+
+    def get_default_history_settings(self) -> ResolvedHistorySettings:
+        """Return defaults-only replay settings for ad hoc shared team scope."""
+        return ResolvedHistorySettings(
+            policy=_history_policy_from_limits(
+                num_history_runs=self.defaults.num_history_runs,
+                num_history_messages=self.defaults.num_history_messages,
+            ),
+            max_tool_calls_from_history=self.defaults.max_tool_calls_from_history,
+            system_message_role="system",
+            skip_history_system_role=True,
+        )
+
+    def get_entity_history_settings(self, entity_name: str) -> ResolvedHistorySettings:
+        """Return effective replay settings for one configured agent or team."""
+        if entity_name in self.agents:
+            entity = self.get_agent(entity_name)
+        elif entity_name in self.teams:
+            entity = self.get_team(entity_name)
+        else:
+            msg = f"Unknown entity: {entity_name}"
+            raise ValueError(msg)
+
+        num_history_runs = entity.num_history_runs
+        num_history_messages = entity.num_history_messages
+        if num_history_runs is None and num_history_messages is None:
+            num_history_runs = self.defaults.num_history_runs
+            num_history_messages = self.defaults.num_history_messages
+
+        max_tool_calls_from_history = (
+            entity.max_tool_calls_from_history
+            if entity.max_tool_calls_from_history is not None
+            else self.defaults.max_tool_calls_from_history
+        )
+        return ResolvedHistorySettings(
+            policy=_history_policy_from_limits(
+                num_history_runs=num_history_runs,
+                num_history_messages=num_history_messages,
+            ),
+            max_tool_calls_from_history=max_tool_calls_from_history,
+            system_message_role="system",
+            skip_history_system_role=True,
+        )
+
+    def get_default_compaction_config(self) -> CompactionConfig:
+        """Return the effective automatic compaction config for defaults-only scope."""
+        base = self.defaults.compaction
+        merged = base.model_dump() if base is not None else {}
+        return CompactionConfig.model_validate(merged)
+
+    def has_authored_default_compaction_config(self) -> bool:
+        """Return whether defaults-only scope has authored auto-compaction config."""
+        return self.defaults.compaction is not None
+
+    def get_entity_compaction_config(self, entity_name: str) -> CompactionConfig:
+        """Return the effective automatic compaction config for one configured agent or team."""
+        base = self.defaults.compaction
+        defaults_enabled = base.enabled if base is not None else False
+        merged = base.model_dump() if base is not None else {}
+        if entity_name in self.agents:
+            override = self.get_agent(entity_name).compaction
+        elif entity_name in self.teams:
+            override = self.get_team(entity_name).compaction
+        else:
+            msg = f"Unknown entity: {entity_name}"
+            raise ValueError(msg)
+        if override is not None:
+            authored_override = override.model_dump(exclude_unset=True)
+            authored_model = _authored_optional_model(
+                override.model,
+                field_is_set="model" in override.model_fields_set,
+            )
+            explicit_enabled = authored_override.pop(
+                "enabled",
+                override.enabled if "enabled" in override.model_fields_set else None,
+            )
+            for field_name, field_value in authored_override.items():
+                if field_value is None:
+                    merged.pop(field_name, None)
+                    continue
+                merged[field_name] = field_value
+            if authored_override.get("threshold_tokens") is not None:
+                merged.pop("threshold_percent", None)
+            if authored_override.get("threshold_percent") is not None:
+                merged.pop("threshold_tokens", None)
+            merged["enabled"] = _effective_static_compaction_enabled(
+                defaults_enabled=defaults_enabled,
+                override_enabled=explicit_enabled,
+                override_fields_set=override.model_fields_set,
+                authored_model=authored_model,
+            )
+        return CompactionConfig.model_validate(merged)
+
+    def has_authored_entity_compaction_config(self, entity_name: str) -> bool:
+        """Return whether auto-compaction was explicitly configured for one configured entity."""
+        if entity_name in self.agents:
+            override = self.get_agent(entity_name).compaction
+        elif entity_name in self.teams:
+            override = self.get_team(entity_name).compaction
+        else:
+            msg = f"Unknown entity: {entity_name}"
+            raise ValueError(msg)
+        return self.defaults.compaction is not None or override is not None
+
+    def get_model_context_window(self, model_name: str) -> int | None:
+        """Return the configured context window for one model name, when known."""
+        model_config = self.models.get(model_name)
+        return model_config.context_window if model_config and model_config.context_window else None
 
     def get_agent_worker_tools(
         self,
@@ -1075,6 +1374,52 @@ class Config(BaseModel):
         available = sorted(set(self.agents.keys()) | set(self.teams.keys()) | {ROUTER_AGENT_NAME})
         msg = f"Unknown entity: {entity_name}. Available entities: {', '.join(available)}"
         raise ValueError(msg)
+
+    def get_effective_entity_model_name(
+        self,
+        entity_name: str,
+        room_id: str | None,
+        runtime_paths: RuntimePaths,
+    ) -> str:
+        """Return the effective model for one entity in one room context."""
+        if entity_name not in self.agents and entity_name not in self.teams and entity_name != ROUTER_AGENT_NAME:
+            return "default"
+        if room_id is not None:
+            from mindroom.matrix.rooms import get_room_alias_from_id  # noqa: PLC0415
+
+            room_alias = get_room_alias_from_id(room_id, runtime_paths)
+            if room_alias and room_alias in self.room_models:
+                return self.room_models[room_alias]
+        return self.get_entity_model_name(entity_name)
+
+    def resolve_runtime_model(
+        self,
+        *,
+        entity_name: str | None,
+        active_model_name: str | None = None,
+        active_context_window: int | None = None,
+        room_id: str | None = None,
+        runtime_paths: RuntimePaths | None = None,
+        default_model_name: str = "default",
+    ) -> ResolvedRuntimeModel:
+        """Resolve the active runtime model plus its configured context window."""
+        resolved_model_name = active_model_name
+        if resolved_model_name is None:
+            if entity_name is None:
+                resolved_model_name = default_model_name
+            elif room_id is not None:
+                if runtime_paths is None:
+                    msg = "runtime_paths are required to resolve a room-specific runtime model"
+                    raise ValueError(msg)
+                resolved_model_name = self.get_effective_entity_model_name(entity_name, room_id, runtime_paths)
+            else:
+                resolved_model_name = self.get_entity_model_name(entity_name)
+
+        resolved_context_window = active_context_window
+        if resolved_context_window is None:
+            resolved_context_window = self.get_model_context_window(resolved_model_name)
+
+        return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
 
     def get_configured_bots_for_room(
         self,

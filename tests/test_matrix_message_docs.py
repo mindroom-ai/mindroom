@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from agno.tools.function import Function
+from typing import TYPE_CHECKING
 
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
+
+if TYPE_CHECKING:
+    from agno.tools.function import Function
 
 
 def _matrix_message_function() -> Function:

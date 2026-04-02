@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import html
-import json
 import re
 from typing import TYPE_CHECKING, cast
 
 from agno.db.base import SessionType
 from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 if TYPE_CHECKING:
     from agno.db.sqlite import SqliteDb
@@ -47,16 +46,6 @@ def render_enrichment_block(items: list[EnrichmentItem]) -> str:
     return "<mindroom_message_context>\n" + "\n".join(rendered_items) + "\n</mindroom_message_context>"
 
 
-def compute_enrichment_digest(items: list[EnrichmentItem]) -> str | None:
-    """Return a stable digest for the current merged enrichment set."""
-    if not items:
-        return None
-
-    payload = [{"key": item.key, "text": item.text, "cache_policy": item.cache_policy} for item in items]
-    digest_input = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-    return hashlib.sha256(digest_input.encode("utf-8")).hexdigest()
-
-
 def strip_enrichment_block(text: str) -> str:
     """Remove rendered enrichment blocks from persisted text."""
     return _ENRICHMENT_BLOCK_PATTERN.sub("\n", text).strip()
@@ -80,20 +69,29 @@ def _strip_session_message_content(message: object) -> bool:
     return changed
 
 
-def _session_runs(session: AgentSession) -> list[RunOutput | TeamRunOutput]:
+def _session_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
     return list(session.runs or [])
 
 
-def strip_enrichment_from_session_storage(storage: SqliteDb, session_id: str) -> bool:
+def strip_enrichment_from_session_storage(
+    storage: SqliteDb,
+    session_id: str,
+    *,
+    session_type: SessionType = SessionType.AGENT,
+) -> bool:
     """Remove enrichment blocks from persisted Agno session history for one session."""
-    raw_session = storage.get_session(session_id, SessionType.AGENT)
+    raw_session = storage.get_session(session_id, session_type)
     if raw_session is None:
         return False
 
     if isinstance(raw_session, dict):
-        session = AgentSession.from_dict(cast("dict[str, object]", raw_session))
+        session = (
+            TeamSession.from_dict(cast("dict[str, object]", raw_session))
+            if session_type is SessionType.TEAM
+            else AgentSession.from_dict(cast("dict[str, object]", raw_session))
+        )
     else:
-        session = cast("AgentSession", raw_session)
+        session = cast("AgentSession | TeamSession", raw_session)
     if session is None:
         return False
 

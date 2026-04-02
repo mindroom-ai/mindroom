@@ -19,6 +19,7 @@ import {
   FieldGroup,
   CheckboxListField,
   CheckboxListItem,
+  HistoryContextSection,
 } from '@/components/shared';
 import { useForm, useWatch, Controller } from 'react-hook-form';
 import {
@@ -26,6 +27,7 @@ import {
   AgentPrivateConfig,
   AgentPrivateKnowledgeConfig,
   getDefaultPrivateConfig,
+  resolveEffectiveDefaultTools,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
 } from '@/types/config';
 import { Badge } from '@/components/ui/badge';
@@ -61,7 +63,6 @@ export function AgentEditor() {
   const defaultShowToolCalls = config?.defaults.show_tool_calls ?? true;
   const defaultMarkdown = config?.defaults.markdown ?? true;
   const defaultCompressToolResults = config?.defaults.compress_tool_results ?? true;
-  const defaultEnableSessionSummaries = config?.defaults.enable_session_summaries ?? false;
   const globalMemoryBackend = config?.memory?.backend ?? 'mem0';
   const knowledgeBaseNames = useMemo(
     () => Object.keys(config?.knowledge_bases || {}).sort(),
@@ -104,6 +105,7 @@ export function AgentEditor() {
       delegate_to: [],
       context_files: [],
       private: undefined,
+      compaction: undefined,
       learning: defaultLearning,
       learning_mode: defaultLearningMode,
       memory_backend: undefined,
@@ -111,8 +113,6 @@ export function AgentEditor() {
   });
   const learningEnabled = useWatch({ name: 'learning', control });
   const effectiveLearningEnabled = learningEnabled ?? defaultLearning;
-  const numHistoryRuns = useWatch({ name: 'num_history_runs', control });
-  const numHistoryMessages = useWatch({ name: 'num_history_messages', control });
   const agentTools = useWatch({ name: 'tools', control });
   const includeDefaultTools = useWatch({ name: 'include_default_tools', control });
   const privateConfig = useWatch({ name: 'private', control });
@@ -128,6 +128,13 @@ export function AgentEditor() {
   );
   const validationErrorForPath = useScopedConfigValidation(validationPrefix);
   const agentRootError = validationErrorForPath([], true);
+  const numHistoryRunsError = validationErrorForPath(['num_history_runs'], true);
+  const numHistoryMessagesError = validationErrorForPath(['num_history_messages'], true);
+  const maxToolCallsFromHistoryError = validationErrorForPath(
+    ['max_tool_calls_from_history'],
+    true
+  );
+  const compactionError = validationErrorForPath(['compaction'], true);
   const privateScopeError = validationErrorForPath(['private', 'per'], true);
   const privateRootError = validationErrorForPath(['private', 'root'], true);
   const privateTemplateDirError = validationErrorForPath(['private', 'template_dir'], true);
@@ -200,13 +207,13 @@ export function AgentEditor() {
   // Compute effective tools: agent tools + defaults.tools (when include_default_tools is enabled)
   const effectiveTools = useMemo(() => {
     const tools = new Set(agentTools);
-    if ((includeDefaultTools ?? true) && config?.defaults.tools) {
-      for (const t of config.defaults.tools) {
+    if (includeDefaultTools ?? true) {
+      for (const t of resolveEffectiveDefaultTools(config?.defaults)) {
         tools.add(t);
       }
     }
     return [...tools];
-  }, [agentTools, includeDefaultTools, config?.defaults.tools]);
+  }, [agentTools, includeDefaultTools, config?.defaults]);
 
   // Prepare checkbox items for skills (includes orphaned selected skills)
   const skillItems: CheckboxListItem[] = useMemo(() => {
@@ -265,6 +272,7 @@ export function AgentEditor() {
         delegate_to: selectedAgent.delegate_to ?? [],
         context_files: selectedAgent.context_files ?? [],
         private: selectedAgent.private ?? undefined,
+        compaction: selectedAgent.compaction ?? undefined,
         learning: selectedAgent.learning ?? defaultLearning,
         learning_mode: selectedAgent.learning_mode ?? defaultLearningMode,
       });
@@ -378,6 +386,21 @@ export function AgentEditor() {
     }
   };
 
+  const updateCompaction = useCallback(
+    (nextCompaction: Agent['compaction']) => {
+      setValue('compaction', nextCompaction);
+      handleFieldChange('compaction', nextCompaction);
+    },
+    [handleFieldChange, setValue]
+  );
+
+  const mutateCompaction = useCallback(
+    (mutator: (current: Agent['compaction']) => Agent['compaction']) => {
+      updateCompaction(mutator(getValues('compaction')));
+    },
+    [getValues, updateCompaction]
+  );
+
   const handlePrivateScopeChange = (per: AgentPrivateConfig['per']) => {
     mutatePrivate(current => ({
       ...ensurePrivateConfig(current),
@@ -463,13 +486,6 @@ export function AgentEditor() {
       ...(current ?? { enabled: true }),
       watch,
     }));
-  };
-
-  /** Parse a string to a non-negative integer or return null for empty/invalid input. */
-  const parseOptionalInt = (raw: string): number | null => {
-    if (raw.trim() === '') return null;
-    const n = parseInt(raw, 10);
-    return Number.isNaN(n) || n < 0 ? null : n;
   };
   const toolHasOverrides = (toolName: string): boolean => {
     if (selectedAgentId == null) {
@@ -1723,194 +1739,45 @@ export function AgentEditor() {
         />
       </FieldGroup>
 
-      {/* History & Context Settings */}
-      <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">
-        <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
-          History & Context
-        </h3>
-
-        {/* Num History Runs */}
-        <div className="space-y-4">
-          <FieldGroup
-            label="History Runs"
-            helperText={`Number of prior conversation runs to include as history context. Leave empty to use default${
-              config?.defaults.num_history_runs != null
-                ? ` (${config.defaults.num_history_runs})`
-                : ' (all)'
-            }.`}
-            htmlFor="num_history_runs"
-          >
-            <Controller
-              name="num_history_runs"
-              control={control}
-              render={({ field }) => (
-                <Input
-                  id="num_history_runs"
-                  type="number"
-                  min={0}
-                  value={field.value ?? ''}
-                  placeholder={
-                    config?.defaults.num_history_runs != null
-                      ? `Default: ${config.defaults.num_history_runs}`
-                      : 'Default: all'
-                  }
-                  disabled={numHistoryMessages != null}
-                  onChange={e => {
-                    const value = parseOptionalInt(e.target.value);
-                    field.onChange(value);
-                    handleFieldChange('num_history_runs', value);
-                  }}
-                />
-              )}
-            />
-            {numHistoryMessages != null && (
-              <p className="text-xs text-amber-600 dark:text-amber-400">
-                Disabled because History Messages is set (mutually exclusive).
-              </p>
-            )}
-          </FieldGroup>
-
-          {/* Num History Messages */}
-          <FieldGroup
-            label="History Messages"
-            helperText={`Max messages from history (mutually exclusive with History Runs). Leave empty to use default${
-              config?.defaults.num_history_messages != null
-                ? ` (${config.defaults.num_history_messages})`
-                : ' (all)'
-            }.`}
-            htmlFor="num_history_messages"
-          >
-            <Controller
-              name="num_history_messages"
-              control={control}
-              render={({ field }) => (
-                <Input
-                  id="num_history_messages"
-                  type="number"
-                  min={0}
-                  value={field.value ?? ''}
-                  placeholder={
-                    config?.defaults.num_history_messages != null
-                      ? `Default: ${config.defaults.num_history_messages}`
-                      : 'Default: all'
-                  }
-                  disabled={numHistoryRuns != null}
-                  onChange={e => {
-                    const value = parseOptionalInt(e.target.value);
-                    field.onChange(value);
-                    handleFieldChange('num_history_messages', value);
-                  }}
-                />
-              )}
-            />
-            {numHistoryRuns != null && (
-              <p className="text-xs text-amber-600 dark:text-amber-400">
-                Disabled because History Runs is set (mutually exclusive).
-              </p>
-            )}
-          </FieldGroup>
-
-          {/* Max Tool Calls From History */}
-          <FieldGroup
-            label="Max Tool Calls from History"
-            helperText={`Max tool call messages replayed from history. Leave empty to use default${
-              config?.defaults.max_tool_calls_from_history != null
-                ? ` (${config.defaults.max_tool_calls_from_history})`
-                : ' (no limit)'
-            }.`}
-            htmlFor="max_tool_calls_from_history"
-          >
-            <Controller
-              name="max_tool_calls_from_history"
-              control={control}
-              render={({ field }) => (
-                <Input
-                  id="max_tool_calls_from_history"
-                  type="number"
-                  min={0}
-                  value={field.value ?? ''}
-                  placeholder={
-                    config?.defaults.max_tool_calls_from_history != null
-                      ? `Default: ${config.defaults.max_tool_calls_from_history}`
-                      : 'Default: no limit'
-                  }
-                  onChange={e => {
-                    const value = parseOptionalInt(e.target.value);
-                    field.onChange(value);
-                    handleFieldChange('max_tool_calls_from_history', value);
-                  }}
-                />
-              )}
-            />
-          </FieldGroup>
-
-          {/* Compress Tool Results */}
-          <FieldGroup
-            label="Compress Tool Results"
-            helperText={`Compress tool results in history to save context (global default: ${
-              defaultCompressToolResults ? 'on' : 'off'
-            })`}
-            htmlFor="compress_tool_results"
-          >
-            <Controller
-              name="compress_tool_results"
-              control={control}
-              render={({ field }) => (
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="compress_tool_results"
-                    checked={field.value ?? defaultCompressToolResults}
-                    onCheckedChange={checked => {
-                      const value = checked === true;
-                      field.onChange(value);
-                      handleFieldChange('compress_tool_results', value);
-                    }}
-                  />
-                  <label
-                    htmlFor="compress_tool_results"
-                    className="text-sm font-medium cursor-pointer select-none"
-                  >
-                    Compress tool results
-                  </label>
-                </div>
-              )}
-            />
-          </FieldGroup>
-
-          {/* Enable Session Summaries */}
-          <FieldGroup
-            label="Session Summaries"
-            helperText={`Enable Agno session summaries for conversation compaction (global default: ${
-              defaultEnableSessionSummaries ? 'on' : 'off'
-            })`}
-            htmlFor="enable_session_summaries"
-          >
-            <Controller
-              name="enable_session_summaries"
-              control={control}
-              render={({ field }) => (
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="enable_session_summaries"
-                    checked={field.value ?? defaultEnableSessionSummaries}
-                    onCheckedChange={checked => {
-                      const value = checked === true;
-                      field.onChange(value);
-                      handleFieldChange('enable_session_summaries', value);
-                    }}
-                  />
-                  <label
-                    htmlFor="enable_session_summaries"
-                    className="text-sm font-medium cursor-pointer select-none"
-                  >
-                    Enable session summaries
-                  </label>
-                </div>
-              )}
-            />
-          </FieldGroup>
-        </div>
-      </div>
+      <HistoryContextSection
+        control={control}
+        resetKey={selectedAgentId}
+        defaults={config?.defaults}
+        onFieldChange={(fieldName, value) =>
+          handleFieldChange(fieldName as keyof Agent, value as Agent[keyof Agent])
+        }
+        updateCompaction={updateCompaction}
+        mutateCompaction={mutateCompaction}
+        historyRunsHelperText={`Number of prior conversation runs to include as history context. Leave empty to use default${
+          config?.defaults.num_history_runs != null
+            ? ` (${config.defaults.num_history_runs})`
+            : ' (all)'
+        }.`}
+        historyMessagesHelperText={`Max messages from history (mutually exclusive with History Runs). Leave empty to use default${
+          config?.defaults.num_history_messages != null
+            ? ` (${config.defaults.num_history_messages})`
+            : ' (all)'
+        }.`}
+        maxToolCallsHelperText={`Max tool call messages replayed from history. Leave empty to use default${
+          config?.defaults.max_tool_calls_from_history != null
+            ? ` (${config.defaults.max_tool_calls_from_history})`
+            : ' (no limit)'
+        }.`}
+        autoCompactionHelperText="Automatically compact older session history before a run when the context budget gets tight."
+        thresholdTokensHelperText="Absolute token threshold that triggers compaction. Leave empty to use threshold percent or the runtime fallback."
+        compactionModelPlaceholder={config?.defaults.compaction?.model ?? 'Default: agent model'}
+        numHistoryRunsError={numHistoryRunsError}
+        numHistoryMessagesError={numHistoryMessagesError}
+        maxToolCallsFromHistoryError={maxToolCallsFromHistoryError}
+        compactionError={compactionError}
+        compressToolResults={{
+          defaultValue: defaultCompressToolResults,
+          helperText: `Compress tool results in history to save context (global default: ${
+            defaultCompressToolResults ? 'on' : 'off'
+          })`,
+          onChange: value => handleFieldChange('compress_tool_results', value),
+        }}
+      />
     </EditorPanel>
   );
 }

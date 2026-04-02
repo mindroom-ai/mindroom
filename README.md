@@ -274,10 +274,18 @@ mindroom_user:
 defaults:
   markdown: true
   compress_tool_results: true        # Compress tool results in history to save context
-  enable_session_summaries: false    # AI summaries of older conversation segments (costs extra LLM call)
+  # Auto-compaction is disabled until you author a compaction block.
+  # compaction:
+  #   enabled: true
+  #   threshold_percent: 0.8
+  #   reserve_tokens: 16384
+  #   notify: false
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   num_history_runs: null             # Number of prior runs to include (null = all)
 ```
+
+Auto-compaction is destructive inside the active session.
+It rewrites the stored session summary and removes the compacted raw runs from the live session so Agno replays only the merged summary plus the remaining recent runs.
 
 2. Configure your Matrix homeserver and API keys (optional, defaults shown):
 ```bash
@@ -306,9 +314,11 @@ agents:
     knowledge_bases: [engineering_docs]
     # Per-agent overrides for history/context (override defaults above):
     # compress_tool_results: false
-    # enable_session_summaries: true
     # max_tool_calls_from_history: 5
     # num_history_runs: 10
+    # compaction:
+    #   enabled: true
+    #   threshold_tokens: 60000  # Requires context_window on the active model or compaction.model
 
 voice:
   enabled: true

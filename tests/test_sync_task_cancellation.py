@@ -435,13 +435,13 @@ async def test_stop_entities_prepares_bots_before_cancelling_sync_tasks() -> Non
 
     mock_bot1 = AsyncMock()
     mock_bot1.prepare_for_sync_shutdown = AsyncMock(
-        side_effect=lambda: call_order.append(("prepare", "agent1"))
+        side_effect=lambda: call_order.append(("prepare", "agent1")),
     )
     mock_bot1.stop = AsyncMock(side_effect=lambda **_: call_order.append(("stop", "agent1")))
 
     mock_bot2 = AsyncMock()
     mock_bot2.prepare_for_sync_shutdown = AsyncMock(
-        side_effect=lambda: call_order.append(("prepare", "agent2"))
+        side_effect=lambda: call_order.append(("prepare", "agent2")),
     )
     mock_bot2.stop = AsyncMock(side_effect=lambda **_: call_order.append(("stop", "agent2")))
 

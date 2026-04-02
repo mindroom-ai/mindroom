@@ -111,8 +111,16 @@ agents:
     num_history_runs: null
     num_history_messages: null
     compress_tool_results: true
-    enable_session_summaries: false
     max_tool_calls_from_history: null
+
+    # Auto-compaction stays off until you author defaults.compaction
+    # or a non-empty per-agent compaction override.
+    # A bare per-agent compaction: {} only inherits authored defaults.
+    compaction:
+      enabled: true
+      threshold_percent: 0.8
+      reserve_tokens: 16384
+      notify: false
 
 ```
 
@@ -140,7 +148,7 @@ agents:
 | `num_history_runs` | int | `null` | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages` |
 | `num_history_messages` | int | `null` | Max messages from history. Mutually exclusive with `num_history_runs` |
 | `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `true`) |
-| `enable_session_summaries` | bool | `null` | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`) |
+| `compaction` | object | `null` | Per-agent auto-compaction overrides. When the active runtime model has a known `context_window`, MindRoom always computes a per-run replay plan that reduces or disables persisted replay before the model call if needed. Authoring `defaults.compaction` enables the optional destructive compaction phase for inheriting agents and teams. A non-empty per-agent block also enables that destructive phase for the agent, but a bare `compaction: {}` is only a no-op override that inherits authored defaults. Use `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`, and `notify` to change the destructive-compaction policy. Replay safety always uses the active runtime model window. If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass. Compaction is destructive inside the live session: it merges old history into `session.summary` and removes the compacted raw runs from `session.runs` |
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](../deployment/sandbox-proxy.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
@@ -155,6 +163,13 @@ Per-agent values override them.
 `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
+
+MindRoom prepares persisted history in two phases.
+It may first compact older durable history into `session.summary`.
+It then always plans the replay that is safe for the current model call when the active runtime model has a known `context_window`.
+That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run.
+Compaction rewrites the persisted Agno session in SQLite.
+Older compacted runs are removed from `session.runs` and replaced by the merged `session.summary`, so raw pre-compaction runs are not retained for later audit or debugging.
 
 Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
 `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`).
@@ -547,7 +562,12 @@ defaults:
     min_update_interval: 0.5            # Fast-start seconds between early edits
     interval_ramp_seconds: 15.0         # Set 0 to disable interval ramping
   compress_tool_results: true           # Compress tool results in history to save context
-  enable_session_summaries: false       # AI summaries of older conversation segments (costs extra LLM call)
+  # Auto-compaction is disabled until you author this block.
+  # compaction:
+  #   enabled: true
+  #   threshold_percent: 0.8
+  #   reserve_tokens: 16384
+  #   notify: false
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true                 # Show tool-call markers and trace metadata in message content
   worker_tools: null                     # Tool names to route through workers (null = use MindRoom's default routing policy, [] = disable)

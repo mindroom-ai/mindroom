@@ -12,7 +12,12 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Users } from 'lucide-react';
-import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
+import {
+  EditorPanel,
+  EditorPanelEmptyState,
+  FieldGroup,
+  HistoryContextSection,
+} from '@/components/shared';
 import { useForm, Controller } from 'react-hook-form';
 import { Team } from '@/types/config';
 import { useScopedConfigValidation } from '@/hooks/useScopedConfigValidation';
@@ -46,6 +51,13 @@ export function TeamEditor() {
   const roleError = validationErrorForPath(['role'], true);
   const modeError = validationErrorForPath(['mode'], true);
   const modelError = validationErrorForPath(['model'], true);
+  const numHistoryRunsError = validationErrorForPath(['num_history_runs'], true);
+  const numHistoryMessagesError = validationErrorForPath(['num_history_messages'], true);
+  const maxToolCallsFromHistoryError = validationErrorForPath(
+    ['max_tool_calls_from_history'],
+    true
+  );
+  const compactionError = validationErrorForPath(['compaction'], true);
   const membersError = validationErrorForPath(['agents']);
   const roomsError = validationErrorForPath(['rooms']);
 
@@ -55,7 +67,7 @@ export function TeamEditor() {
     enabled: !!selectedTeamId && window.innerWidth < 1024,
   });
 
-  const { control, reset } = useForm<Team>({
+  const { control, reset, setValue, getValues } = useForm<Team>({
     defaultValues: selectedTeam || {
       id: '',
       display_name: '',
@@ -63,23 +75,43 @@ export function TeamEditor() {
       agents: [],
       rooms: [],
       mode: 'coordinate',
+      compaction: undefined,
     },
   });
-
   // Reset form when selected team changes
   useEffect(() => {
     if (selectedTeam) {
-      reset(selectedTeam);
+      reset({
+        ...selectedTeam,
+        compaction: selectedTeam.compaction ?? undefined,
+      });
     }
   }, [selectedTeam, reset]);
-  // Create a debounced update function
+
+  // Let the store normalize against current state so sequential UI updates do not
+  // reuse stale render-time team data.
   const handleFieldChange = useCallback(
-    (fieldName: keyof Team, value: any) => {
+    <K extends keyof Team>(fieldName: K, value: Team[K]) => {
       if (selectedTeamId) {
         updateTeam(selectedTeamId, { [fieldName]: value });
       }
     },
     [selectedTeamId, updateTeam]
+  );
+
+  const updateCompaction = useCallback(
+    (nextCompaction: Team['compaction']) => {
+      setValue('compaction', nextCompaction);
+      handleFieldChange('compaction', nextCompaction);
+    },
+    [handleFieldChange, setValue]
+  );
+
+  const mutateCompaction = useCallback(
+    (mutator: (current: Team['compaction']) => Team['compaction']) => {
+      updateCompaction(mutator(getValues('compaction')));
+    },
+    [getValues, updateCompaction]
   );
 
   const handleDelete = () => {
@@ -229,6 +261,39 @@ export function TeamEditor() {
           )}
         />
       </FieldGroup>
+
+      <HistoryContextSection
+        control={control}
+        resetKey={selectedTeamId}
+        defaults={config?.defaults}
+        onFieldChange={(fieldName, value) =>
+          handleFieldChange(fieldName as keyof Team, value as Team[keyof Team])
+        }
+        updateCompaction={updateCompaction}
+        mutateCompaction={mutateCompaction}
+        historyRunsHelperText={`Number of prior team-scoped runs to include as replay. Leave empty to use default${
+          config?.defaults.num_history_runs != null
+            ? ` (${config.defaults.num_history_runs})`
+            : ' (all)'
+        }.`}
+        historyMessagesHelperText={`Max replay messages from team-scoped history. Leave empty to use default${
+          config?.defaults.num_history_messages != null
+            ? ` (${config.defaults.num_history_messages})`
+            : ' (all)'
+        }.`}
+        maxToolCallsHelperText={`Max tool call messages replayed from team history. Leave empty to use default${
+          config?.defaults.max_tool_calls_from_history != null
+            ? ` (${config.defaults.max_tool_calls_from_history})`
+            : ' (no limit)'
+        }.`}
+        autoCompactionHelperText="Automatically compact older team-scoped history before the next run when the context budget gets tight."
+        thresholdTokensHelperText="Absolute token threshold that triggers compaction."
+        compactionModelPlaceholder={config?.defaults.compaction?.model ?? 'Default: team run model'}
+        numHistoryRunsError={numHistoryRunsError}
+        numHistoryMessagesError={numHistoryMessagesError}
+        maxToolCallsFromHistoryError={maxToolCallsFromHistoryError}
+        compactionError={compactionError}
+      />
 
       {/* Team Members (Agents) */}
       <FieldGroup

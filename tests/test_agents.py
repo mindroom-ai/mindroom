@@ -16,7 +16,12 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 from pydantic import ValidationError
 
 from mindroom import agent_prompts
-from mindroom.agents import _CULTURE_MANAGER_CACHE, _PRIVATE_CULTURE_MANAGER_CACHE, create_agent
+from mindroom.agents import (
+    _CULTURE_MANAGER_CACHE,
+    _PRIVATE_CULTURE_MANAGER_CACHE,
+    create_agent,
+    get_agent_runtime_sqlite_dbs,
+)
 from mindroom.config.agent import (
     AgentConfig,
     AgentPrivateConfig,
@@ -204,6 +209,26 @@ def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.learning.user_memory.mode is LearningMode.ALWAYS
 
 
+def test_get_agent_runtime_sqlite_dbs_includes_learning_storage(tmp_path: Path) -> None:
+    """Runtime-owned agent DB cleanup should include the separate learning storage."""
+    config = _test_config()
+    config.models = {"default": ModelConfig(provider="ollama", id="test-model")}
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+
+    agent = _create_agent_for_test("general", config=config)
+
+    assert isinstance(agent.learning, LearningMachine)
+    history_db, learning_db = get_agent_runtime_sqlite_dbs(agent)
+    assert history_db is agent.db
+    assert learning_db is agent.learning.db
+    assert history_db is not learning_db
+
+    if learning_db is not None:
+        learning_db.close()
+    if history_db is not None:
+        history_db.close()
+
+
 @patch("mindroom.agents.SqliteDb")
 def test_hidden_tool_calls_prompt_is_injected(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Agents with hidden tool calls get a prompt hint to avoid narrating tool usage."""
@@ -213,6 +238,39 @@ def test_hidden_tool_calls_prompt_is_injected(mock_storage: MagicMock) -> None: 
     agent = _create_agent_for_test("general", config=config)
 
     assert agent_prompts.HIDDEN_TOOL_CALLS_PROMPT in agent.instructions
+
+
+@pytest.mark.parametrize(
+    ("factory", "field_name"),
+    [
+        (lambda: DefaultsConfig(num_history_runs=0), "num_history_runs"),
+        (lambda: DefaultsConfig(num_history_messages=0), "num_history_messages"),
+        (lambda: AgentConfig(display_name="Agent", num_history_runs=0), "num_history_runs"),
+        (lambda: AgentConfig(display_name="Agent", num_history_messages=0), "num_history_messages"),
+        (
+            lambda: TeamConfig(
+                display_name="Team",
+                role="Coordinate work",
+                agents=["general"],
+                num_history_runs=0,
+            ),
+            "num_history_runs",
+        ),
+        (
+            lambda: TeamConfig(
+                display_name="Team",
+                role="Coordinate work",
+                agents=["general"],
+                num_history_messages=0,
+            ),
+            "num_history_messages",
+        ),
+    ],
+)
+def test_history_limits_require_positive_values(factory: Callable[[], object], field_name: str) -> None:
+    """Zero history limits are rejected so they cannot diverge from Agno semantics."""
+    with pytest.raises(ValidationError, match=field_name):
+        factory()
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -1744,7 +1802,9 @@ def test_agent_preload_cap_truncates_context_files_in_order(
 ) -> None:
     """Preload cap should drop earlier context files before later ones."""
     config = _test_config()
-    config.defaults.max_preload_chars = 420
+    authored_defaults = config.defaults.model_dump(mode="python")
+    authored_defaults["max_preload_chars"] = 420
+    config.defaults = DefaultsConfig(**authored_defaults)
 
     workspace = agent_workspace_root_path(tmp_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)

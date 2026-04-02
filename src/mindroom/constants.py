@@ -477,11 +477,6 @@ def runtime_mindroom_namespace(runtime_paths: RuntimePaths) -> str | None:
     return normalized or None
 
 
-def runtime_ai_cache_enabled(runtime_paths: RuntimePaths) -> bool:
-    """Return whether the AI response cache is enabled for one runtime context."""
-    return runtime_env_flag("MINDROOM_ENABLE_AI_CACHE", default=True, runtime_paths=runtime_paths)
-
-
 def matrix_state_file(runtime_paths: RuntimePaths) -> Path:
     """Return the matrix-state file for one runtime context."""
     return runtime_paths.storage_root / "matrix_state.yaml"
@@ -626,6 +621,9 @@ ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
 VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
+MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
+MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
+COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
 STREAM_STATUS_PENDING = "pending"
 STREAM_STATUS_STREAMING = "streaming"

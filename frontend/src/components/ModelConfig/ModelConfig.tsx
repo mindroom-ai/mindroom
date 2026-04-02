@@ -39,6 +39,7 @@ interface RowDraft {
   provider: string;
   modelId: string;
   baseUrl: string;
+  contextWindow: string;
   apiKey: string;
   selectedKeySourceModel: string;
   clearCustomKey: boolean;
@@ -64,6 +65,7 @@ interface ModelRowData {
   providerName: string;
   modelId: string;
   openAIBaseUrl: string | null;
+  contextWindow: number | null;
   keyDisplay: KeyDisplayInfo | null;
 }
 
@@ -72,6 +74,7 @@ const EMPTY_DRAFT: RowDraft = {
   provider: 'openrouter',
   modelId: '',
   baseUrl: '',
+  contextWindow: '',
   apiKey: '',
   selectedKeySourceModel: '',
   clearCustomKey: false,
@@ -149,6 +152,21 @@ function isValidHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function parseOptionalPositiveInteger(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    return Number.NaN;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    return Number.NaN;
+  }
+  return parsed;
 }
 
 async function fetchKeyStatus(service: string): Promise<KeyStatus> {
@@ -440,6 +458,7 @@ export function ModelConfig() {
       provider: row.provider,
       modelId: row.modelId,
       baseUrl: row.openAIBaseUrl || '',
+      contextWindow: row.contextWindow != null ? String(row.contextWindow) : '',
       apiKey: '',
       selectedKeySourceModel: '',
       clearCustomKey: false,
@@ -493,6 +512,21 @@ export function ModelConfig() {
     return { valid: true, value: normalizedBaseUrl };
   };
 
+  const validateContextWindow = (
+    rawContextWindow: string
+  ): { valid: true; value: number | null } | { valid: false } => {
+    const contextWindow = parseOptionalPositiveInteger(rawContextWindow);
+    if (contextWindow !== null && Number.isNaN(contextWindow)) {
+      toast({
+        title: 'Error',
+        description: 'Context window must be a positive integer',
+        variant: 'destructive',
+      });
+      return { valid: false };
+    }
+    return { valid: true, value: contextWindow };
+  };
+
   const handleSaveRow = async () => {
     if (!editingRowId || !rowDraft) {
       return;
@@ -539,6 +573,11 @@ export function ModelConfig() {
       return;
     }
     const normalizedBaseUrl = baseUrlValidation.value;
+    const contextWindowValidation = validateContextWindow(rowDraft.contextWindow);
+    if (!contextWindowValidation.valid) {
+      return;
+    }
+    const normalizedContextWindow = contextWindowValidation.value;
 
     setIsSavingRow(true);
 
@@ -593,6 +632,11 @@ export function ModelConfig() {
     } else {
       delete nextModelConfig.extra_kwargs;
     }
+    if (normalizedContextWindow != null) {
+      nextModelConfig.context_window = normalizedContextWindow;
+    } else {
+      delete nextModelConfig.context_window;
+    }
 
     if (rowDraft.provider !== 'ollama') {
       delete nextModelConfig.host;
@@ -642,6 +686,11 @@ export function ModelConfig() {
       return;
     }
     const normalizedBaseUrl = baseUrlValidation.value;
+    const contextWindowValidation = validateContextWindow(newRowDraft.contextWindow);
+    if (!contextWindowValidation.valid) {
+      return;
+    }
+    const normalizedContextWindow = contextWindowValidation.value;
 
     setIsSavingNewRow(true);
 
@@ -662,6 +711,7 @@ export function ModelConfig() {
     const nextModelConfig: {
       provider: ProviderType;
       id: string;
+      context_window?: number;
       extra_kwargs?: Record<string, unknown>;
     } = {
       provider: newRowDraft.provider as ProviderType,
@@ -669,6 +719,9 @@ export function ModelConfig() {
     };
     if (newRowDraft.provider === 'openai' && normalizedBaseUrl) {
       nextModelConfig.extra_kwargs = { base_url: normalizedBaseUrl };
+    }
+    if (normalizedContextWindow != null) {
+      nextModelConfig.context_window = normalizedContextWindow;
     }
 
     updateModel(modelName, nextModelConfig);
@@ -713,6 +766,7 @@ export function ModelConfig() {
         providerName: getProviderInfo(modelConfig.provider).name,
         modelId: modelConfig.id,
         openAIBaseUrl,
+        contextWindow: modelConfig.context_window ?? null,
         keyDisplay,
       };
     });
@@ -935,6 +989,30 @@ export function ModelConfig() {
     );
   };
 
+  const renderContextWindowEditor = (
+    draft: RowDraft,
+    setDraft: Dispatch<SetStateAction<RowDraft>>
+  ) => {
+    return (
+      <div className="space-y-2" onClick={event => event.stopPropagation()}>
+        <Input
+          value={draft.contextWindow}
+          onChange={event => {
+            const contextWindow = event.target.value;
+            setDraft(current => ({ ...current, contextWindow }));
+          }}
+          onClick={event => event.stopPropagation()}
+          placeholder="optional context window"
+          inputMode="numeric"
+          className="h-8 text-xs"
+        />
+        <p className="text-xs text-muted-foreground">
+          Required for compaction-aware budgeting when the provider does not report it elsewhere.
+        </p>
+      </div>
+    );
+  };
+
   const columns: ColumnDef<ModelRowData>[] = [
     {
       accessorKey: 'modelName',
@@ -1028,6 +1106,14 @@ export function ModelConfig() {
                   </code>
                 </p>
               )}
+              {row.original.contextWindow != null && (
+                <p className="text-xs text-muted-foreground">
+                  Context window:{' '}
+                  <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+                    {row.original.contextWindow.toLocaleString()}
+                  </code>
+                </p>
+              )}
             </div>
           );
         }
@@ -1047,6 +1133,7 @@ export function ModelConfig() {
               rowDraft,
               setRowDraft as Dispatch<SetStateAction<RowDraft>>
             )}
+            {renderContextWindowEditor(rowDraft, setRowDraft as Dispatch<SetStateAction<RowDraft>>)}
           </div>
         );
       },
@@ -1239,6 +1326,7 @@ export function ModelConfig() {
                           placeholder="provider model id"
                         />
                         {renderOpenAIEndpointEditor(newRowDraft, setNewRowDraft)}
+                        {renderContextWindowEditor(newRowDraft, setNewRowDraft)}
                       </div>
                     </td>
                     <td className="px-4 py-2.5 align-middle">

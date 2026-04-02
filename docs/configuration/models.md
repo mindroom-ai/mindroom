@@ -29,7 +29,7 @@ Each model configuration supports the following fields:
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
 | `api_key` | No | `null` | API key (usually read from environment variables) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
-| `context_window` | No | `null` | Context window size in tokens; when set, history is dynamically trimmed to stay within 80% of this limit |
+| `context_window` | No | `null` | Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit `compaction.model` also needs its own `context_window` for destructive compaction |
 
 ## Configuration Examples
 
@@ -100,9 +100,18 @@ models:
 
 ## Context Window
 
-When `context_window` is set, MindRoom estimates the total context size before each model call (system prompt + conversation history + current message) using a chars/4 token approximation. If the estimate exceeds 80% of the context window, the number of history runs replayed is automatically reduced to fit within budget. If even a single history run exceeds the remaining budget, history is disabled entirely for that call.
-
-A warning is logged whenever history is trimmed, including the original and reduced run counts.
+When `context_window` is set, MindRoom uses it to budget persisted replay and auto-compaction before each run.
+MindRoom always applies a final replay-fit step when the active runtime model has a known `context_window`.
+That replay-fit step reduces or disables persisted replay for the current run when needed.
+Authoring `defaults.compaction`, or a non-empty per-agent/per-team `compaction` override, adds an optional destructive compaction phase before that replay-fit step and lets you customize the thresholds, reserve, summary model, and notices, or disable destructive auto-compaction entirely.
+A bare per-entity `compaction: {}` is only a no-op override that inherits authored defaults.
+`threshold_tokens` and `threshold_percent` use the active runtime model window for replay budgeting.
+Manual `compact_context` still uses that active runtime window for the final replay-fit step on the next run, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`.
+If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
+The budget uses a chars/4 approximation and reserves headroom for the current prompt and output.
+MindRoom does not mutate configured `num_history_runs` to fit the window.
+Instead, it may first compact older runs into `session.summary`, and it then computes the replay plan that actually fits the current call.
+If needed, that replay plan can reduce raw replay, fall back to summary-only replay, or disable persisted replay entirely for the run.
 
 ```yaml
 models:
@@ -112,7 +121,7 @@ models:
     context_window: 200000  # 200K tokens
 ```
 
-This is useful for models with smaller context windows or agents with long-running conversations that accumulate large histories.
+This is useful for models with smaller context windows or long-running conversations that accumulate persisted history.
 
 ## Extra Kwargs
 

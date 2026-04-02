@@ -192,6 +192,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 |------|------|-------------|-----------------|
 | :lucide-sliders-horizontal: | `custom_api` | Custom API calls | Varies |
 | :lucide-sliders-horizontal: | `config_manager` | Build and manage MindRoom agents with expert knowledge of the system | - |
+| :lucide-minimize-2: | `compact_context` | Schedule context compaction for the next reply in the current conversation scope, rewriting persisted session history into a summary and deleting the compacted raw runs | - |
 | :lucide-workflow: | `subagents` | Spawn and communicate with sub-agent sessions | - |
 | :lucide-workflow: | `delegate` | Delegate tasks to other configured agents | - |
 

@@ -19,7 +19,6 @@ from .context import (
 )
 from .decorators import hook
 from .enrichment import (
-    compute_enrichment_digest,
     render_enrichment_block,
     strip_enrichment_block,
     strip_enrichment_from_session_storage,
@@ -76,7 +75,6 @@ __all__ = [
     "ScheduleFiredContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
-    "compute_enrichment_digest",
     "emit",
     "emit_collect",
     "emit_gate",

@@ -1989,6 +1989,15 @@ describe('configStore', () => {
       expect(state.isDirty).toBe(true);
     });
 
+    it('normalizes empty team compaction overrides away', () => {
+      const { updateTeam } = useConfigStore.getState();
+      updateTeam('team1', { compaction: {} });
+
+      const state = useConfigStore.getState();
+      const updatedTeam = state.teams.find(team => team.id === 'team1');
+      expect(updatedTeam?.compaction).toBeUndefined();
+    });
+
     it('should create new team', () => {
       const { createTeam } = useConfigStore.getState();
       const newTeamData = {

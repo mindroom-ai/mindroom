@@ -135,6 +135,94 @@ def validate_unique_tool_entries(
     return tools
 
 
+def _validate_compaction_threshold_choice(
+    *,
+    threshold_tokens: int | None,
+    threshold_percent: float | None,
+) -> None:
+    if threshold_tokens is not None and threshold_percent is not None:
+        msg = "threshold_tokens and threshold_percent are mutually exclusive"
+        raise ValueError(msg)
+
+
+class CompactionOverrideConfig(BaseModel):
+    """Optional per-agent overrides for automatic compaction."""
+
+    enabled: bool | None = Field(default=None, description="Whether to auto-compact before a run")
+    threshold_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description="Absolute history trigger threshold in tokens",
+    )
+    threshold_percent: float | None = Field(
+        default=None,
+        gt=0,
+        lt=1,
+        description="Context-window trigger threshold as a fraction",
+    )
+    reserve_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description="Reserved headroom for output and tool definitions",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Optional model config name to use for summary generation",
+    )
+    notify: bool | None = Field(
+        default=None,
+        description="Whether to emit a Matrix compaction notice after compaction",
+    )
+
+    @model_validator(mode="after")
+    def validate_threshold_choice(self) -> Self:
+        """Ensure only one compaction threshold knob is authored at a time."""
+        _validate_compaction_threshold_choice(
+            threshold_tokens=self.threshold_tokens,
+            threshold_percent=self.threshold_percent,
+        )
+        return self
+
+
+class CompactionConfig(BaseModel):
+    """Concrete automatic compaction configuration."""
+
+    enabled: bool = Field(default=True, description="Whether to auto-compact before a run")
+    threshold_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description="Absolute history trigger threshold in tokens (defaults to 80% of context window when both thresholds are None)",
+    )
+    threshold_percent: float | None = Field(
+        default=None,
+        gt=0,
+        lt=1,
+        description="Context-window trigger threshold as a fraction",
+    )
+    reserve_tokens: int = Field(
+        default=16384,
+        ge=0,
+        description="Reserved headroom for output and tool definitions",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Optional model config name to use for summary generation",
+    )
+    notify: bool = Field(
+        default=False,
+        description="Whether to emit a Matrix compaction notice after compaction",
+    )
+
+    @model_validator(mode="after")
+    def validate_threshold_choice(self) -> Self:
+        """Ensure only one compaction threshold knob is authored at a time."""
+        _validate_compaction_threshold_choice(
+            threshold_tokens=self.threshold_tokens,
+            threshold_percent=self.threshold_percent,
+        )
+        return self
+
+
 class DefaultsConfig(BaseModel):
     """Default configuration values for agents."""
 
@@ -156,21 +244,23 @@ class DefaultsConfig(BaseModel):
     )
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
+    compaction: CompactionConfig | None = Field(
+        default=None,
+        description="Default automatic compaction policy (materializes defaults when absent)",
+    )
     num_history_runs: int | None = Field(
         default=None,
+        ge=1,
         description="Default number of prior Agno runs to include as history context (None = all)",
     )
     num_history_messages: int | None = Field(
         default=None,
+        ge=1,
         description="Default max messages from history (mutually exclusive with num_history_runs)",
     )
     compress_tool_results: bool = Field(
         default=True,
         description="Compress tool results in history to save context",
-    )
-    enable_session_summaries: bool = Field(
-        default=False,
-        description="Enable Agno session summaries for conversation compaction",
     )
     max_tool_calls_from_history: int | None = Field(
         default=None,
@@ -264,7 +354,7 @@ class ModelConfig(BaseModel):
     context_window: int | None = Field(
         default=None,
         ge=1,
-        description="Context window size in tokens; when set, history is dynamically reduced toward an 80% target of this limit",
+        description="Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit compaction.model also needs its own context_window for destructive compaction",
     )
 
 

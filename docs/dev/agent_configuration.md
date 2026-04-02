@@ -63,7 +63,7 @@ Each model entry supports these fields:
 - **host** - Optional host URL (e.g., for Ollama or OpenAI-compatible servers)
 - **api_key** - Optional API key (usually set via env vars instead)
 - **extra_kwargs** - Additional provider-specific parameters (e.g., `base_url`)
-- **context_window** - Context window size in tokens; when set, history is dynamically reduced toward an 80% target
+- **context_window** - Context window size in tokens; when set, MindRoom budgets persisted replay and applies a final replay-fit step before each run, which may reduce replay, fall back to summary-only replay, or disable persisted replay entirely for that run
 
 ### Supported Providers
 
@@ -175,7 +175,7 @@ agents:
 - **num_history_runs**: Number of prior Agno runs to include as history context (per-agent override)
 - **num_history_messages**: Max messages from history (mutually exclusive with `num_history_runs`)
 - **compress_tool_results**: Compress tool results in history to save context (per-agent override)
-- **enable_session_summaries**: Enable Agno session summaries for conversation compaction (per-agent override)
+- **compaction**: Optional per-agent auto-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`, `notify`); when the active runtime model has a known `context_window`, MindRoom always computes a replay plan for the current run and reduces or disables persisted replay when needed. Authoring `defaults.compaction` enables the optional destructive compaction phase for inheriting agents and teams. A non-empty agent block also enables that destructive phase for the agent, but a bare `agents.<name>.compaction: {}` is only a no-op override that inherits authored defaults. Compaction rewrites the live session so compacted history moves into `session.summary` while only recent raw runs remain in `session.runs`
 - **max_tool_calls_from_history**: Max tool call messages replayed from history (per-agent override)
 - **show_tool_calls**: Whether to show tool call details inline in responses (per-agent override)
 - **worker_tools**: Tool names to route through scoped workers (overrides defaults; `null` uses the built-in default routing policy)
@@ -203,12 +203,26 @@ teams:
     agents: [research, code]
     mode: coordinate  # "coordinate" or "collaborate"
     model: "default"  # Optional model override
+    num_history_runs: 8  # Optional team-scoped replay policy
+    num_history_messages: null  # Optional; mutually exclusive with num_history_runs
+    max_tool_calls_from_history: 6  # Optional replay trimming for tool calls
+    compaction:  # Optional team-scoped auto-compaction overrides
+      enabled: true
+      threshold_percent: 0.8
+      reserve_tokens: 16384
+      notify: false
     rooms:
       - lobby
 ```
 
 - **coordinate**: A lead agent orchestrates the others
 - **collaborate**: All members respond in parallel with a consensus summary
+- **num_history_runs / num_history_messages**: Optional team-owned replay policy for named teams
+- **max_tool_calls_from_history**: Optional cap on replayed tool call messages for the shared team scope
+- **compaction**: Optional team-owned auto-compaction overrides for the shared team scope
+
+Named teams use these explicit team settings for replay and compaction when provided.
+Dynamic teams have no named config block, so they inherit replay and compaction settings from `defaults`.
 
 ## Cultures Configuration
 
@@ -321,7 +335,12 @@ defaults:
   learning: true
   learning_mode: "always"  # "always" or "agentic"
   compress_tool_results: true
-  enable_session_summaries: false
+  # Auto-compaction is disabled until you author this block.
+  # compaction:
+  #   enabled: true
+  #   threshold_percent: 0.8
+  #   reserve_tokens: 16384
+  #   notify: false
   show_tool_calls: true
   allow_self_config: false
   max_preload_chars: 50000  # Hard cap for context_files preload

@@ -15,7 +15,12 @@ from pydantic import (
 
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.memory import MemoryBackend  # noqa: TC001
-from mindroom.config.models import AgentLearningMode, ToolConfigEntry, validate_unique_tool_entries
+from mindroom.config.models import (
+    AgentLearningMode,
+    CompactionOverrideConfig,
+    ToolConfigEntry,
+    validate_unique_tool_entries,
+)
 from mindroom.tool_system.metadata import TOOL_METADATA, normalize_authored_tool_overrides
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
@@ -188,6 +193,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Memory backend override for this agent ('mem0' or 'file'); inherits memory.backend when omitted",
     )
+    compaction: CompactionOverrideConfig | None = Field(
+        default=None,
+        description="Per-agent auto-compaction overrides",
+    )
     private: AgentPrivateConfig | None = Field(
         default=None,
         description="Optional requester-private state materialized per private.per partition",
@@ -210,19 +219,17 @@ class AgentConfig(BaseModel):
     )
     num_history_runs: int | None = Field(
         default=None,
+        ge=1,
         description="Number of prior Agno runs to include as history context (per-agent override)",
     )
     num_history_messages: int | None = Field(
         default=None,
+        ge=1,
         description="Max messages from history (mutually exclusive with num_history_runs)",
     )
     compress_tool_results: bool | None = Field(
         default=None,
         description="Compress tool results in history to save context (per-agent override)",
-    )
-    enable_session_summaries: bool | None = Field(
-        default=None,
-        description="Enable Agno session summaries for conversation compaction (per-agent override)",
     )
     max_tool_calls_from_history: int | None = Field(
         default=None,
@@ -272,7 +279,7 @@ class AgentConfig(BaseModel):
 
     def authored_model_dump(self) -> dict[str, object]:
         """Serialize the authored agent config."""
-        return self.model_dump(exclude_none=True)
+        return self.model_dump(exclude_unset=True)
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -350,6 +357,25 @@ class TeamConfig(BaseModel):
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
     model: str | None = Field(default="default", description="Default model for this team (optional)")
     mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
+    compaction: CompactionOverrideConfig | None = Field(
+        default=None,
+        description="Per-team auto-compaction overrides",
+    )
+    num_history_runs: int | None = Field(
+        default=None,
+        ge=1,
+        description="Number of prior scoped runs to include as team history context",
+    )
+    num_history_messages: int | None = Field(
+        default=None,
+        ge=1,
+        description="Max messages from team-scoped history (mutually exclusive with num_history_runs)",
+    )
+    max_tool_calls_from_history: int | None = Field(
+        default=None,
+        ge=0,
+        description="Max tool call messages replayed from team history",
+    )
 
     @field_validator("agents")
     @classmethod
@@ -360,6 +386,14 @@ class TeamConfig(BaseModel):
             msg = f"Duplicate agents are not allowed in a team: {', '.join(duplicates)}"
             raise ValueError(msg)
         return agents
+
+    @model_validator(mode="after")
+    def validate_history_settings(self) -> Self:
+        """Ensure team history replay knobs stay unambiguous."""
+        if self.num_history_runs is not None and self.num_history_messages is not None:
+            msg = "num_history_runs and num_history_messages are mutually exclusive"
+            raise ValueError(msg)
+        return self
 
 
 class CultureConfig(BaseModel):

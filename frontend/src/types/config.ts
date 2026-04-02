@@ -16,6 +16,7 @@ export const SHARED_CONTEXT_FILE_PLACEHOLDER = 'SOUL.md';
 export interface ModelConfig {
   provider: ProviderType;
   id: string;
+  context_window?: number | null;
   host?: string; // For ollama
   extra_kwargs?: Record<string, unknown>; // Additional provider-specific parameters
 }
@@ -101,6 +102,78 @@ export type CultureMode = 'automatic' | 'agentic' | 'manual';
 
 export type ThreadMode = 'thread' | 'room';
 
+export interface CompactionConfig {
+  enabled?: boolean;
+  threshold_tokens?: number | null;
+  threshold_percent?: number | null;
+  reserve_tokens?: number;
+  model?: string | null;
+  notify?: boolean;
+}
+
+const DEFAULT_INHERITED_TOOLS = ['scheduler'] as const;
+
+function isPureCompactionModelClear(compaction: CompactionConfig): boolean {
+  return (
+    compaction.model === null &&
+    compaction.enabled === undefined &&
+    compaction.threshold_tokens === undefined &&
+    compaction.threshold_percent === undefined &&
+    compaction.reserve_tokens === undefined &&
+    compaction.notify === undefined
+  );
+}
+
+function isEmptyCompactionOverride(compaction: CompactionConfig): boolean {
+  return (
+    compaction.enabled === undefined &&
+    compaction.model === undefined &&
+    compaction.threshold_tokens === undefined &&
+    compaction.threshold_percent === undefined &&
+    compaction.reserve_tokens === undefined &&
+    compaction.notify === undefined
+  );
+}
+
+function resolveAuthoredCompactionEnabled(
+  compaction: CompactionConfig | null | undefined
+): boolean {
+  if (compaction == null) {
+    return false;
+  }
+  if (compaction.enabled !== undefined) {
+    return compaction.enabled;
+  }
+  return true;
+}
+
+export function resolveEffectiveCompactionEnabled(
+  compaction: CompactionConfig | null | undefined,
+  defaultCompaction: CompactionConfig | null | undefined
+): boolean {
+  const defaultEnabled = resolveAuthoredCompactionEnabled(defaultCompaction);
+  if (compaction == null) {
+    return defaultEnabled;
+  }
+  if (compaction.enabled !== undefined) {
+    return compaction.enabled;
+  }
+  if (isEmptyCompactionOverride(compaction) || isPureCompactionModelClear(compaction)) {
+    return defaultEnabled;
+  }
+  return true;
+}
+
+export function resolveEffectiveDefaultTools(
+  defaults: Config['defaults'] | null | undefined
+): string[] {
+  const defaultTools = defaults?.tools;
+  if (defaultTools !== undefined) {
+    return [...defaultTools];
+  }
+  return [...DEFAULT_INHERITED_TOOLS];
+}
+
 export interface Agent {
   id: string; // The key in the agents object
   display_name: string;
@@ -116,6 +189,7 @@ export interface Agent {
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
   memory_backend?: MemoryBackend; // Per-agent memory backend override (inherits memory.backend when omitted)
+  compaction?: CompactionConfig | null; // Per-agent auto-compaction overrides
   model?: string; // Reference to a model in the models section
   show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
   worker_tools?: string[]; // Tool names to route through scoped workers (overrides defaults)
@@ -127,7 +201,6 @@ export interface Agent {
   num_history_runs?: number | null; // Number of prior runs to include as history
   num_history_messages?: number | null; // Max messages from history (mutually exclusive with num_history_runs)
   compress_tool_results?: boolean; // Compress tool results in history
-  enable_session_summaries?: boolean; // Enable session summaries for conversation compaction
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from history
   allow_self_config?: boolean; // Allow agent to modify its own configuration via a tool
 }
@@ -140,6 +213,10 @@ export interface Team {
   rooms: string[];
   mode: 'coordinate' | 'collaborate';
   model?: string; // Optional team-specific model
+  compaction?: CompactionConfig | null; // Per-team auto-compaction overrides
+  num_history_runs?: number | null; // Number of prior scoped runs to include as team history
+  num_history_messages?: number | null; // Max team-scoped history messages (mutually exclusive with num_history_runs)
+  max_tool_calls_from_history?: number | null; // Max tool call messages replayed from team history
 }
 
 export interface Culture {
@@ -185,6 +262,7 @@ export interface Config {
     markdown: boolean;
     learning?: boolean;
     learning_mode?: LearningMode;
+    compaction?: CompactionConfig;
     show_tool_calls?: boolean;
     worker_scope?: WorkerScope | null;
     worker_tools?: string[]; // Tool names to route through scoped workers by default for all agents
@@ -194,7 +272,6 @@ export interface Config {
     num_history_runs?: number | null;
     num_history_messages?: number | null;
     compress_tool_results?: boolean;
-    enable_session_summaries?: boolean;
     max_tool_calls_from_history?: number | null;
     allow_self_config?: boolean;
   };
@@ -255,6 +332,55 @@ function normalizePrivateConfig(
   };
 }
 
+function normalizeCompactionConfig(
+  compaction: CompactionConfig | null | undefined
+): CompactionConfig | null | undefined {
+  if (compaction == null) {
+    return compaction;
+  }
+
+  const normalizedModel =
+    compaction.model === null
+      ? null
+      : compaction.model?.trim()
+        ? compaction.model.trim()
+        : undefined;
+  const hasExplicitNullClear = Object.values(compaction).some(value => value === null);
+  const normalizedCompaction: CompactionConfig = {
+    ...compaction,
+    model: normalizedModel,
+  };
+
+  if (Object.values(normalizedCompaction).every(value => value == null) && !hasExplicitNullClear) {
+    return undefined;
+  }
+
+  if (
+    normalizedCompaction.enabled === undefined &&
+    !isPureCompactionModelClear(normalizedCompaction)
+  ) {
+    normalizedCompaction.enabled = true;
+  }
+
+  return normalizedCompaction;
+}
+
+function normalizeCompactionUpdates<T extends { compaction?: CompactionConfig | null }>(
+  entity: T,
+  updates: Partial<T>
+): Partial<T> {
+  const normalizedUpdates: Partial<T> = { ...updates };
+  const nextCompaction = 'compaction' in updates ? updates.compaction : entity.compaction;
+
+  if ('compaction' in updates || nextCompaction != null) {
+    normalizedUpdates.compaction = normalizeCompactionConfig(
+      nextCompaction
+    ) as Partial<T>['compaction'];
+  }
+
+  return normalizedUpdates;
+}
+
 export function getDefaultPrivateConfig(agent: Pick<Agent, 'private'>): AgentPrivateConfig {
   if (agent.private != null) {
     return agent.private;
@@ -265,7 +391,7 @@ export function getDefaultPrivateConfig(agent: Pick<Agent, 'private'>): AgentPri
 }
 
 export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Partial<Agent> {
-  const normalizedUpdates: Partial<Agent> = { ...updates };
+  const normalizedUpdates = normalizeCompactionUpdates(agent, updates);
   const nextPrivate = 'private' in updates ? updates.private : agent.private;
 
   if (nextPrivate != null) {
@@ -274,4 +400,8 @@ export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Pa
   }
 
   return normalizedUpdates;
+}
+
+export function normalizeTeamUpdates(team: Team, updates: Partial<Team>): Partial<Team> {
+  return normalizeCompactionUpdates(team, updates);
 }

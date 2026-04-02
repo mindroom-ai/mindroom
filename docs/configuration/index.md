@@ -67,7 +67,6 @@ See [Model Configuration — File-based Secrets](models.md#file-based-secrets) f
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
 | `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
-| `MINDROOM_ENABLE_AI_CACHE` | Enable the AI response cache (caches model responses keyed by model, messages, and tools — useful during development to avoid repeated API calls) | `true` |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner` or `kubernetes`) | `static_runner` |
@@ -189,7 +188,7 @@ models:
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
-    context_window: null           # Optional: Context window in tokens (enables auto history trimming)
+    context_window: null           # Optional: Needed on the active runtime model for replay safety; explicit compaction.model also needs its own window for summary generation
 
 # Team configurations (optional)
 teams:
@@ -199,6 +198,14 @@ teams:
     agents: [researcher, writer]   # Required: List of agent names
     mode: collaborate              # Optional: "coordinate" or "collaborate" (default: coordinate)
     model: sonnet                  # Optional: Model for team coordination (default: "default")
+    num_history_runs: 8            # Optional: Team-scoped replay policy
+    num_history_messages: null     # Optional: Mutually exclusive with num_history_runs
+    max_tool_calls_from_history: 6 # Optional: Limit replayed tool call messages
+    compaction:                    # Optional: Team-scoped auto-compaction overrides
+      enabled: true
+      threshold_percent: 0.8
+      reserve_tokens: 16384
+      notify: false
     rooms: []                      # Optional: Rooms to auto-join
 
 # Culture configurations (optional)
@@ -229,7 +236,14 @@ defaults:
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
   compress_tool_results: true      # Compress tool results in history to save context
-  enable_session_summaries: false  # AI summaries of older conversation segments (costs extra LLM call)
+  # Auto-compaction stays off until you author defaults.compaction
+  # or a non-empty per-agent/per-team compaction override.
+  # A bare compaction: {} only inherits authored defaults.
+  # compaction:
+  #   enabled: true
+  #   threshold_percent: 0.8
+  #   reserve_tokens: 16384
+  #   notify: false
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
@@ -240,6 +254,10 @@ defaults:
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
 # defaults.streaming is also global-only and controls streamed message edit cadence.
 # Tools can be plain strings or single-key dicts with per-agent config overrides.
+
+# Auto-compaction is destructive inside the active session.
+# It rewrites the stored session summary and removes compacted raw runs from
+# the live session so Agno replays only the summary plus recent runs.
 # Use __MINDROOM_INHERIT__ inside a tool override to clear one inherited authored field
 # while keeping the rest of defaults.tools for that agent.
 # See agents.md for the full per-agent tool configuration syntax.

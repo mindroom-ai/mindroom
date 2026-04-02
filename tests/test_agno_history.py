@@ -1,1497 +1,2716 @@
-"""Tests for Agno-native multi-turn conversation history."""
+"""Tests for native Agno history replay and destructive compaction."""
+# ruff: noqa: D102, D103, ANN201, TC003
 
 from __future__ import annotations
 
-import importlib
-import os
-import tempfile
+import sys
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import nio
 import pytest
 from agno.agent import Agent
-from agno.db.sqlite import SqliteDb
-from agno.media import Image
+from agno.models.base import Model
 from agno.models.message import Message
-from agno.models.ollama import Ollama
+from agno.models.response import ModelResponse
+from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
+from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
-from pydantic import ValidationError
+from agno.session.summary import SessionSummary
+from agno.session.team import TeamSession
+from agno.team import Team
+from agno.tools import Toolkit
+from agno.tools.function import Function
 
-import mindroom
-import mindroom.agents
-from mindroom.agents import (
-    _get_agent_session,
-    get_seen_event_ids,
-    remove_run_by_event_id,
-)
-from mindroom.ai import (
-    _apply_context_window_limit,
-    _build_prompt_with_unseen,
-    _get_unseen_messages,
-    _prepare_agent_and_prompt,
-    ai_response,
-)
-from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.agents import create_agent, create_session_storage, get_agent_session
+from mindroom.ai import _prepare_agent_and_prompt, build_prompt_with_thread_history
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
-from mindroom.constants import STREAM_STATUS_STREAMING, RuntimePaths, resolve_runtime_paths
-from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_tracker import ResponseTracker
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
+from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, RuntimePaths, resolve_runtime_paths
+from mindroom.history import PreparedHistoryState, prepare_history_for_run
+from mindroom.history.compaction import (
+    _build_summary_input,
+    estimate_agent_static_tokens,
+    estimate_history_messages_tokens,
+    estimate_prompt_visible_history_tokens,
+    estimate_session_summary_tokens,
+    estimate_static_tokens,
+    estimate_tool_definition_tokens,
+)
+from mindroom.history.policy import resolve_history_execution_plan, should_attempt_destructive_compaction
+from mindroom.history.runtime import (
+    apply_replay_plan,
+    estimate_preparation_static_tokens,
+    estimate_preparation_static_tokens_for_team,
+    finalize_history_preparation,
+    open_bound_scope_session_context,
+    open_scope_session_context,
+    plan_replay_that_fits,
+    prepare_bound_scope_history,
+)
+from mindroom.history.storage import (
+    read_scope_seen_event_ids,
+    read_scope_state,
+    update_scope_seen_event_ids,
+    write_scope_state,
+)
+from mindroom.history.types import (
+    HistoryPolicy,
+    HistoryScope,
+    HistoryScopeState,
+    ResolvedHistoryExecutionPlan,
+    ResolvedHistorySettings,
+    ResolvedReplayPlan,
+)
+from mindroom.teams import TeamMode, _create_team_instance
+from mindroom.thread_utils import create_session_id
+from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from tests.conftest import bind_runtime_paths
 
-# ---------------------------------------------------------------------------
-# Config tests
-# ---------------------------------------------------------------------------
+
+@dataclass
+class FakeModel(Model):
+    """Minimal model for deterministic agent creation tests."""
+
+    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        return ModelResponse(content="ok")
+
+    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        return ModelResponse(content="ok")
+
+    def invoke_stream(self, *_args: object, **_kwargs: object):
+        yield ModelResponse(content="ok")
+
+    async def ainvoke_stream(self, *_args: object, **_kwargs: object):
+        yield ModelResponse(content="ok")
+
+    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
+        return response
+
+    def _parse_provider_response_delta(
+        self,
+        response: ModelResponse,
+        *_args: object,
+        **_kwargs: object,
+    ) -> ModelResponse:
+        return response
 
 
-def _runtime_paths(tmp_path: object, *, config_path: Path | None = None) -> RuntimePaths:
-    base_path = Path(str(tmp_path))
+@dataclass
+class RecordingModel(Model):
+    """Model that records the final prompt message list."""
+
+    seen_messages: list[Message] = field(default_factory=list)
+
+    def invoke(self, *_args: object, **kwargs: object) -> ModelResponse:
+        messages = kwargs.get("messages")
+        if isinstance(messages, list):
+            self.seen_messages = list(messages)
+        return ModelResponse(content="ok")
+
+    async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
+        messages = kwargs.get("messages")
+        if isinstance(messages, list):
+            self.seen_messages = list(messages)
+        return ModelResponse(content="ok")
+
+    def invoke_stream(self, *_args: object, **_kwargs: object):
+        yield ModelResponse(content="ok")
+
+    async def ainvoke_stream(self, *_args: object, **_kwargs: object):
+        yield ModelResponse(content="ok")
+
+    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
+        return response
+
+    def _parse_provider_response_delta(
+        self,
+        response: ModelResponse,
+        *_args: object,
+        **_kwargs: object,
+    ) -> ModelResponse:
+        return response
+
+
+def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(
-        config_path=config_path or base_path / "config.yaml",
-        storage_path=base_path,
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
     )
 
 
-def _runtime_bound_config(config: Config, tmp_path: object | None = None) -> Config:
-    """Return a runtime-bound config for history tests."""
-    return bind_runtime_paths(config, _runtime_paths(tmp_path or tempfile.mkdtemp()))
-
-
-def _load_default_config() -> Config:
-    """Create a stable runtime-bound config for agent-history tests."""
-    return _runtime_bound_config(
+def _make_config(
+    tmp_path: Path,
+    *,
+    num_history_runs: int | None = None,
+    num_history_messages: int | None = None,
+    compaction: CompactionOverrideConfig | None = None,
+    context_window: int | None = 48_000,
+    models: dict[str, ModelConfig] | None = None,
+) -> tuple[Config, RuntimePaths]:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
         Config(
             agents={
-                "calculator": AgentConfig(display_name="Calculator"),
-                "general": AgentConfig(display_name="General"),
+                "test_agent": AgentConfig(
+                    display_name="Test Agent",
+                    num_history_runs=num_history_runs,
+                    num_history_messages=num_history_messages,
+                    compaction=compaction,
+                ),
             },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
+            defaults=DefaultsConfig(tools=[]),
+            models=(
+                models
+                if models is not None
+                else {
+                    "default": ModelConfig(
+                        provider="openai",
+                        id="test-model",
+                        context_window=context_window,
+                    ),
+                }
+            ),
         ),
+        runtime_paths,
     )
+    return config, runtime_paths
 
 
-def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> Agent:
-    """Create an agent with the test config's bound runtime context."""
-    execution_identity = cast("ToolExecutionIdentity | None", kwargs.pop("execution_identity", None))
-    return mindroom.agents.create_agent(
-        agent_name,
-        config,
-        runtime_paths_for(config),
-        execution_identity=execution_identity,
-        **kwargs,
-    )
-
-
-def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
-    """Construct an agent bot with the explicit runtime bound to the test config."""
-    return AgentBot(
-        agent_user=agent_user,
-        storage_path=storage_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=rooms,
-    )
-
-
-def _edit_test_config() -> Config:
-    """Create a minimal runtime-bound config for edit/regeneration bot tests."""
-    return _runtime_bound_config(
-        Config(
-            agents={"test_agent": AgentConfig(display_name="Test Agent")},
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-        ),
-    )
-
-
-def test_mindroom_forces_agno_telemetry_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """MindRoom startup hard-disables Agno telemetry regardless of env state."""
-    monkeypatch.setenv("AGNO_TELEMETRY", "true")
-
-    importlib.reload(mindroom)
-
-    assert os.environ["AGNO_TELEMETRY"] == "false"
-
-
-class TestHistoryConfig:
-    """Test history configuration fields and validation."""
-
-    def test_defaults_num_history_runs_default(self) -> None:
-        """Default num_history_runs is None (include all history)."""
-        defaults = DefaultsConfig()
-        assert defaults.num_history_runs is None
-        assert defaults.num_history_messages is None
-
-    def test_show_stop_button_default_true(self) -> None:
-        """DefaultsConfig.show_stop_button defaults to True."""
-        defaults = DefaultsConfig()
-        assert defaults.show_stop_button is True
-
-    def test_agent_config_history_defaults_none(self) -> None:
-        """AgentConfig history fields default to None (inherit from defaults)."""
-        agent = AgentConfig(display_name="Test")
-        assert agent.num_history_runs is None
-        assert agent.num_history_messages is None
-
-    def test_config_rejects_both_history_knobs_agent(self) -> None:
-        """Setting both num_history_runs and num_history_messages raises ValidationError."""
-        with pytest.raises(ValidationError, match="mutually exclusive"):
-            AgentConfig(
-                display_name="Test",
-                num_history_runs=5,
-                num_history_messages=20,
-            )
-
-    def test_config_rejects_both_history_knobs_defaults(self) -> None:
-        """Setting both on DefaultsConfig raises ValidationError."""
-        with pytest.raises(ValidationError, match="mutually exclusive"):
-            DefaultsConfig(
-                num_history_runs=5,
-                num_history_messages=20,
-            )
-
-    def test_agent_config_allows_single_knob(self) -> None:
-        """Setting only one knob is fine."""
-        agent_runs = AgentConfig(display_name="Test", num_history_runs=10)
-        assert agent_runs.num_history_runs == 10
-        assert agent_runs.num_history_messages is None
-
-        agent_msgs = AgentConfig(display_name="Test", num_history_messages=50)
-        assert agent_msgs.num_history_runs is None
-        assert agent_msgs.num_history_messages == 50
-
-    def test_defaults_num_history_messages_works(self) -> None:
-        """DefaultsConfig can use num_history_messages when num_history_runs is None."""
-        defaults = DefaultsConfig(num_history_runs=None, num_history_messages=50)
-        assert defaults.num_history_messages == 50
-        assert defaults.num_history_runs is None
-
-    def test_defaults_num_history_messages_wired_to_agent(self) -> None:
-        """Defaults-level num_history_messages flows to agent when no per-agent override."""
-        config = _load_default_config()
-        config.defaults = DefaultsConfig(num_history_runs=None, num_history_messages=50)
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.num_history_messages == 50
-        assert agent.num_history_runs is None
-
-    def test_num_history_runs_config_wired_to_agent(self) -> None:
-        """Default config includes all history (None bypasses Agno's default of 3)."""
-        config = _load_default_config()
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.add_history_to_context is True
-        # Both defaults are None → post-construction override to None (all history)
-        assert agent.num_history_runs is None
-
-    def test_num_history_runs_per_agent_override(self) -> None:
-        """Per-agent num_history_runs overrides defaults and clears num_history_messages."""
-        config = _load_default_config()
-        config.agents["calculator"].num_history_runs = 7
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.num_history_runs == 7
-        assert agent.num_history_messages is None
-
-    def test_num_history_messages_per_agent_override(self) -> None:
-        """Per-agent num_history_messages overrides defaults and clears num_history_runs."""
-        config = _load_default_config()
-        config.agents["calculator"].num_history_messages = 50
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.num_history_messages == 50
-        assert agent.num_history_runs is None
-
-    def test_compress_tool_results_default(self) -> None:
-        """create_agent() sets compress_tool_results=True by default."""
-        config = _load_default_config()
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.compress_tool_results is True
-
-    def test_compress_tool_results_per_agent_override(self) -> None:
-        """Per-agent compress_tool_results=False overrides the default."""
-        config = _load_default_config()
-        config.agents["calculator"].compress_tool_results = False
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.compress_tool_results is False
-
-    # -- enable_session_summaries --
-
-    def test_enable_session_summaries_default_false(self) -> None:
-        """DefaultsConfig.enable_session_summaries defaults to False."""
-        defaults = DefaultsConfig()
-        assert defaults.enable_session_summaries is False
-
-    def test_agent_config_enable_session_summaries_default_none(self) -> None:
-        """AgentConfig.enable_session_summaries defaults to None (inherit)."""
-        agent = AgentConfig(display_name="Test")
-        assert agent.enable_session_summaries is None
-
-    def test_enable_session_summaries_wired_default(self) -> None:
-        """create_agent() sets enable_session_summaries=False by default."""
-        config = _load_default_config()
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.enable_session_summaries is False
-
-    def test_enable_session_summaries_defaults_override(self) -> None:
-        """Defaults-level enable_session_summaries=True flows to agent."""
-        config = _load_default_config()
-        config.defaults.enable_session_summaries = True
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.enable_session_summaries is True
-
-    def test_enable_session_summaries_per_agent_true(self) -> None:
-        """Per-agent enable_session_summaries=True overrides defaults False."""
-        config = _load_default_config()
-        config.agents["calculator"].enable_session_summaries = True
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.enable_session_summaries is True
-
-    def test_enable_session_summaries_per_agent_false_overrides_defaults_true(self) -> None:
-        """Per-agent enable_session_summaries=False overrides defaults True."""
-        config = _load_default_config()
-        config.defaults.enable_session_summaries = True
-        config.agents["calculator"].enable_session_summaries = False
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.enable_session_summaries is False
-
-    # -- max_tool_calls_from_history --
-
-    def test_max_tool_calls_from_history_default_none(self) -> None:
-        """DefaultsConfig.max_tool_calls_from_history defaults to None."""
-        defaults = DefaultsConfig()
-        assert defaults.max_tool_calls_from_history is None
-
-    def test_agent_config_max_tool_calls_from_history_default_none(self) -> None:
-        """AgentConfig.max_tool_calls_from_history defaults to None (inherit)."""
-        agent = AgentConfig(display_name="Test")
-        assert agent.max_tool_calls_from_history is None
-
-    def test_max_tool_calls_from_history_wired_default(self) -> None:
-        """create_agent() sets max_tool_calls_from_history=None by default."""
-        config = _load_default_config()
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.max_tool_calls_from_history is None
-
-    def test_max_tool_calls_from_history_defaults_override(self) -> None:
-        """Defaults-level max_tool_calls_from_history=5 flows to agent."""
-        config = _load_default_config()
-        config.defaults.max_tool_calls_from_history = 5
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.max_tool_calls_from_history == 5
-
-    def test_max_tool_calls_from_history_per_agent_override(self) -> None:
-        """Per-agent max_tool_calls_from_history=3 overrides defaults None."""
-        config = _load_default_config()
-        config.agents["calculator"].max_tool_calls_from_history = 3
-        with patch("mindroom.agents.SqliteDb"):
-            agent = _create_agent_for_test("calculator", config)
-        assert agent.max_tool_calls_from_history == 3
-
-    def test_max_tool_calls_from_history_defaults_rejects_negative(self) -> None:
-        """DefaultsConfig rejects negative max_tool_calls_from_history."""
-        with pytest.raises(ValidationError):
-            DefaultsConfig(max_tool_calls_from_history=-1)
-
-    def test_max_tool_calls_from_history_agent_rejects_negative(self) -> None:
-        """AgentConfig rejects negative max_tool_calls_from_history."""
-        with pytest.raises(ValidationError):
-            AgentConfig(display_name="Test", max_tool_calls_from_history=-1)
-
-
-# ---------------------------------------------------------------------------
-# Agent helper tests
-# ---------------------------------------------------------------------------
-
-
-def _make_storage_with_session(session_id: str, runs: list[RunOutput] | None = None) -> SqliteDb:
-    """Create a mock SqliteDb that returns a session with the given runs."""
-    session = AgentSession(session_id=session_id, runs=runs)
-    storage = MagicMock(spec=SqliteDb)
-    storage.get_session.return_value = session
-    return storage
-
-
-def _make_run_output(
-    run_id: str = "run-1",
-    metadata: dict[str, Any] | None = None,
+def _completed_run(
+    run_id: str,
+    *,
+    agent_id: str = "test_agent",
+    messages: list[Message] | None = None,
 ) -> RunOutput:
-    """Create a RunOutput with optional metadata."""
-    return RunOutput(run_id=run_id, metadata=metadata)
-
-
-class TestGetAgentSession:
-    """Test _get_agent_session helper."""
-
-    def test_no_session(self) -> None:
-        """Return None when session does not exist."""
-        storage = MagicMock(spec=SqliteDb)
-        storage.get_session.return_value = None
-        assert _get_agent_session(storage, "sid") is None
-
-    def test_empty_runs(self) -> None:
-        """Return session with empty runs list."""
-        storage = _make_storage_with_session("sid", runs=[])
-        session = _get_agent_session(storage, "sid")
-        assert session is not None
-        assert not session.runs
-
-    def test_has_runs(self) -> None:
-        """Return session with runs."""
-        run = _make_run_output()
-        storage = _make_storage_with_session("sid", runs=[run])
-        session = _get_agent_session(storage, "sid")
-        assert session is not None
-        assert len(session.runs) == 1
-
-
-class TestGetSeenEventIds:
-    """Test get_seen_event_ids helper."""
-
-    def test_empty_runs(self) -> None:
-        """Return empty set when session has no runs."""
-        session = AgentSession(session_id="sid", runs=[])
-        assert get_seen_event_ids(session) == set()
-
-    def test_runs_without_metadata(self) -> None:
-        """Return empty set when runs have no metadata."""
-        run = _make_run_output(metadata=None)
-        session = AgentSession(session_id="sid", runs=[run])
-        assert get_seen_event_ids(session) == set()
-
-    def test_runs_with_seen_ids(self) -> None:
-        """Return union of all matrix_seen_event_ids across runs."""
-        run1 = _make_run_output("r1", metadata={"matrix_seen_event_ids": ["$e1", "$e2"]})
-        run2 = _make_run_output("r2", metadata={"matrix_seen_event_ids": ["$e2", "$e3"]})
-        session = AgentSession(session_id="sid", runs=[run1, run2])
-        assert get_seen_event_ids(session) == {"$e1", "$e2", "$e3"}
-
-    def test_runs_with_mixed_metadata(self) -> None:
-        """Runs without matrix_seen_event_ids are skipped gracefully."""
-        run1 = _make_run_output("r1", metadata={"other_key": "val"})
-        run2 = _make_run_output("r2", metadata={"matrix_seen_event_ids": ["$e1"]})
-        session = AgentSession(session_id="sid", runs=[run1, run2])
-        assert get_seen_event_ids(session) == {"$e1"}
-
-
-class TestRemoveRunByEventId:
-    """Test remove_run_by_event_id helper."""
-
-    def test_no_session(self) -> None:
-        """Return False when session does not exist."""
-        storage = MagicMock(spec=SqliteDb)
-        storage.get_session.return_value = None
-        assert remove_run_by_event_id(storage, "sid", "$e1") is False
-
-    def test_no_matching_run(self) -> None:
-        """Return False when no run matches the event_id."""
-        run = _make_run_output("r1", metadata={"matrix_event_id": "$other"})
-        storage = _make_storage_with_session("sid", runs=[run])
-        assert remove_run_by_event_id(storage, "sid", "$e1") is False
-        storage.upsert_session.assert_not_called()
-
-    def test_removes_matching_run(self) -> None:
-        """Remove the matching run and save the session."""
-        run1 = _make_run_output("r1", metadata={"matrix_event_id": "$e1"})
-        run2 = _make_run_output("r2", metadata={"matrix_event_id": "$e2"})
-        session = AgentSession(session_id="sid", runs=[run1, run2])
-        storage = MagicMock(spec=SqliteDb)
-        storage.get_session.return_value = session
-        assert remove_run_by_event_id(storage, "sid", "$e1") is True
-        storage.upsert_session.assert_called_once()
-        # Verify only run2 remains
-        saved_session = storage.upsert_session.call_args[0][0]
-        assert len(saved_session.runs) == 1
-        assert saved_session.runs[0].run_id == "r2"
-
-
-# ---------------------------------------------------------------------------
-# Unseen message detection tests
-# ---------------------------------------------------------------------------
-
-
-class TestGetUnseenMessages:
-    """Test _get_unseen_messages helper."""
-
-    def _make_config(self) -> Config:
-        """Create a minimal Config for testing."""
-        return _runtime_bound_config(
-            Config(
-                agents={"test_agent": AgentConfig(display_name="Test")},
-                models={"default": {"provider": "openai", "id": "test"}},
-            ),
-        )
-
-    def test_filters_agent_messages(self) -> None:
-        """Messages from this agent are excluded."""
-        config = self._make_config()
-        agent_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
-        thread_history = [
-            {"sender": agent_id, "body": "I am the agent", "event_id": "$a1"},
-            {"sender": "@user:example.com", "body": "Hello", "event_id": "$u1"},
-        ]
-        unseen, partial_reply_kinds = _get_unseen_messages(
-            thread_history,
-            "test_agent",
-            config,
-            runtime_paths_for(config),
-            set(),
-            None,
-            active_event_ids=set(),
-        )
-        assert len(unseen) == 1
-        assert unseen[0]["event_id"] == "$u1"
-        assert partial_reply_kinds == set()
-
-    def test_filters_seen_event_ids(self) -> None:
-        """Messages with event_ids in seen_event_ids are excluded."""
-        config = self._make_config()
-        thread_history = [
-            {"sender": "@user:example.com", "body": "Old msg", "event_id": "$u1"},
-            {"sender": "@user:example.com", "body": "New msg", "event_id": "$u2"},
-        ]
-        unseen, partial_reply_kinds = _get_unseen_messages(
-            thread_history,
-            "test_agent",
-            config,
-            runtime_paths_for(config),
-            {"$u1"},
-            None,
-            active_event_ids=set(),
-        )
-        assert len(unseen) == 1
-        assert unseen[0]["event_id"] == "$u2"
-        assert partial_reply_kinds == set()
-
-    def test_filters_current_event(self) -> None:
-        """The current triggering message is excluded."""
-        config = self._make_config()
-        thread_history = [
-            {"sender": "@user:example.com", "body": "Current", "event_id": "$u1"},
-        ]
-        unseen, partial_reply_kinds = _get_unseen_messages(
-            thread_history,
-            "test_agent",
-            config,
-            runtime_paths_for(config),
-            set(),
-            "$u1",
-            active_event_ids=set(),
-        )
-        assert len(unseen) == 0
-        assert partial_reply_kinds == set()
-
-    def test_empty_history(self) -> None:
-        """Empty thread history returns empty list."""
-        config = self._make_config()
-        unseen, partial_reply_kinds = _get_unseen_messages(
-            [],
-            "test_agent",
-            config,
-            runtime_paths_for(config),
-            set(),
-            None,
-            active_event_ids=set(),
-        )
-        assert unseen == []
-        assert partial_reply_kinds == set()
-
-    def test_multi_user_scenario(self) -> None:
-        """Multiple users/agents in thread, only unseen from non-self returned."""
-        config = self._make_config()
-        agent_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
-        thread_history = [
-            {"sender": "@alice:example.com", "body": "Hi", "event_id": "$a1"},
-            {"sender": agent_id, "body": "Hello Alice", "event_id": "$bot1"},
-            {"sender": "@bob:example.com", "body": "Hey", "event_id": "$b1"},
-            {"sender": "@alice:example.com", "body": "More", "event_id": "$a2"},
-        ]
-        # Agent has seen $a1 (from previous turn)
-        unseen, partial_reply_kinds = _get_unseen_messages(
-            thread_history,
-            "test_agent",
-            config,
-            runtime_paths_for(config),
-            {"$a1"},
-            "$a2",
-            active_event_ids=set(),
-        )
-        # Only $b1 should be unseen ($a1 seen, $bot1 is self, $a2 is current)
-        assert len(unseen) == 1
-        assert unseen[0]["event_id"] == "$b1"
-        assert partial_reply_kinds == set()
-
-
-class TestBuildPromptWithUnseen:
-    """Test _build_prompt_with_unseen helper."""
-
-    def test_no_unseen(self) -> None:
-        """Prompt is returned unchanged when no unseen messages."""
-        result = _build_prompt_with_unseen("Hello", [], partial_reply_kinds=None)
-        assert result == "Hello"
-
-    def test_with_unseen(self) -> None:
-        """Unseen messages are prepended to the prompt."""
-        unseen = [
-            {"sender": "@alice:example.com", "body": "Hi there"},
-        ]
-        result = _build_prompt_with_unseen("Hello", unseen, partial_reply_kinds=None)
-        assert "Messages from other participants" in result
-        assert "@alice:example.com: Hi there" in result
-        assert "Current message:\nHello" in result
-
-    def test_unseen_missing_body(self) -> None:
-        """Messages without body are skipped."""
-        unseen = [{"sender": "@alice:example.com"}]
-        result = _build_prompt_with_unseen("Hello", unseen, partial_reply_kinds=None)
-        assert result == "Hello"
-
-
-# ---------------------------------------------------------------------------
-# _prepare_agent_and_prompt integration tests
-# ---------------------------------------------------------------------------
-
-
-class TestPrepareAgentAndPrompt:
-    """Test the _prepare_agent_and_prompt logic for history vs fallback."""
-
-    @pytest.fixture
-    def config(self) -> Config:
-        """Load config for testing."""
-        return _load_default_config()
-
-    def _mock_session(self, runs: list[RunOutput] | None = None) -> AgentSession | None:
-        """Create a mock AgentSession or None."""
-        if runs is None:
-            return None
-        return AgentSession(session_id="sid", runs=runs)
-
-    @pytest.mark.asyncio
-    async def test_fallback_when_no_session(self, config: Config, tmp_path: object) -> None:
-        """Matrix fallback without prior runs should still reuse unseen partial-reply logic."""
-        runtime_paths = _runtime_paths(tmp_path)
-        agent_id = config.get_ids(runtime_paths)["calculator"].full_id
-        thread_history = [
-            {"sender": "@user:example.com", "body": "Earlier question", "event_id": "$u1"},
-            {
-                "sender": agent_id,
-                "body": "Partial reply ⋯",
-                "event_id": "$bot1",
-                "stream_status": STREAM_STATUS_STREAMING,
-            },
-            {"sender": "@user:example.com", "body": "Current question", "event_id": "$u2"},
-        ]
-        with (
-            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
-            patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=None),
-            patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
-            patch("mindroom.ai.create_session_storage"),
-        ):
-            mock_create.return_value = MagicMock(spec=Agent)
-            _agent, prompt, unseen_ids = await _prepare_agent_and_prompt(
-                "calculator",
-                "test",
-                runtime_paths,
-                config,
-                thread_history=thread_history,
-                session_id="sid",
-                reply_to_event_id="$u2",
-                active_event_ids={"$bot1"},
-            )
-            mock_stuff.assert_not_called()
-            assert unseen_ids == ["$u1"]
-            assert "Your previous response is still being delivered." in prompt
-            assert "Do NOT repeat or redo that work." in prompt
-            assert "You (reply still streaming): Partial reply" in prompt
-
-    @pytest.mark.asyncio
-    async def test_agno_history_skips_thread_stuffing(self, config: Config, tmp_path: object) -> None:
-        """When session has runs, build_prompt_with_thread_history is NOT called."""
-        thread_history = [
-            {"sender": "@user:example.com", "body": "Old", "event_id": "$u1"},
-            {"sender": "@user:example.com", "body": "New", "event_id": "$u2"},
-        ]
-        run = _make_run_output("r1", metadata={"matrix_seen_event_ids": ["$u1"]})
-        with (
-            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
-            patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=self._mock_session([run])),
-            patch("mindroom.ai.build_prompt_with_thread_history") as mock_stuff,
-            patch("mindroom.ai.create_session_storage"),
-        ):
-            mock_create.return_value = MagicMock(spec=Agent)
-            _agent, _prompt, unseen_ids = await _prepare_agent_and_prompt(
-                "calculator",
-                "test",
-                _runtime_paths(tmp_path),
-                config,
-                thread_history=thread_history,
-                session_id="sid",
-                reply_to_event_id="$u2",
-            )
-            mock_stuff.assert_not_called()
-            # $u1 is seen, $u2 is current → no unseen messages, but the function still ran the Agno path
-            assert unseen_ids == []
-
-    @pytest.mark.asyncio
-    async def test_session_has_runs_but_no_metadata_uses_agno_path(self, config: Config, tmp_path: object) -> None:
-        """Session has runs but no matrix metadata → still uses Agno history (no stuffing)."""
-        thread_history = [
-            {"sender": "@user:example.com", "body": "Msg", "event_id": "$u1"},
-        ]
-        run = _make_run_output("r1", metadata=None)
-        with (
-            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
-            patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=self._mock_session([run])),
-            patch("mindroom.ai.build_prompt_with_thread_history") as mock_stuff,
-            patch("mindroom.ai.create_session_storage"),
-        ):
-            mock_create.return_value = MagicMock(spec=Agent)
-            # $u1 is current, so no unseen, but Agno path used
-            _, _prompt, unseen_ids = await _prepare_agent_and_prompt(
-                "calculator",
-                "test",
-                _runtime_paths(tmp_path),
-                config,
-                thread_history=thread_history,
-                session_id="sid",
-                reply_to_event_id="$u1",
-            )
-            mock_stuff.assert_not_called()
-            assert unseen_ids == []
-
-    @pytest.mark.asyncio
-    async def test_no_session_id_uses_fallback(self, config: Config, tmp_path: object) -> None:
-        """When session_id is None, fallback path is used."""
-        thread_history = [{"sender": "@user:example.com", "body": "Hi", "event_id": "$u1"}]
-        with (
-            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
-            patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
-        ):
-            mock_create.return_value = MagicMock(spec=Agent)
-            _, _prompt, unseen_ids = await _prepare_agent_and_prompt(
-                "calculator",
-                "test",
-                _runtime_paths(tmp_path),
-                config,
-                thread_history=thread_history,
-                session_id=None,
-            )
-            mock_stuff.assert_called_once()
-            assert unseen_ids == []
-
-    @pytest.mark.asyncio
-    async def test_matrix_first_turn_without_unseen_messages_skips_stuffing(
-        self,
-        config: Config,
-        tmp_path: object,
-    ) -> None:
-        """Matrix first turns should stay on the unseen-message path even when nothing is injected."""
-        thread_history = [{"sender": "@user:example.com", "body": "Current question", "event_id": "$u1"}]
-        with (
-            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
-            patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=None),
-            patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
-            patch("mindroom.ai.create_session_storage"),
-        ):
-            mock_create.return_value = MagicMock(spec=Agent)
-            _, prompt, unseen_ids = await _prepare_agent_and_prompt(
-                "calculator",
-                "test",
-                _runtime_paths(tmp_path),
-                config,
-                thread_history=thread_history,
-                session_id="sid",
-                reply_to_event_id="$u1",
-            )
-
-            mock_stuff.assert_not_called()
-            assert prompt == "enhanced"
-            assert unseen_ids == []
-
-    @pytest.mark.asyncio
-    async def test_prepare_agent_and_prompt_reloads_context_files_for_next_reply(
-        self,
-        config: Config,
-        tmp_path: Path,
-    ) -> None:
-        """Editing a context file should affect the next reply preparation without restart."""
-        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
-        config.agents["general"].memory_backend = "file"
-        config.agents["general"].context_files = ["SOUL.md"]
-        config.agents["general"].tools = []
-        config.agents["general"].include_default_tools = False
-
-        workspace = agent_workspace_root_path(tmp_path, "general")
-        workspace.mkdir(parents=True, exist_ok=True)
-        soul_path = workspace / "SOUL.md"
-        soul_path.write_text("First context version.", encoding="utf-8")
-
-        with (
-            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
-            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
-        ):
-            first_agent, first_prompt, first_unseen = await _prepare_agent_and_prompt(
-                "general",
-                "test",
-                _runtime_paths(tmp_path),
-                config,
-                session_id=None,
-            )
-
-            soul_path.write_text("Second context version.", encoding="utf-8")
-
-            second_agent, second_prompt, second_unseen = await _prepare_agent_and_prompt(
-                "general",
-                "test",
-                _runtime_paths(tmp_path),
-                config,
-                session_id=None,
-            )
-
-        assert "First context version." in first_agent.role
-        assert "Second context version." not in first_agent.role
-        assert "Second context version." in second_agent.role
-        assert "First context version." not in second_agent.role
-        assert first_prompt == "enhanced"
-        assert second_prompt == "enhanced"
-        assert first_unseen == []
-        assert second_unseen == []
-
-    @pytest.mark.asyncio
-    async def test_openai_compat_with_prior_runs_skips_stuffing(self, config: Config, tmp_path: object) -> None:
-        """OpenAI-compat path: no reply_to_event_id, prior runs exist → Agno replays history, no stuffing."""
-        thread_history = [
-            {"sender": "user", "body": "Hello"},
-            {"sender": "assistant", "body": "Hi there"},
-            {"sender": "user", "body": "Follow up"},
-        ]
-        run = _make_run_output("r1", metadata=None)
-        with (
-            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
-            patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=self._mock_session([run])),
-            patch("mindroom.ai.build_prompt_with_thread_history") as mock_stuff,
-            patch("mindroom.ai.create_session_storage"),
-        ):
-            mock_create.return_value = MagicMock(spec=Agent)
-            _, prompt, unseen_ids = await _prepare_agent_and_prompt(
-                "calculator",
-                "test",
-                _runtime_paths(tmp_path),
-                config,
-                thread_history=thread_history,
-                session_id="sid",
-                reply_to_event_id=None,
-            )
-            # No stuffing — Agno handles history replay natively
-            mock_stuff.assert_not_called()
-            # Bare enhanced prompt (no unseen injection either)
-            assert prompt == "enhanced"
-            assert unseen_ids == []
-
-    @pytest.mark.asyncio
-    async def test_openai_compat_first_turn_uses_stuffing(self, config: Config, tmp_path: object) -> None:
-        """OpenAI-compat path: no reply_to_event_id, no prior runs → fallback to thread stuffing."""
-        thread_history = [
-            {"sender": "user", "body": "Hello"},
-        ]
-        with (
-            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
-            patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai._get_agent_session", return_value=None),
-            patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
-            patch("mindroom.ai.create_session_storage"),
-        ):
-            mock_create.return_value = MagicMock(spec=Agent)
-            _, prompt, unseen_ids = await _prepare_agent_and_prompt(
-                "calculator",
-                "test",
-                _runtime_paths(tmp_path),
-                config,
-                thread_history=thread_history,
-                session_id="sid",
-                reply_to_event_id=None,
-            )
-            # First turn with no prior runs → stuffing fallback
-            mock_stuff.assert_called_once()
-            assert prompt == "stuffed"
-            assert unseen_ids == []
-
-
-# ---------------------------------------------------------------------------
-# Metadata passing tests
-# ---------------------------------------------------------------------------
-
-
-class TestMetadataPassing:
-    """Test that event_id metadata is passed to agent.arun()."""
-
-    @pytest.mark.asyncio
-    async def test_event_id_in_metadata(self, tmp_path: object) -> None:
-        """Verify matrix_event_id and matrix_seen_event_ids stored in metadata."""
-        config = _load_default_config()
-
-        with (
-            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prep,
-            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock) as mock_run,
-        ):
-            mock_agent = MagicMock(spec=Agent)
-            mock_agent.add_history_to_context = True
-            mock_prep.return_value = (mock_agent, "prompt", ["$unseen1"])
-            mock_run.return_value = MagicMock(content="response", tools=None)
-
-            await ai_response(
-                agent_name="calculator",
-                prompt="test",
-                session_id="sid",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=config,
-                reply_to_event_id="$trigger",
-            )
-
-            mock_run.assert_called_once()
-            call_kwargs = mock_run.call_args.kwargs
-            assert call_kwargs["metadata"] == {
-                "matrix_event_id": "$trigger",
-                "matrix_seen_event_ids": ["$trigger", "$unseen1"],
-            }
-
-    @pytest.mark.asyncio
-    async def test_no_metadata_without_reply_to_event_id(self, tmp_path: object) -> None:
-        """When reply_to_event_id is None, metadata is None."""
-        config = _load_default_config()
-
-        with (
-            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prep,
-            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock) as mock_run,
-        ):
-            mock_agent = MagicMock(spec=Agent)
-            mock_agent.add_history_to_context = True
-            mock_prep.return_value = (mock_agent, "prompt", [])
-            mock_run.return_value = MagicMock(content="response", tools=None)
-
-            await ai_response(
-                agent_name="calculator",
-                prompt="test",
-                session_id="sid",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=config,
-            )
-
-            call_kwargs = mock_run.call_args.kwargs
-            assert call_kwargs["metadata"] is None
-
-
-# ---------------------------------------------------------------------------
-# Unseen reinjection test
-# ---------------------------------------------------------------------------
-
-
-class TestUnseenNotReinjected:
-    """Test that consumed unseen messages are not re-injected on the next turn."""
-
-    def test_unseen_messages_not_reinjected(self) -> None:
-        """Consumed unseen event_ids are excluded from detection on the next turn."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"bot": AgentConfig(display_name="Bot")},
-                models={"default": {"provider": "openai", "id": "test"}},
-            ),
-        )
-
-        thread_history = [
-            {"sender": "@alice:example.com", "body": "Turn 1", "event_id": "$a1"},
-            {"sender": "@bob:example.com", "body": "Turn 1 bob", "event_id": "$b1"},
-            {"sender": "@alice:example.com", "body": "Turn 2", "event_id": "$a2"},
-        ]
-
-        # Turn 1: agent sees $a1, $b1 is unseen
-        turn1_seen = {"$a1"}
-        unseen_turn1, partial_reply_kinds_turn1 = _get_unseen_messages(
-            thread_history,
-            "bot",
-            config,
-            runtime_paths_for(config),
-            turn1_seen,
-            "$a1",
-            active_event_ids=set(),
-        )
-        unseen_turn1_ids = [m["event_id"] for m in unseen_turn1]
-        assert "$b1" in unseen_turn1_ids
-        assert partial_reply_kinds_turn1 == set()
-
-        # After turn 1, matrix_seen_event_ids = [$a1, $b1]
-        turn2_seen = {"$a1", "$b1"}
-
-        # Turn 2: $b1 should NOT appear as unseen
-        unseen_turn2, partial_reply_kinds_turn2 = _get_unseen_messages(
-            thread_history,
-            "bot",
-            config,
-            runtime_paths_for(config),
-            turn2_seen,
-            "$a2",
-            active_event_ids=set(),
-        )
-        unseen_turn2_ids = [m["event_id"] for m in unseen_turn2]
-        assert "$b1" not in unseen_turn2_ids
-        assert unseen_turn2_ids == []
-        assert partial_reply_kinds_turn2 == set()
-
-
-# ---------------------------------------------------------------------------
-# Edit cleanup test
-# ---------------------------------------------------------------------------
-
-
-class TestEditRemovesStaleRun:
-    """Test that _handle_message_edit removes stale run before regeneration."""
-
-    @pytest.mark.asyncio
-    async def test_edit_removes_stale_run(self, tmp_path: object) -> None:
-        """Verify remove_run_by_event_id is called before regeneration."""
-        agent_user = AgentMatrixUser(
-            agent_name="test_agent",
-            user_id="@test_agent:example.com",
-            display_name="Test Agent",
-            password="test_password",  # noqa: S106
-        )
-
-        config = _edit_test_config()
-        bot = _agent_bot(
-            agent_user=agent_user,
-            storage_path=Path(str(tmp_path)),
-            config=config,
-            rooms=["!test:example.com"],
-        )
-        bot.client = AsyncMock(spec=nio.AsyncClient)
-        bot.client.rooms = {}
-        bot.client.user_id = "@test_agent:example.com"
-        bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
-        bot.logger = MagicMock()
-
-        room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
-        bot.response_tracker.mark_responded("$original:example.com", "$response:example.com")
-
-        edit_event = nio.RoomMessageText.from_dict(
-            {
-                "content": {
-                    "body": "* @test_agent what is 3+3?",
-                    "msgtype": "m.text",
-                    "m.new_content": {"body": "@test_agent what is 3+3?", "msgtype": "m.text"},
-                    "m.relates_to": {"event_id": "$original:example.com", "rel_type": "m.replace"},
+    return RunOutput(
+        run_id=run_id,
+        agent_id=agent_id,
+        status=RunStatus.completed,
+        messages=messages
+        or [
+            Message(role="user", content=f"{run_id} question"),
+            Message(role="assistant", content=f"{run_id} answer"),
+        ],
+    )
+
+
+def _completed_team_run(
+    run_id: str,
+    *,
+    team_id: str,
+    messages: list[Message] | None = None,
+) -> TeamRunOutput:
+    return TeamRunOutput(
+        run_id=run_id,
+        team_id=team_id,
+        status=RunStatus.completed,
+        messages=messages
+        or [
+            Message(role="user", content=f"{run_id} team question"),
+            Message(role="assistant", content=f"{run_id} team answer"),
+        ],
+    )
+
+
+def _session(
+    session_id: str,
+    *,
+    agent_id: str = "test_agent",
+    runs: list[RunOutput | TeamRunOutput] | None = None,
+    metadata: dict[str, object] | None = None,
+    summary: SessionSummary | None = None,
+) -> AgentSession:
+    return AgentSession(
+        session_id=session_id,
+        agent_id=agent_id,
+        runs=runs or [],
+        metadata=metadata,
+        summary=summary,
+        created_at=1,
+        updated_at=1,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _close_test_storages(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Close temporary SQLite handles created directly by Agno history tests."""
+    storages: list[object] = []
+    module = sys.modules[__name__]
+    original_create_session_storage = create_session_storage
+
+    def _tracked_create_session_storage(*args: object, **kwargs: object) -> object:
+        storage = original_create_session_storage(*args, **kwargs)
+        storages.append(storage)
+        return storage
+
+    monkeypatch.setattr(module, "create_session_storage", _tracked_create_session_storage)
+    yield
+
+    seen_storage_ids: set[int] = set()
+    for storage in storages:
+        storage_id = id(storage)
+        if storage_id in seen_storage_ids:
+            continue
+        seen_storage_ids.add(storage_id)
+        storage.close()
+
+
+def _team_session(
+    session_id: str,
+    *,
+    team_id: str,
+    runs: list[RunOutput | TeamRunOutput] | None = None,
+    metadata: dict[str, object] | None = None,
+    summary: SessionSummary | None = None,
+) -> TeamSession:
+    return TeamSession(
+        session_id=session_id,
+        team_id=team_id,
+        runs=runs or [],
+        metadata=metadata,
+        summary=summary,
+        created_at=1,
+        updated_at=1,
+    )
+
+
+def _agent(
+    *,
+    agent_id: str = "test_agent",
+    name: str = "Test Agent",
+    model: Model | None = None,
+    db: object | None = None,
+    num_history_runs: int | None = None,
+    num_history_messages: int | None = None,
+) -> Agent:
+    return Agent(
+        id=agent_id,
+        name=name,
+        model=model or FakeModel(id="fake-model", provider="fake"),
+        db=db,
+        add_history_to_context=True,
+        add_session_summary_to_context=True,
+        num_history_runs=num_history_runs,
+        num_history_messages=num_history_messages,
+        store_history_messages=False,
+    )
+
+
+def test_estimate_static_tokens_includes_tool_definitions() -> None:
+    def search_docs(query: str, limit: int = 5) -> str:
+        """Search the engineering docs for a matching answer."""
+        return f"{query}:{limit}"
+
+    def export_notes(title: str, include_metadata: bool = False) -> str:
+        """Export the current working notes as markdown with full metadata attached."""
+        return f"{title}:{include_metadata}"
+
+    toolkit = Toolkit(
+        name="docs",
+        tools=[search_docs],
+        instructions="Always cite the relevant document section when using search_docs.",
+        add_instructions=True,
+    )
+    export_tool = Function(
+        name="export_notes",
+        entrypoint=export_notes,
+    )
+    agent_with_tools = _agent()
+    agent_with_tools.role = "Engineer"
+    agent_with_tools.instructions = ["Stay concise."]
+    agent_with_tools.tools = [toolkit, export_tool]
+
+    baseline_agent = _agent()
+    baseline_agent.role = agent_with_tools.role
+    baseline_agent.instructions = list(agent_with_tools.instructions)
+
+    expected_export_tool = export_tool.model_copy(deep=True)
+    expected_export_tool.process_entrypoint(strict=False)
+    expected_payloads = [
+        {
+            "name": "search_docs",
+            "description": "Search the engineering docs for a matching answer.",
+            "parameters": Function.from_callable(search_docs).parameters,
+        },
+        {
+            "name": "export_notes",
+            "description": "Export the current working notes as markdown with full metadata attached.",
+            "parameters": expected_export_tool.parameters,
+        },
+    ]
+    tool_tokens = estimate_tool_definition_tokens(agent_with_tools)
+    assert tool_tokens == (
+        len(stable_serialize(expected_payloads)) // 4
+        + estimate_text_tokens("Always cite the relevant document section when using search_docs.")
+    )
+    assert estimate_tool_definition_tokens(baseline_agent) == 0
+    assert estimate_static_tokens(agent_with_tools, "Current prompt") == (
+        estimate_static_tokens(baseline_agent, "Current prompt") + tool_tokens
+    )
+
+
+def test_estimate_agent_static_tokens_uses_real_system_message_builder() -> None:
+    @dataclass
+    class PromptAwareModel(FakeModel):
+        def get_instructions_for_model(self, tools: list[Any] | None = None) -> list[str] | None:
+            _ = tools
+            return ["Follow provider guidance."]
+
+        def get_system_message_for_model(self, tools: list[Any] | None = None) -> str | None:
+            _ = tools
+            return "Provider system message."
+
+    agent = _agent(model=PromptAwareModel(id="fake-model", provider="fake"))
+    agent.role = "Engineer"
+    agent.instructions = ["Stay concise."]
+    agent.markdown = True
+
+    session = AgentSession(
+        session_id="history-budget",
+        agent_id=agent.id,
+        user_id="history-budget-user",
+    )
+    run_context = RunContext(
+        run_id="history-budget",
+        session_id="history-budget",
+        user_id="history-budget-user",
+        session_state={},
+    )
+    system_message = agent.get_system_message(
+        session=session,
+        run_context=run_context,
+        tools=None,
+        add_session_state_to_context=False,
+    )
+    assert system_message is not None
+    assert system_message.content is not None
+
+    expected_tokens = estimate_text_tokens("Current prompt") + estimate_text_tokens(str(system_message.content))
+    assert estimate_agent_static_tokens(agent, "Current prompt") == expected_tokens
+    assert estimate_agent_static_tokens(agent, "Current prompt") > estimate_static_tokens(agent, "Current prompt")
+
+
+def test_estimate_tool_definition_tokens_processes_functions_with_custom_parameters() -> None:
+    def sync_calendar_event(title: str, include_attendees: bool = False) -> str:
+        """Sync the current event draft into the shared calendar."""
+        return f"{title}:{include_attendees}"
+
+    custom_tool = Function(
+        name="sync_calendar_event",
+        entrypoint=sync_calendar_event,
+        parameters={
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Calendar event title.",
                 },
-                "event_id": "$edit:example.com",
-                "sender": "@user:example.com",
-                "origin_server_ts": 1000001,
-                "type": "m.room.message",
-                "room_id": "!test:example.com",
             },
+            "required": ["title"],
+        },
+    )
+    agent = _agent()
+    agent.tools = [custom_tool]
+
+    expected_tool = custom_tool.model_copy(deep=True)
+    expected_tool.process_entrypoint(strict=False)
+
+    assert expected_tool.description == "Sync the current event draft into the shared calendar."
+    assert expected_tool.parameters["additionalProperties"] is False
+    assert (
+        estimate_tool_definition_tokens(agent)
+        == len(
+            stable_serialize(
+                [
+                    {
+                        "name": "sync_calendar_event",
+                        "description": expected_tool.description,
+                        "parameters": expected_tool.parameters,
+                    },
+                ],
+            ),
         )
-        edit_event.source = {
-            "content": {
-                "body": "* @test_agent what is 3+3?",
-                "msgtype": "m.text",
-                "m.new_content": {"body": "@test_agent what is 3+3?", "msgtype": "m.text"},
-                "m.relates_to": {"event_id": "$original:example.com", "rel_type": "m.replace"},
+        // 4
+    )
+
+
+def test_estimate_tool_definition_tokens_ignores_empty_toolkit() -> None:
+    agent = _agent()
+    agent.tools = [Toolkit(name="empty")]
+
+    assert estimate_tool_definition_tokens(agent) == 0
+
+
+def test_create_agent_enables_agno_native_history_replay(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path, num_history_runs=2)
+
+    with patch("mindroom.ai.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+        agent = create_agent(
+            "test_agent",
+            config,
+            runtime_paths,
+            execution_identity=None,
+            include_interactive_questions=False,
+        )
+
+    assert agent.add_history_to_context is True
+    assert agent.add_session_summary_to_context is True
+    assert agent.num_history_runs == 2
+    assert agent.num_history_messages is None
+    assert agent.store_history_messages is False
+
+
+def test_create_agent_uses_active_model_override(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(provider="openai", id="default-model"),
+                "large": ModelConfig(provider="openai", id="large-model"),
             },
-            "event_id": "$edit:example.com",
-            "sender": "@user:example.com",
-        }
+        ),
+        runtime_paths,
+    )
+    with patch("mindroom.ai.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")) as mock_get:
+        create_agent(
+            "test_agent",
+            config,
+            runtime_paths,
+            execution_identity=None,
+            active_model_name="large",
+            include_interactive_questions=False,
+        )
 
-        with (
-            patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
-            patch.object(bot, "_edit_message", new_callable=AsyncMock),
-            patch("mindroom.bot.should_agent_respond") as mock_should_respond,
-            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock) as mock_streaming,
-            patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai_response,
-            patch("mindroom.bot.remove_run_by_event_id") as mock_remove_run,
-            patch("mindroom.bot.create_session_storage") as mock_create_storage,
-        ):
-            mock_context.return_value = MagicMock(
-                am_i_mentioned=True,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
-                has_non_agent_mentions=False,
-            )
-            mock_should_respond.return_value = True
-            mock_streaming.return_value = False
-            mock_ai_response.return_value = "The answer is 6"
-            mock_remove_run.return_value = True
-            mock_create_storage.return_value = MagicMock(spec=SqliteDb)
+    assert mock_get.call_args is not None
+    assert mock_get.call_args.args[2] == "large"
 
-            await bot._on_message(room, edit_event)
 
-            # Verify remove_run_by_event_id was called with the original event ID
-            mock_remove_run.assert_called_once()
-            call_args = mock_remove_run.call_args
-            assert call_args[0][1] == "!test:example.com"  # session_id (room_id:thread_id, no thread)
-            assert call_args[0][2] == "$original:example.com"  # event_id
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    agent = _agent()
+    agent.team_id = "team-123"
+    with open_scope_session_context(
+        agent=agent,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.scope == HistoryScope(kind="team", scope_id="team-123")
+        session = _team_session(
+            "session-1",
+            team_id="team-123",
+            runs=[_completed_team_run("team-1", team_id="team-123")],
+            summary=SessionSummary(summary="team summary", updated_at=datetime.now(UTC)),
+        )
+        scope_context.storage.upsert_session(session)
 
-    @pytest.mark.asyncio
-    async def test_edit_checks_thread_and_room_sessions_for_stale_run(self, tmp_path: object) -> None:
-        """Verify edit cleanup checks both thread and room sessions when thread context exists."""
-        agent_user = AgentMatrixUser(
+    prepared = await prepare_history_for_run(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
+
+    assert prepared.replays_persisted_history is True
+    assert prepared.compaction_outcomes == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+            _completed_run("run-3"),
+            _completed_run("run-4"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    agent = _agent(db=storage)
+    with (
+        patch(
+            "mindroom.ai.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(
+                return_value=SessionSummary(
+                    summary="merged summary",
+                    updated_at=datetime.now(UTC),
+                ),
+            ),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=agent,
             agent_name="test_agent",
-            user_id="@test_agent:example.com",
-            display_name="Test Agent",
-            password="test_password",  # noqa: S106
-        )
-
-        config = _edit_test_config()
-        bot = _agent_bot(
-            agent_user=agent_user,
-            storage_path=Path(str(tmp_path)),
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
             config=config,
-            rooms=["!test:example.com"],
+            execution_identity=None,
+            storage=storage,
+            session=session,
         )
-        bot.client = AsyncMock(spec=nio.AsyncClient)
-        bot.client.rooms = {}
-        bot.client.user_id = "@test_agent:example.com"
-        bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
-        bot.logger = MagicMock()
 
-        room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
-        bot.response_tracker.mark_responded("$original:example.com", "$response:example.com")
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "merged summary"
+    assert [run.run_id for run in persisted.runs] == ["run-3", "run-4"]
 
-        edit_event = nio.RoomMessageText.from_dict(
-            {
-                "content": {
-                    "body": "* @test_agent what is 3+3?",
-                    "msgtype": "m.text",
-                    "m.new_content": {"body": "@test_agent what is 3+3?", "msgtype": "m.text"},
-                    "m.relates_to": {"event_id": "$original:example.com", "rel_type": "m.replace"},
-                },
-                "event_id": "$edit:example.com",
-                "sender": "@user:example.com",
-                "origin_server_ts": 1000001,
-                "type": "m.room.message",
-                "room_id": "!test:example.com",
-            },
+    state = read_scope_state(persisted, scope)
+    assert state.last_summary_model == "summary-model"
+    assert state.last_compacted_run_count == 2
+    assert state.force_compact_before_next_run is False
+    assert state.last_compacted_at is not None
+
+    assert prepared.replays_persisted_history is True
+    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_outcomes[0].summary == "merged summary"
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_uses_provided_storage_without_reopening_scope_context(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    storage.upsert_session(session)
+
+    with patch("mindroom.history.runtime.open_scope_session_context") as mock_open_scope_context:
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
         )
-        edit_event.source = {
-            "content": {
-                "body": "* @test_agent what is 3+3?",
-                "msgtype": "m.text",
-                "m.new_content": {"body": "@test_agent what is 3+3?", "msgtype": "m.text"},
-                "m.relates_to": {"event_id": "$original:example.com", "rel_type": "m.replace"},
-            },
-            "event_id": "$edit:example.com",
-            "sender": "@user:example.com",
+
+    mock_open_scope_context.assert_not_called()
+    assert prepared.replay_plan is not None
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    room_session_id = create_session_id("!room:localhost", None)
+    thread_session_id = create_session_id("!room:localhost", "$thread-1")
+    room_session = _session(
+        room_session_id,
+        runs=[
+            _completed_run("room-1"),
+            _completed_run("room-2"),
+            _completed_run("room-3"),
+        ],
+    )
+    thread_session = _session(
+        thread_session_id,
+        runs=[
+            _completed_run("thread-1"),
+            _completed_run("thread-2"),
+            _completed_run("thread-3"),
+            _completed_run("thread-4"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(thread_session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(room_session)
+    storage.upsert_session(thread_session)
+
+    with (
+        patch(
+            "mindroom.ai.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(
+                return_value=SessionSummary(
+                    summary="thread summary",
+                    updated_at=datetime.now(UTC),
+                ),
+            ),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id=thread_session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=thread_session,
+        )
+
+    persisted_room = get_agent_session(storage, room_session_id)
+    persisted_thread = get_agent_session(storage, thread_session_id)
+    assert persisted_room is not None
+    assert persisted_thread is not None
+    assert persisted_room.summary is None
+    assert [run.run_id for run in persisted_room.runs] == ["room-1", "room-2", "room-3"]
+    assert persisted_thread.summary is not None
+    assert persisted_thread.summary.summary == "thread summary"
+    assert [run.run_id for run in persisted_thread.runs] == ["thread-3", "thread-4"]
+    assert len(prepared.compaction_outcomes) == 1
+    outcome = prepared.compaction_outcomes[0]
+    assert outcome.session_id == thread_session_id
+    assert outcome.scope == scope.key
+    assert outcome.to_notice_metadata()["session_id"] == thread_session_id
+    assert outcome.to_notice_metadata()["scope"] == scope.key
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_auto_compaction_rechecks_after_merged_summary_growth(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-3",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    summary_mock = AsyncMock(
+        side_effect=[
+            SessionSummary(summary="expanded summary " * 20, updated_at=datetime.now(UTC)),
+            SessionSummary(summary="final summary", updated_at=datetime.now(UTC)),
+        ],
+    )
+    with (
+        patch(
+            "mindroom.ai.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=summary_mock,
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            available_history_budget=160,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "final summary"
+    assert [run.run_id for run in persisted.runs] == ["run-3"]
+    assert summary_mock.await_count == 2
+    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_outcomes[0].runs_after == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_uses_context_window_guard_without_authored_compaction(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path, context_window=600)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+            _completed_run(
+                "run-3",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+    agent = _agent(db=storage)
+    prepared = await prepare_history_for_run(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
+    assert prepared.compaction_outcomes == []
+    assert prepared.replay_plan is not None
+    assert prepared.replay_plan.mode == "limited"
+    assert prepared.replay_plan.add_history_to_context is True
+    assert prepared.replay_plan.add_session_summary_to_context is True
+    assert prepared.replay_plan.num_history_runs == 2
+    assert prepared.replay_plan.num_history_messages is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_context_window_guard_preserves_custom_system_message_role(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path, context_window=40)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="developer", content="d" * 120),
+                    Message(role="user", content="u" * 15),
+                    Message(role="assistant", content="a" * 15),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="developer", content="d" * 120),
+                    Message(role="user", content="u" * 15),
+                    Message(role="assistant", content="a" * 15),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+    agent = _agent(db=storage)
+
+    prepared = await prepare_history_for_run(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+            system_message_role="developer",
+        ),
+        static_prompt_tokens=0,
+        available_history_budget=10,
+    )
+
+    assert prepared.replay_plan is not None
+    assert prepared.replay_plan.mode == "limited"
+    assert prepared.replay_plan.add_history_to_context is True
+    assert prepared.replay_plan.add_session_summary_to_context is True
+    assert prepared.replay_plan.num_history_runs == 1
+    assert prepared.replay_plan.num_history_messages is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+            _completed_run("run-3"),
+            _completed_run("run-4"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    with (
+        patch(
+            "mindroom.ai.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(side_effect=RuntimeError("summary failed")),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3", "run-4"]
+
+    state = read_scope_state(persisted, scope)
+    assert state.force_compact_before_next_run is False
+    assert state.last_summary_model is None
+    assert state.last_compacted_run_count is None
+
+    assert prepared.compaction_outcomes == []
+    assert prepared.replays_persisted_history is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_without_context_window_skips_auto_compaction(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=None,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+            _completed_run("run-3"),
+        ],
+    )
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
+    assert prepared.compaction_outcomes == []
+    assert prepared.replays_persisted_history is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_authored_compaction_still_plans_safe_replay_when_compaction_unavailable(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=600,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    agent = _agent(db=storage)
+    prepared = await prepare_history_for_run(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
+    assert prepared.compaction_outcomes == []
+    assert prepared.replay_plan is not None
+    assert prepared.replay_plan.mode == "limited"
+    assert prepared.replay_plan.add_history_to_context is True
+    assert prepared.replay_plan.add_session_summary_to_context is True
+    assert prepared.replay_plan.num_history_runs == 1
+    assert prepared.replay_plan.num_history_messages is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_without_authored_compaction_and_no_window_skips_warning(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path, context_window=None)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    storage.upsert_session(session)
+
+    with patch("mindroom.history.runtime.logger.warning") as mock_warning:
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
+    assert prepared.compaction_outcomes == []
+    assert prepared.replays_persisted_history is True
+    assert mock_warning.call_args_list == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_skips_warning(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=False),
+        context_window=None,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    storage.upsert_session(session)
+
+    with patch("mindroom.history.runtime.logger.warning") as mock_warning:
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
+    assert prepared.compaction_outcomes == []
+    assert prepared.replays_persisted_history is True
+    assert mock_warning.call_args_list == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_warns_once_when_authored_compaction_is_unavailable(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=None,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    storage.upsert_session(session)
+
+    with patch("mindroom.history.runtime.logger.warning") as mock_warning:
+        await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert len(mock_warning.call_args_list) == 1
+
+
+def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
+    big_run = _completed_run(
+        "run-big",
+        messages=[
+            Message(role="user", content="u" * 800),
+            Message(role="assistant", content="a" * 800),
+        ],
+    )
+    small_run = _completed_run("run-small")
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[big_run, small_run],
+        max_input_tokens=220,
+    )
+
+    assert [run.run_id for run in included_runs] == ["run-big"]
+    assert "Run truncated to fit compaction budget." in summary_input
+    assert 'run_id="run-big"' in summary_input
+
+
+def test_build_summary_input_skips_when_previous_summary_cannot_be_preserved() -> None:
+    run = _completed_run("run-1")
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary="existing durable summary " * 50,
+        compacted_runs=[run],
+        max_input_tokens=50,
+    )
+
+    assert included_runs == []
+    assert "<previous_summary>" in summary_input
+
+
+def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selection() -> None:
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="system", content="Persisted system"),
+                    Message(role="user", content="old user"),
+                    Message(
+                        role="assistant",
+                        content="old assistant",
+                        tool_calls=[
+                            {"id": "call-1", "type": "function", "function": {"name": "tool", "arguments": "{}"}},
+                        ],
+                    ),
+                    Message(role="tool", content="old tool"),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="new user"),
+                    Message(role="assistant", content="new assistant"),
+                ],
+            ),
+        ],
+    )
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="messages", limit=3),
+        max_tool_calls_from_history=None,
+    )
+
+    estimated_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=history_settings,
+    )
+
+    expected_messages = [
+        Message(role="user", content="new user"),
+        Message(role="assistant", content="new assistant"),
+    ]
+    assert estimated_tokens == estimate_history_messages_tokens(expected_messages)
+
+
+def test_estimate_prompt_visible_history_tokens_honors_custom_system_message_role() -> None:
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="developer", content="Persisted developer prompt"),
+                    Message(role="user", content="old user"),
+                    Message(role="assistant", content="old assistant"),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="new user"),
+                    Message(role="assistant", content="new assistant"),
+                ],
+            ),
+        ],
+    )
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="messages", limit=3),
+        max_tool_calls_from_history=None,
+        system_message_role="developer",
+    )
+
+    estimated_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=history_settings,
+    )
+
+    expected_messages = [
+        Message(role="assistant", content="old assistant"),
+        Message(role="user", content="new user"),
+        Message(role="assistant", content="new assistant"),
+    ]
+    assert estimated_tokens == estimate_history_messages_tokens(expected_messages)
+
+
+@pytest.mark.asyncio
+async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    owner_agent = _agent(agent_id="alpha", name="Alpha")
+    peer_agent = _agent(agent_id="beta", name="Beta")
+
+    def team_lookup(topic: str, include_links: bool = False) -> str:
+        """Look up team context for a topic before delegating work."""
+        return f"{topic}:{include_links}"
+
+    toolkit = Toolkit(
+        name="team_docs",
+        tools=[team_lookup],
+        instructions="Use the team docs tool before delegating factual questions.",
+        add_instructions=True,
+    )
+    team = Team(
+        members=[owner_agent, peer_agent],
+        model=FakeModel(id="fake-model", provider="fake"),
+        id="team_alpha+beta",
+        name="Pair",
+        role="Verbose team role",
+        tools=[toolkit],
+        get_member_information_tool=True,
+    )
+
+    prepared_tools = team._determine_tools_for_model(
+        model=team.model,
+        run_response=TeamRunOutput(
+            run_id="history-budget",
+            team_id=team.id,
+            session_id="history-budget",
+            session_state={},
+        ),
+        run_context=RunContext(run_id="history-budget", session_id="history-budget", session_state={}),
+        team_run_context={},
+        session=TeamSession(session_id="history-budget", team_id=team.id),
+        check_mcp_tools=False,
+    )
+    expected_payloads = [
+        {
+            "name": tool.name,
+            "description": tool.description or "",
+            "parameters": tool.parameters,
         }
+        for tool in prepared_tools
+    ]
+    previous_tool_instructions = team._tool_instructions
+    try:
+        team._tool_instructions = [toolkit.instructions]
+        system_message = team.get_system_message(
+            session=TeamSession(session_id="history-budget", team_id=team.id),
+            tools=prepared_tools,
+            add_session_state_to_context=False,
+        )
+    finally:
+        team._tool_instructions = previous_tool_instructions
+    expected_static_prompt_tokens = estimate_text_tokens("Current prompt")
+    if system_message is not None and system_message.content is not None:
+        expected_static_prompt_tokens += estimate_text_tokens(str(system_message.content))
+    expected_static_prompt_tokens += len(stable_serialize(expected_payloads)) // 4
 
-        with (
-            patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
-            patch.object(bot, "_edit_message", new_callable=AsyncMock),
-            patch("mindroom.bot.should_agent_respond") as mock_should_respond,
-            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock) as mock_streaming,
-            patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai_response,
-            patch("mindroom.bot.remove_run_by_event_id") as mock_remove_run,
-            patch("mindroom.bot.create_session_storage") as mock_create_storage,
-        ):
-            mock_context.return_value = MagicMock(
-                am_i_mentioned=True,
-                is_thread=True,
-                thread_id="$thread_root:example.com",
-                thread_history=[],
-                mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
-                has_non_agent_mentions=False,
-            )
-            mock_should_respond.return_value = True
-            mock_streaming.return_value = False
-            mock_ai_response.return_value = "The answer is 6"
-            mock_remove_run.side_effect = [False, True]
-            mock_create_storage.return_value = MagicMock(spec=SqliteDb)
+    with (
+        patch(
+            "mindroom.history.runtime.prepare_scope_history",
+            new=AsyncMock(return_value=MagicMock()),
+        ) as mock_prepare,
+        patch(
+            "tests.test_agno_history.finalize_history_preparation",
+            return_value=PreparedHistoryState(replays_persisted_history=True),
+        ) as mock_finalize,
+        open_bound_scope_session_context(
+            agents=[peer_agent, owner_agent],
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+        ) as scope_context,
+    ):
+        prepared_scope_history = await prepare_bound_scope_history(
+            agents=[peer_agent, owner_agent],
+            team=team,
+            full_prompt="Current prompt",
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=scope_context,
+        )
+        prepared = finalize_history_preparation(
+            prepared_scope_history=prepared_scope_history,
+            config=config,
+        )
 
-            await bot._on_message(room, edit_event)
-
-            assert mock_remove_run.call_count == 2
-            called_session_ids = [call.args[1] for call in mock_remove_run.call_args_list]
-            assert called_session_ids == [
-                "!test:example.com:$thread_root:example.com",
-                "!test:example.com",
-            ]
-            for call in mock_remove_run.call_args_list:
-                assert call.args[2] == "$original:example.com"
-
-
-# ---------------------------------------------------------------------------
-# Full scenario test
-# ---------------------------------------------------------------------------
+    assert prepared.replays_persisted_history is True
+    assert mock_finalize.call_count == 1
+    assert mock_prepare.await_count == 1
+    assert mock_prepare.await_args.kwargs["agent"] is owner_agent
+    assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
+    assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+beta")
+    assert (
+        estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
+    )
+    assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == expected_static_prompt_tokens
 
 
-class TestFullScenario:
-    """End-to-end scenario: multi-user thread + edit + restart."""
+def test_estimate_preparation_static_tokens_for_team_includes_agentic_state_tool() -> None:
+    owner_agent = _agent(agent_id="alpha", name="Alpha")
+    peer_agent = _agent(agent_id="beta", name="Beta")
+    team = Team(
+        members=[owner_agent, peer_agent],
+        model=FakeModel(id="fake-model", provider="fake"),
+        id="team_alpha+beta",
+        name="Pair",
+        role="Stateful team role",
+        enable_agentic_state=True,
+    )
+    budget_session_id = "history-budget"
+    session = TeamSession(session_id=budget_session_id, team_id=team.id)
+    prepared_tools = team._determine_tools_for_model(
+        model=team.model,
+        run_response=TeamRunOutput(
+            run_id=budget_session_id,
+            team_id=team.id,
+            session_id=budget_session_id,
+            session_state={},
+        ),
+        run_context=RunContext(
+            run_id=budget_session_id,
+            session_id=budget_session_id,
+            session_state={},
+        ),
+        team_run_context={},
+        session=session,
+        check_mcp_tools=False,
+    )
+    expected_payloads = [
+        {
+            "name": tool.name,
+            "description": tool.description or "",
+            "parameters": tool.parameters,
+        }
+        for tool in prepared_tools
+    ]
+    assert any(tool["name"] == "update_session_state" for tool in expected_payloads)
 
-    def test_multi_user_edit_restart(self) -> None:
-        """Asserts exact unseen IDs injected each turn and no reinjection."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"bot": AgentConfig(display_name="Bot")},
-                models={"default": {"provider": "openai", "id": "test"}},
+    previous_tool_instructions = team._tool_instructions
+    try:
+        team._tool_instructions = []
+        system_message = team.get_system_message(
+            session=session,
+            tools=prepared_tools,
+            add_session_state_to_context=False,
+        )
+    finally:
+        team._tool_instructions = previous_tool_instructions
+
+    expected_static_prompt_tokens = estimate_text_tokens("Current prompt")
+    if system_message is not None and system_message.content is not None:
+        expected_static_prompt_tokens += estimate_text_tokens(str(system_message.content))
+    expected_static_prompt_tokens += len(stable_serialize(expected_payloads)) // 4
+
+    assert (
+        estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
+    )
+
+
+def test_estimate_preparation_static_tokens_for_team_preserves_tool_instructions() -> None:
+    owner_agent = _agent(agent_id="alpha", name="Alpha")
+    peer_agent = _agent(agent_id="beta", name="Beta")
+    team = Team(
+        members=[owner_agent, peer_agent],
+        model=FakeModel(id="fake-model", provider="fake"),
+        id="team_alpha+beta",
+        name="Pair",
+        role="Stateful team role",
+        enable_agentic_state=True,
+    )
+    team._tool_instructions = ["keep me"]
+
+    estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt")
+
+    assert team._tool_instructions == ["keep me"]
+
+
+def test_create_team_instance_enables_native_team_history_and_disables_members(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "alpha": AgentConfig(display_name="Alpha", num_history_messages=100),
+                "zeta": AgentConfig(display_name="Zeta", num_history_messages=1),
+            },
+            teams={
+                "pair": TeamConfig(
+                    display_name="Pair",
+                    role="Test team",
+                    agents=["alpha", "zeta"],
+                    num_history_messages=2,
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=2_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+    alpha = _agent(agent_id="alpha", name="Alpha")
+    zeta = _agent(agent_id="zeta", name="Zeta")
+
+    with patch("mindroom.teams.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+        team = _create_team_instance(
+            agents=[alpha, zeta],
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_display_name="Team-alpha-zeta",
+            fallback_team_id="Team-alpha-zeta",
+            configured_team_name="pair",
+        )
+
+    assert alpha.add_history_to_context is False
+    assert alpha.add_session_summary_to_context is False
+    assert zeta.add_history_to_context is False
+    assert zeta.add_session_summary_to_context is False
+    assert team.add_history_to_context is True
+    assert team.add_session_summary_to_context is True
+    assert team.num_history_messages == 2
+    assert team.store_history_messages is False
+
+
+def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "alpha": AgentConfig(display_name="Alpha"),
+                "zeta": AgentConfig(display_name="Zeta"),
+            },
+            teams={
+                "pair": TeamConfig(
+                    display_name="Pair",
+                    role="Test team",
+                    agents=["alpha", "zeta"],
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=2_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+    alpha = _agent(agent_id="alpha", name="Alpha")
+    zeta = _agent(agent_id="zeta", name="Zeta")
+
+    with patch("mindroom.teams.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+        team = _create_team_instance(
+            agents=[alpha, zeta],
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_display_name="Team-alpha-zeta",
+            fallback_team_id="Team-alpha-zeta",
+            configured_team_name="pair",
+        )
+
+    assert team.num_history_runs is None
+    assert team.num_history_messages is None
+
+
+def test_get_entity_compaction_config_merges_authored_overrides(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": AgentConfig(
+                    display_name="Test Agent",
+                    compaction=CompactionOverrideConfig(
+                        threshold_percent=0.6,
+                    ),
+                ),
+            },
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(
+                    enabled=False,
+                    threshold_tokens=12_000,
+                    reserve_tokens=2_048,
+                    model="summary-model",
+                    notify=True,
+                ),
             ),
-        )
-        agent_id = config.get_ids(runtime_paths_for(config))["bot"].full_id
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=48_000,
+                ),
+                "summary-model": ModelConfig(
+                    provider="openai",
+                    id="summary-model-id",
+                    context_window=32_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
 
-        # Simulate a thread with multiple users
-        thread_history = [
-            {"sender": "@alice:example.com", "body": "Hi bot", "event_id": "$a1"},
-            {"sender": agent_id, "body": "Hi Alice!", "event_id": "$bot1"},
-            {"sender": "@bob:example.com", "body": "Me too", "event_id": "$b1"},
-            {"sender": "@carol:example.com", "body": "Hello all", "event_id": "$c1"},
-            {"sender": "@alice:example.com", "body": "Follow up", "event_id": "$a2"},
-        ]
+    resolved = config.get_entity_compaction_config("test_agent")
 
-        # Turn 1: Agent responded to $a1. It saw $a1.
-        turn1_seen = {"$a1"}
-        # Current message for turn 2 is $a2
-        unseen_turn2, partial_reply_kinds_turn2 = _get_unseen_messages(
-            thread_history,
-            "bot",
-            config,
-            runtime_paths_for(config),
-            turn1_seen,
-            "$a2",
-            active_event_ids=set(),
-        )
-        unseen_turn2_ids = [m["event_id"] for m in unseen_turn2]
-        # Should see $b1 and $c1 (not $bot1 (self), not $a1 (seen), not $a2 (current))
-        assert unseen_turn2_ids == ["$b1", "$c1"]
-        assert partial_reply_kinds_turn2 == set()
-
-        # After turn 2, all consumed: $a1, $b1, $c1, $a2
-        turn3_seen = {"$a1", "$b1", "$c1", "$a2"}
-
-        # Turn 3: New message from bob
-        thread_history.append({"sender": "@bob:example.com", "body": "Another", "event_id": "$b2"})
-        thread_history.append({"sender": "@alice:example.com", "body": "Turn 3", "event_id": "$a3"})
-
-        unseen_turn3, partial_reply_kinds_turn3 = _get_unseen_messages(
-            thread_history,
-            "bot",
-            config,
-            runtime_paths_for(config),
-            turn3_seen,
-            "$a3",
-            active_event_ids=set(),
-        )
-        unseen_turn3_ids = [m["event_id"] for m in unseen_turn3]
-        assert unseen_turn3_ids == ["$b2"]
-        assert partial_reply_kinds_turn3 == set()
-
-        # Simulate restart: seen_event_ids still come from stored metadata
-        # Same assertion holds — no reinjection
-        restart_seen = {"$a1", "$b1", "$c1", "$a2", "$b2", "$a3"}
-        unseen_after_restart, partial_reply_kinds_after_restart = _get_unseen_messages(
-            thread_history,
-            "bot",
-            config,
-            runtime_paths_for(config),
-            restart_seen,
-            "$a3",
-            active_event_ids=set(),
-        )
-        assert unseen_after_restart == []
-        assert partial_reply_kinds_after_restart == set()
+    assert resolved.enabled is True
+    assert resolved.threshold_tokens is None
+    assert resolved.threshold_percent == 0.6
+    assert resolved.reserve_tokens == 2_048
+    assert resolved.model == "summary-model"
+    assert resolved.notify is True
 
 
-# ---------------------------------------------------------------------------
-# Token-aware context window pre-check tests
-# ---------------------------------------------------------------------------
+def test_authored_empty_defaults_compaction_enables_destructive_compaction(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "agents": {
+                "test_agent": {
+                    "display_name": "Test Agent",
+                },
+            },
+            "defaults": {
+                "tools": [],
+                "compaction": {},
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "test-model",
+                    "context_window": 48_000,
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.get_entity_compaction_config("test_agent"),
+        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        active_model_name="default",
+        active_context_window=48_000,
+        static_prompt_tokens=2_000,
+    )
+
+    assert execution_plan.authored_compaction_enabled is True
 
 
-class TestApplyContextWindowLimit:
-    """Test dynamic history reduction based on context window."""
+def test_authored_empty_agent_compaction_override_stays_disabled_without_defaults(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "agents": {
+                "test_agent": {
+                    "display_name": "Test Agent",
+                    "compaction": {},
+                },
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "test-model",
+                    "context_window": 48_000,
+                },
+            },
+        },
+        runtime_paths,
+    )
 
-    @staticmethod
-    def _make_config(context_window: int | None = None) -> Config:
-        """Create a Config with the given context_window on the default model."""
-        return _runtime_bound_config(
-            Config(
-                agents={"test_agent": AgentConfig(display_name="Test")},
-                models={"default": {"provider": "openai", "id": "test", "context_window": context_window}},
-            ),
-        )
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.get_entity_compaction_config("test_agent"),
+        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        active_model_name="default",
+        active_context_window=48_000,
+        static_prompt_tokens=2_000,
+    )
 
-    @staticmethod
-    def _make_agent(
-        role: str = "Short role.",
-        instructions: list[str] | None = None,
-        num_history_runs: int | None = None,
-        num_history_messages: int | None = None,
-        max_tool_calls_from_history: int | None = None,
-    ) -> MagicMock:
-        """Create a mock Agent with the given history settings."""
-        agent = MagicMock(spec=Agent)
-        agent.role = role
-        agent.instructions = instructions or []
-        agent.num_history_runs = num_history_runs
-        agent.num_history_messages = num_history_messages
-        agent.add_history_to_context = True
-        agent.max_tool_calls_from_history = max_tool_calls_from_history
-        return agent
+    assert execution_plan.authored_compaction_enabled is False
 
-    @staticmethod
-    def _make_msg(content: str, *, from_history: bool = False, role: str = "user") -> Message:
-        """Create a real Agno Message with text content."""
-        return Message(role=role, content=content, from_history=from_history)
 
-    def _make_session(
-        self,
-        run_contents: list[str],
-        *,
-        from_history_indices: set[int] | None = None,
-        statuses: list[RunStatus] | None = None,
-    ) -> AgentSession:
-        """Create a session with runs containing the given content strings."""
-        history_indices = from_history_indices or set()
-        runs = []
-        for i, content in enumerate(run_contents):
-            msg = self._make_msg(content, from_history=i in history_indices)
-            status = statuses[i] if statuses is not None else RunStatus.running
-            runs.append(RunOutput(run_id=f"r{i}", messages=[msg], status=status))
-        return AgentSession(session_id="sid", runs=runs)
-
-    def test_no_context_window(self, tmp_path: object) -> None:
-        """No context_window configured -> num_history_runs unchanged."""
-        config = self._make_config(context_window=None)
-        agent = self._make_agent(num_history_runs=5)
-        _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
-        assert agent.num_history_runs == 5
-
-    def test_no_session_id(self, tmp_path: object) -> None:
-        """No session_id -> num_history_runs unchanged."""
-        config = self._make_config(context_window=1000)
-        agent = self._make_agent(num_history_runs=5)
-        _apply_context_window_limit(agent, "test_agent", config, "Hello", None, tmp_path)
-        assert agent.num_history_runs == 5
-
-    def test_skips_when_num_history_messages_set(self, tmp_path: object) -> None:
-        """When num_history_messages is set, skip run-based reduction."""
-        config = self._make_config(context_window=100)
-        agent = self._make_agent(num_history_messages=10)
-        _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
-        assert agent.num_history_messages == 10
-
-    def test_no_session_no_change(self, tmp_path: object) -> None:
-        """No existing session -> num_history_runs unchanged."""
-        config = self._make_config(context_window=100)
-        agent = self._make_agent(num_history_runs=5)
-        with (
-            patch("mindroom.ai.create_session_storage"),
-            patch("mindroom.ai._get_agent_session", return_value=None),
-        ):
-            _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
-        assert agent.num_history_runs == 5
-
-    def test_passes_execution_identity_when_loading_private_session_storage(self, tmp_path: Path) -> None:
-        """Private-agent history budgeting should keep explicit execution identity when loading sessions."""
-        config = _runtime_bound_config(
+def test_validate_compaction_model_references_does_not_emit_availability_warnings(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    with patch("mindroom.config.main.logger.warning") as mock_warning:
+        bind_runtime_paths(
             Config(
                 agents={
                     "test_agent": AgentConfig(
                         display_name="Test Agent",
-                        private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+                        compaction=CompactionOverrideConfig(enabled=True),
                     ),
                 },
-                models={"default": ModelConfig(provider="openai", id="test-model", context_window=100)},
+                defaults=DefaultsConfig(tools=[]),
+                models={
+                    "default": ModelConfig(
+                        provider="openai",
+                        id="test-model",
+                        context_window=None,
+                    ),
+                },
             ),
-            tmp_path,
+            runtime_paths,
         )
-        agent = self._make_agent(num_history_runs=5)
-        execution_identity = ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="test_agent",
-            requester_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id="$thread",
-            resolved_thread_id="$thread",
-            session_id="sid",
-        )
-        runtime_paths = _runtime_paths(tmp_path)
 
+    assert mock_warning.call_args_list == []
+
+
+def test_validate_compaction_model_references_rejects_explicit_model_without_context_window(
+    tmp_path: Path,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+
+    with pytest.raises(
+        ValueError,
+        match=r"Explicit compaction\.model requires a model with context_window: agents\.test_agent\.compaction\.model -> summary-model",
+    ):
+        bind_runtime_paths(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        compaction=CompactionOverrideConfig(enabled=True, model="summary-model"),
+                    ),
+                },
+                defaults=DefaultsConfig(tools=[]),
+                models={
+                    "default": ModelConfig(
+                        provider="openai",
+                        id="test-model",
+                        context_window=48_000,
+                    ),
+                    "summary-model": ModelConfig(
+                        provider="openai",
+                        id="summary-model-id",
+                        context_window=None,
+                    ),
+                },
+            ),
+            runtime_paths,
+        )
+
+
+def test_validate_compaction_model_references_rejects_disabled_explicit_model_without_context_window(
+    tmp_path: Path,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+
+    with pytest.raises(
+        ValueError,
+        match=r"Explicit compaction\.model requires a model with context_window",
+    ):
+        bind_runtime_paths(
+            Config(
+                defaults=DefaultsConfig(
+                    tools=[],
+                    compaction=CompactionConfig(
+                        enabled=False,
+                        model="summary-model",
+                    ),
+                ),
+                models={
+                    "default": ModelConfig(
+                        provider="openai",
+                        id="test-model",
+                        context_window=48_000,
+                    ),
+                    "summary-model": ModelConfig(
+                        provider="openai",
+                        id="summary-model-id",
+                        context_window=None,
+                    ),
+                },
+            ),
+            runtime_paths,
+        )
+
+
+def test_authored_model_dump_preserves_explicit_compaction_model_clear(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": AgentConfig(
+                    display_name="Test Agent",
+                    compaction=CompactionOverrideConfig(enabled=True, model=None),
+                ),
+            },
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=48_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+
+    assert config.authored_model_dump()["agents"]["test_agent"]["compaction"] == {
+        "enabled": True,
+        "model": None,
+    }
+
+
+def test_get_entity_compaction_config_inherits_disabled_defaults_for_pure_model_clear(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": AgentConfig(
+                    display_name="Test Agent",
+                    compaction=CompactionOverrideConfig(model=None),
+                ),
+            },
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(
+                    enabled=False,
+                    model="summary-model",
+                ),
+            ),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=48_000,
+                ),
+                "summary-model": ModelConfig(
+                    provider="openai",
+                    id="summary-model-id",
+                    context_window=32_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+
+    compaction_config = config.get_entity_compaction_config("test_agent")
+
+    assert compaction_config.enabled is False
+    assert compaction_config.model is None
+
+
+def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_summary_budget(
+    tmp_path: Path,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": AgentConfig(
+                    display_name="Test Agent",
+                    compaction=CompactionOverrideConfig(model="summary-model"),
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(
+                    provider="openai",
+                    id="test-model",
+                    context_window=None,
+                ),
+                "summary-model": ModelConfig(
+                    provider="openai",
+                    id="summary-model-id",
+                    context_window=32_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.get_entity_compaction_config("test_agent"),
+        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        active_model_name="default",
+        active_context_window=None,
+        static_prompt_tokens=2_000,
+    )
+
+    assert execution_plan.compaction_context_window == 32_000
+    assert execution_plan.replay_window_tokens is None
+    assert execution_plan.summary_input_budget_tokens is not None
+    assert execution_plan.replay_budget_tokens is None
+    assert execution_plan.destructive_compaction_available is True
+
+
+def test_resolve_runtime_model_uses_room_override_for_team(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            teams={
+                "team_123": TeamConfig(
+                    display_name="Test Team",
+                    role="Coordinate work",
+                    agents=["test_agent"],
+                    model="default",
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            room_models={"lobby": "large"},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model", context_window=None),
+                "large": ModelConfig(provider="openai", id="large-model", context_window=32_000),
+            },
+        ),
+        runtime_paths,
+    )
+    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+
+    runtime_model = config.resolve_runtime_model(
+        entity_name="team_123",
+        room_id="!room:localhost",
+        runtime_paths=runtime_paths,
+    )
+
+    assert runtime_model.model_name == "large"
+    assert runtime_model.context_window == 32_000
+
+
+def test_resolve_runtime_model_uses_room_override_for_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
+            defaults=DefaultsConfig(tools=[]),
+            room_models={"lobby": "large"},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model", context_window=None),
+                "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
+            },
+        ),
+        runtime_paths,
+    )
+    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+
+    runtime_model = config.resolve_runtime_model(
+        entity_name="test_agent",
+        room_id="!room:localhost",
+        runtime_paths=runtime_paths,
+    )
+
+    assert runtime_model.model_name == "large"
+    assert runtime_model.context_window == 48_000
+
+
+def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavailable(tmp_path: Path) -> None:
+    config, _runtime_paths_value = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=4_096,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.get_entity_compaction_config("test_agent"),
+        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        active_model_name="default",
+        active_context_window=4_096,
+        static_prompt_tokens=500,
+    )
+
+    assert execution_plan.summary_input_budget_tokens == 0
+    assert execution_plan.destructive_compaction_available is False
+    assert execution_plan.unavailable_reason == "non_positive_summary_input_budget"
+
+
+def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_disabled(
+    tmp_path: Path,
+) -> None:
+    config, _runtime_paths_value = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(
+            enabled=False,
+            threshold_tokens=100,
+        ),
+        context_window=1_000,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.get_entity_compaction_config("test_agent"),
+        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        active_model_name="default",
+        active_context_window=1_000,
+        static_prompt_tokens=10,
+    )
+
+    assert execution_plan.trigger_threshold_tokens is None
+    assert execution_plan.replay_budget_tokens == 490
+
+
+def test_should_attempt_destructive_compaction_forced_compaction_takes_priority() -> None:
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_config=True,
+        authored_compaction_enabled=True,
+        destructive_compaction_available=True,
+        explicit_compaction_model=True,
+        compaction_model_name="summary-model",
+        compaction_context_window=32_000,
+        replay_window_tokens=32_000,
+        trigger_threshold_tokens=24_000,
+        reserve_tokens=16_384,
+        static_prompt_tokens=2_000,
+        replay_budget_tokens=10_000,
+        summary_input_budget_tokens=5_000,
+    )
+
+    assert should_attempt_destructive_compaction(
+        plan=execution_plan,
+        force_compact_before_next_run=True,
+        current_history_tokens=None,
+    )
+
+
+def test_should_attempt_destructive_compaction_uses_authored_compaction_when_over_budget() -> None:
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_config=True,
+        authored_compaction_enabled=True,
+        destructive_compaction_available=True,
+        explicit_compaction_model=True,
+        compaction_model_name="summary-model",
+        compaction_context_window=32_000,
+        replay_window_tokens=32_000,
+        trigger_threshold_tokens=24_000,
+        reserve_tokens=16_384,
+        static_prompt_tokens=2_000,
+        replay_budget_tokens=10_000,
+        summary_input_budget_tokens=5_000,
+    )
+
+    assert should_attempt_destructive_compaction(
+        plan=execution_plan,
+        force_compact_before_next_run=False,
+        current_history_tokens=10_001,
+    )
+
+
+def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            ),
+        ],
+    )
+
+    replay_plan = plan_replay_that_fits(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="runs", limit=2),
+            max_tool_calls_from_history=None,
+        ),
+        available_history_budget=250,
+    )
+
+    assert replay_plan.mode == "limited"
+    assert replay_plan.history_limit_mode == "runs"
+    assert replay_plan.history_limit == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    live_agent = _agent()
+    live_agent.role = "Verbose role " + ("r" * 200)
+    thread_history = [
+        {"sender": "alice", "body": "Earlier context"},
+        {"sender": "bob", "body": "More context"},
+    ]
+
+    with (
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch(
+            "mindroom.execution_preparation.prepare_scope_history",
+            new=AsyncMock(return_value=MagicMock()),
+        ) as mock_prepare,
+        patch(
+            "mindroom.execution_preparation.finalize_history_preparation",
+            return_value=PreparedHistoryState(),
+        ),
+    ):
+        await _prepare_agent_and_prompt(
+            "test_agent",
+            "Current prompt",
+            runtime_paths,
+            config,
+            thread_history=thread_history,
+        )
+
+    expected_fallback_prompt = build_prompt_with_thread_history("Current prompt", thread_history)
+    assert mock_prepare.await_args is not None
+    assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == estimate_preparation_static_tokens(
+        live_agent,
+        full_prompt="Current prompt",
+        fallback_full_prompt=expected_fallback_prompt,
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execution_and_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
+            defaults=DefaultsConfig(tools=[]),
+            room_models={"lobby": "large"},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model", context_window=None),
+                "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
+            },
+        ),
+        runtime_paths,
+    )
+    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+    live_agent = _agent()
+
+    with (
+        patch("mindroom.ai.create_agent", return_value=live_agent) as mock_create_agent,
+        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch(
+            "mindroom.execution_preparation.prepare_scope_history",
+            new=AsyncMock(return_value=MagicMock()),
+        ) as mock_prepare,
+        patch(
+            "mindroom.execution_preparation.finalize_history_preparation",
+            return_value=PreparedHistoryState(),
+        ),
+    ):
+        await _prepare_agent_and_prompt(
+            "test_agent",
+            "Current prompt",
+            runtime_paths,
+            config,
+            room_id="!room:localhost",
+        )
+
+    assert mock_create_agent.call_args is not None
+    assert mock_create_agent.call_args.kwargs["active_model_name"] == "large"
+    assert mock_prepare.await_args is not None
+    assert mock_prepare.await_args.kwargs["active_model_name"] == "large"
+    assert mock_prepare.await_args.kwargs["active_context_window"] == 48_000
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_replay_is_disabled(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    live_agent = _agent()
+    thread_history = [
+        {"sender": "alice", "body": "Earlier context"},
+        {"sender": "bob", "body": "More context"},
+    ]
+
+    with (
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch(
+            "mindroom.execution_preparation.prepare_scope_history",
+            new=AsyncMock(return_value=MagicMock()),
+        ),
+        patch(
+            "mindroom.execution_preparation.finalize_history_preparation",
+            return_value=PreparedHistoryState(replays_persisted_history=False),
+        ),
+    ):
+        prepared_agent, full_prompt, _unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+            "test_agent",
+            "Current prompt",
+            runtime_paths,
+            config,
+            thread_history=thread_history,
+        )
+
+    assert prepared_agent is live_agent
+    assert prepared.replays_persisted_history is False
+    assert full_prompt == build_prompt_with_thread_history("Current prompt", thread_history)
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_forced_compaction_without_budget_clears_flag(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=None,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
+    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert prepared.compaction_outcomes == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_without_budget_returns_configured_replay_plan(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        num_history_runs=2,
+        context_window=None,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage, num_history_runs=2),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+
+    assert prepared.replay_plan == ResolvedReplayPlan(
+        mode="configured",
+        estimated_tokens=estimate_prompt_visible_history_tokens(
+            session=session,
+            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="runs", limit=2),
+                max_tool_calls_from_history=None,
+            ),
+        ),
+        add_history_to_context=True,
+        add_session_summary_to_context=True,
+        num_history_runs=2,
+        num_history_messages=None,
+    )
+    assert prepared.replays_persisted_history is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_session_persistence(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        num_history_runs=2,
+        context_window=500,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 800),
+                    Message(role="assistant", content="a" * 800),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 800),
+                    Message(role="assistant", content="a" * 800),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage, num_history_runs=2),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+
+    assert prepared.replay_plan is not None
+    assert prepared.replay_plan.mode == "disabled"
+    assert prepared.replays_persisted_history is False
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summary_only(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    agent = _agent(db=storage)
+    with (
+        patch(
+            "mindroom.ai.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(
+                side_effect=[
+                    SessionSummary(summary="first summary", updated_at=datetime.now(UTC)),
+                    SessionSummary(summary="final summary", updated_at=datetime.now(UTC)),
+                ],
+            ),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=agent,
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            available_history_budget=1,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "final summary"
+    assert persisted.runs == []
+    state = read_scope_state(persisted, scope)
+    assert state.last_compacted_run_count == 2
+    assert state.force_compact_before_next_run is False
+    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_outcomes[0].runs_after == 0
+    assert prepared.compaction_outcomes[0].summary == "final summary"
+    assert prepared.replay_plan is not None
+    assert prepared.replay_plan.mode == "disabled"
+    assert prepared.replay_plan.add_history_to_context is False
+    assert prepared.replay_plan.add_session_summary_to_context is False
+
+
+def test_plan_replay_that_fits_disables_summary_only_when_wrapped_summary_exceeds_budget() -> None:
+    summary_text = "s" * 360
+    available_history_budget = estimate_text_tokens(summary_text)
+    assert estimate_session_summary_tokens(summary_text) > available_history_budget
+
+    agent = _agent()
+    session = _session(
+        "session-1",
+        summary=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC)),
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 600),
+                    Message(role="assistant", content="a" * 600),
+                ],
+            ),
+        ],
+    )
+
+    replay_plan = plan_replay_that_fits(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+        ),
+        available_history_budget=available_history_budget,
+    )
+    apply_replay_plan(target=agent, replay_plan=replay_plan)
+
+    assert replay_plan.mode == "disabled"
+    assert agent.add_history_to_context is False
+    assert agent.add_session_summary_to_context is False
+    assert agent.num_history_runs is None
+    assert agent.num_history_messages is None
+
+
+def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    scope = HistoryScope(kind="team", scope_id="team-123")
+    session = _session("session-1")
+
+    assert update_scope_seen_event_ids(session, scope, ["event-1"]) is True
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+
+    assert read_scope_seen_event_ids(session, scope) == {"event-1"}
+
+
+def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
+    team_scope = HistoryScope(kind="team", scope_id="team-123")
+    session = _session("session-1")
+
+    write_scope_state(session, agent_scope, HistoryScopeState(force_compact_before_next_run=True))
+    write_scope_state(session, team_scope, HistoryScopeState(last_summary_model="summary-model"))
+
+    assert read_scope_state(session, agent_scope).force_compact_before_next_run is True
+    assert read_scope_state(session, agent_scope).last_summary_model is None
+    assert read_scope_state(session, team_scope).force_compact_before_next_run is False
+    assert read_scope_state(session, team_scope).last_summary_model == "summary-model"
+
+
+def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session(
+        "session-1",
+        metadata={
+            MINDROOM_COMPACTION_METADATA_KEY: {
+                "version": 1,
+                "force_compact_before_next_run": True,
+            },
+        },
+    )
+
+    assert read_scope_state(session, agent_scope).force_compact_before_next_run is False
+
+    write_scope_state(session, agent_scope, HistoryScopeState(force_compact_before_next_run=True))
+
+    assert session.metadata == {
+        MINDROOM_COMPACTION_METADATA_KEY: {
+            "version": 2,
+            "states": {
+                agent_scope.key: {
+                    "force_compact_before_next_run": True,
+                },
+            },
+        },
+    }
+
+
+def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
+    team_scope = HistoryScope(kind="team", scope_id="team-123")
+    session = _session(
+        "session-1",
+        runs=[
+            RunOutput(
+                run_id="agent-run",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={"matrix_seen_event_ids": ["agent-event"]},
+            ),
+            TeamRunOutput(
+                run_id="team-run",
+                team_id="team-123",
+                status=RunStatus.completed,
+                metadata={"matrix_seen_event_ids": ["team-event"]},
+            ),
+        ],
+    )
+    update_scope_seen_event_ids(session, team_scope, ["preserved-team-event"])
+
+    assert read_scope_seen_event_ids(session, agent_scope) == {"agent-event"}
+    assert read_scope_seen_event_ids(session, team_scope) == {"team-event", "preserved-team-event"}
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            RunOutput(
+                run_id="run-1",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={"matrix_seen_event_ids": ["event-1", "event-2"]},
+            ),
+            RunOutput(
+                run_id="run-2",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={"matrix_seen_event_ids": ["event-3"]},
+            ),
+            RunOutput(
+                run_id="run-3",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={"matrix_seen_event_ids": ["event-4"]},
+            ),
+            RunOutput(
+                run_id="run-4",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={"matrix_seen_event_ids": ["event-5"]},
+            ),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    with (
+        patch(
+            "mindroom.ai.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(
+                return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+            ),
+        ),
+    ):
+        await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert read_scope_seen_event_ids(persisted, scope) == {
+        "event-1",
+        "event-2",
+        "event-3",
+        "event-4",
+        "event-5",
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_agno_replays_summary_and_recent_raw_history_without_persisting_replay(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    storage.upsert_session(
+        _session(
+            "session-1",
+            runs=[
+                _completed_run("run-1"),
+                _completed_run("run-2"),
+            ],
+            summary=SessionSummary(summary="stored summary", updated_at=datetime.now(UTC)),
+        ),
+    )
+    model = RecordingModel(id="recording-model", provider="fake")
+    agent = _agent(
+        model=model,
+        db=storage,
+        num_history_runs=1,
+    )
+
+    response = await agent.arun("Current prompt", session_id="session-1")
+
+    assert response.content == "ok"
+    assert model.seen_messages[0].role == "system"
+    assert "stored summary" in str(model.seen_messages[0].content)
+    assert [message.content for message in model.seen_messages[1:3]] == [
+        "run-2 question",
+        "run-2 answer",
+    ]
+    assert [message.from_history for message in model.seen_messages[1:3]] == [True, True]
+    assert model.seen_messages[-1].role == "user"
+    assert model.seen_messages[-1].content == "Current prompt"
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    latest_run = persisted.runs[-1]
+    assert isinstance(latest_run, RunOutput)
+    assert [message.content for message in latest_run.messages or []] == [
+        model.seen_messages[0].content,
+        "Current prompt",
+        "ok",
+    ]
+    assert all(message.from_history is False for message in latest_run.messages or [])
+    assert latest_run.additional_input in (None, [])
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_context(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path, num_history_runs=1)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[_completed_run("run-1"), _completed_run("run-2")],
+        summary=SessionSummary(summary="stored summary", updated_at=datetime.now(UTC)),
+    )
+    update_scope_seen_event_ids(session, HistoryScope(kind="agent", scope_id="test_agent"), ["event-1"])
+    storage.upsert_session(session)
+
+    recording_model = RecordingModel(id="recording-model", provider="fake")
+    live_agent = _agent(model=recording_model, db=storage, num_history_runs=1)
+
+    with open_scope_session_context(
+        agent=live_agent,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
         with (
-            patch("mindroom.ai.create_session_storage") as mock_create_storage,
-            patch("mindroom.ai._get_agent_session", return_value=None),
+            patch("mindroom.ai.create_agent", return_value=live_agent),
+            patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
         ):
-            _apply_context_window_limit(
-                agent,
+            agent, full_prompt, unseen_event_ids, prepared = await _prepare_agent_and_prompt(
                 "test_agent",
-                config,
-                "Hello",
-                "sid",
+                "Current prompt",
                 runtime_paths,
-                execution_identity=execution_identity,
+                config,
+                scope_context=scope_context,
+                thread_history=[
+                    {"event_id": "event-1", "sender": "alice", "body": "Already seen"},
+                    {"event_id": "event-2", "sender": "alice", "body": "Fresh follow-up"},
+                    {"event_id": "event-3", "sender": "alice", "body": "Current message body"},
+                ],
+                reply_to_event_id="event-3",
             )
 
-        mock_create_storage.assert_called_once_with(
-            "test_agent",
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        )
+    assert unseen_event_ids == ["event-2"]
+    assert prepared.replays_persisted_history is True
+    assert "Fresh follow-up" in full_prompt
+    assert "Already seen" not in full_prompt
+    assert "stored summary" not in full_prompt
+    assert "<history_context>" not in full_prompt
 
-    def test_within_budget_no_change(self, tmp_path: object) -> None:
-        """Under threshold -> num_history_runs unchanged."""
-        # context_window=10000, threshold=8000
-        # Static: ~10 tokens, history: ~50 tokens -> well under 8000
-        config = self._make_config(context_window=10000)
-        agent = self._make_agent(role="Short role.", num_history_runs=None)
-        session = self._make_session(["a" * 100, "b" * 100])
-        _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path, session=session)
-        assert agent.num_history_runs is None  # Unchanged
+    response = await agent.arun(full_prompt, session_id="session-1")
 
-    def test_reduces_history_over_budget(self, tmp_path: object) -> None:
-        """Over threshold -> num_history_runs reduced."""
-        # context_window=100, threshold=80
-        # Static: role(40 chars = 10 tokens) + prompt(40 chars = 10 tokens) = 20 tokens
-        # History: 5 runs x 100 chars = 25 tokens each, total = 125 tokens
-        # Grand total: 20 + 125 = 145 > 80
-        # Budget for history: 80 - 20 = 60 tokens
-        # Each run ~ 25 tokens -> fits 2 runs (50 <= 60)
-        config = self._make_config(context_window=100)
-        agent = self._make_agent(role="x" * 40, num_history_runs=None)
-        session = self._make_session(["a" * 100] * 5)
-        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
-        assert agent.num_history_runs == 2
+    assert response.content == "ok"
+    assert recording_model.seen_messages[0].role == "system"
+    assert "stored summary" in str(recording_model.seen_messages[0].content)
+    assert [message.content for message in recording_model.seen_messages[1:3]] == [
+        "run-2 question",
+        "run-2 answer",
+    ]
 
-    def test_reduces_with_explicit_limit(self, tmp_path: object) -> None:
-        """When num_history_runs is already set but still too high, it gets reduced."""
-        config = self._make_config(context_window=100)
-        agent = self._make_agent(role="x" * 40, num_history_runs=5)
-        session = self._make_session(["a" * 100] * 10)
-        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
-        assert agent.num_history_runs == 2
-
-    def test_disables_history_when_latest_run_exceeds_budget(self, tmp_path: object) -> None:
-        """If no runs fit budget, history is disabled for this run."""
-        config = self._make_config(context_window=10)
-        agent = self._make_agent(role="x" * 100, num_history_runs=5)
-        session = self._make_session(["a" * 1000] * 5)
-        _apply_context_window_limit(agent, "test_agent", config, "y" * 100, "sid", tmp_path, session=session)
-        assert agent.add_history_to_context is False
-
-    def test_disables_history_when_static_prompt_exhausts_budget(self, tmp_path: object) -> None:
-        """If static prompt exceeds threshold, history is disabled for this run."""
-        config = self._make_config(context_window=50)  # threshold=40
-        agent = self._make_agent(role="x" * 200, num_history_runs=3)
-        session = self._make_session(["a" * 20] * 3)
-        _apply_context_window_limit(agent, "test_agent", config, "y" * 200, "sid", tmp_path, session=session)
-        assert agent.add_history_to_context is False
-
-    def test_no_change_when_already_within_limit(self, tmp_path: object) -> None:
-        """With explicit num_history_runs that fits within budget, no change."""
-        config = self._make_config(context_window=10000)
-        agent = self._make_agent(role="Short.", num_history_runs=2)
-        session = self._make_session(["a" * 100, "b" * 100])
-        _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path, session=session)
-        assert agent.num_history_runs == 2  # Unchanged
-
-    def test_ignores_messages_already_tagged_as_history(self, tmp_path: object) -> None:
-        """Messages tagged with from_history should not be counted again."""
-        config = self._make_config(context_window=100)  # threshold=80
-        agent = self._make_agent(role="x" * 40, num_history_runs=None)
-        session = self._make_session(
-            ["a" * 100, "b" * 1000],
-            from_history_indices={1},
-        )
-        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
-        assert agent.num_history_runs is None
-        assert agent.add_history_to_context is True
-
-    def test_ignores_non_replayable_error_runs(self, tmp_path: object) -> None:
-        """Errored runs should not influence history budgeting."""
-        config = self._make_config(context_window=100)  # threshold=80
-        agent = self._make_agent(role="x" * 40, num_history_runs=None)
-        session = self._make_session(
-            ["a" * 100, "b" * 1000],
-            statuses=[RunStatus.running, RunStatus.error],
-        )
-        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
-        assert agent.num_history_runs is None
-        assert agent.add_history_to_context is True
-
-    def test_counts_media_messages_in_history_budgeting(self, tmp_path: object) -> None:
-        """History with image payloads should count toward context budget."""
-        config = self._make_config(context_window=40)  # threshold=32
-        agent = self._make_agent(role="x" * 20, num_history_runs=None)
-        media_msg = Message(
-            role="user",
-            content="",
-            images=[Image(url="https://example.com/" + ("a" * 300))],
-        )
-        session = AgentSession(
-            session_id="sid",
-            runs=[RunOutput(run_id="r1", messages=[media_msg], status=RunStatus.running)],
-        )
-        _apply_context_window_limit(agent, "test_agent", config, "y" * 20, "sid", tmp_path, session=session)
-        assert agent.add_history_to_context is False
-
-    def test_respects_max_tool_calls_from_history_when_budgeting(self, tmp_path: object) -> None:
-        """Budgeting should mirror Agno's tool-call filtering."""
-        config = self._make_config(context_window=100)  # threshold=80
-        agent = self._make_agent(
-            role="x" * 40,
-            num_history_runs=None,
-            max_tool_calls_from_history=0,
-        )
-        tool_history_run = RunOutput(
-            run_id="r1",
-            status=RunStatus.running,
-            messages=[
-                Message(role="user", content="hi"),
-                Message(
-                    role="assistant",
-                    content="",
-                    tool_calls=[
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {"name": "test_tool", "arguments": "{}"},
-                        },
-                    ],
-                ),
-                Message(role="tool", tool_call_id="call_1", content="x" * 4000),
-                Message(role="assistant", content="done"),
-            ],
-        )
-        session = AgentSession(session_id="sid", runs=[tool_history_run])
-        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
-        assert agent.add_history_to_context is True
-        assert agent.num_history_runs is None
-
-    def test_model_config_context_window_field(self) -> None:
-        """ModelConfig accepts and stores context_window."""
-        mc = ModelConfig(provider="openai", id="gpt-4", context_window=128000)
-        assert mc.context_window == 128000
-
-    def test_model_config_context_window_defaults_none(self) -> None:
-        """context_window defaults to None."""
-        mc = ModelConfig(provider="openai", id="gpt-4")
-        assert mc.context_window is None
-
-    def test_model_config_context_window_must_be_positive(self) -> None:
-        """context_window rejects zero values."""
-        with pytest.raises(ValidationError):
-            ModelConfig(provider="openai", id="gpt-4", context_window=0)
+    final_user_message = recording_model.seen_messages[-1]
+    assert final_user_message.role == "user"
+    assert isinstance(final_user_message.content, str)
+    assert "Fresh follow-up" in final_user_message.content
+    assert "Already seen" not in final_user_message.content
+    assert "Current prompt" in final_user_message.content
+    assert "stored summary" not in final_user_message.content

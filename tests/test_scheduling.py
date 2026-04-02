@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -29,6 +29,9 @@ from mindroom.scheduling import (
     save_edited_scheduled_task,
     schedule_task,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 
 def _runtime_paths() -> object:

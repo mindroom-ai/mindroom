@@ -24,6 +24,10 @@ def test_all(tool_name: str) -> None:
         pytest.skip(f"{tool_name} tool is not implemented, skipping test")
     except ImportError as e:
         pytest.skip(f"{tool_name} dependency not installed: {e}")
+    except RuntimeError as e:
+        if tool_name == "openbb" and ".build.lock" in str(e):
+            pytest.skip(f"{tool_name} import is transiently locked by upstream build process: {e}")
+        raise
     verify_tool_configfields(tool_name, tool_class)
 
 

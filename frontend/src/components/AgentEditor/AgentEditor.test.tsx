@@ -209,6 +209,21 @@ describe('AgentEditor', () => {
     expect(useTools).toHaveBeenCalledWith('test_agent', 'user');
   });
 
+  it('shows inherited default tools even when defaults.tools is omitted from authored config', () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      config: {
+        ...mockConfig,
+        defaults: {},
+      },
+      agents: [{ ...mockAgent, include_default_tools: undefined }],
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByLabelText('worker scheduler')).toBeInTheDocument();
+  });
+
   it('fails closed when agent policy preview is unavailable', () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
@@ -372,6 +387,19 @@ describe('AgentEditor', () => {
     // Rooms are now displayed as checkboxes, not input fields
     const testRoomCheckbox = screen.getByRole('checkbox', { name: /Test Room/i });
     expect(testRoomCheckbox).toBeChecked();
+  });
+
+  it('clears zero history runs instead of writing them through', async () => {
+    render(<AgentEditor />);
+
+    const historyRunsInput = screen.getByLabelText('History Runs');
+    fireEvent.change(historyRunsInput, { target: { value: '0' } });
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith('test_agent', {
+        num_history_runs: null,
+      });
+    });
   });
 
   it('shows empty state when no agent is selected', () => {
@@ -831,6 +859,258 @@ describe('AgentEditor', () => {
         },
       });
     });
+  });
+
+  it('drops empty compaction overrides during normalization', () => {
+    expect(normalizeAgentUpdates(mockAgent, { compaction: {} }).compaction).toBeUndefined();
+    expect(
+      normalizeAgentUpdates(
+        { ...mockAgent, compaction: { enabled: true, threshold_tokens: 2000 } },
+        { compaction: { threshold_tokens: undefined, model: '   ' } }
+      ).compaction
+    ).toBeUndefined();
+  });
+
+  it('preserves explicit disabled compaction overrides during normalization', () => {
+    expect(normalizeAgentUpdates(mockAgent, { compaction: { enabled: false } }).compaction).toEqual(
+      {
+        enabled: false,
+      }
+    );
+  });
+
+  it('preserves explicit compaction model clears during normalization', () => {
+    expect(normalizeAgentUpdates(mockAgent, { compaction: { model: null } }).compaction).toEqual({
+      model: null,
+    });
+  });
+
+  it('enables authored compaction overrides and clears the inherited sibling threshold', () => {
+    expect(
+      normalizeAgentUpdates(mockAgent, {
+        compaction: {
+          threshold_percent: 0.6,
+          threshold_tokens: null,
+        },
+      }).compaction
+    ).toEqual({
+      enabled: true,
+      threshold_percent: 0.6,
+      threshold_tokens: null,
+    });
+  });
+
+  it('treats authored compaction overrides as enabled in the editor', () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { threshold_tokens: 2000 },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByRole('checkbox', { name: /enable auto-compaction/i })).toBeChecked();
+  });
+
+  it('clears invalid compaction integer input instead of writing NaN', async () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { enabled: true, threshold_tokens: 2000 },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    fireEvent.change(screen.getByLabelText('Threshold Tokens'), { target: { value: 'abc' } });
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith(
+        'test_agent',
+        expect.objectContaining({
+          compaction: { enabled: true },
+        })
+      );
+    });
+  });
+
+  it('clears the compaction model as an explicit null override', async () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { enabled: true, model: 'summary-model' },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    fireEvent.change(screen.getByLabelText('Compaction Model'), { target: { value: '' } });
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith(
+        'test_agent',
+        expect.objectContaining({
+          compaction: { enabled: true, model: null },
+        })
+      );
+    });
+  });
+
+  it('shows auto-compaction as disabled for a pure model clear when defaults are disabled', () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { model: null },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          compaction: {
+            enabled: false,
+            reserve_tokens: 16384,
+            threshold_percent: 0.8,
+            notify: false,
+          },
+        },
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByLabelText('Enable auto-compaction')).not.toBeChecked();
+  });
+
+  it('shows auto-compaction as disabled for an empty authored override when defaults are disabled', () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: {},
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          compaction: {
+            enabled: false,
+            reserve_tokens: 16384,
+            threshold_percent: 0.8,
+            notify: false,
+          },
+        },
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByLabelText('Enable auto-compaction')).not.toBeChecked();
+  });
+
+  it('shows auto-compaction as disabled when defaults.compaction is omitted', () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [mockAgent],
+      config: {
+        ...mockConfig,
+        defaults: {},
+        agents: { test_agent: mockAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByLabelText('Enable auto-compaction')).not.toBeChecked();
+  });
+
+  it('shows auto-compaction as enabled when defaults.compaction is an authored empty object', () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [mockAgent],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          compaction: {},
+        },
+        agents: { test_agent: mockAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByLabelText('Enable auto-compaction')).toBeChecked();
+  });
+
+  it('shows field-level history and compaction validation errors', () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      diagnostics: [
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'num_history_runs'],
+            msg: 'History runs must be at least 1.',
+            type: 'value_error',
+          },
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'num_history_messages'],
+            msg: 'History messages must be at least 1.',
+            type: 'value_error',
+          },
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'max_tool_calls_from_history'],
+            msg: 'Max tool calls must be at least 0.',
+            type: 'value_error',
+          },
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'compaction'],
+            msg: 'Compaction config is invalid.',
+            type: 'value_error',
+          },
+        },
+      ],
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByText('History runs must be at least 1.')).toBeInTheDocument();
+    expect(screen.getByText('History messages must be at least 1.')).toBeInTheDocument();
+    expect(screen.getByText('Max tool calls must be at least 0.')).toBeInTheDocument();
+    expect(screen.getByText('Compaction config is invalid.')).toBeInTheDocument();
   });
 
   it('uses the canonical shared context placeholder', async () => {

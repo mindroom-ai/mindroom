@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -17,6 +17,7 @@ import httpx
 import nio
 import pytest
 import uvicorn
+from agno.db.base import SessionType
 from agno.knowledge.document import Document
 from agno.knowledge.knowledge import Knowledge
 from agno.media import Image
@@ -31,6 +32,7 @@ from mindroom.bot import (
     MultiKnowledgeVectorDb,
     TeamBot,
     _DispatchPayload,
+    _get_or_create_lock,
     _MessageContext,
     _PreparedDispatch,
     _ResponseAction,
@@ -49,6 +51,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.history import CompactionOutcome
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -100,6 +103,11 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     )
 
 
+@contextmanager
+def _open_storage(storage: object) -> object:
+    yield storage
+
+
 def _mock_shared_knowledge_manager(
     *,
     base_id: str,
@@ -141,6 +149,134 @@ def _hook_envelope(*, body: str = "hello", source_event_id: str = "$event") -> M
         agent_name="calculator",
         source_kind="message",
     )
+
+
+def test_get_or_create_lock_evicts_enough_unlocked_entries_to_stay_bounded() -> None:
+    """Evict unlocked cached thread locks until the cache stays within bounds."""
+    locks = {f"thread-{index}": asyncio.Lock() for index in range(101)}
+
+    new_lock = _get_or_create_lock(locks, "thread-new", max_entries=100)
+
+    assert isinstance(new_lock, asyncio.Lock)
+    assert "thread-new" in locks
+    assert len(locks) == 100
+
+
+def test_response_lifecycle_lock_uses_resolved_thread_root_for_first_turns(
+    tmp_path: Path,
+    mock_agent_user: AgentMatrixUser,
+) -> None:
+    """Different first-turn replies in one room should not serialize on a shared None key."""
+    config = TestAgentBot.create_mock_config(tmp_path)
+    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+    first_lock = bot._response_lifecycle_lock("!test:localhost", None, "$event-a")
+    second_lock = bot._response_lifecycle_lock("!test:localhost", None, "$event-b")
+
+    assert first_lock is not second_lock
+
+
+def test_response_lifecycle_lock_reuses_same_resolved_thread_root(
+    tmp_path: Path,
+    mock_agent_user: AgentMatrixUser,
+) -> None:
+    """Existing-thread and first-turn replies sharing a root should share one lifecycle lock."""
+    config = TestAgentBot.create_mock_config(tmp_path)
+    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+    existing_thread_lock = bot._response_lifecycle_lock("!test:localhost", "$root", "$event-a")
+    first_turn_lock = bot._response_lifecycle_lock("!test:localhost", None, "$root")
+
+    assert existing_thread_lock is first_turn_lock
+
+
+def test_response_lifecycle_lock_stays_room_scoped_in_room_mode(
+    tmp_path: Path,
+    mock_agent_user: AgentMatrixUser,
+) -> None:
+    """Room-mode agents should continue to serialize one room-scoped lifecycle at a time."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    thread_mode="room",
+                ),
+            },
+            teams={},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=True),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+    first_lock = bot._response_lifecycle_lock("!test:localhost", None, "$event-a")
+    second_lock = bot._response_lifecycle_lock("!test:localhost", None, "$event-b")
+
+    assert first_lock is second_lock
+
+
+def test_conversation_session_id_uses_resolved_thread_root_for_first_turns(
+    tmp_path: Path,
+    mock_agent_user: AgentMatrixUser,
+) -> None:
+    """Different first-turn replies in one room should persist into distinct sessions."""
+    config = TestAgentBot.create_mock_config(tmp_path)
+    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+    first_session_id = bot._conversation_session_id(
+        room_id="!test:localhost",
+        thread_id=None,
+        reply_to_event_id="$event-a",
+    )
+    second_session_id = bot._conversation_session_id(
+        room_id="!test:localhost",
+        thread_id=None,
+        reply_to_event_id="$event-b",
+    )
+
+    assert first_session_id == create_session_id("!test:localhost", "$event-a")
+    assert second_session_id == create_session_id("!test:localhost", "$event-b")
+    assert first_session_id != second_session_id
+
+
+def test_conversation_session_id_stays_room_scoped_in_room_mode(
+    tmp_path: Path,
+    mock_agent_user: AgentMatrixUser,
+) -> None:
+    """Room-mode agents should continue to share one room session."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    thread_mode="room",
+                ),
+            },
+            teams={},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=True),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+    first_session_id = bot._conversation_session_id(
+        room_id="!test:localhost",
+        thread_id=None,
+        reply_to_event_id="$event-a",
+    )
+    second_session_id = bot._conversation_session_id(
+        room_id="!test:localhost",
+        thread_id=None,
+        reply_to_event_id="$event-b",
+    )
+
+    assert first_session_id == create_session_id("!test:localhost", None)
+    assert first_session_id == second_session_id
 
 
 @asynccontextmanager
@@ -244,6 +380,26 @@ class _FailingStubVectorDb:
     ) -> list[Document]:
         _ = (query, limit, filters)
         raise RuntimeError(self.error_message)
+
+
+def _make_compaction_outcome(*, mode: str = "auto", notify: bool = True) -> CompactionOutcome:
+    return CompactionOutcome(
+        mode=mode,
+        session_id="!test:localhost:$thread_root_id",
+        scope="agent:general",
+        summary="## Goal\nPreserve <summary> & keep context.",
+        summary_model="compact-model",
+        before_tokens=30000,
+        after_tokens=12000,
+        window_tokens=200000,
+        threshold_tokens=100000,
+        reserve_tokens=16384,
+        runs_before=18,
+        runs_after=7,
+        compacted_run_count=12,
+        compacted_at="2026-03-22T20:15:00Z",
+        notify=notify,
+    )
 
 
 class TestAgentBot:
@@ -1017,6 +1173,7 @@ class TestAgentBot:
             assert stream_kwargs["reply_to_event_id"] == "event123"
             assert stream_kwargs["show_tool_calls"] is True
             assert stream_kwargs["run_metadata_collector"] == {}
+            assert stream_kwargs["compaction_outcomes_collector"] == []
             mock_ai_response.assert_not_called()
             # With streaming and stop button: initial message + reaction + edits
             # Note: The exact count may vary based on implementation
@@ -1041,6 +1198,7 @@ class TestAgentBot:
             assert ai_kwargs["show_tool_calls"] is True
             assert ai_kwargs["tool_trace_collector"] == []
             assert ai_kwargs["run_metadata_collector"] == {}
+            assert ai_kwargs["compaction_outcomes_collector"] == []
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final
             assert bot.client.room_send.call_count >= 2
@@ -1582,7 +1740,7 @@ class TestAgentBot:
                 requester_user_id="@user:localhost",
                 payload=_DispatchPayload(prompt="team prompt"),
                 response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
-                enrichment_digest="digest",
+                strip_transient_enrichment_after_run=True,
                 correlation_id="corr-team",
             )
 
@@ -1615,7 +1773,7 @@ class TestAgentBot:
             patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
             patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.bot.team_response", new_callable=AsyncMock, return_value="Team reply"),
-            patch("mindroom.bot.create_session_storage", return_value=storage),
+            patch("mindroom.bot.open_scope_storage", return_value=_open_storage(storage)),
             patch("mindroom.bot.strip_enrichment_from_session_storage") as mock_strip_enrichment,
         ):
             event_id = await bot._generate_team_response_helper(
@@ -1628,12 +1786,16 @@ class TestAgentBot:
                 requester_user_id="@user:localhost",
                 payload=_DispatchPayload(prompt="team prompt"),
                 response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
-                enrichment_digest="digest",
+                strip_transient_enrichment_after_run=True,
                 correlation_id="corr-team",
             )
 
         assert event_id == "$team"
-        mock_strip_enrichment.assert_called_once_with(storage, create_session_id("!test:localhost", None))
+        mock_strip_enrichment.assert_called_once_with(
+            storage,
+            create_session_id("!test:localhost", "$team-root"),
+            session_type=SessionType.TEAM,
+        )
 
     @pytest.mark.asyncio
     async def test_reaction_hooks_run_after_built_in_handlers_decline(

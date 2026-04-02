@@ -15,7 +15,9 @@ from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from agno.run.agent import RunOutput
+from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 import mindroom.tools  # noqa: F401
 from mindroom import agent_prompts, constants
@@ -43,6 +45,7 @@ from mindroom.workspaces import ensure_workspace_template
 if TYPE_CHECKING:
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
+    from agno.team import Team
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
@@ -395,7 +398,7 @@ def _tool_init_context_from_runtime(agent_runtime: ResolvedAgentRuntime) -> Agen
     )
 
 
-def build_agent_toolkit(
+def build_agent_toolkit(  # noqa: PLR0911
     tool_name: str,
     *,
     agent_name: str,
@@ -458,6 +461,16 @@ def build_agent_toolkit(
         from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
 
         return SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths)
+
+    if tool_name == "compact_context":
+        from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
+
+        return CompactContextTools(
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
 
     return _build_registered_agent_tool(
         tool_name,
@@ -541,6 +554,14 @@ def _resolve_agent_learning(
     )
 
 
+def get_agent_runtime_sqlite_dbs(agent: Agent) -> tuple[SqliteDb | None, SqliteDb | None]:
+    """Return the runtime-owned SQLite handles attached to one agent."""
+    history_db = agent.db if isinstance(agent.db, SqliteDb) else None
+    learning = agent.learning
+    learning_db = learning.db if isinstance(learning, LearningMachine) and isinstance(learning.db, SqliteDb) else None
+    return history_db, learning_db
+
+
 def create_session_storage(
     agent_name: str,
     config: Config,
@@ -556,6 +577,24 @@ def create_session_storage(
         session_table=f"{agent_name}_sessions",
         execution_identity=execution_identity,
     )
+
+
+def create_state_storage_db(
+    storage_name: str,
+    state_root: Path,
+    *,
+    subdir: str,
+    session_table: str,
+) -> SqliteDb:
+    """Create a persistent SQLite database from an already-resolved state root."""
+    db_dir = state_root / subdir
+    db_dir.mkdir(parents=True, exist_ok=True)
+    return SqliteDb(session_table=session_table, db_file=str(db_dir / f"{storage_name}.db"))
+
+
+def enable_all_history_replay(entity: Agent | Team) -> None:
+    """Undo Agno's default three-run history fallback."""
+    entity.num_history_runs = None
 
 
 def _create_agent_state_db(
@@ -574,25 +613,12 @@ def _create_agent_state_db(
         runtime_paths,
         execution_identity=execution_identity,
     ).state_root
-    return _create_agent_state_db_from_state_root(
-        agent_name,
-        state_storage_path,
+    return create_state_storage_db(
+        storage_name=agent_name,
+        state_root=state_storage_path,
         subdir=subdir,
         session_table=session_table,
     )
-
-
-def _create_agent_state_db_from_state_root(
-    agent_name: str,
-    state_storage_path: Path,
-    *,
-    subdir: str,
-    session_table: str,
-) -> SqliteDb:
-    """Create a persistent SQLite database from an already-resolved agent state root."""
-    db_dir = state_storage_path / subdir
-    db_dir.mkdir(parents=True, exist_ok=True)
-    return SqliteDb(session_table=session_table, db_file=str(db_dir / f"{agent_name}.db"))
 
 
 def _create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
@@ -602,7 +628,7 @@ def _create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
     return SqliteDb(db_file=str(culture_dir / f"{culture_name}.db"))
 
 
-def _get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | None:
+def get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | None:
     """Retrieve and deserialize an AgentSession from storage."""
     raw = storage.get_session(session_id, SessionType.AGENT)
     if raw is None:
@@ -614,32 +640,48 @@ def _get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | Non
     return None
 
 
-def get_seen_event_ids(session: AgentSession) -> set[str]:
-    """Return union of all matrix_seen_event_ids from run metadata."""
-    if not session.runs:
-        return set()
-    seen: set[str] = set()
-    for run in session.runs:
-        if isinstance(run, RunOutput) and run.metadata:
-            seen_ids = run.metadata.get("matrix_seen_event_ids")
-            if isinstance(seen_ids, list):
-                seen.update(seen_ids)
-    return seen
+def get_team_session(storage: SqliteDb, session_id: str) -> TeamSession | None:
+    """Retrieve and deserialize a TeamSession from storage."""
+    raw = storage.get_session(session_id, SessionType.TEAM)
+    if raw is None:
+        return None
+    if isinstance(raw, TeamSession):
+        return raw
+    if isinstance(raw, dict):
+        return TeamSession.from_dict(cast("dict[str, Any]", raw))
+    return None
 
 
-def remove_run_by_event_id(storage: SqliteDb, session_id: str, event_id: str) -> bool:
+def remove_run_by_event_id(
+    storage: SqliteDb,
+    session_id: str,
+    event_id: str,
+    *,
+    session_type: SessionType = SessionType.AGENT,
+) -> bool:
     """Remove a run whose matrix_event_id matches, save session.
 
     Returns True if a run was removed.
     """
-    session = _get_agent_session(storage, session_id)
+    session = (
+        get_team_session(storage, session_id)
+        if session_type is SessionType.TEAM
+        else get_agent_session(
+            storage,
+            session_id,
+        )
+    )
     if session is None or not session.runs:
         return False
     original_len = len(session.runs)
     session.runs = [
         run
         for run in session.runs
-        if not (isinstance(run, RunOutput) and run.metadata and run.metadata.get("matrix_event_id") == event_id)
+        if not (
+            isinstance(run, (RunOutput, TeamRunOutput))
+            and run.metadata
+            and run.metadata.get("matrix_event_id") == event_id
+        )
     ]
     if len(session.runs) == original_len:
         return False
@@ -727,6 +769,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     runtime_paths: constants.RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,
+    history_storage: SqliteDb | None = None,
+    active_model_name: str | None = None,
     hook_registry: HookRegistry | None = None,
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
@@ -740,6 +784,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         runtime_paths: Explicit runtime context for paths, env, and credentials.
         execution_identity: Request execution identity used to resolve scoped
             state, workspaces, worker routing, and requester-local storage.
+        history_storage: Optional already-open session storage owned by the
+            caller for this request. When omitted, create_agent opens its own
+            storage and the caller must close it after the run if needed.
+        active_model_name: Optional resolved runtime model name for this run.
+            When omitted, the agent's configured model is used.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
@@ -815,16 +864,16 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 error=str(exc),
             )
 
-    storage = _create_agent_state_db_from_state_root(
-        agent_name,
-        agent_runtime.state_root,
+    storage = history_storage or create_state_storage_db(
+        storage_name=agent_name,
+        state_root=agent_runtime.state_root,
         subdir="sessions",
         session_table=f"{agent_name}_sessions",
     )
     learning_storage = (
-        _create_agent_state_db_from_state_root(
-            agent_name,
-            agent_runtime.state_root,
+        create_state_storage_db(
+            storage_name=agent_name,
+            state_root=agent_runtime.state_root,
             subdir="learning",
             session_table=f"{agent_name}_learning_sessions",
         )
@@ -833,7 +882,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     )
 
     # Get model config for identity context
-    model_name = agent_config.model or "default"
+    model_name = active_model_name or agent_config.model or "default"
     if model_name in config.models:
         model_config = config.models[model_name]
         model_provider = model_config.provider.title()  # Capitalize provider name
@@ -879,7 +928,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
-    model = get_model_instance(config, runtime_paths, agent_config.model)
+    model = get_model_instance(config, runtime_paths, model_name)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
 
     skills = build_agent_skills(agent_name, config, runtime_paths)
@@ -953,12 +1002,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         else defaults.compress_tool_results
     )
 
-    enable_session_summaries = (
-        agent_config.enable_session_summaries
-        if agent_config.enable_session_summaries is not None
-        else defaults.enable_session_summaries
-    )
-
     max_tool_calls_from_history = (
         agent_config.max_tool_calls_from_history
         if agent_config.max_tool_calls_from_history is not None
@@ -981,18 +1024,18 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         add_history_to_context=True,
         num_history_runs=num_history_runs,
         num_history_messages=num_history_messages,
+        # Keep persisted runs raw even though Agno replays history natively.
+        store_history_messages=False,
         culture_manager=culture_manager,
         add_culture_to_context=add_culture_to_context,
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
         compress_tool_results=compress_tool_results,
-        enable_session_summaries=enable_session_summaries,
+        add_session_summary_to_context=True,
         max_tool_calls_from_history=max_tool_calls_from_history,
     )
-    # Agno hardcodes num_history_runs=3 when both are None. Override after
-    # construction so get_messages receives None and returns all runs.
     if include_all_history:
-        agent.num_history_runs = None
+        enable_all_history_replay(agent)
 
     logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
 
