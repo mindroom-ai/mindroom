@@ -1728,11 +1728,8 @@ async def build_threaded_edit_content(
     extra_content: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build edit content that preserves thread fallback semantics when needed."""
-    latest_thread_event_id = None
-    if thread_id:
-        latest_thread_event_id = await _latest_thread_event_id(client, room_id, thread_id)
-        if latest_thread_event_id is None:
-            latest_thread_event_id = event_id
+    _ = client, room_id
+    latest_thread_event_id = event_id if thread_id else None
 
     return format_message_with_mentions(
         config,
