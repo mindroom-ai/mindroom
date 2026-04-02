@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot, _MessageContext, _PreparedTextEvent
+from mindroom.bot import AgentBot, _MessageContext, _PrecheckedEvent, _PreparedTextEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -388,7 +388,10 @@ class TestCoalescingInDispatch:
             patch.object(bot, "_prepare_dispatch", return_value=dispatch),
             patch.object(bot, "_resolve_dispatch_action") as mock_resolve,
         ):
-            await bot._dispatch_text_message(room, event, "@user:localhost")
+            await bot._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            )
 
         # Should have marked the older event as responded
         assert bot.response_tracker.has_responded("$m1")
@@ -422,6 +425,9 @@ class TestCoalescingInDispatch:
             patch.object(bot, "_build_dispatch_payload_with_attachments", return_value=MagicMock()),
             patch.object(bot, "_execute_dispatch_action") as mock_execute,
         ):
-            await bot._dispatch_text_message(room, event, "@user:localhost")
+            await bot._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            )
 
         mock_execute.assert_called_once()

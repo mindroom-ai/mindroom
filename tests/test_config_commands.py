@@ -238,7 +238,6 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         logger=MagicMock(),
         response_tracker=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
-        requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         resolve_reply_thread_id=MagicMock(return_value=None),
         send_response=AsyncMock(return_value=None),
         send_skill_command_response=AsyncMock(return_value=None),
@@ -255,7 +254,13 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         "mindroom.commands.handler.handle_config_command",
         AsyncMock(return_value=("ok", None)),
     ) as mock_handle_config_command:
-        await handle_command(context=context, room=room, event=event, command=command)
+        await handle_command(
+            context=context,
+            room=room,
+            event=event,
+            command=command,
+            requester_user_id="@alice:example.org",
+        )
 
     mock_handle_config_command.assert_awaited_once_with("show", runtime_paths=context.runtime_paths)
 
