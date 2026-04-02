@@ -112,7 +112,6 @@ from mindroom.thread_utils import (
     get_all_mentioned_agents_in_thread,
     get_configured_agents_for_room,
     has_multiple_non_agent_users_in_thread,
-    has_user_responded_after_message,
     should_agent_respond,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -1351,7 +1350,7 @@ class AgentBot:
             processing_log="Processing",
         )
 
-    async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:  # noqa: PLR0911
+    async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
         assert self.client is not None
 
@@ -1421,12 +1420,6 @@ class AgentBot:
             thread_history = []
             if thread_id:
                 thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-                if has_user_responded_after_message(thread_history, event.reacts_to, self.matrix_id):
-                    self.logger.info(
-                        "Ignoring reaction - agent already responded after this question",
-                        reacted_to=event.reacts_to,
-                    )
-                    return
 
             # Send immediate acknowledgment
             ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
