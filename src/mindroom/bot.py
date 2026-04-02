@@ -447,6 +447,10 @@ class _ResponseDispatchResult:
     options_list: list[dict[str, str]] | None = None
 
 
+class _SuppressedPlaceholderCleanupError(RuntimeError):
+    """Raised when a suppressed placeholder cannot be removed safely."""
+
+
 @dataclass(frozen=True)
 class _PreparedHookedPayload:
     """Resolved dispatch payload after enrichment hooks run."""
@@ -2288,41 +2292,50 @@ class AgentBot:
         )
 
         self.logger.info(processing_log, event_id=event.event_id)
-        if action.kind == "team":
-            assert action.form_team is not None
-            assert action.form_team.mode is not None
-            response_event_id = await self._generate_team_response_helper(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                thread_id=dispatch.context.thread_id,
-                payload=prepared_payload.payload,
-                team_agents=action.form_team.eligible_members,
-                team_mode=action.form_team.mode,
-                thread_history=dispatch.context.thread_history,
-                requester_user_id=dispatch.requester_user_id,
-                existing_event_id=placeholder_event_id,
-                existing_event_is_placeholder=placeholder_event_id is not None,
-                response_envelope=prepared_payload.envelope,
-                strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+        try:
+            if action.kind == "team":
+                assert action.form_team is not None
+                assert action.form_team.mode is not None
+                response_event_id = await self._generate_team_response_helper(
+                    room_id=room.room_id,
+                    reply_to_event_id=event.event_id,
+                    thread_id=dispatch.context.thread_id,
+                    payload=prepared_payload.payload,
+                    team_agents=action.form_team.eligible_members,
+                    team_mode=action.form_team.mode,
+                    thread_history=dispatch.context.thread_history,
+                    requester_user_id=dispatch.requester_user_id,
+                    existing_event_id=placeholder_event_id,
+                    existing_event_is_placeholder=placeholder_event_id is not None,
+                    response_envelope=prepared_payload.envelope,
+                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                    correlation_id=dispatch.correlation_id,
+                )
+            else:
+                response_event_id = await self._generate_response(
+                    room_id=room.room_id,
+                    prompt=prepared_payload.payload.prompt,
+                    reply_to_event_id=event.event_id,
+                    thread_id=dispatch.context.thread_id,
+                    thread_history=dispatch.context.thread_history,
+                    user_id=dispatch.requester_user_id,
+                    media=prepared_payload.payload.media,
+                    attachment_ids=prepared_payload.payload.attachment_ids,
+                    existing_event_id=placeholder_event_id,
+                    existing_event_is_placeholder=placeholder_event_id is not None,
+                    model_prompt=prepared_payload.payload.model_prompt,
+                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                    response_envelope=prepared_payload.envelope,
+                    correlation_id=dispatch.correlation_id,
+                )
+        except _SuppressedPlaceholderCleanupError:
+            self.logger.warning(
+                "Suppressed placeholder cleanup failed",
+                source_event_id=event.event_id,
+                placeholder_event_id=placeholder_event_id,
                 correlation_id=dispatch.correlation_id,
             )
-        else:
-            response_event_id = await self._generate_response(
-                room_id=room.room_id,
-                prompt=prepared_payload.payload.prompt,
-                reply_to_event_id=event.event_id,
-                thread_id=dispatch.context.thread_id,
-                thread_history=dispatch.context.thread_history,
-                user_id=dispatch.requester_user_id,
-                media=prepared_payload.payload.media,
-                attachment_ids=prepared_payload.payload.attachment_ids,
-                existing_event_id=placeholder_event_id,
-                existing_event_is_placeholder=placeholder_event_id is not None,
-                model_prompt=prepared_payload.payload.model_prompt,
-                strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
-                response_envelope=prepared_payload.envelope,
-                correlation_id=dispatch.correlation_id,
-            )
+            return
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
     async def _finalize_dispatch_failure(
@@ -4008,8 +4021,11 @@ class AgentBot:
                     event_id=existing_event_id,
                     reason="Suppressed placeholder response",
                 )
+                if not redacted:
+                    msg = f"failed to redact suppressed placeholder {existing_event_id}"
+                    raise _SuppressedPlaceholderCleanupError(msg)
                 return _ResponseDispatchResult(
-                    event_id=None if redacted else existing_event_id,
+                    event_id=None,
                     response_text=draft.response_text,
                     delivery_kind=None,
                     suppressed=True,
@@ -4105,6 +4121,7 @@ class AgentBot:
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
+            resolved_thread_id=resolved_thread_id,
         )
         room_mode = self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room_id) == "room"
         model_prompt = self._append_matrix_prompt_context(

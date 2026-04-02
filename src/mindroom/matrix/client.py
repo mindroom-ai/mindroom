@@ -1636,12 +1636,22 @@ async def fetch_thread_history(
         return await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
 
 
-async def _latest_thread_event_id(
+async def _latest_thread_event_id(  # noqa: C901, PLR0911
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
 ) -> str:
     """Get the latest visible event ID in a thread for MSC3440 fallback compliance."""
+
+    async def fallback_to_history() -> str:
+        try:
+            thread_messages = await fetch_thread_history(client, room_id, thread_id)
+        except Exception:
+            return thread_id
+        if thread_messages:
+            return thread_messages[-1].visible_event_id or thread_id
+        return thread_id
+
     try:
         relation_events = await _collect_related_events(
             client,
@@ -1654,28 +1664,38 @@ async def _latest_thread_event_id(
             max_events=1,
         )
     except _ThreadHistoryFastPathUnavailableError:
-        thread_messages = await fetch_thread_history(client, room_id, thread_id)
-        if thread_messages:
-            return thread_messages[-1].visible_event_id or thread_id
-        return thread_id
+        return await fallback_to_history()
 
     for relation_event in relation_events:
         if not isinstance(relation_event, nio.RoomMessageText):
             continue
         relation_event_info = EventInfo.from_event(relation_event.source)
+        if relation_event_info.is_edit and relation_event_info.thread_id_from_edit == thread_id:
+            return relation_event.event_id
         if relation_event_info.thread_id != thread_id:
             continue
-        latest_replacement = await _fetch_latest_message_replacement(client, room_id, relation_event)
+        try:
+            latest_replacement = await _fetch_latest_message_replacement(client, room_id, relation_event)
+        except _ThreadHistoryFastPathUnavailableError:
+            return await fallback_to_history()
         if latest_replacement is not None:
             return latest_replacement[0].event_id
         return relation_event.event_id
     try:
         root_response = await client.room_get_event(room_id, thread_id)
     except Exception as exc:
-        msg = f"root lookup failed for {thread_id}"
-        raise _ThreadHistoryFastPathUnavailableError(msg) from exc
+        logger.info(
+            "Falling back to history for latest thread event after root lookup failure",
+            room_id=room_id,
+            thread_id=thread_id,
+            reason=str(exc),
+        )
+        return await fallback_to_history()
     if isinstance(root_response, nio.RoomGetEventResponse) and isinstance(root_response.event, nio.RoomMessageText):
-        latest_replacement = await _fetch_latest_message_replacement(client, room_id, root_response.event)
+        try:
+            latest_replacement = await _fetch_latest_message_replacement(client, room_id, root_response.event)
+        except _ThreadHistoryFastPathUnavailableError:
+            return await fallback_to_history()
         if latest_replacement is not None:
             return latest_replacement[0].event_id
     return thread_id

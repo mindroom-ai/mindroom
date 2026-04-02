@@ -25,11 +25,26 @@ from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
     from pathlib import Path
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
     return bind_runtime_paths(config, test_runtime_paths(tmp_path))
+
+
+async def _empty_event_iterator() -> AsyncGenerator[object, None]:
+    if False:
+        yield None
+
+
+def _make_matrix_client_mock() -> AsyncMock:
+    client = AsyncMock()
+    client.rooms = {}
+    client.add_event_callback = MagicMock()
+    client.add_response_callback = MagicMock()
+    client.room_get_event_relations = MagicMock(return_value=_empty_event_iterator())
+    return client
 
 
 @pytest.fixture
@@ -90,7 +105,7 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
         password="p",  # noqa: S106
     )
     router = AgentBot(router_user, tmp_path, config_with_team, runtime_paths)
-    router.client = AsyncMock()
+    router.client = _make_matrix_client_mock()
 
     # Room has router + team + two agents and the human user
     team_user_id = ids["t1"].full_id
@@ -141,7 +156,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         team_mode="coordinate",
         enable_streaming=False,
     )
-    bot.client = AsyncMock()
+    bot.client = _make_matrix_client_mock()
 
     # Minimal orchestrator stub is fine because we patch team_response
     bot.orchestrator = MagicMock()
@@ -213,7 +228,7 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         team_mode="coordinate",
         enable_streaming=False,
     )
-    bot.client = AsyncMock()
+    bot.client = _make_matrix_client_mock()
     bot.orchestrator = MagicMock()
     bot._generate_team_response_helper = AsyncMock()
 
@@ -288,7 +303,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         team_mode="coordinate",
         enable_streaming=False,
     )
-    bot.client = AsyncMock()
+    bot.client = _make_matrix_client_mock()
     bot.orchestrator = MagicMock()
     bot.orchestrator.agent_bots = {"a1": MagicMock()}
     bot._edit_message = AsyncMock(return_value=True)
@@ -341,7 +356,7 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
         team_mode="coordinate",
         enable_streaming=False,
     )
-    bot.client = AsyncMock()
+    bot.client = _make_matrix_client_mock()
     bot.orchestrator = MagicMock()
 
     team_user_id = ids["t1"].full_id
@@ -424,7 +439,7 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
         team_mode="coordinate",
         enable_streaming=False,
     )
-    bot.client = AsyncMock()
+    bot.client = _make_matrix_client_mock()
     bot.orchestrator = MagicMock()
 
     # Craft a mention using a DIFFERENT domain than the bot's MatrixID
