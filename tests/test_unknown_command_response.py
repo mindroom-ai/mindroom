@@ -71,6 +71,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     event.event_id = "$test_event"
     event.sender = "@user:localhost"
     event.body = "!unknown_command"
+    event.server_timestamp = 1234567890
     event.source = {"content": {"body": "!unknown_command"}}
 
     # Mock send_message to capture what would be sent
@@ -170,6 +171,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     event.event_id = "$test_event"
     event.sender = "@user:localhost"
     event.body = "!schedule"  # Incomplete schedule command
+    event.server_timestamp = 1234567890
     event.source = {
         "content": {
             "body": "!schedule",
@@ -290,6 +292,7 @@ async def test_unknown_command_with_reply(tmp_path: Path) -> None:
     event.event_id = "$test_event"
     event.sender = "@user:localhost"
     event.body = "!invalid"
+    event.server_timestamp = 1234567890
     event.source = {
         "content": {"body": "!invalid", "m.relates_to": {"m.in_reply_to": {"event_id": "$original_message"}}},
     }
