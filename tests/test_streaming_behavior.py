@@ -38,6 +38,17 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
+async def _aiter(*events: object) -> AsyncIterator[object]:
+    for event in events:
+        yield event
+
+
+def _make_matrix_client_mock() -> AsyncMock:
+    client = AsyncMock()
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    return client
+
+
 @pytest.fixture
 def mock_helper_agent() -> AgentMatrixUser:
     """Create a mock helper agent user."""
@@ -119,7 +130,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        helper_bot.client = AsyncMock()
+        helper_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -137,7 +148,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        calc_bot.client = AsyncMock()
+        calc_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -262,7 +273,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        calc_bot.client = AsyncMock()
+        calc_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()

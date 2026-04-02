@@ -1762,6 +1762,51 @@ class TestAgentBot:
             await asyncio.gather(running_task, other_room_task, return_exceptions=True)
 
     @pytest.mark.asyncio
+    async def test_deliver_generated_response_redacts_suppressed_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Suppressing a placeholder-backed response should remove the placeholder event."""
+
+        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+        async def before_hook(ctx: BeforeResponseContext) -> None:
+            ctx.draft.suppress = True
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot._send_response = AsyncMock()
+        bot._edit_message = AsyncMock()
+        bot._redact_message_event = AsyncMock(return_value=True)
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
+
+        delivery = await bot._deliver_generated_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$event123",
+            thread_id="$thread123",
+            existing_event_id="$placeholder",
+            existing_event_is_placeholder=True,
+            response_text="Handled",
+            response_kind="ai",
+            response_envelope=_hook_envelope(body="Please send an update", source_event_id="$event123"),
+            correlation_id="corr-suppress",
+            tool_trace=None,
+            extra_content=None,
+        )
+
+        assert delivery.suppressed is True
+        assert delivery.event_id is None
+        bot._redact_message_event.assert_awaited_once_with(
+            room_id="!test:localhost",
+            event_id="$placeholder",
+            reason="Suppressed placeholder response",
+        )
+        bot._send_response.assert_not_awaited()
+        bot._edit_message.assert_not_awaited()
+        assert bot._resolve_response_event_id(delivery, "$placeholder", "$placeholder") is None
+
+    @pytest.mark.asyncio
     async def test_process_and_respond_streaming_applies_before_and_after_hooks_once(
         self,
         mock_agent_user: AgentMatrixUser,

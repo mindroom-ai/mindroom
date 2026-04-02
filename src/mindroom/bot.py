@@ -573,16 +573,22 @@ class AgentBot:
         room_id: str,
         thread_id: str | None,
         reply_to_event_id: str | None,
+        *,
+        resolved_thread_id: str | None = None,
     ) -> asyncio.Lock:
         """Return the per-thread lock that serializes one response lifecycle."""
-        resolved_thread_id = self._resolved_conversation_thread_id(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
+        effective_resolved_thread_id = (
+            resolved_thread_id
+            if resolved_thread_id is not None
+            else self._resolved_conversation_thread_id(
+                room_id=room_id,
+                thread_id=thread_id,
+                reply_to_event_id=reply_to_event_id,
+            )
         )
         return _get_or_create_lock(
             cast("dict[object, asyncio.Lock]", self._response_lifecycle_locks),
-            (room_id, resolved_thread_id),
+            (room_id, effective_resolved_thread_id),
         )
 
     def _resolved_conversation_thread_id(
@@ -605,11 +611,14 @@ class AgentBot:
         room_id: str,
         thread_id: str | None,
         reply_to_event_id: str | None,
+        resolved_thread_id: str | None = None,
     ) -> str:
         """Return the canonical persisted session ID for one response lifecycle."""
         return create_session_id(
             room_id,
-            self._resolved_conversation_thread_id(
+            resolved_thread_id
+            if resolved_thread_id is not None
+            else self._resolved_conversation_thread_id(
                 room_id=room_id,
                 thread_id=thread_id,
                 reply_to_event_id=reply_to_event_id,
@@ -2709,6 +2718,7 @@ class AgentBot:
         active_model_name: str | None = None,
         attachment_ids: list[str] | None = None,
         correlation_id: str | None = None,
+        resolved_thread_id: str | None = None,
     ) -> ToolRuntimeContext | None:
         """Build shared runtime context for all tool calls."""
         if self.client is None:
@@ -2717,7 +2727,11 @@ class AgentBot:
             agent_name=agent_name or self.agent_name,
             room_id=room_id,
             thread_id=thread_id,
-            resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id),
+            resolved_thread_id=(
+                resolved_thread_id
+                if resolved_thread_id is not None
+                else self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id)
+            ),
             requester_id=user_id or self.matrix_id.full_id,
             client=self.client,
             config=self.config,
@@ -2812,6 +2826,7 @@ class AgentBot:
         user_id: str | None,
         session_id: str,
         agent_name: str | None = None,
+        resolved_thread_id: str | None = None,
     ) -> ToolExecutionIdentity:
         """Build the serializable execution identity used for worker routing."""
         return build_tool_execution_identity(
@@ -2821,7 +2836,11 @@ class AgentBot:
             requester_id=user_id or self.matrix_id.full_id,
             room_id=room_id,
             thread_id=thread_id,
-            resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id),
+            resolved_thread_id=(
+                resolved_thread_id
+                if resolved_thread_id is not None
+                else self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id)
+            ),
             session_id=session_id,
         )
 
@@ -2843,6 +2862,7 @@ class AgentBot:
         thread_id: str | None,
         reply_to_event_id: str | None,
         include_context: bool,
+        resolved_thread_id: str | None = None,
     ) -> str:
         """Append room/thread/event ids to the LLM prompt when messaging tools are available."""
         if not include_context:
@@ -2850,7 +2870,11 @@ class AgentBot:
         if self._MATRIX_PROMPT_CONTEXT_MARKER in prompt:
             return prompt
 
-        effective_thread_id = self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id)
+        effective_thread_id = (
+            resolved_thread_id
+            if resolved_thread_id is not None
+            else self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id)
+        )
         metadata_block = "\n".join(
             (
                 self._MATRIX_PROMPT_CONTEXT_MARKER,
@@ -3043,12 +3067,24 @@ class AgentBot:
 
         Returns the initial message ID if created, None otherwise.
         """
-        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id, reply_to_event_id)
+        resolved_thread_id = self._resolve_response_thread_root(
+            thread_id,
+            reply_to_event_id,
+            room_id=room_id,
+            response_envelope=response_envelope,
+        )
+        lifecycle_lock = self._response_lifecycle_lock(
+            room_id,
+            thread_id,
+            reply_to_event_id,
+            resolved_thread_id=resolved_thread_id,
+        )
         async with lifecycle_lock:
             return await self._generate_team_response_helper_locked(
                 room_id=room_id,
                 reply_to_event_id=reply_to_event_id,
                 thread_id=thread_id,
+                resolved_thread_id=resolved_thread_id,
                 team_agents=team_agents,
                 team_mode=team_mode,
                 thread_history=thread_history,
@@ -3067,6 +3103,7 @@ class AgentBot:
         room_id: str,
         reply_to_event_id: str,
         thread_id: str | None,
+        resolved_thread_id: str | None,
         team_agents: list[MatrixID],
         team_mode: str,
         thread_history: Sequence[ResolvedVisibleMessage],
@@ -3117,12 +3154,13 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             include_context=include_matrix_prompt_context,
+            resolved_thread_id=resolved_thread_id,
         )
         resolved_response_envelope = response_envelope or MessageEnvelope(
             source_event_id=reply_to_event_id,
             room_id=room_id,
             thread_id=thread_id,
-            resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id),
+            resolved_thread_id=resolved_thread_id,
             requester_id=requester_user_id,
             sender_id=requester_user_id,
             body=payload.prompt,
@@ -3132,12 +3170,6 @@ class AgentBot:
             source_kind="message",
         )
         resolved_correlation_id = correlation_id or reply_to_event_id
-        resolved_thread_id = self._resolve_response_thread_root(
-            thread_id,
-            reply_to_event_id,
-            room_id=room_id,
-            response_envelope=resolved_response_envelope,
-        )
         delivery_thread_id = (
             resolved_thread_id if existing_event_id is None or existing_event_is_placeholder else thread_id
         )
@@ -3145,6 +3177,7 @@ class AgentBot:
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
+            resolved_thread_id=resolved_thread_id,
         )
         tool_context = self._build_tool_runtime_context(
             room_id=room_id,
@@ -3155,6 +3188,7 @@ class AgentBot:
             session_id=session_id,
             attachment_ids=payload.attachment_ids,
             correlation_id=resolved_correlation_id,
+            resolved_thread_id=resolved_thread_id,
         )
         execution_identity = self._build_tool_execution_identity(
             room_id=room_id,
@@ -3162,6 +3196,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
             session_id=session_id,
+            resolved_thread_id=resolved_thread_id,
         )
         orchestrator = self.orchestrator
         if orchestrator is None:
@@ -3263,6 +3298,8 @@ class AgentBot:
                         reply_to_event_id=reply_to_event_id,
                         thread_id=delivery_thread_id,
                         existing_event_id=event_id,
+                        existing_event_is_placeholder=event_id is not None
+                        and (existing_event_is_placeholder or existing_event_id is None),
                         response_text=draft.response_text,
                         response_kind="team",
                         response_envelope=resolved_response_envelope,
@@ -3327,6 +3364,8 @@ class AgentBot:
                     reply_to_event_id=reply_to_event_id,
                     thread_id=delivery_thread_id,
                     existing_event_id=message_id,
+                    existing_event_is_placeholder=message_id is not None
+                    and (existing_event_is_placeholder or existing_event_id is None),
                     response_text=response_text,
                     response_kind="team",
                     response_envelope=resolved_response_envelope,
@@ -3562,6 +3601,7 @@ class AgentBot:
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
+            resolved_thread_id=resolved_thread_id,
         )
         model_prompt = self._append_matrix_prompt_context(
             model_prompt or prompt,
@@ -3569,6 +3609,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
+            resolved_thread_id=resolved_thread_id,
         )
         active_model_name = self._resolve_runtime_model_for_room(room_id)
         tool_context = self._build_tool_runtime_context(
@@ -3580,6 +3621,7 @@ class AgentBot:
             session_id=session_id,
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
+            resolved_thread_id=resolved_thread_id,
         )
         execution_identity = self._build_tool_execution_identity(
             room_id=room_id,
@@ -3587,6 +3629,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
             session_id=session_id,
+            resolved_thread_id=resolved_thread_id,
         )
         request_knowledge_managers = await self._ensure_request_knowledge_managers(
             [self.agent_name],
@@ -3648,6 +3691,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             thread_id=response_thread_id,
             existing_event_id=existing_event_id,
+            existing_event_is_placeholder=existing_event_is_placeholder,
             response_text=response_text,
             response_kind=response_kind,
             response_envelope=response_envelope
@@ -3655,7 +3699,7 @@ class AgentBot:
                 source_event_id=reply_to_event_id,
                 room_id=room_id,
                 thread_id=thread_id,
-                resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id),
+                resolved_thread_id=resolved_thread_id,
                 requester_id=user_id or self.matrix_id.full_id,
                 sender_id=user_id or self.matrix_id.full_id,
                 body=prompt,
@@ -3675,7 +3719,7 @@ class AgentBot:
             interactive.register_interactive_question(
                 delivery.event_id,
                 room_id,
-                response_thread_id,
+                resolved_thread_id if resolved_thread_id is not None else response_thread_id,
                 delivery.option_map,
                 self.agent_name,
             )
@@ -3737,11 +3781,13 @@ class AgentBot:
             prompt,
             thread_history,
         )
+        resolved_thread_id = self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id)
 
         session_id = self._conversation_session_id(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
+            resolved_thread_id=resolved_thread_id,
         )
         model_prompt = self._append_matrix_prompt_context(
             prompt,
@@ -3749,6 +3795,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             include_context=self._agent_has_matrix_messaging_tool(agent_name),
+            resolved_thread_id=resolved_thread_id,
         )
         tool_context = self._build_tool_runtime_context(
             room_id=room_id,
@@ -3757,6 +3804,7 @@ class AgentBot:
             user_id=user_id,
             session_id=session_id,
             agent_name=agent_name,
+            resolved_thread_id=resolved_thread_id,
         )
         execution_identity = self._build_tool_execution_identity(
             room_id=room_id,
@@ -3765,6 +3813,7 @@ class AgentBot:
             user_id=user_id,
             session_id=session_id,
             agent_name=agent_name,
+            resolved_thread_id=resolved_thread_id,
         )
         request_knowledge_managers = await self._ensure_request_knowledge_managers([agent_name], execution_identity)
         reprioritize_auto_flush_sessions(
@@ -3918,6 +3967,7 @@ class AgentBot:
         reply_to_event_id: str,
         thread_id: str | None,
         existing_event_id: str | None,
+        existing_event_is_placeholder: bool = False,
         response_text: str,
         response_kind: str,
         response_envelope: MessageEnvelope,
@@ -3952,6 +4002,18 @@ class AgentBot:
                 source_event_id=response_envelope.source_event_id,
                 correlation_id=correlation_id,
             )
+            if existing_event_id is not None and existing_event_is_placeholder:
+                redacted = await self._redact_message_event(
+                    room_id=room_id,
+                    event_id=existing_event_id,
+                    reason="Suppressed placeholder response",
+                )
+                return _ResponseDispatchResult(
+                    event_id=None if redacted else existing_event_id,
+                    response_text=draft.response_text,
+                    delivery_kind=None,
+                    suppressed=True,
+                )
             return _ResponseDispatchResult(
                 event_id=existing_event_id,
                 response_text=draft.response_text,
@@ -4051,6 +4113,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
+            resolved_thread_id=resolved_thread_id,
         )
         active_model_name = self._resolve_runtime_model_for_room(room_id)
         tool_context = self._build_tool_runtime_context(
@@ -4062,6 +4125,7 @@ class AgentBot:
             session_id=session_id,
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
+            resolved_thread_id=resolved_thread_id,
         )
         execution_identity = self._build_tool_execution_identity(
             room_id=room_id,
@@ -4069,6 +4133,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
             session_id=session_id,
+            resolved_thread_id=resolved_thread_id,
         )
         request_knowledge_managers = await self._ensure_request_knowledge_managers(
             [self.agent_name],
@@ -4152,7 +4217,7 @@ class AgentBot:
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
-                    response_thread_id,
+                    resolved_thread_id if resolved_thread_id is not None else response_thread_id,
                     interactive_response.option_map,
                     self.agent_name,
                 )
@@ -4202,6 +4267,7 @@ class AgentBot:
                 reply_to_event_id=reply_to_event_id,
                 thread_id=response_thread_id,
                 existing_event_id=event_id,
+                existing_event_is_placeholder=adopt_existing_placeholder,
                 response_text=draft.response_text,
                 response_kind=response_kind,
                 response_envelope=response_envelope,
@@ -4232,7 +4298,7 @@ class AgentBot:
             interactive.register_interactive_question(
                 delivery.event_id,
                 room_id,
-                response_thread_id,
+                resolved_thread_id if resolved_thread_id is not None else response_thread_id,
                 delivery.option_map,
                 self.agent_name,
             )
@@ -4260,6 +4326,8 @@ class AgentBot:
         existing_event_id: str | None,
     ) -> str | None:
         if delivery_result is not None and delivery_result.event_id is not None:
+            return delivery_result.event_id
+        if delivery_result is not None and delivery_result.suppressed:
             return delivery_result.event_id
         if delivery_result is not None and existing_event_id is not None:
             return existing_event_id
@@ -4307,13 +4375,25 @@ class AgentBot:
             Event ID of the response message, or None if failed
 
         """
-        lifecycle_lock = self._response_lifecycle_lock(room_id, thread_id, reply_to_event_id)
+        resolved_thread_id = self._resolve_response_thread_root(
+            thread_id,
+            reply_to_event_id,
+            room_id=room_id,
+            response_envelope=response_envelope,
+        )
+        lifecycle_lock = self._response_lifecycle_lock(
+            room_id,
+            thread_id,
+            reply_to_event_id,
+            resolved_thread_id=resolved_thread_id,
+        )
         async with lifecycle_lock:
             return await self._generate_response_locked(
                 room_id=room_id,
                 prompt=prompt,
                 reply_to_event_id=reply_to_event_id,
                 thread_id=thread_id,
+                resolved_thread_id=resolved_thread_id,
                 thread_history=thread_history,
                 existing_event_id=existing_event_id,
                 existing_event_is_placeholder=existing_event_is_placeholder,
@@ -4332,6 +4412,7 @@ class AgentBot:
         prompt: str,
         reply_to_event_id: str,
         thread_id: str | None,
+        resolved_thread_id: str | None,
         thread_history: Sequence[ResolvedVisibleMessage],
         existing_event_id: str | None = None,
         existing_event_is_placeholder: bool = False,
@@ -4359,6 +4440,7 @@ class AgentBot:
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
+            resolved_thread_id=resolved_thread_id,
         )
         execution_identity = self._build_tool_execution_identity(
             room_id=room_id,
@@ -4366,6 +4448,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
             session_id=session_id,
+            resolved_thread_id=resolved_thread_id,
         )
         reprioritize_auto_flush_sessions(
             self.storage_path,
@@ -4385,14 +4468,8 @@ class AgentBot:
         )
         delivery_result: _ResponseDispatchResult | None = None
         response_run_id = str(uuid4())
-        response_thread_id = self._resolve_response_thread_root(
-            thread_id,
-            reply_to_event_id,
-            room_id=room_id,
-            response_envelope=response_envelope,
-        )
         delivery_thread_id = (
-            response_thread_id if existing_event_id is None or existing_event_is_placeholder else thread_id
+            resolved_thread_id if existing_event_id is None or existing_event_is_placeholder else thread_id
         )
 
         # Create async function for generation that takes message_id as parameter
@@ -4415,7 +4492,7 @@ class AgentBot:
                     model_prompt=model_prompt_text,
                     response_envelope=response_envelope,
                     correlation_id=correlation_id,
-                    resolved_thread_id=delivery_thread_id,
+                    resolved_thread_id=resolved_thread_id,
                 )
             else:
                 delivery_result = await self._process_and_respond(
@@ -4433,7 +4510,7 @@ class AgentBot:
                     model_prompt=model_prompt_text,
                     response_envelope=response_envelope,
                     correlation_id=correlation_id,
-                    resolved_thread_id=delivery_thread_id,
+                    resolved_thread_id=resolved_thread_id,
                 )
 
         # Use unified handler for cancellation support
@@ -4753,6 +4830,22 @@ class AgentBot:
             return True
         self.logger.error("Failed to edit message", event_id=event_id, error=str(response))
         return False
+
+    async def _redact_message_event(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        reason: str,
+    ) -> bool:
+        """Redact one visible event when a placeholder should disappear entirely."""
+        if self.client is None:
+            return False
+        response = await self.client.room_redact(room_id, event_id, reason=reason)
+        if isinstance(response, nio.RoomRedactError):
+            self.logger.error("Failed to redact message", event_id=event_id, error=str(response))
+            return False
+        return True
 
     async def _handle_ai_routing(
         self,
@@ -5083,11 +5176,19 @@ class TeamBot(AgentBot):
             )
         assert team_resolution.mode is not None
 
+        resolved_thread_id = self._resolve_response_thread_root(
+            thread_id,
+            reply_to_event_id,
+            room_id=room_id,
+            response_envelope=response_envelope,
+        )
+
         # Store memory once for the entire team (avoids duplicate LLM processing)
         session_id = self._conversation_session_id(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
+            resolved_thread_id=resolved_thread_id,
         )
         execution_identity = self._build_tool_execution_identity(
             room_id=room_id,
@@ -5095,6 +5196,7 @@ class TeamBot(AgentBot):
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
             session_id=session_id,
+            resolved_thread_id=resolved_thread_id,
         )
         # Convert MatrixID list to agent names for memory storage
         agent_names = [
@@ -5141,7 +5243,7 @@ class TeamBot(AgentBot):
                 source_event_id=reply_to_event_id,
                 room_id=room_id,
                 thread_id=thread_id,
-                resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id),
+                resolved_thread_id=resolved_thread_id,
                 requester_id=user_id or self.matrix_id.full_id,
                 sender_id=user_id or self.matrix_id.full_id,
                 body=memory_prompt,
