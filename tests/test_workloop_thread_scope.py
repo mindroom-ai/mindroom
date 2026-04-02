@@ -59,6 +59,12 @@ def _plugin_root() -> Path:
     return Path.home() / ".mindroom-chat" / "plugins" / "workloop"
 
 
+pytestmark = pytest.mark.skipif(
+    not _plugin_root().is_dir(),
+    reason="workloop plugin checkout is not available in this environment",
+)
+
+
 def _copy_plugin_root(tmp_path: Path) -> Path:
     """Copy the live workloop plugin into tmp_path and patch known fixture drift."""
     source_root = _plugin_root()
