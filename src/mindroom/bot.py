@@ -1507,11 +1507,13 @@ class AgentBot:
         if action is None:
             return
 
+        prompt_text = event.body
+
         async def build_payload(context: _MessageContext) -> _DispatchPayload:
             return await self._build_dispatch_payload_with_attachments(
                 room_id=room.room_id,
                 context=context,
-                prompt=event.body,
+                prompt=prompt_text,
                 current_attachment_ids=message_attachment_ids,
                 media_thread_id=context.thread_id,
             )

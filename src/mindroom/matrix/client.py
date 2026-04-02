@@ -1057,7 +1057,7 @@ async def send_file_message(
 
 def _history_message_sort_key(message: ResolvedVisibleMessage) -> tuple[int, str]:
     """Sort thread history messages by timestamp and event ID."""
-    return (message.timestamp or 0, message.event_id or "")
+    return (message.timestamp, message.event_id)
 
 
 def _sort_thread_history[TVisibleMessage: ResolvedVisibleMessage](
@@ -1539,21 +1539,18 @@ async def fetch_thread_history(
         return await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
 
 
-async def _latest_thread_event_id(  # noqa: C901, PLR0911
+async def _latest_thread_event_id(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
 ) -> str:
     """Get the latest visible event ID in a thread for MSC3440 fallback compliance."""
-
-    async def fallback_to_history() -> str:
-        try:
-            thread_messages = await fetch_thread_history(client, room_id, thread_id)
-        except Exception:
-            return thread_id
-        if thread_messages:
-            return thread_messages[-1].visible_event_id or thread_id
+    try:
+        thread_messages = await fetch_thread_history(client, room_id, thread_id)
+    except Exception:
         return thread_id
+    if thread_messages:
+        return thread_messages[-1].visible_event_id
 
     try:
         relation_events = await _collect_related_events(
@@ -1562,45 +1559,27 @@ async def _latest_thread_event_id(  # noqa: C901, PLR0911
             thread_id,
             rel_type=RelationshipType.thread,
             event_type="m.room.message",
-            direction=nio.MessageDirection.back,
-            limit=1,
-            max_events=1,
         )
     except _ThreadHistoryFastPathUnavailableError:
-        return await fallback_to_history()
+        return thread_id
 
-    for relation_event in relation_events:
-        if not isinstance(relation_event, nio.RoomMessageText):
+    latest_thread_edit: nio.RoomMessageText | None = None
+    for event in relation_events:
+        if not isinstance(event, nio.RoomMessageText):
             continue
-        relation_event_info = EventInfo.from_event(relation_event.source)
-        if relation_event_info.is_edit and relation_event_info.thread_id_from_edit == thread_id:
-            return relation_event.event_id
-        if relation_event_info.thread_id != thread_id:
+        event_info = EventInfo.from_event(event.source)
+        if not event_info.is_edit or event_info.thread_id_from_edit != thread_id:
             continue
-        try:
-            latest_replacement = await _fetch_latest_message_replacement(client, room_id, relation_event)
-        except _ThreadHistoryFastPathUnavailableError:
-            return await fallback_to_history()
-        if latest_replacement is not None:
-            return latest_replacement[0].event_id
-        return relation_event.event_id
-    try:
-        root_response = await client.room_get_event(room_id, thread_id)
-    except Exception as exc:
-        logger.info(
-            "Falling back to history for latest thread event after root lookup failure",
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=str(exc),
-        )
-        return await fallback_to_history()
-    if isinstance(root_response, nio.RoomGetEventResponse) and isinstance(root_response.event, nio.RoomMessageText):
-        try:
-            latest_replacement = await _fetch_latest_message_replacement(client, room_id, root_response.event)
-        except _ThreadHistoryFastPathUnavailableError:
-            return await fallback_to_history()
-        if latest_replacement is not None:
-            return latest_replacement[0].event_id
+        if latest_thread_edit is None or (
+            event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
+            event.event_id,
+        ) > (
+            latest_thread_edit.server_timestamp if isinstance(latest_thread_edit.server_timestamp, int) else 0,
+            latest_thread_edit.event_id,
+        ):
+            latest_thread_edit = event
+    if latest_thread_edit is not None:
+        return latest_thread_edit.event_id
     return thread_id
 
 

@@ -576,7 +576,7 @@ def _merge_resolved_message_state(
 
 def _scanned_thread_tail_event_ids(message_events: list[nio.RoomMessageText]) -> dict[str, str]:
     """Return latest visible event IDs by thread root from scanned room history."""
-    original_thread_ids: dict[str, str] = {}
+    original_thread_ids = _scanned_original_thread_ids(message_events)
     latest_visible_by_original_event_id: dict[str, tuple[int, str, str]] = {}
 
     for event in message_events:
@@ -597,6 +597,24 @@ def _scanned_thread_tail_event_ids(message_events: list[nio.RoomMessageText]) ->
         latest_thread_events[thread_id] = (timestamp, visible_event_id)
 
     return {thread_id: visible_event_id for thread_id, (_, visible_event_id) in latest_thread_events.items()}
+
+
+def _scanned_original_thread_ids(message_events: list[nio.RoomMessageText]) -> dict[str, str]:
+    """Return known thread roots by original event ID from scanned room history."""
+    original_thread_ids: dict[str, str] = {}
+    for event in message_events:
+        event_id = event.event_id
+        if not isinstance(event_id, str):
+            continue
+        event_info = EventInfo.from_event(event.source)
+        if event_info.is_edit:
+            original_event_id = event_info.original_event_id
+            if isinstance(original_event_id, str) and isinstance(event_info.thread_id_from_edit, str):
+                original_thread_ids[original_event_id] = event_info.thread_id_from_edit
+            continue
+        if isinstance(event_info.thread_id, str):
+            original_thread_ids[event_id] = event_info.thread_id
+    return original_thread_ids
 
 
 def _scanned_visible_thread_event(
