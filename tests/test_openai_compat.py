@@ -32,6 +32,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import HistoryScope, ResolvedReplayPlan
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -1288,8 +1289,8 @@ class TestMessageConversion:
         prompt, history = _convert_messages(messages)
         assert prompt == "How are you?"
         assert history == [
-            {"sender": "user", "body": "Hi"},
-            {"sender": "assistant", "body": "Hello!"},
+            ResolvedVisibleMessage.synthetic(sender="user", body="Hi", event_id="$openai-1", timestamp=1),
+            ResolvedVisibleMessage.synthetic(sender="assistant", body="Hello!", event_id="$openai-2", timestamp=2),
         ]
 
     def test_system_message_prepended(self) -> None:
@@ -1325,7 +1326,7 @@ class TestMessageConversion:
         assert prompt == "Thanks"
         # tool message should not appear in history
         assert history is not None
-        assert all(h["sender"] != "tool" for h in history)
+        assert all(h.sender != "tool" for h in history)
 
     def test_multimodal_content(self) -> None:
         """Multimodal content extracts text parts."""
@@ -1671,8 +1672,8 @@ class TestAutoRouting:
             assert call_args[0][0] == "Write code"  # prompt
             thread_history = call_args[0][4]
             assert thread_history == [
-                {"sender": "user", "body": "Hi"},
-                {"sender": "assistant", "body": "Hello!"},
+                ResolvedVisibleMessage.synthetic(sender="user", body="Hi", event_id="$openai-1", timestamp=1),
+                ResolvedVisibleMessage.synthetic(sender="assistant", body="Hello!", event_id="$openai-2", timestamp=2),
             ]
 
     def test_auto_streaming(self, app_client: TestClient) -> None:

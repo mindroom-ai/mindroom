@@ -17,7 +17,7 @@ from mindroom.thread_utils import (
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
 )
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
 
 
 @pytest.fixture
@@ -96,11 +96,11 @@ class TestAgentOrderPreservation:
         runtime_paths = runtime_paths_for(mock_config)
         domain = mock_config.get_domain(runtime_paths)
         thread_history = [
-            {"sender": f"@mindroom_research:{domain}", "content": {"body": "Starting research"}},
-            {"sender": f"@mindroom_email:{domain}", "content": {"body": "Sending email"}},
-            {"sender": f"@mindroom_phone:{domain}", "content": {"body": "Making call"}},
-            {"sender": f"@mindroom_email:{domain}", "content": {"body": "Another email"}},  # Duplicate
-            {"sender": f"@mindroom_analyst:{domain}", "content": {"body": "Analyzing"}},
+            make_visible_message(sender=f"@mindroom_research:{domain}", body="Starting research"),
+            make_visible_message(sender=f"@mindroom_email:{domain}", body="Sending email"),
+            make_visible_message(sender=f"@mindroom_phone:{domain}", body="Making call"),
+            make_visible_message(sender=f"@mindroom_email:{domain}", body="Another email"),
+            make_visible_message(sender=f"@mindroom_analyst:{domain}", body="Analyzing"),
         ]
 
         agents = get_agents_in_thread(thread_history, mock_config, runtime_paths)
@@ -115,9 +115,9 @@ class TestAgentOrderPreservation:
         runtime_paths = runtime_paths_for(mock_config)
         domain = mock_config.get_domain(runtime_paths)
         thread_history = [
-            {"sender": f"@mindroom_email:{domain}", "content": {"body": "Email"}},
-            {"sender": f"@mindroom_{ROUTER_AGENT_NAME}:{domain}", "content": {"body": "Routing"}},
-            {"sender": f"@mindroom_phone:{domain}", "content": {"body": "Phone"}},
+            make_visible_message(sender=f"@mindroom_email:{domain}", body="Email"),
+            make_visible_message(sender=f"@mindroom_{ROUTER_AGENT_NAME}:{domain}", body="Routing"),
+            make_visible_message(sender=f"@mindroom_phone:{domain}", body="Phone"),
         ]
 
         agents = get_agents_in_thread(thread_history, mock_config, runtime_paths)
@@ -133,30 +133,27 @@ class TestAgentOrderPreservation:
         runtime_paths = runtime_paths_for(mock_config)
         domain = mock_config.get_domain(runtime_paths)
         thread_history = [
-            {
-                "content": {
+            make_visible_message(
+                body="First message",
+                content={
                     "body": "First message",
-                    "m.mentions": {
-                        "user_ids": [f"@mindroom_phone:{domain}", f"@mindroom_email:{domain}"],
-                    },
+                    "m.mentions": {"user_ids": [f"@mindroom_phone:{domain}", f"@mindroom_email:{domain}"]},
                 },
-            },
-            {
-                "content": {
+            ),
+            make_visible_message(
+                body="Second message",
+                content={
                     "body": "Second message",
-                    "m.mentions": {
-                        "user_ids": [f"@mindroom_research:{domain}", f"@mindroom_phone:{domain}"],  # phone is duplicate
-                    },
+                    "m.mentions": {"user_ids": [f"@mindroom_research:{domain}", f"@mindroom_phone:{domain}"]},
                 },
-            },
-            {
-                "content": {
+            ),
+            make_visible_message(
+                body="Third message",
+                content={
                     "body": "Third message",
-                    "m.mentions": {
-                        "user_ids": [f"@mindroom_analyst:{domain}", f"@mindroom_email:{domain}"],  # email is duplicate
-                    },
+                    "m.mentions": {"user_ids": [f"@mindroom_analyst:{domain}", f"@mindroom_email:{domain}"]},
                 },
-            },
+            ),
         ]
 
         agents = get_all_mentioned_agents_in_thread(thread_history, mock_config, runtime_paths)
@@ -171,8 +168,9 @@ class TestAgentOrderPreservation:
         runtime_paths = runtime_paths_for(mock_config)
         domain = mock_config.get_domain(runtime_paths)
         thread_history = [
-            {
-                "content": {
+            make_visible_message(
+                body="Message 1",
+                content={
                     "body": "Message 1",
                     "m.mentions": {
                         "user_ids": [
@@ -182,9 +180,10 @@ class TestAgentOrderPreservation:
                         ],
                     },
                 },
-            },
-            {
-                "content": {
+            ),
+            make_visible_message(
+                body="Message 2",
+                content={
                     "body": "Message 2",
                     "m.mentions": {
                         "user_ids": [
@@ -194,7 +193,7 @@ class TestAgentOrderPreservation:
                         ],
                     },
                 },
-            },
+            ),
         ]
 
         agents = get_all_mentioned_agents_in_thread(thread_history, mock_config, runtime_paths)

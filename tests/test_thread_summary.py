@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.thread_summary import (
     _FIRST_THRESHOLD,
     _SUBSEQUENT_INTERVAL,
@@ -19,15 +20,15 @@ from mindroom.thread_summary import (
 )
 
 
-def _make_thread_history(count: int) -> list[dict[str, Any]]:
+def _make_thread_history(count: int) -> list[ResolvedVisibleMessage]:
     """Build a fake thread history with *count* messages."""
     return [
-        {
-            "sender": f"@user{i}:localhost",
-            "body": f"Message {i}",
-            "timestamp": 1700000000 + i * 1000,
-            "event_id": f"$event{i}",
-        }
+        ResolvedVisibleMessage.synthetic(
+            sender=f"@user{i}:localhost",
+            body=f"Message {i}",
+            timestamp=1700000000 + i * 1000,
+            event_id=f"$event{i}",
+        )
         for i in range(count)
     ]
 

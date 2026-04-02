@@ -23,6 +23,7 @@ from mindroom.attachments import (
     register_local_attachment,
     resolve_attachments,
 )
+from tests.conftest import make_visible_message
 
 
 def test_attachment_id_for_event_is_stable() -> None:
@@ -54,9 +55,9 @@ def test_parse_attachment_ids_from_event_source_dedupes() -> None:
 def test_parse_attachment_ids_from_thread_history_dedupes_in_order() -> None:
     """Thread history metadata should produce ordered unique attachment IDs."""
     thread_history = [
-        {"content": {"com.mindroom.attachment_ids": ["att_a", "att_b"]}},
-        {"content": {"com.mindroom.attachment_ids": ["att_b", "att_c"]}},
-        {"content": {"body": "no attachments"}},
+        make_visible_message(content={"com.mindroom.attachment_ids": ["att_a", "att_b"]}),
+        make_visible_message(content={"com.mindroom.attachment_ids": ["att_b", "att_c"]}),
+        make_visible_message(body="no attachments"),
     ]
     assert parse_attachment_ids_from_thread_history(thread_history) == ["att_a", "att_b", "att_c"]
 

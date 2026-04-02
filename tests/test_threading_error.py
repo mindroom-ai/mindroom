@@ -20,6 +20,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.reply_chain import _merge_thread_and_chain_history
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -32,6 +33,15 @@ if TYPE_CHECKING:
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     """Return a runtime-bound config for threading tests."""
     return bind_runtime_paths(config, test_runtime_paths(runtime_root))
+
+
+def _message(*, event_id: str, body: str, sender: str = "@user:localhost") -> ResolvedVisibleMessage:
+    """Build one typed visible message for thread-history mocks."""
+    return ResolvedVisibleMessage.synthetic(
+        sender=sender,
+        body=body,
+        event_id=event_id,
+    )
 
 
 class TestThreadingBehavior:
@@ -270,8 +280,8 @@ class TestThreadingBehavior:
         )
 
         expected_history = [
-            {"event_id": "$thread_root:localhost", "body": "Root"},
-            {"event_id": "$thread_msg:localhost", "body": "Agent answer in thread"},
+            _message(event_id="$thread_root:localhost", body="Root"),
+            _message(event_id="$thread_msg:localhost", body="Agent answer in thread"),
         ]
         with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=expected_history)) as mock_fetch:
             context = await bot._extract_message_context(room, event)
@@ -320,8 +330,8 @@ class TestThreadingBehavior:
         )
 
         expected_history = [
-            {"event_id": "$thread_root:localhost", "body": "Original root message"},
-            {"event_id": "$thread_msg:localhost", "body": "Agent answer in thread"},
+            _message(event_id="$thread_root:localhost", body="Original root message"),
+            _message(event_id="$thread_msg:localhost", body="Agent answer in thread"),
         ]
         with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=expected_history)) as mock_fetch:
             context = await bot._extract_message_context(room, event)
@@ -359,8 +369,8 @@ class TestThreadingBehavior:
         )
 
         expected_history = [
-            {"event_id": "$thread_root:localhost", "body": "Root"},
-            {"event_id": "$thread_msg:localhost", "body": "Original"},
+            _message(event_id="$thread_root:localhost", body="Root"),
+            _message(event_id="$thread_msg:localhost", body="Original"),
         ]
         with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=expected_history)) as mock_fetch:
             context = await bot._extract_message_context(room, event)
@@ -414,8 +424,8 @@ class TestThreadingBehavior:
         )
 
         expected_history = [
-            {"event_id": "$thread_root:localhost", "body": "Root"},
-            {"event_id": "$thread_msg:localhost", "body": "Thread message"},
+            _message(event_id="$thread_root:localhost", body="Root"),
+            _message(event_id="$thread_msg:localhost", body="Thread message"),
         ]
         with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=expected_history)) as mock_fetch:
             context = await bot._extract_message_context(room, event)
@@ -503,7 +513,7 @@ class TestThreadingBehavior:
 
         assert context.is_thread is True
         assert context.thread_id == "$msg1:localhost"
-        assert [msg["event_id"] for msg in context.thread_history] == [
+        assert [msg.event_id for msg in context.thread_history] == [
             "$msg1:localhost",
             "$msg2:localhost",
             "$msg3:localhost",
@@ -570,7 +580,7 @@ class TestThreadingBehavior:
 
         assert context.is_thread is True
         assert context.thread_id == "$msg1:localhost"
-        assert [msg["event_id"] for msg in context.thread_history] == ["$msg1:localhost", "$msg2:localhost"]
+        assert [msg.event_id for msg in context.thread_history] == ["$msg1:localhost", "$msg2:localhost"]
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
@@ -628,8 +638,8 @@ class TestThreadingBehavior:
         assert context.thread_id == "$msg1:localhost"
         assert context_cached.thread_id == "$msg1:localhost"
         assert len(context.thread_history) == chain_length
-        assert context.thread_history[0]["event_id"] == "$msg1:localhost"
-        assert context.thread_history[-1]["event_id"] == newest_parent_id
+        assert context.thread_history[0].event_id == "$msg1:localhost"
+        assert context.thread_history[-1].event_id == newest_parent_id
         assert bot.client.room_get_event.await_count == chain_length
         mock_fetch.assert_not_called()
 
@@ -693,7 +703,7 @@ class TestThreadingBehavior:
 
         assert context.is_thread is True
         assert context.thread_id == "$msg2:localhost"
-        assert [msg["event_id"] for msg in context.thread_history] == ["$msg2:localhost", "$msg3:localhost"]
+        assert [msg.event_id for msg in context.thread_history] == ["$msg2:localhost", "$msg3:localhost"]
         assert bot.client.room_get_event.await_count == 2
         mock_fetch.assert_not_called()
 
@@ -748,7 +758,7 @@ class TestThreadingBehavior:
 
         assert context.is_thread is True
         assert context.thread_id == "$msg4:localhost"
-        assert [msg["event_id"] for msg in context.thread_history] == [
+        assert [msg.event_id for msg in context.thread_history] == [
             "$msg4:localhost",
             "$msg5:localhost",
             "$msg6:localhost",
@@ -835,7 +845,7 @@ class TestThreadingBehavior:
 
         assert ctx2.is_thread is True
         assert ctx2.thread_id == "$msg1:localhost"  # true root, not stale $msg4
-        assert ctx2.thread_history[0]["event_id"] == "$msg1:localhost"
+        assert ctx2.thread_history[0].event_id == "$msg1:localhost"
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
@@ -962,15 +972,15 @@ class TestThreadingBehavior:
         )
 
         thread_history = [
-            {"event_id": "$thread_root:localhost", "body": "Thread root"},
-            {"event_id": "$thread_msg:localhost", "body": "Earlier threaded message"},
+            _message(event_id="$thread_root:localhost", body="Thread root"),
+            _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
         ]
         with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=thread_history)) as mock_fetch:
             context = await bot._extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
-        assert [msg["event_id"] for msg in context.thread_history] == [
+        assert [msg.event_id for msg in context.thread_history] == [
             "$thread_root:localhost",
             "$thread_msg:localhost",
             "$plain1:localhost",
@@ -1052,21 +1062,21 @@ class TestThreadingBehavior:
         )
 
         thread_history = [
-            {"event_id": "$thread_root:localhost", "body": "Thread root"},
-            {"event_id": "$thread_msg:localhost", "body": "Earlier threaded message"},
+            _message(event_id="$thread_root:localhost", body="Thread root"),
+            _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
         ]
         with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=thread_history)):
             context = await bot._extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
-        assert [msg["event_id"] for msg in context.thread_history] == [
+        assert [msg.event_id for msg in context.thread_history] == [
             "$thread_root:localhost",
             "$thread_msg:localhost",
             "$plain1:localhost",
         ]
-        assert context.thread_history[-1]["body"] == "Hydrated plain reply from sidecar"
-        assert context.thread_history[-1]["content"]["body"] == "Hydrated plain reply from sidecar"
+        assert context.thread_history[-1].body == "Hydrated plain reply from sidecar"
+        assert context.thread_history[-1].content["body"] == "Hydrated plain reply from sidecar"
         bot.client.download.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1171,16 +1181,16 @@ class TestThreadingBehavior:
         )
 
         thread_history = [
-            {"event_id": "$root:localhost", "body": "Thread root"},
-            {"event_id": "$t1:localhost", "body": "First threaded reply"},
-            {"event_id": "$t2:localhost", "body": "Thread reply after plain interleave"},
+            _message(event_id="$root:localhost", body="Thread root"),
+            _message(event_id="$t1:localhost", body="First threaded reply"),
+            _message(event_id="$t2:localhost", body="Thread reply after plain interleave"),
         ]
         with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=thread_history)) as mock_fetch:
             context = await bot._extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$root:localhost"
-        assert [msg["event_id"] for msg in context.thread_history] == [
+        assert [msg.event_id for msg in context.thread_history] == [
             "$root:localhost",
             "$t1:localhost",
             "$p1:localhost",
@@ -1192,21 +1202,21 @@ class TestThreadingBehavior:
     def test_merge_thread_and_chain_history_preserves_chronological_order(self) -> None:
         """Merged context should preserve chronological order for interleaved plain replies."""
         thread_history = [
-            {"event_id": "$root:localhost", "body": "Thread root"},
-            {"event_id": "$t1:localhost", "body": "First threaded reply"},
-            {"event_id": "$t2:localhost", "body": "Thread reply after plain interleave"},
+            _message(event_id="$root:localhost", body="Thread root"),
+            _message(event_id="$t1:localhost", body="First threaded reply"),
+            _message(event_id="$t2:localhost", body="Thread reply after plain interleave"),
         ]
         chain_history = [
-            {"event_id": "$root:localhost", "body": "Thread root"},
-            {"event_id": "$t1:localhost", "body": "First threaded reply"},
-            {"event_id": "$p1:localhost", "body": "First plain interleaved reply"},
-            {"event_id": "$t2:localhost", "body": "Thread reply after plain interleave"},
-            {"event_id": "$p2:localhost", "body": "Second plain reply"},
+            _message(event_id="$root:localhost", body="Thread root"),
+            _message(event_id="$t1:localhost", body="First threaded reply"),
+            _message(event_id="$p1:localhost", body="First plain interleaved reply"),
+            _message(event_id="$t2:localhost", body="Thread reply after plain interleave"),
+            _message(event_id="$p2:localhost", body="Second plain reply"),
         ]
 
         merged = _merge_thread_and_chain_history(thread_history, chain_history)
 
-        assert [msg["event_id"] for msg in merged] == [
+        assert [msg.event_id for msg in merged] == [
             "$root:localhost",
             "$t1:localhost",
             "$p1:localhost",
@@ -1602,7 +1612,13 @@ class TestThreadingBehavior:
             patch("mindroom.bot.get_latest_thread_event_id_if_needed", AsyncMock(return_value="$latest:localhost")),
             patch("mindroom.bot.send_message", AsyncMock(return_value="$router_response:localhost")) as mock_send,
         ):
-            await bot._handle_ai_routing(room, event, thread_history=[], thread_id="$thread_root:localhost")
+            await bot._handle_ai_routing(
+                room,
+                event,
+                thread_history=[],
+                thread_id="$thread_root:localhost",
+                requester_user_id="@user:localhost",
+            )
 
         mock_send.assert_awaited_once()
         bot.client.room_get_event.assert_not_called()

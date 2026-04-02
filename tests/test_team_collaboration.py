@@ -16,7 +16,13 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamOutcome
 from mindroom.thread_utils import get_agents_in_thread
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    make_visible_message,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -169,21 +175,9 @@ class TestTeamFormation:
         """Test that multiple agents already in a thread form a team when no one is mentioned."""
         # Mock thread history showing both agents have participated
         thread_history = [
-            {
-                "type": "m.room.message",
-                "sender": "@user:localhost",
-                "content": {"body": "How should we implement authentication?"},
-            },
-            {
-                "type": "m.room.message",
-                "sender": mock_code_agent.user_id,
-                "content": {"body": "I suggest using JWT tokens..."},
-            },
-            {
-                "type": "m.room.message",
-                "sender": mock_security_agent.user_id,
-                "content": {"body": "We should also add rate limiting..."},
-            },
+            make_visible_message(sender="@user:localhost", body="How should we implement authentication?"),
+            make_visible_message(sender=mock_code_agent.user_id, body="I suggest using JWT tokens..."),
+            make_visible_message(sender=mock_security_agent.user_id, body="We should also add rate limiting..."),
         ]
 
         # Message with no mentions would trigger team formation
@@ -315,16 +309,8 @@ class TestTeamResponseBehavior:
         """Test that single agent behavior remains unchanged."""
         # Thread with only one agent
         thread_history = [
-            {
-                "type": "m.room.message",
-                "sender": "@user:localhost",
-                "content": {"body": "Can you help with Python?"},
-            },
-            {
-                "type": "m.room.message",
-                "sender": mock_code_agent.user_id,
-                "content": {"body": "Sure, I can help with Python!"},
-            },
+            make_visible_message(sender="@user:localhost", body="Can you help with Python?"),
+            make_visible_message(sender=mock_code_agent.user_id, body="Sure, I can help with Python!"),
         ]
 
         # No mentions in follow-up would cause single agent to continue
@@ -377,16 +363,8 @@ class TestTeamResponseBehavior:
 
         # Both should form team when working together
         thread_with_both = [
-            {
-                "type": "m.room.message",
-                "sender": native_agent.user_id,
-                "content": {"body": "Research findings..."},
-            },
-            {
-                "type": "m.room.message",
-                "sender": invited_agent.user_id,
-                "content": {"body": "Analysis of findings..."},
-            },
+            make_visible_message(sender=native_agent.user_id, body="Research findings..."),
+            make_visible_message(sender=invited_agent.user_id, body="Analysis of findings..."),
         ]
 
         agents = get_agents_in_thread(thread_with_both, self.config, runtime_paths_for(self.config))

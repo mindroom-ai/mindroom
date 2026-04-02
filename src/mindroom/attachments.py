@@ -18,11 +18,12 @@ import nio
 
 from .constants import ATTACHMENT_IDS_KEY
 from .logging_config import get_logger
-from .matrix.client import VisibleMessageLike, visible_message_content
 from .matrix.media import download_media_bytes, media_mime_type, resolve_image_mime_type
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from .matrix.client import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
 
@@ -97,11 +98,11 @@ def parse_attachment_ids_from_event_source(event_source: dict[str, Any] | None) 
     return normalized
 
 
-def parse_attachment_ids_from_thread_history(thread_history: Sequence[VisibleMessageLike]) -> list[str]:
+def parse_attachment_ids_from_thread_history(thread_history: Sequence[ResolvedVisibleMessage]) -> list[str]:
     """Extract attachment IDs referenced by message metadata in thread history."""
     attachment_ids: list[str] = []
     for message in thread_history:
-        content = visible_message_content(message)
+        content = message.content
         if content is None:
             continue
         message_attachment_ids = parse_attachment_ids_from_event_source({"content": content})

@@ -17,6 +17,7 @@ from mindroom.matrix.client import (
     fetch_thread_history,
     fetch_thread_snapshot,
 )
+from tests.conftest import make_visible_message
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -105,7 +106,7 @@ class TestThreadHistory:
     async def test_fetch_thread_history_delegates_to_room_scan_fallback_helper(self) -> None:
         """Preserve the legacy room-scan path behind an explicit helper."""
         client = AsyncMock()
-        expected_history = [{"event_id": "$thread_root", "body": "root"}]
+        expected_history = [make_visible_message(event_id="$thread_root", body="root")]
 
         with patch(
             "mindroom.matrix.client._fetch_thread_history_via_room_messages",
@@ -302,7 +303,7 @@ class TestThreadHistory:
                 self._relation_key("$thread_root", RelationshipType.thread): RuntimeError("unsupported"),
             },
         )
-        fallback_history = [{"event_id": "$thread_root", "body": "fallback"}]
+        fallback_history = [make_visible_message(event_id="$thread_root", body="fallback")]
 
         with patch(
             "mindroom.matrix.client._fetch_thread_history_via_room_messages",
@@ -316,7 +317,7 @@ class TestThreadHistory:
     @pytest.mark.asyncio
     async def test_fetch_thread_snapshot_marks_room_scan_fallback_as_full_history(self) -> None:
         """Snapshot fallback should go straight to the room-scan helper."""
-        fallback_history = [{"event_id": "$thread_root", "body": "fallback"}]
+        fallback_history = [make_visible_message(event_id="$thread_root", body="fallback")]
         client = AsyncMock()
 
         with (
@@ -476,7 +477,7 @@ class TestThreadHistory:
 
         with patch(
             "mindroom.matrix.client.fetch_thread_history",
-            new=AsyncMock(return_value=[{"event_id": "$reply_latest"}]),
+            new=AsyncMock(return_value=[make_visible_message(event_id="$reply_latest")]),
         ) as mock_fetch_history:
             event_id = await _latest_thread_event_id(client, "!room:localhost", "$thread_root")
 

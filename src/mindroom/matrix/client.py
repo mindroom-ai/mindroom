@@ -80,6 +80,30 @@ class ResolvedVisibleMessage:
         message.refresh_stream_status()
         return message
 
+    @classmethod
+    def synthetic(
+        cls,
+        *,
+        sender: str,
+        body: str,
+        event_id: str,
+        timestamp: int = 0,
+        content: dict[str, Any] | None = None,
+        thread_id: str | None = None,
+    ) -> "ResolvedVisibleMessage":
+        """Build a synthetic visible message for non-Matrix history inputs."""
+        message = cls(
+            sender=sender,
+            body=body,
+            timestamp=timestamp,
+            event_id=event_id,
+            content=content or {"body": body},
+            thread_id=thread_id,
+            latest_event_id=event_id,
+        )
+        message.refresh_stream_status()
+        return message
+
     def refresh_stream_status(self) -> None:
         """Refresh normalized stream status from message content."""
         self.stream_status = _stream_status_from_content(self.content)
@@ -129,7 +153,6 @@ class ResolvedVisibleMessage:
         return message_data
 
 
-type VisibleMessageLike = ResolvedVisibleMessage | Mapping[str, Any]
 type ReadableMessageEvent = nio.RoomMessageText
 type _EditableMessageEvent = nio.RoomMessageText
 
@@ -148,116 +171,76 @@ def _reply_to_event_id_from_content(content: Mapping[str, Any] | None) -> str | 
     return reply_to_event_id if isinstance(reply_to_event_id, str) else None
 
 
-def visible_message_event_id(message: VisibleMessageLike) -> str | None:
+def visible_message_event_id(message: ResolvedVisibleMessage) -> str | None:
     """Return the original/root event ID for one visible message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.event_id
-    event_id = message.get("event_id")
-    return event_id if isinstance(event_id, str) else None
+    return message.event_id
 
 
-def visible_message_sender(message: VisibleMessageLike) -> str | None:
+def visible_message_sender(message: ResolvedVisibleMessage) -> str | None:
     """Return the sender ID for one visible message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.sender
-    sender = message.get("sender")
-    return sender if isinstance(sender, str) else None
+    return message.sender
 
 
-def visible_message_body(message: VisibleMessageLike) -> str | None:
+def visible_message_body(message: ResolvedVisibleMessage) -> str | None:
     """Return the resolved visible body for one message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.body
-    body = message.get("body")
-    return body if isinstance(body, str) else None
+    return message.body
 
 
-def visible_message_timestamp(message: VisibleMessageLike) -> int | None:
+def visible_message_timestamp(message: ResolvedVisibleMessage) -> int | None:
     """Return the visible-message timestamp when available."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.timestamp
-    timestamp = message.get("timestamp")
-    return timestamp if isinstance(timestamp, int) else None
+    return message.timestamp
 
 
-def visible_message_content(message: VisibleMessageLike) -> dict[str, Any] | None:
+def visible_message_content(message: ResolvedVisibleMessage) -> dict[str, Any] | None:
     """Return the canonical visible content payload for one message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.content
-    content = message.get("content")
-    return content if isinstance(content, dict) else None
+    return message.content
 
 
-def visible_message_thread_id(message: VisibleMessageLike) -> str | None:
+def visible_message_thread_id(message: ResolvedVisibleMessage) -> str | None:
     """Return the thread root ID associated with one visible message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.thread_id
-    thread_id = message.get("thread_id")
-    return thread_id if isinstance(thread_id, str) else None
+    return message.thread_id
 
 
-def visible_message_stream_status(message: VisibleMessageLike) -> str | None:
+def visible_message_stream_status(message: ResolvedVisibleMessage) -> str | None:
     """Return normalized stream status metadata for one visible message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.stream_status
-    stream_status = message.get("stream_status")
-    return stream_status if isinstance(stream_status, str) else None
+    return message.stream_status
 
 
-def visible_message_visible_event_id(message: VisibleMessageLike) -> str | None:
+def visible_message_visible_event_id(message: ResolvedVisibleMessage) -> str | None:
     """Return the event ID for the currently visible event state."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.visible_event_id
-    latest_event_id = message.get("latest_event_id")
-    if isinstance(latest_event_id, str):
-        return latest_event_id
-    return visible_message_event_id(message)
+    return message.visible_event_id
 
 
-def visible_message_reply_to_event_id(message: VisibleMessageLike) -> str | None:
+def visible_message_reply_to_event_id(message: ResolvedVisibleMessage) -> str | None:
     """Return the explicit reply target encoded on one visible message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.reply_to_event_id
-    return _reply_to_event_id_from_content(visible_message_content(message))
+    return message.reply_to_event_id
 
 
-def visible_message_to_dict(message: VisibleMessageLike) -> dict[str, Any]:
+def visible_message_to_dict(message: ResolvedVisibleMessage) -> dict[str, Any]:
     """Serialize one visible message into the public JSON-safe shape."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.to_dict()
-    return dict(message)
+    return message.to_dict()
 
 
 def replace_visible_message(
-    message: VisibleMessageLike,
+    message: ResolvedVisibleMessage,
     *,
     sender: str | None = None,
     body: str | None = None,
-) -> VisibleMessageLike:
+) -> ResolvedVisibleMessage:
     """Return one visible-message copy while keeping body/content coherent."""
     updated_content: dict[str, Any] | None = None
     if body is not None and (content := visible_message_content(message)) is not None:
         updated_content = dict(content)
         updated_content["body"] = body
 
-    if isinstance(message, ResolvedVisibleMessage):
-        updates: dict[str, str | dict[str, Any]] = {}
-        if sender is not None:
-            updates["sender"] = sender
-        if body is not None:
-            updates["body"] = body
-        if updated_content is not None:
-            updates["content"] = updated_content
-        return replace(message, **updates)
-
-    copied = dict(message)
+    updates: dict[str, str | dict[str, Any]] = {}
     if sender is not None:
-        copied["sender"] = sender
+        updates["sender"] = sender
     if body is not None:
-        copied["body"] = body
+        updates["body"] = body
     if updated_content is not None:
-        copied["content"] = updated_content
-    return copied
+        updates["content"] = updated_content
+    return replace(message, **updates)
 
 
 class PermanentMatrixStartupError(ValueError):
@@ -1126,12 +1109,12 @@ async def send_file_message(
     return await send_message(client, room_id, content)
 
 
-def _history_message_sort_key(message: VisibleMessageLike) -> tuple[int, str]:
+def _history_message_sort_key(message: ResolvedVisibleMessage) -> tuple[int, str]:
     """Sort thread history messages by timestamp and event ID."""
     return (visible_message_timestamp(message) or 0, visible_message_event_id(message) or "")
 
 
-def _sort_thread_history[TVisibleMessage: VisibleMessageLike](
+def _sort_thread_history[TVisibleMessage: ResolvedVisibleMessage](
     messages: list[TVisibleMessage],
     *,
     thread_id: str,
@@ -1469,7 +1452,7 @@ async def _record_thread_snapshot_message(
     event_info: EventInfo,
     thread_id: str,
     root_message_found: bool,
-    messages_by_event_id: dict[str, dict[str, Any]],
+    messages_by_event_id: dict[str, ResolvedVisibleMessage],
 ) -> bool:
     """Record root/thread message into a lightweight dispatch snapshot."""
     if event.event_id in messages_by_event_id:
@@ -1480,27 +1463,27 @@ async def _record_thread_snapshot_message(
 
     if is_root_message and not root_message_found:
         message_data = await _extract_unresolved_message(event)
-        message_data["thread_id"] = event_info.thread_id
-        message_data["latest_event_id"] = event.event_id
-        if stream_status := _stream_status_from_content(message_data["content"]):
-            message_data["stream_status"] = stream_status
-        messages_by_event_id[event.event_id] = message_data
+        messages_by_event_id[event.event_id] = ResolvedVisibleMessage.from_message_data(
+            message_data,
+            thread_id=event_info.thread_id,
+            latest_event_id=event.event_id,
+        )
         return True
 
     if is_thread_message:
         message_data = await _extract_unresolved_message(event)
-        message_data["thread_id"] = event_info.thread_id
-        message_data["latest_event_id"] = event.event_id
-        if stream_status := _stream_status_from_content(message_data["content"]):
-            message_data["stream_status"] = stream_status
-        messages_by_event_id[event.event_id] = message_data
+        messages_by_event_id[event.event_id] = ResolvedVisibleMessage.from_message_data(
+            message_data,
+            thread_id=event_info.thread_id,
+            latest_event_id=event.event_id,
+        )
 
     return root_message_found
 
 
 async def _apply_latest_snapshot_edits_to_messages(
     *,
-    messages_by_event_id: dict[str, dict[str, Any]],
+    messages_by_event_id: dict[str, ResolvedVisibleMessage],
     latest_edits_by_original_event_id: dict[str, tuple[_EditableMessageEvent, str | None]],
     required_thread_id: str | None = None,
 ) -> None:
@@ -1516,31 +1499,25 @@ async def _apply_latest_snapshot_edits_to_messages(
             continue
 
         if existing_message is not None:
-            existing_message["body"] = edited_body
-            existing_message["timestamp"] = edit_event.server_timestamp
-            existing_message["latest_event_id"] = edit_event.event_id
-            if edit_thread_id is not None:
-                existing_message["thread_id"] = edit_thread_id
-            if edited_content is not None:
-                existing_message["content"] = edited_content
-                stream_status = _stream_status_from_content(edited_content)
-                if stream_status is None:
-                    existing_message.pop("stream_status", None)
-                else:
-                    existing_message["stream_status"] = stream_status
+            existing_message.apply_edit(
+                body=edited_body,
+                timestamp=edit_event.server_timestamp,
+                latest_event_id=edit_event.event_id,
+                thread_id=edit_thread_id,
+                content=edited_content,
+            )
             continue
 
-        synthesized_message = {
-            "sender": edit_event.sender,
-            "body": edited_body,
-            "timestamp": edit_event.server_timestamp,
-            "event_id": original_event_id,
-            "content": edited_content if edited_content is not None else {},
-            "thread_id": edit_thread_id,
-            "latest_event_id": edit_event.event_id,
-        }
-        if stream_status := _stream_status_from_content(synthesized_message["content"]):
-            synthesized_message["stream_status"] = stream_status
+        synthesized_message = ResolvedVisibleMessage(
+            sender=edit_event.sender,
+            body=edited_body,
+            timestamp=edit_event.server_timestamp,
+            event_id=original_event_id,
+            content=edited_content if edited_content is not None else {},
+            thread_id=edit_thread_id,
+            latest_event_id=edit_event.event_id,
+        )
+        synthesized_message.refresh_stream_status()
         messages_by_event_id[original_event_id] = synthesized_message
 
 
@@ -1550,7 +1527,7 @@ async def _fetch_thread_context_via_relations(
     thread_id: str,
     *,
     require_direct_children: bool,
-) -> list[dict[str, Any]]:
+) -> list[ResolvedVisibleMessage]:
     """Fetch a lightweight thread snapshot through relations plus the root event."""
     try:
         root_response = await client.room_get_event(room_id, thread_id)
@@ -1586,7 +1563,7 @@ async def _fetch_thread_context_via_relations(
         msg = f"no direct thread children returned for {thread_id}"
         raise _ThreadHistoryFastPathUnavailableError(msg)
 
-    messages_by_event_id: dict[str, dict[str, Any]] = {}
+    messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     root_event = root_response.event
     root_message_event = root_event if isinstance(root_event, nio.RoomMessageText) else None
     if root_message_event is not None:
@@ -1776,7 +1753,7 @@ async def fetch_thread_snapshot(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-) -> ThreadHistoryResult:
+) -> ThreadHistoryResult[ResolvedVisibleMessage]:
     """Fetch lightweight thread context for dispatch decisions."""
     try:
         return thread_history_result(
@@ -1790,10 +1767,7 @@ async def fetch_thread_snapshot(
         )
     except _ThreadHistoryFastPathUnavailableError:
         fallback_history = await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
-        return thread_history_result(
-            [visible_message_to_dict(message) for message in fallback_history],
-            is_full_history=True,
-        )
+        return thread_history_result(fallback_history, is_full_history=True)
 
 
 async def fetch_thread_history(

@@ -14,7 +14,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.memory._prompting import _format_memories_as_context
 from mindroom.tool_system.worker_routing import agent_state_root_path, agent_workspace_root_path
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
@@ -498,9 +498,9 @@ class TestMemoryFacade:
         config: Config,
     ) -> None:
         thread_history = [
-            {"sender": "@user:matrix.org", "body": "I need help with math"},
-            {"sender": "@router:matrix.org", "body": "@calculator can help with that"},
-            {"sender": "@user:matrix.org", "body": "Yes please"},
+            make_visible_message(sender="@user:matrix.org", body="I need help with math"),
+            make_visible_message(sender="@router:matrix.org", body="@calculator can help with that"),
+            make_visible_message(sender="@user:matrix.org", body="Yes please"),
         ]
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):

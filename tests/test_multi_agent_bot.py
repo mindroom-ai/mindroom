@@ -35,6 +35,7 @@ from mindroom.bot import (
     _get_or_create_lock,
     _merge_response_extra_content,
     _MessageContext,
+    _PrecheckedEvent,
     _PreparedDispatch,
     _ResponseAction,
     _ResponseDispatchResult,
@@ -69,6 +70,7 @@ from mindroom.hooks import (
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.matrix.client import (
     PermanentMatrixStartupError,
+    ResolvedVisibleMessage,
     ThreadHistoryResult,
     _ThreadHistoryFastPathUnavailableError,
 )
@@ -155,6 +157,24 @@ def _hook_envelope(*, body: str = "hello", source_event_id: str = "$event") -> M
         mentioned_agents=(),
         agent_name="calculator",
         source_kind="message",
+    )
+
+
+def _visible_message(
+    *,
+    sender: str,
+    body: str | None = None,
+    event_id: str | None = None,
+    timestamp: int | None = None,
+    content: dict[str, object] | None = None,
+) -> ResolvedVisibleMessage:
+    """Create a typed visible message for bot thread-history tests."""
+    return ResolvedVisibleMessage.synthetic(
+        sender=sender,
+        body=body,
+        event_id=event_id,
+        timestamp=timestamp,
+        content=content,
     )
 
 
@@ -2308,18 +2328,18 @@ class TestAgentBot:
         prior_user_time = datetime(2026, 3, 10, 8, 10, tzinfo=ZoneInfo("America/Los_Angeles"))
         prior_agent_time = datetime(2026, 3, 10, 8, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
         thread_history = [
-            {
-                "sender": "@alice:localhost",
-                "body": "Earlier user question",
-                "timestamp": int(prior_user_time.timestamp() * 1000),
-                "event_id": "$user1",
-            },
-            {
-                "sender": mock_agent_user.user_id,
-                "body": "Existing agent reply",
-                "timestamp": int(prior_agent_time.timestamp() * 1000),
-                "event_id": "$agent1",
-            },
+            _visible_message(
+                sender="@alice:localhost",
+                body="Earlier user question",
+                timestamp=int(prior_user_time.timestamp() * 1000),
+                event_id="$user1",
+            ),
+            _visible_message(
+                sender=mock_agent_user.user_id,
+                body="Existing agent reply",
+                timestamp=int(prior_agent_time.timestamp() * 1000),
+                event_id="$agent1",
+            ),
         ]
 
         with (
@@ -2347,8 +2367,8 @@ class TestAgentBot:
         process_kwargs = bot._process_and_respond.await_args.kwargs
         assert process_args[1] == "What time is it?"
         assert process_kwargs["model_prompt"] == "[2026-03-20 08:15 PDT] What time is it?"
-        assert process_args[4][0]["body"] == "[2026-03-10 08:10 PDT] Earlier user question"
-        assert process_args[4][1]["body"] == "Existing agent reply"
+        assert process_args[4][0].body == "[2026-03-10 08:10 PDT] Earlier user question"
+        assert process_args[4][1].body == "Existing agent reply"
 
     @pytest.mark.asyncio
     async def test_generate_response_keeps_memory_inputs_unprefixed(
@@ -2394,24 +2414,24 @@ class TestAgentBot:
         alice_time = datetime(2026, 3, 10, 8, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
         agent_time = datetime(2026, 3, 10, 8, 14, tzinfo=ZoneInfo("America/Los_Angeles"))
         thread_history = [
-            {
-                "sender": "@bob:localhost",
-                "body": "Bob question",
-                "timestamp": int(bob_time.timestamp() * 1000),
-                "event_id": "$bob1",
-            },
-            {
-                "sender": "@alice:localhost",
-                "body": "Alice earlier",
-                "timestamp": int(alice_time.timestamp() * 1000),
-                "event_id": "$alice1",
-            },
-            {
-                "sender": mock_agent_user.user_id,
-                "body": "Existing agent reply",
-                "timestamp": int(agent_time.timestamp() * 1000),
-                "event_id": "$agent1",
-            },
+            _visible_message(
+                sender="@bob:localhost",
+                body="Bob question",
+                timestamp=int(bob_time.timestamp() * 1000),
+                event_id="$bob1",
+            ),
+            _visible_message(
+                sender="@alice:localhost",
+                body="Alice earlier",
+                timestamp=int(alice_time.timestamp() * 1000),
+                event_id="$alice1",
+            ),
+            _visible_message(
+                sender=mock_agent_user.user_id,
+                body="Existing agent reply",
+                timestamp=int(agent_time.timestamp() * 1000),
+                event_id="$agent1",
+            ),
         ]
 
         with (
@@ -2439,9 +2459,9 @@ class TestAgentBot:
         process_kwargs = bot._process_and_respond.await_args.kwargs
         assert process_args[1] == "What time is it?"
         assert process_kwargs["model_prompt"] == "[2026-03-20 08:15 PDT] What time is it?"
-        assert process_args[4][0]["body"] == "[2026-03-10 08:10 PDT] Bob question"
-        assert process_args[4][1]["body"] == "[2026-03-10 08:12 PDT] Alice earlier"
-        assert process_args[4][2]["body"] == "Existing agent reply"
+        assert process_args[4][0].body == "[2026-03-10 08:10 PDT] Bob question"
+        assert process_args[4][1].body == "[2026-03-10 08:12 PDT] Alice earlier"
+        assert process_args[4][2].body == "Existing agent reply"
 
         assert len(stored_calls) == 1
         store_args, _ = stored_calls[0]
@@ -3158,10 +3178,11 @@ class TestAgentBot:
                 is_thread=True,
                 thread_id="$thread_root",
                 thread_history=[
-                    {
-                        "event_id": "$routed_prev",
-                        "content": {ATTACHMENT_IDS_KEY: [history_attachment_id]},
-                    },
+                    _visible_message(
+                        sender="@user:localhost",
+                        event_id="$routed_prev",
+                        content={ATTACHMENT_IDS_KEY: [history_attachment_id]},
+                    ),
                 ],
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
@@ -4796,13 +4817,13 @@ class TestAgentBot:
             },
         )
         snapshot = [
-            {
-                "event_id": "$thread_root",
-                "sender": "@user:localhost",
-                "body": "Root",
-                "timestamp": 1234567889,
-                "content": {"body": "Root"},
-            },
+            _visible_message(
+                event_id="$thread_root",
+                sender="@user:localhost",
+                body="Root",
+                timestamp=1234567889,
+                content={"body": "Root"},
+            ),
         ]
 
         with (
@@ -4846,20 +4867,20 @@ class TestAgentBot:
         )
         full_history = ThreadHistoryResult(
             [
-                {
-                    "event_id": "$thread_root",
-                    "sender": "@user:localhost",
-                    "body": "Root",
-                    "timestamp": 1234567889,
-                    "content": {"body": "Root"},
-                },
-                {
-                    "event_id": "$reply",
-                    "sender": "@mindroom_calculator:localhost",
-                    "body": "Reply",
-                    "timestamp": 1234567890,
-                    "content": {"body": "Reply"},
-                },
+                _visible_message(
+                    event_id="$thread_root",
+                    sender="@user:localhost",
+                    body="Root",
+                    timestamp=1234567889,
+                    content={"body": "Root"},
+                ),
+                _visible_message(
+                    event_id="$reply",
+                    sender="@mindroom_calculator:localhost",
+                    body="Reply",
+                    timestamp=1234567890,
+                    content={"body": "Reply"},
+                ),
             ],
             is_full_history=True,
         )
@@ -4911,13 +4932,13 @@ class TestAgentBot:
                 is_thread=True,
                 thread_id="$thread_root",
                 thread_history=[
-                    {
-                        "event_id": "$thread_root",
-                        "sender": "@user:localhost",
-                        "body": "Snapshot root",
-                        "timestamp": 1,
-                        "content": {"body": "Snapshot root"},
-                    },
+                    _visible_message(
+                        event_id="$thread_root",
+                        sender="@user:localhost",
+                        body="Snapshot root",
+                        timestamp=1,
+                        content={"body": "Snapshot root"},
+                    ),
                 ],
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
@@ -4928,20 +4949,20 @@ class TestAgentBot:
         )
         bot.response_tracker = MagicMock()
         full_history = [
-            {
-                "event_id": "$thread_root",
-                "sender": "@user:localhost",
-                "body": "Full root",
-                "timestamp": 1,
-                "content": {"body": "Full root"},
-            },
-            {
-                "event_id": "$reply",
-                "sender": "@mindroom_calculator:localhost",
-                "body": "Full reply",
-                "timestamp": 2,
-                "content": {"body": "Full reply"},
-            },
+            _visible_message(
+                event_id="$thread_root",
+                sender="@user:localhost",
+                body="Full root",
+                timestamp=1,
+                content={"body": "Full root"},
+            ),
+            _visible_message(
+                event_id="$reply",
+                sender="@mindroom_calculator:localhost",
+                body="Full reply",
+                timestamp=2,
+                content={"body": "Full reply"},
+            ),
         ]
         call_order: list[str] = []
 
@@ -4982,7 +5003,10 @@ class TestAgentBot:
             patch.object(bot, "_generate_response", new=AsyncMock(side_effect=fake_generate_response)),
             patch.object(bot, "_log_dispatch_latency"),
         ):
-            await bot._dispatch_text_message(room, event, "@user:localhost")
+            await bot._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            )
 
         assert call_order == ["action", "placeholder", "hydrate", "payload", "generate"]
         assert dispatch.context.thread_history == full_history
@@ -5029,7 +5053,10 @@ class TestAgentBot:
             patch.object(bot, "_build_dispatch_payload_with_attachments", new=AsyncMock()) as mock_build_payload,
             patch.object(bot, "_execute_dispatch_action", new=AsyncMock()) as mock_execute,
         ):
-            await bot._dispatch_text_message(room, event, "@user:localhost")
+            await bot._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            )
 
         mock_fetch_history.assert_not_awaited()
         mock_build_payload.assert_not_awaited()
@@ -5058,7 +5085,7 @@ class TestAgentBot:
                 am_i_mentioned=True,
                 is_thread=True,
                 thread_id="$thread_root",
-                thread_history=[{"event_id": "$thread_root", "sender": "@user:localhost"}],
+                thread_history=[_visible_message(event_id="$thread_root", sender="@user:localhost")],
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
@@ -5457,13 +5484,13 @@ class TestAgentBot:
 
         # Test 1: Thread with only this agent - should respond without mention
         test1_history = [
-            {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
-            {
-                "sender": mock_agent_user.user_id,
-                "body": "My previous response",
-                "timestamp": 124,
-                "event_id": "prev2",
-            },
+            _visible_message(sender="@user:localhost", body="Previous message", timestamp=123, event_id="prev1"),
+            _visible_message(
+                sender=mock_agent_user.user_id,
+                body="My previous response",
+                timestamp=124,
+                event_id="prev2",
+            ),
         ]
         mock_fetch_history.return_value = test1_history
         mock_fetch_snapshot.return_value = test1_history
@@ -5545,16 +5572,16 @@ class TestAgentBot:
 
         # Test 2: Thread with multiple agents - should NOT respond without mention
         test2_history = [
-            {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
-            {"sender": mock_agent_user.user_id, "body": "My response", "timestamp": 124, "event_id": "prev2"},
-            {
-                "sender": config.get_ids(runtime_paths_for(config))["general"].full_id
+            _visible_message(sender="@user:localhost", body="Previous message", timestamp=123, event_id="prev1"),
+            _visible_message(sender=mock_agent_user.user_id, body="My response", timestamp=124, event_id="prev2"),
+            _visible_message(
+                sender=config.get_ids(runtime_paths_for(config))["general"].full_id
                 if "general" in config.get_ids(runtime_paths_for(config))
                 else "@mindroom_general:localhost",
-                "body": "Another agent response",
-                "timestamp": 125,
-                "event_id": "prev3",
-            },
+                body="Another agent response",
+                timestamp=125,
+                event_id="prev3",
+            ),
         ]
         mock_fetch_history.return_value = test2_history
         mock_fetch_snapshot.return_value = test2_history

@@ -883,7 +883,12 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
             has_non_agent_mentions=False,
         )
 
-        await bot._handle_message_edit(room, edit_event, EventInfo.from_event(edit_event.source))
+        await bot._handle_message_edit(
+            room,
+            edit_event,
+            EventInfo.from_event(edit_event.source),
+            requester_user_id=edit_event.sender,
+        )
 
         mock_generate_response.assert_awaited_once()
         call_kwargs = mock_generate_response.call_args.kwargs
