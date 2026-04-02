@@ -270,7 +270,12 @@ class TestResponseTrackingRegression:
         }
 
         # Process routing
-        await bot._handle_ai_routing(mock_room, message_event, [])
+        await bot._handle_ai_routing(
+            mock_room,
+            message_event,
+            [],
+            requester_user_id="@user:localhost",
+        )
 
         # Verify routing message was sent
         assert bot.client.room_send.call_count == 1
@@ -288,7 +293,12 @@ class TestResponseTrackingRegression:
         mock_suggest_agent.reset_mock()
 
         # Process same message again (simulating restart)
-        await bot._handle_ai_routing(mock_room, message_event, [])
+        await bot._handle_ai_routing(
+            mock_room,
+            message_event,
+            [],
+            requester_user_id="@user:localhost",
+        )
 
         # With proper tracking, this shouldn't happen again
         # (In real scenario, _should_skip_duplicate_response would prevent reaching here)

@@ -275,7 +275,12 @@ class TestAIRouting:
         with patch("mindroom.bot.suggest_agent_for_message") as mock_suggest:
             # Should raise AssertionError since general is not the router agent
             with pytest.raises(AssertionError):
-                await bot._handle_ai_routing(mock_room, mock_event, [])
+                await bot._handle_ai_routing(
+                    mock_room,
+                    mock_event,
+                    [],
+                    requester_user_id="@user:localhost",
+                )
 
             # Should not call routing since it failed the assertion
             mock_suggest.assert_not_called()

@@ -4516,14 +4516,15 @@ class AgentBot:
         thread_history: Sequence[VisibleMessageLike],
         thread_id: str | None = None,
         message: str | None = None,
-        requester_user_id: str | None = None,
+        *,
+        requester_user_id: str,
         extra_content: dict[str, Any] | None = None,
     ) -> None:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
 
         # Use configured agents only - router should not suggest random agents
-        permission_sender_id = requester_user_id or event.sender
+        permission_sender_id = requester_user_id
         available_agents = get_configured_agents_for_room(room.room_id, self.config, self.runtime_paths)
         available_agents = filter_agents_by_sender_permissions(
             available_agents,

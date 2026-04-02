@@ -403,6 +403,7 @@ class TestRouterHandoffThreadMode:
                 self._routing_event(),
                 thread_history=[],
                 thread_id="$thread_root",
+                requester_user_id="@user:localhost",
             )
         mock_get_latest.assert_not_called()
         assert "m.relates_to" not in captured_content
@@ -442,6 +443,7 @@ class TestRouterHandoffThreadMode:
                 self._routing_event(),
                 thread_history=[],
                 thread_id="$thread_root",
+                requester_user_id="@user:localhost",
             )
         mock_get_latest.assert_awaited_once()
         assert "m.relates_to" in captured_content

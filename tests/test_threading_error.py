@@ -1599,7 +1599,13 @@ class TestThreadingBehavior:
             patch("mindroom.bot.get_latest_thread_event_id_if_needed", AsyncMock(return_value="$latest:localhost")),
             patch("mindroom.bot.send_message", AsyncMock(return_value="$router_response:localhost")) as mock_send,
         ):
-            await bot._handle_ai_routing(room, event, thread_history=[], thread_id="$thread_root:localhost")
+            await bot._handle_ai_routing(
+                room,
+                event,
+                thread_history=[],
+                thread_id="$thread_root:localhost",
+                requester_user_id="@user:localhost",
+            )
 
         mock_send.assert_awaited_once()
         bot.client.room_get_event.assert_not_called()
