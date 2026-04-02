@@ -239,7 +239,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
             "The answer is 6",
             None,  # thread_id
             tool_trace=[],
-            extra_content=None,
+            extra_content={},
         )
 
         # Verify that the response tracker still maps to the same response
@@ -705,7 +705,6 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
         patch("mindroom.bot.fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
-        patch("mindroom.bot.has_user_responded_after_message", return_value=False),
     ):
         # Setup mocks
         mock_handle_reaction.return_value = ("Option 1", "thread_id")  # selected_value, thread_id
