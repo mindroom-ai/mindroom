@@ -74,13 +74,13 @@ class TestThreadHistory:
         assert len(history) == 2
 
         # Verify they're in chronological order (root first, then router)
-        assert history[0]["event_id"] == "$thread_root"
-        assert history[0]["body"] == "look up Feynman on Wikipedia"
-        assert history[0]["sender"] == "@user:localhost"
+        assert history[0].event_id == "$thread_root"
+        assert history[0].body == "look up Feynman on Wikipedia"
+        assert history[0].sender == "@user:localhost"
 
-        assert history[1]["event_id"] == "$router_msg"
-        assert history[1]["body"] == "@mindroom_research:localhost could you help with this?"
-        assert history[1]["sender"] == "@mindroom_news:localhost"
+        assert history[1].event_id == "$router_msg"
+        assert history[1].body == "@mindroom_research:localhost could you help with this?"
+        assert history[1].sender == "@mindroom_news:localhost"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_only_thread_messages(self) -> None:
@@ -140,11 +140,11 @@ class TestThreadHistory:
 
         # Should only include thread1 messages
         assert len(history) == 2
-        assert history[0]["event_id"] == "$thread1"
-        assert history[1]["event_id"] == "$msg1"
+        assert history[0].event_id == "$thread1"
+        assert history[1].event_id == "$msg1"
 
         # Should not include other thread or room messages
-        event_ids = [msg["event_id"] for msg in history]
+        event_ids = [msg.event_id for msg in history]
         assert "$msg2" not in event_ids
         assert "$room_msg" not in event_ids
 
@@ -173,8 +173,8 @@ class TestThreadHistory:
 
         # Should only include the root message
         assert len(history) == 1
-        assert history[0]["event_id"] == "$thread_root"
-        assert history[0]["body"] == "New thread"
+        assert history[0].event_id == "$thread_root"
+        assert history[0].body == "New thread"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_applies_edits(self) -> None:
@@ -229,9 +229,9 @@ class TestThreadHistory:
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
-        assert history[1]["body"] == "Final answer"
-        assert history[1]["content"]["body"] == "Final answer"
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Final answer"
+        assert history[1].content["body"] == "Final answer"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_applies_v2_sidecar_edits(self) -> None:
@@ -316,10 +316,10 @@ class TestThreadHistory:
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
-        assert history[1]["body"] == "Full final answer"
-        assert history[1]["content"]["body"] == "Full final answer"
-        assert history[1]["content"]["io.mindroom.tool_trace"] == {
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Full final answer"
+        assert history[1].content["body"] == "Full final answer"
+        assert history[1].content["io.mindroom.tool_trace"] == {
             "version": 1,
             "events": [{"tool": "shell"}],
         }
@@ -380,9 +380,9 @@ class TestThreadHistory:
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
-        assert history[1]["body"] == "Preview edit"
-        assert history[1]["content"]["body"] == "Preview edit"
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Preview edit"
+        assert history[1].content["body"] == "Preview edit"
         client.download.assert_not_called()
 
     @pytest.mark.asyncio
@@ -458,8 +458,8 @@ class TestThreadHistory:
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
-        assert history[1]["body"] == "Final answer"
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Final answer"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_edit_without_thread_updates_existing_message(self) -> None:
@@ -510,8 +510,8 @@ class TestThreadHistory:
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
-        assert history[1]["body"] == "Updated answer"
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Updated answer"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_edit_without_thread_does_not_synthesize_missing_original(self) -> None:
@@ -611,8 +611,8 @@ class TestThreadHistory:
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
         assert len(history) == 1
-        assert history[0]["event_id"] == "$missing_original"
-        assert history[0]["body"] == "Final answer"
+        assert history[0].event_id == "$missing_original"
+        assert history[0].body == "Final answer"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_does_not_stop_after_edit_only_page(self) -> None:
@@ -673,8 +673,8 @@ class TestThreadHistory:
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
         assert client.room_messages.call_count == 2
-        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
-        assert history[1]["body"] == "Final answer"
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1].body == "Final answer"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_stops_when_root_is_found(self) -> None:
@@ -711,4 +711,4 @@ class TestThreadHistory:
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
         assert client.room_messages.call_count == 1
-        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]

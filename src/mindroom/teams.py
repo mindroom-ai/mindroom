@@ -65,7 +65,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Collection, Mapping
+    from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 
     import nio
     from agno.db.sqlite import SqliteDb
@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history import CompactionOutcome
     from mindroom.knowledge.manager import KnowledgeManager
+    from mindroom.matrix.client import VisibleMessageLike
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -1193,7 +1194,7 @@ async def _prepare_materialized_team_execution(
     mode: TeamMode,
     message: str,
     orchestrator: MultiAgentOrchestrator,
-    thread_history: list[dict] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     model_name: str | None,
     reply_to_event_id: str | None,
     active_event_ids: Collection[str],
@@ -1264,7 +1265,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     message: str,
     orchestrator: MultiAgentOrchestrator,
     execution_identity: ToolExecutionIdentity | None,
-    thread_history: list[dict] | None = None,
+    thread_history: Sequence[VisibleMessageLike] | None = None,
     model_name: str | None = None,
     media: MediaInputs | None = None,
     session_id: str | None = None,
@@ -1507,7 +1508,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     orchestrator: MultiAgentOrchestrator,
     execution_identity: ToolExecutionIdentity | None,
     mode: TeamMode = TeamMode.COORDINATE,
-    thread_history: list[dict] | None = None,
+    thread_history: Sequence[VisibleMessageLike] | None = None,
     model_name: str | None = None,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,

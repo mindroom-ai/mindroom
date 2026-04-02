@@ -26,7 +26,7 @@ from mindroom.execution_preparation import (
     _get_unseen_messages_for_sender,
     _PartialReplyKind,
 )
-from mindroom.matrix.client import _stream_status_from_content, fetch_thread_history
+from mindroom.matrix.client import VisibleMessageLike, _stream_status_from_content, fetch_thread_history
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
@@ -56,7 +56,7 @@ def _get_unseen_messages(
     seen_event_ids: set[str],
     current_event_id: str | None,
     active_event_ids: set[str],
-) -> tuple[list[dict[str, object]], set[_PartialReplyKind]]:
+) -> tuple[list[VisibleMessageLike], set[_PartialReplyKind], set[str]]:
     response_sender_id = config.get_ids(runtime_paths).get(agent_name)
     response_sender = response_sender_id.full_id if response_sender_id is not None else None
     return _get_unseen_messages_for_sender(
@@ -293,7 +293,7 @@ class TestUnseenMessagesPartialReplies:
             {"event_id": "e3", "sender": "@user:localhost", "body": "New question"},
         ]
 
-        unseen, partial_reply_kinds = _get_unseen_messages(
+        unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
             thread_history,
             "helper",
             config,
@@ -304,9 +304,9 @@ class TestUnseenMessagesPartialReplies:
         )
 
         assert partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}
+        assert in_progress_event_ids == {"e2"}
         assert len(unseen) == 1
         assert unseen[0]["body"] == "Partial reply"
-        assert unseen[0]["partial_reply_kind"] is _PartialReplyKind.IN_PROGRESS
 
         prompt = _build_prompt_with_unseen("Answer the new question.", unseen, partial_reply_kinds=partial_reply_kinds)
         assert "Your previous response is still being delivered." in prompt
@@ -329,7 +329,7 @@ class TestUnseenMessagesPartialReplies:
             {"event_id": "e2", "sender": "@user:localhost", "body": "Continue"},
         ]
 
-        unseen, partial_reply_kinds = _get_unseen_messages(
+        unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
             thread_history,
             "helper",
             config,
@@ -340,9 +340,9 @@ class TestUnseenMessagesPartialReplies:
         )
 
         assert partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}
+        assert in_progress_event_ids == set()
         assert len(unseen) == 1
         assert unseen[0]["body"] == "Partial answer"
-        assert unseen[0]["partial_reply_kind"] is _PartialReplyKind.INTERRUPTED
 
         prompt = _build_prompt_with_unseen("Continue.", unseen, partial_reply_kinds=partial_reply_kinds)
         assert "Your previous response was interrupted before completion." in prompt
@@ -354,7 +354,7 @@ class TestUnseenMessagesPartialReplies:
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
 
-        unseen, partial_reply_kinds = _get_unseen_messages(
+        unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
             [
                 {
                     "event_id": "e1",
@@ -375,7 +375,7 @@ class TestUnseenMessagesPartialReplies:
 
         assert [msg["event_id"] for msg in unseen] == ["e1", "e2"]
         assert partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}
-        assert _get_unseen_event_ids_for_metadata(unseen) == ["e2"]
+        assert _get_unseen_event_ids_for_metadata(unseen, in_progress_event_ids=in_progress_event_ids) == ["e2"]
 
     def test_recent_streaming_reply_without_live_event_id_is_treated_as_interrupted(self) -> None:
         """After restart, recent streaming metadata should not be mistaken for still-active output."""
@@ -383,7 +383,7 @@ class TestUnseenMessagesPartialReplies:
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
 
-        unseen, partial_reply_kinds = _get_unseen_messages(
+        unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
             [
                 {
                     "event_id": "e1",
@@ -404,7 +404,7 @@ class TestUnseenMessagesPartialReplies:
         )
 
         assert partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}
-        assert unseen[0]["partial_reply_kind"] is _PartialReplyKind.INTERRUPTED
+        assert in_progress_event_ids == set()
         assert unseen[0]["body"] == "Partial reply"
 
     def test_placeholder_only_self_reply_is_not_injected(self) -> None:
@@ -413,7 +413,7 @@ class TestUnseenMessagesPartialReplies:
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
 
-        unseen, partial_reply_kinds = _get_unseen_messages(
+        unseen, partial_reply_kinds, _in_progress_event_ids = _get_unseen_messages(
             [
                 {
                     "event_id": "e1",
@@ -441,7 +441,7 @@ class TestUnseenMessagesPartialReplies:
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
 
-        initial_unseen, initial_kinds = _get_unseen_messages(
+        initial_unseen, initial_kinds, initial_in_progress_event_ids = _get_unseen_messages(
             [
                 {
                     "event_id": "e1",
@@ -459,9 +459,14 @@ class TestUnseenMessagesPartialReplies:
             current_event_id="e2",
             active_event_ids=set(),
         )
-        seen_event_ids = set(_get_unseen_event_ids_for_metadata(initial_unseen)) | {"e2"}
+        seen_event_ids = set(
+            _get_unseen_event_ids_for_metadata(
+                initial_unseen,
+                in_progress_event_ids=initial_in_progress_event_ids,
+            ),
+        ) | {"e2"}
 
-        repeated_unseen, repeated_kinds = _get_unseen_messages(
+        repeated_unseen, repeated_kinds, _repeated_in_progress_event_ids = _get_unseen_messages(
             [
                 {
                     "event_id": "e1",
@@ -482,7 +487,10 @@ class TestUnseenMessagesPartialReplies:
 
         assert [msg["event_id"] for msg in initial_unseen] == ["e1"]
         assert initial_kinds == {_PartialReplyKind.INTERRUPTED}
-        assert _get_unseen_event_ids_for_metadata(initial_unseen) == ["e1"]
+        assert _get_unseen_event_ids_for_metadata(
+            initial_unseen,
+            in_progress_event_ids=initial_in_progress_event_ids,
+        ) == ["e1"]
         assert repeated_unseen == []
         assert repeated_kinds == set()
 
@@ -492,7 +500,7 @@ class TestUnseenMessagesPartialReplies:
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
 
-        initial_unseen, _initial_kinds = _get_unseen_messages(
+        initial_unseen, _initial_kinds, initial_in_progress_event_ids = _get_unseen_messages(
             [
                 {
                     "event_id": "e1",
@@ -510,9 +518,14 @@ class TestUnseenMessagesPartialReplies:
             current_event_id="e2",
             active_event_ids={"e1"},
         )
-        seen_event_ids = set(_get_unseen_event_ids_for_metadata(initial_unseen)) | {"e2"}
+        seen_event_ids = set(
+            _get_unseen_event_ids_for_metadata(
+                initial_unseen,
+                in_progress_event_ids=initial_in_progress_event_ids,
+            ),
+        ) | {"e2"}
 
-        updated_unseen, updated_kinds = _get_unseen_messages(
+        updated_unseen, updated_kinds, updated_in_progress_event_ids = _get_unseen_messages(
             [
                 {
                     "event_id": "e1",
@@ -532,6 +545,7 @@ class TestUnseenMessagesPartialReplies:
         )
 
         assert updated_kinds == {_PartialReplyKind.INTERRUPTED}
+        assert updated_in_progress_event_ids == set()
         assert [msg["event_id"] for msg in updated_unseen] == ["e1"]
         assert updated_unseen[0]["body"] == "Partial reply"
 
@@ -602,9 +616,9 @@ class TestThreadHistoryStreamStatus:
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert history[1]["body"] == "Final answer"
-        assert history[1]["stream_status"] == "completed"
-        assert history[1]["content"][STREAM_STATUS_KEY] == "completed"
+        assert history[1].body == "Final answer"
+        assert history[1].stream_status == "completed"
+        assert history[1].content[STREAM_STATUS_KEY] == "completed"
 
 
 class TestStreamingFinalizeStatuses:

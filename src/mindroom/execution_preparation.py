@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
@@ -25,10 +25,19 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client import (
+    VisibleMessageLike,
+    replace_visible_message,
+    visible_message_body,
+    visible_message_content,
+    visible_message_event_id,
+    visible_message_sender,
+    visible_message_stream_status,
+)
 from mindroom.streaming import clean_partial_reply_text, is_in_progress_message, is_interrupted_partial_reply
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection
+    from collections.abc import Awaitable, Callable, Collection, Sequence
 
     from agno.agent import Agent
     from agno.team import Team
@@ -83,7 +92,7 @@ class PreparedExecutionContext:
 
 def build_prompt_with_thread_history(
     prompt: str,
-    thread_history: list[dict[str, Any]] | None = None,
+    thread_history: Sequence[VisibleMessageLike] | None = None,
     *,
     header: str = "Previous conversation in this thread:",
     prompt_intro: str = "Current message:\n",
@@ -97,12 +106,12 @@ def build_prompt_with_thread_history(
     messages = thread_history[-max_messages:] if max_messages is not None else thread_history
     context_lines: list[str] = []
     for msg in messages:
-        body = msg.get("body")
+        body = visible_message_body(msg)
         if not isinstance(body, str) or not body:
             continue
         if max_message_length is not None and len(body) >= max_message_length:
             continue
-        sender = msg.get("sender")
+        sender = visible_message_sender(msg)
         if not isinstance(sender, str) or not sender:
             if missing_sender_label is None:
                 continue
@@ -115,12 +124,12 @@ def build_prompt_with_thread_history(
 
 
 def _classify_partial_reply(
-    msg: dict[str, Any],
+    msg: VisibleMessageLike,
     *,
     active_event_ids: Collection[str],
 ) -> _PartialReplyKind | None:
     """Classify a self-authored partial reply from persisted stream metadata first."""
-    status = msg.get("stream_status")
+    status = visible_message_stream_status(msg)
     if status == STREAM_STATUS_COMPLETED:
         return None
 
@@ -128,12 +137,12 @@ def _classify_partial_reply(
     if status in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR}:
         partial_kind = _PartialReplyKind.INTERRUPTED
     elif status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
-        event_id = msg.get("event_id")
+        event_id = visible_message_event_id(msg)
         if isinstance(event_id, str):
             return _PartialReplyKind.IN_PROGRESS if event_id in active_event_ids else _PartialReplyKind.INTERRUPTED
         partial_kind = _PartialReplyKind.IN_PROGRESS
     else:
-        body = msg.get("body", "")
+        body = visible_message_body(msg) or ""
         if not isinstance(body, str):
             return None
         if is_interrupted_partial_reply(body):
@@ -160,34 +169,39 @@ def _build_unseen_messages_header(partial_reply_kinds: set[_PartialReplyKind]) -
     return _MIXED_PARTIAL_REPLY_HEADER
 
 
-def _get_unseen_event_ids_for_metadata(unseen_messages: list[dict[str, Any]]) -> list[str]:
+def _get_unseen_event_ids_for_metadata(
+    unseen_messages: list[VisibleMessageLike],
+    *,
+    in_progress_event_ids: set[str],
+) -> list[str]:
     """Return unseen event IDs that should be persisted as consumed by this run."""
     event_ids: list[str] = []
     for msg in unseen_messages:
-        event_id = msg.get("event_id")
+        event_id = visible_message_event_id(msg)
         if not isinstance(event_id, str):
             continue
-        if msg.get("partial_reply_kind") is _PartialReplyKind.IN_PROGRESS:
+        if event_id in in_progress_event_ids:
             continue
         event_ids.append(event_id)
     return event_ids
 
 
 def _get_unseen_messages_for_sender(
-    thread_history: list[dict[str, Any]],
+    thread_history: Sequence[VisibleMessageLike],
     *,
     sender_id: str | None,
     seen_event_ids: set[str],
     current_event_id: str | None,
     active_event_ids: Collection[str],
-) -> tuple[list[dict[str, Any]], set[_PartialReplyKind]]:
+) -> tuple[list[VisibleMessageLike], set[_PartialReplyKind], set[str]]:
     """Filter thread_history to unseen messages for one Matrix sender."""
-    unseen: list[dict[str, Any]] = []
+    unseen: list[VisibleMessageLike] = []
     partial_reply_kinds: set[_PartialReplyKind] = set()
+    in_progress_event_ids: set[str] = set()
     for msg in thread_history:
-        event_id = msg.get("event_id")
-        sender = msg.get("sender")
-        content = msg.get("content")
+        event_id = visible_message_event_id(msg)
+        sender = visible_message_sender(msg)
+        content = visible_message_content(msg)
         if event_id and event_id in seen_event_ids:
             continue
         if current_event_id and event_id == current_event_id:
@@ -201,29 +215,30 @@ def _get_unseen_messages_for_sender(
             )
             if partial_kind is None:
                 continue
-            body = msg.get("body")
+            body = visible_message_body(msg)
             if not isinstance(body, str):
                 continue
             cleaned_body = _clean_partial_reply_body(body)
             if not cleaned_body:
                 continue
             partial_reply_kinds.add(partial_kind)
+            if partial_kind is _PartialReplyKind.IN_PROGRESS and event_id is not None:
+                in_progress_event_ids.add(event_id)
             unseen.append(
-                {
-                    **msg,
-                    "sender": _PARTIAL_REPLY_SENDER_LABELS.get(partial_kind.value, "You (partial reply)"),
-                    "body": cleaned_body,
-                    "partial_reply_kind": partial_kind,
-                },
+                replace_visible_message(
+                    msg,
+                    sender=_PARTIAL_REPLY_SENDER_LABELS.get(partial_kind.value, "You (partial reply)"),
+                    body=cleaned_body,
+                ),
             )
             continue
         unseen.append(msg)
-    return unseen, partial_reply_kinds
+    return unseen, partial_reply_kinds, in_progress_event_ids
 
 
 def build_prompt_with_unseen_thread_context(
     prompt: str,
-    thread_history: list[dict[str, Any]] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     *,
     seen_event_ids: set[str],
     current_event_id: str | None,
@@ -234,7 +249,7 @@ def build_prompt_with_unseen_thread_context(
     if not current_event_id or not thread_history:
         return prompt, []
 
-    unseen_messages, partial_reply_kinds = _get_unseen_messages_for_sender(
+    unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
         thread_history,
         sender_id=response_sender_id,
         seen_event_ids=seen_event_ids,
@@ -246,12 +261,15 @@ def build_prompt_with_unseen_thread_context(
         unseen_messages,
         partial_reply_kinds=partial_reply_kinds,
     )
-    return prompt_with_unseen, _get_unseen_event_ids_for_metadata(unseen_messages)
+    return prompt_with_unseen, _get_unseen_event_ids_for_metadata(
+        unseen_messages,
+        in_progress_event_ids=in_progress_event_ids,
+    )
 
 
 def _build_prompt_with_unseen(
     prompt: str,
-    unseen_messages: list[dict[str, Any]],
+    unseen_messages: list[VisibleMessageLike],
     *,
     partial_reply_kinds: set[_PartialReplyKind] | None,
 ) -> str:
@@ -277,7 +295,7 @@ async def _prepare_execution_context_common(
     scope_context: ScopeSessionContext | None,
     prompt: str,
     fallback_prompt: str | None,
-    thread_history: list[dict[str, Any]] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     reply_to_event_id: str | None,
     active_event_ids: Collection[str],
     response_sender_id: str | None,
@@ -344,7 +362,7 @@ async def prepare_agent_execution_context(
     agent: Agent,
     agent_name: str,
     prompt: str,
-    thread_history: list[dict[str, Any]] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     runtime_paths: RuntimePaths,
     config: Config,
     room_id: str | None,
@@ -415,7 +433,7 @@ async def prepare_bound_team_execution_context(
     team: Team,
     prompt: str,
     fallback_prompt: str,
-    thread_history: list[dict[str, Any]] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     runtime_paths: RuntimePaths,
     config: Config,
     team_name: str | None,

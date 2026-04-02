@@ -5,9 +5,9 @@ import io
 import json
 import mimetypes
 import ssl as ssl_module
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +96,16 @@ class ResolvedVisibleMessage:
             self.content = content
         self.refresh_stream_status()
 
+    @property
+    def visible_event_id(self) -> str:
+        """Return the event ID for the currently visible event state."""
+        return self.latest_event_id
+
+    @property
+    def reply_to_event_id(self) -> str | None:
+        """Return the explicit reply target encoded on the visible content."""
+        return _reply_to_event_id_from_content(self.content)
+
     def to_dict(self) -> dict[str, Any]:
         """Convert the resolved message back to the public dictionary shape."""
         message_data = {
@@ -110,6 +120,135 @@ class ResolvedVisibleMessage:
         if self.stream_status is not None:
             message_data["stream_status"] = self.stream_status
         return message_data
+
+
+type VisibleMessageLike = ResolvedVisibleMessage | Mapping[str, Any]
+
+
+def _reply_to_event_id_from_content(content: Mapping[str, Any] | None) -> str | None:
+    """Return the explicit reply target encoded on one visible content payload."""
+    if content is None:
+        return None
+    relates_to = content.get("m.relates_to")
+    if not isinstance(relates_to, Mapping):
+        return None
+    in_reply_to = relates_to.get("m.in_reply_to")
+    if not isinstance(in_reply_to, Mapping):
+        return None
+    reply_to_event_id = in_reply_to.get("event_id")
+    return reply_to_event_id if isinstance(reply_to_event_id, str) else None
+
+
+def visible_message_event_id(message: VisibleMessageLike) -> str | None:
+    """Return the original/root event ID for one visible message."""
+    if isinstance(message, ResolvedVisibleMessage):
+        return message.event_id
+    event_id = message.get("event_id")
+    return event_id if isinstance(event_id, str) else None
+
+
+def visible_message_sender(message: VisibleMessageLike) -> str | None:
+    """Return the sender ID for one visible message."""
+    if isinstance(message, ResolvedVisibleMessage):
+        return message.sender
+    sender = message.get("sender")
+    return sender if isinstance(sender, str) else None
+
+
+def visible_message_body(message: VisibleMessageLike) -> str | None:
+    """Return the resolved visible body for one message."""
+    if isinstance(message, ResolvedVisibleMessage):
+        return message.body
+    body = message.get("body")
+    return body if isinstance(body, str) else None
+
+
+def visible_message_timestamp(message: VisibleMessageLike) -> int | None:
+    """Return the visible-message timestamp when available."""
+    if isinstance(message, ResolvedVisibleMessage):
+        return message.timestamp
+    timestamp = message.get("timestamp")
+    return timestamp if isinstance(timestamp, int) else None
+
+
+def visible_message_content(message: VisibleMessageLike) -> dict[str, Any] | None:
+    """Return the canonical visible content payload for one message."""
+    if isinstance(message, ResolvedVisibleMessage):
+        return message.content
+    content = message.get("content")
+    return content if isinstance(content, dict) else None
+
+
+def visible_message_thread_id(message: VisibleMessageLike) -> str | None:
+    """Return the thread root ID associated with one visible message."""
+    if isinstance(message, ResolvedVisibleMessage):
+        return message.thread_id
+    thread_id = message.get("thread_id")
+    return thread_id if isinstance(thread_id, str) else None
+
+
+def visible_message_stream_status(message: VisibleMessageLike) -> str | None:
+    """Return normalized stream status metadata for one visible message."""
+    if isinstance(message, ResolvedVisibleMessage):
+        return message.stream_status
+    stream_status = message.get("stream_status")
+    return stream_status if isinstance(stream_status, str) else None
+
+
+def visible_message_visible_event_id(message: VisibleMessageLike) -> str | None:
+    """Return the event ID for the currently visible event state."""
+    if isinstance(message, ResolvedVisibleMessage):
+        return message.visible_event_id
+    latest_event_id = message.get("latest_event_id")
+    if isinstance(latest_event_id, str):
+        return latest_event_id
+    return visible_message_event_id(message)
+
+
+def visible_message_reply_to_event_id(message: VisibleMessageLike) -> str | None:
+    """Return the explicit reply target encoded on one visible message."""
+    if isinstance(message, ResolvedVisibleMessage):
+        return message.reply_to_event_id
+    return _reply_to_event_id_from_content(visible_message_content(message))
+
+
+def visible_message_to_dict(message: VisibleMessageLike) -> dict[str, Any]:
+    """Serialize one visible message into the public JSON-safe shape."""
+    if isinstance(message, ResolvedVisibleMessage):
+        return message.to_dict()
+    return dict(message)
+
+
+def replace_visible_message(
+    message: VisibleMessageLike,
+    *,
+    sender: str | None = None,
+    body: str | None = None,
+) -> VisibleMessageLike:
+    """Return one visible-message copy while keeping body/content coherent."""
+    updated_content: dict[str, Any] | None = None
+    if body is not None and (content := visible_message_content(message)) is not None:
+        updated_content = dict(content)
+        updated_content["body"] = body
+
+    if isinstance(message, ResolvedVisibleMessage):
+        updates: dict[str, str | dict[str, Any]] = {}
+        if sender is not None:
+            updates["sender"] = sender
+        if body is not None:
+            updates["body"] = body
+        if updated_content is not None:
+            updates["content"] = updated_content
+        return replace(message, **updates)
+
+    copied = dict(message)
+    if sender is not None:
+        copied["sender"] = sender
+    if body is not None:
+        copied["body"] = body
+    if updated_content is not None:
+        copied["content"] = updated_content
+    return copied
 
 
 class PermanentMatrixStartupError(ValueError):
@@ -1096,7 +1235,7 @@ async def resolve_latest_visible_messages(
     client: nio.AsyncClient,
     *,
     sender: str | None = None,
-) -> dict[str, dict[str, Any]]:
+) -> dict[str, ResolvedVisibleMessage]:
     """Resolve the latest visible message state by original event ID for a set of message events."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText, str | None]] = {}
@@ -1128,14 +1267,14 @@ async def resolve_latest_visible_messages(
         messages_by_event_id=messages_by_event_id,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
     )
-    return {event_id: message.to_dict() for event_id, message in messages_by_event_id.items()}
+    return messages_by_event_id
 
 
 async def fetch_thread_history(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-) -> list[dict[str, Any]]:
+) -> list[ResolvedVisibleMessage]:
     """Fetch all messages in a thread.
 
     Args:
@@ -1144,7 +1283,7 @@ async def fetch_thread_history(
         thread_id: The thread root event ID
 
     Returns:
-        List of messages in chronological order, each containing sender, body, timestamp, and event_id
+        List of canonical visible messages in chronological order.
 
     """
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
@@ -1203,7 +1342,7 @@ async def fetch_thread_history(
     )
     messages = list(messages_by_event_id.values())
     messages.sort(key=_history_message_sort_key)
-    return [message.to_dict() for message in messages]
+    return messages
 
 
 async def _latest_thread_event_id(
@@ -1227,8 +1366,8 @@ async def _latest_thread_event_id(
     """
     thread_msgs = await fetch_thread_history(client, room_id, thread_id)
     if thread_msgs:
-        last_event_id = thread_msgs[-1].get("event_id")
-        return str(last_event_id) if last_event_id else thread_id
+        last_event_id = thread_msgs[-1].visible_event_id
+        return last_event_id or thread_id
     return thread_id
 
 
