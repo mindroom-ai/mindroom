@@ -15,6 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
 from tests.conftest import (
@@ -31,6 +32,22 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
     """Return a runtime-bound test config."""
     runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
     return bind_runtime_paths(config, runtime_paths)
+
+
+def _message(
+    *,
+    sender: str,
+    body: str,
+    content: dict[str, object] | None = None,
+    event_id: str | None = None,
+) -> ResolvedVisibleMessage:
+    """Build one typed visible message for scheduling/routing tests."""
+    return ResolvedVisibleMessage.synthetic(
+        sender=sender,
+        body=body,
+        event_id=event_id or f"${sender}-{body}".replace(" ", "_"),
+        content=content,
+    )
 
 
 @pytest.fixture
@@ -760,20 +777,22 @@ class TestCommandHandling:
 
         # Create thread history with user command and router error
         thread_history = [
-            {
-                "event_id": "$user_msg",
-                "sender": "@user:localhost",
-                "content": {"msgtype": "m.text", "body": "!schedule remind me in 1 min", "m.mentions": {}},
-            },
-            {
-                "event_id": "$router_error",
-                "sender": "@mindroom_router:localhost",
-                "content": {
+            _message(
+                event_id="$user_msg",
+                sender="@user:localhost",
+                body="!schedule remind me in 1 min",
+                content={"msgtype": "m.text", "body": "!schedule remind me in 1 min", "m.mentions": {}},
+            ),
+            _message(
+                event_id="$router_error",
+                sender="@mindroom_router:localhost",
+                body="❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
+                content={
                     "msgtype": "m.text",
                     "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
-                    "m.mentions": {},  # No mentions!
+                    "m.mentions": {},
                 },
-            },
+            ),
         ]
 
         # NOTE: In reality, when router sends an error without mentions,
@@ -910,30 +929,34 @@ class TestCommandHandling:
 
         # Create thread history with multiple agents mentioned
         thread_history = [
-            {
-                "event_id": "$user_msg",
-                "sender": "@user:localhost",
-                "content": {
+            _message(
+                event_id="$user_msg",
+                sender="@user:localhost",
+                body="@news @research check this out",
+                content={
                     "msgtype": "m.text",
                     "body": "@news @research check this out",
                     "m.mentions": {"user_ids": ["@mindroom_news:localhost", "@mindroom_research:localhost"]},
                 },
-            },
-            {
-                "event_id": "$news_response",
-                "sender": "@mindroom_news:localhost",
-                "content": {"msgtype": "m.text", "body": "I'll look into it", "m.mentions": {}},
-            },
-            {
-                "event_id": "$research_response",
-                "sender": "@mindroom_research:localhost",
-                "content": {"msgtype": "m.text", "body": "Analyzing now", "m.mentions": {}},
-            },
-            {
-                "event_id": "$user_schedule",
-                "sender": "@user:localhost",
-                "content": {"msgtype": "m.text", "body": "!schedule remind me tomorrow", "m.mentions": {}},
-            },
+            ),
+            _message(
+                event_id="$news_response",
+                sender="@mindroom_news:localhost",
+                body="I'll look into it",
+                content={"msgtype": "m.text", "body": "I'll look into it", "m.mentions": {}},
+            ),
+            _message(
+                event_id="$research_response",
+                sender="@mindroom_research:localhost",
+                body="Analyzing now",
+                content={"msgtype": "m.text", "body": "Analyzing now", "m.mentions": {}},
+            ),
+            _message(
+                event_id="$user_schedule",
+                sender="@user:localhost",
+                body="!schedule remind me tomorrow",
+                content={"msgtype": "m.text", "body": "!schedule remind me tomorrow", "m.mentions": {}},
+            ),
         ]
 
         # Mock context for the router error message
@@ -1014,34 +1037,38 @@ class TestCommandHandling:
 
         # Create thread history that mimics the real scenario
         thread_history = [
-            {
-                "event_id": "$earlier_msg",
-                "sender": "@user:localhost",
-                "content": {
+            _message(
+                event_id="$earlier_msg",
+                sender="@user:localhost",
+                body="Calculate compound interest on $10,000 at 5% for 10 years",
+                content={
                     "msgtype": "m.text",
                     "body": "Calculate compound interest on $10,000 at 5% for 10 years",
                     "m.mentions": {},
                 },
-            },
-            {
-                "event_id": "$router_routing",
-                "sender": "@mindroom_router:localhost",
-                "content": {
+            ),
+            _message(
+                event_id="$router_routing",
+                sender="@mindroom_router:localhost",
+                body="@mindroom_finance:localhost could you help with this? ✓",
+                content={
                     "msgtype": "m.text",
                     "body": "@mindroom_finance:localhost could you help with this? ✓",
                     "m.mentions": {"user_ids": ["@mindroom_finance:localhost"]},
                 },
-            },
-            {
-                "event_id": "$finance_response",
-                "sender": "@mindroom_finance:localhost",
-                "content": {"msgtype": "m.text", "body": "I'll calculate that for you...", "m.mentions": {}},
-            },
-            {
-                "event_id": "$user_schedule",
-                "sender": "@user:localhost",
-                "content": {"msgtype": "m.text", "body": "!schedule remind me in 1 min", "m.mentions": {}},
-            },
+            ),
+            _message(
+                event_id="$finance_response",
+                sender="@mindroom_finance:localhost",
+                body="I'll calculate that for you...",
+                content={"msgtype": "m.text", "body": "I'll calculate that for you...", "m.mentions": {}},
+            ),
+            _message(
+                event_id="$user_schedule",
+                sender="@user:localhost",
+                body="!schedule remind me in 1 min",
+                content={"msgtype": "m.text", "body": "!schedule remind me in 1 min", "m.mentions": {}},
+            ),
         ]
 
         # Mock context for the router error message
@@ -1051,15 +1078,16 @@ class TestCommandHandling:
         mock_context.thread_id = "$thread123"
         mock_context.thread_history = [
             *thread_history,
-            {
-                "event_id": "$router_error",
-                "sender": "@mindroom_router:localhost",
-                "content": {
+            _message(
+                event_id="$router_error",
+                sender="@mindroom_router:localhost",
+                body="❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
+                content={
                     "msgtype": "m.text",
                     "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
                     "m.mentions": {},
                 },
-            },
+            ),
         ]
         mock_context.mentioned_agents = []
         mock_context.has_non_agent_mentions = False
@@ -1385,8 +1413,8 @@ class TestRouterSkipsSingleAgent:
         mock_context.is_thread = True
         mock_context.thread_id = "$thread1"
         mock_context.thread_history = [
-            {"sender": "@alice:localhost", "body": "Can someone help?"},
-            {"sender": "@bob:localhost", "body": "I have the same question"},
+            _message(sender="@alice:localhost", body="Can someone help?"),
+            _message(sender="@bob:localhost", body="I have the same question"),
         ]
         bot._extract_message_context = AsyncMock(return_value=mock_context)
 

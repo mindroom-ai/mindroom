@@ -12,7 +12,6 @@ from mindroom.agents import describe_agent
 from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
-    ResolvedVisibleMessage,
     VisibleMessageLike,
     visible_message_body,
     visible_message_sender,
@@ -152,9 +151,6 @@ async def suggest_agent_for_message(
             if sender.startswith("@") and ":" in sender:
                 sender_id = MatrixID.parse(sender)
                 sender = sender_id.agent_name(config, runtime_paths) or sender_id.domain
-            if isinstance(msg, ResolvedVisibleMessage):
-                resolved_context.append(replace(msg, sender=sender))
-            else:
-                resolved_context.append({"sender": sender, "body": visible_message_body(msg) or ""})
+            resolved_context.append(replace(msg, sender=sender))
 
     return await suggest_agent(message, agent_names, config, runtime_paths, resolved_context)

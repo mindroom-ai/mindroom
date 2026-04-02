@@ -13,7 +13,7 @@ import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import uuid4
 
 from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -43,6 +43,7 @@ from mindroom.history.runtime import (
 from mindroom.knowledge.manager import initialize_shared_knowledge_managers
 from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client import ResolvedVisibleMessage, VisibleMessageLike
 from mindroom.routing import suggest_agent
 from mindroom.team_runtime_resolution import materialize_exact_requested_team_members
 from mindroom.teams import TeamMode, TeamOutcome, _create_team_instance, format_team_response, resolve_configured_team
@@ -68,8 +69,6 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput, RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
     from agno.team import Team
-
-    from mindroom.matrix.client import VisibleMessageLike
 
 logger = get_logger(__name__)
 
@@ -455,15 +454,15 @@ def _extract_content_text(content: str | list[dict] | None) -> str:
 
 
 def _find_last_user_message(
-    conversation: list[dict[str, str]],
-) -> tuple[str, list[dict[str, str]] | None] | None:
+    conversation: list[ResolvedVisibleMessage],
+) -> tuple[str, list[ResolvedVisibleMessage] | None] | None:
     """Find the last user message and split into (prompt, thread_history).
 
     Returns None if no user message exists.
     """
     for i in range(len(conversation) - 1, -1, -1):
-        if conversation[i]["sender"] == "user":
-            prompt = conversation[i]["body"]
+        if conversation[i].sender == "user":
+            prompt = conversation[i].body
             history = conversation[:i] if i > 0 else None
             return prompt, history
     return None
@@ -471,7 +470,7 @@ def _find_last_user_message(
 
 def _convert_messages(
     messages: list[_ChatMessage],
-) -> tuple[str, list[dict[str, Any]] | None]:
+) -> tuple[str, list[ResolvedVisibleMessage] | None]:
     """Convert OpenAI messages to MindRoom's (prompt, thread_history) format.
 
     Returns:
@@ -479,7 +478,8 @@ def _convert_messages(
 
     """
     system_parts: list[str] = []
-    conversation: list[dict[str, str]] = []
+    conversation: list[ResolvedVisibleMessage] = []
+    synthetic_index = 0
 
     for msg in messages:
         if msg.role in ("system", "developer"):
@@ -491,7 +491,15 @@ def _convert_messages(
         elif msg.role in ("user", "assistant"):
             text = _extract_content_text(msg.content)
             if text:
-                conversation.append({"sender": msg.role, "body": text})
+                synthetic_index += 1
+                conversation.append(
+                    ResolvedVisibleMessage.synthetic(
+                        sender=msg.role,
+                        body=text,
+                        event_id=f"$openai-{synthetic_index}",
+                        timestamp=synthetic_index,
+                    ),
+                )
 
     system_prompt = "\n\n".join(system_parts) if system_parts else ""
 
@@ -562,7 +570,7 @@ def _validate_chat_request(
 def _parse_chat_request(
     request: Request,
     body: bytes,
-) -> tuple[_ChatCompletionRequest, Config, RuntimePaths, str, list[dict[str, Any]] | None] | JSONResponse:
+) -> tuple[_ChatCompletionRequest, Config, RuntimePaths, str, list[ResolvedVisibleMessage] | None] | JSONResponse:
     """Parse and validate a chat completion request body.
 
     Returns (request, config, runtime_paths, prompt, thread_history) on success, or a JSONResponse error.

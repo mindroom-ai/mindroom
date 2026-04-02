@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,7 +27,12 @@ from mindroom.execution_preparation import (
     _get_unseen_messages_for_sender,
     _PartialReplyKind,
 )
-from mindroom.matrix.client import VisibleMessageLike, _stream_status_from_content, fetch_thread_history
+from mindroom.matrix.client import (
+    ResolvedVisibleMessage,
+    VisibleMessageLike,
+    _stream_status_from_content,
+    fetch_thread_history,
+)
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
@@ -47,8 +53,26 @@ def _make_config() -> Config:
     return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
 
 
+@dataclass
+class _TestVisibleMessage:
+    """Minimal typed message object for classification-only test cases."""
+
+    sender: str
+    body: object
+    event_id: str | None
+    timestamp: int | None
+    content: dict[str, object]
+    stream_status: str | None
+    thread_id: str | None = None
+    latest_event_id: str | None = None
+
+    @property
+    def visible_event_id(self) -> str | None:
+        return self.latest_event_id or self.event_id
+
+
 def _get_unseen_messages(
-    thread_history: list[dict[str, object]],
+    thread_history: list[VisibleMessageLike],
     agent_name: str,
     config: Config,
     runtime_paths: object,
@@ -65,6 +89,39 @@ def _get_unseen_messages(
         seen_event_ids=seen_event_ids,
         current_event_id=current_event_id,
         active_event_ids=active_event_ids,
+    )
+
+
+def _make_visible_message(
+    *,
+    sender: str = "@user:localhost",
+    body: object = "",
+    event_id: str | None = None,
+    timestamp: int | None = None,
+    stream_status: str | None = None,
+    content: dict[str, object] | None = None,
+) -> VisibleMessageLike | _TestVisibleMessage:
+    resolved_content = dict(content) if isinstance(content, dict) else {}
+    if stream_status is not None:
+        resolved_content[STREAM_STATUS_KEY] = stream_status
+    if event_id is None or not isinstance(body, str):
+        return _TestVisibleMessage(
+            sender=sender,
+            body=body,
+            event_id=event_id,
+            timestamp=timestamp,
+            content=resolved_content,
+            stream_status=stream_status,
+            latest_event_id=event_id,
+        )
+
+    resolved_content.setdefault("body", body)
+    return ResolvedVisibleMessage.synthetic(
+        sender=sender,
+        body=body,
+        event_id=event_id,
+        timestamp=timestamp or 0,
+        content=resolved_content,
     )
 
 
@@ -95,7 +152,7 @@ class TestClassifyPartialReply:
         """Treat completed messages as fully delivered, even if the body looks partial."""
         assert (
             _classify_partial_reply(
-                {"body": "Final answer", "stream_status": STREAM_STATUS_COMPLETED},
+                _make_visible_message(body="Final answer", stream_status=STREAM_STATUS_COMPLETED),
                 active_event_ids=set(),
             )
             is None
@@ -105,7 +162,7 @@ class TestClassifyPartialReply:
         """Treat cancelled messages as interrupted partial replies."""
         assert (
             _classify_partial_reply(
-                {"body": "Partial answer", "stream_status": STREAM_STATUS_CANCELLED},
+                _make_visible_message(body="Partial answer", stream_status=STREAM_STATUS_CANCELLED),
                 active_event_ids=set(),
             )
             is _PartialReplyKind.INTERRUPTED
@@ -115,7 +172,7 @@ class TestClassifyPartialReply:
         """Treat errored messages as interrupted partial replies."""
         assert (
             _classify_partial_reply(
-                {"body": "Partial answer", "stream_status": STREAM_STATUS_ERROR},
+                _make_visible_message(body="Partial answer", stream_status=STREAM_STATUS_ERROR),
                 active_event_ids=set(),
             )
             is _PartialReplyKind.INTERRUPTED
@@ -125,7 +182,7 @@ class TestClassifyPartialReply:
         """Treat initial sent-but-not-finalized messages as still in progress."""
         assert (
             _classify_partial_reply(
-                {"body": "Thinking...", "stream_status": STREAM_STATUS_PENDING},
+                _make_visible_message(body="Thinking...", stream_status=STREAM_STATUS_PENDING),
                 active_event_ids=set(),
             )
             is _PartialReplyKind.IN_PROGRESS
@@ -135,7 +192,7 @@ class TestClassifyPartialReply:
         """Treat actively edited streaming messages as still in progress."""
         assert (
             _classify_partial_reply(
-                {"body": "Partial answer ⋯", "stream_status": STREAM_STATUS_STREAMING},
+                _make_visible_message(body="Partial answer ⋯", stream_status=STREAM_STATUS_STREAMING),
                 active_event_ids=set(),
             )
             is _PartialReplyKind.IN_PROGRESS
@@ -145,12 +202,12 @@ class TestClassifyPartialReply:
         """Prefer the live active-event set over any stale timestamp in the event body."""
         assert (
             _classify_partial_reply(
-                {
-                    "event_id": "e1",
-                    "body": "Partial answer ⋯",
-                    "stream_status": STREAM_STATUS_STREAMING,
-                    "timestamp": 1_000,
-                },
+                _make_visible_message(
+                    event_id="e1",
+                    body="Partial answer ⋯",
+                    stream_status=STREAM_STATUS_STREAMING,
+                    timestamp=1_000,
+                ),
                 active_event_ids={"e1"},
             )
             is _PartialReplyKind.IN_PROGRESS
@@ -160,12 +217,12 @@ class TestClassifyPartialReply:
         """Treat non-live streaming events as interrupted when the bot has no active task for them."""
         assert (
             _classify_partial_reply(
-                {
-                    "event_id": "e1",
-                    "body": "Partial answer ⋯",
-                    "stream_status": STREAM_STATUS_STREAMING,
-                    "timestamp": 599_000,
-                },
+                _make_visible_message(
+                    event_id="e1",
+                    body="Partial answer ⋯",
+                    stream_status=STREAM_STATUS_STREAMING,
+                    timestamp=599_000,
+                ),
                 active_event_ids=set(),
             )
             is _PartialReplyKind.INTERRUPTED
@@ -175,7 +232,7 @@ class TestClassifyPartialReply:
         """Prefer persisted completion metadata over stale visible marker text."""
         assert (
             _classify_partial_reply(
-                {"body": "Finished text ⋯", "stream_status": STREAM_STATUS_COMPLETED},
+                _make_visible_message(body="Finished text ⋯", stream_status=STREAM_STATUS_COMPLETED),
                 active_event_ids=set(),
             )
             is None
@@ -185,7 +242,7 @@ class TestClassifyPartialReply:
         """Fallback to body-marker detection for pre-upgrade messages."""
         assert (
             _classify_partial_reply(
-                {"body": "Legacy partial ⋯"},
+                _make_visible_message(body="Legacy partial ⋯"),
                 active_event_ids=set(),
             )
             is _PartialReplyKind.IN_PROGRESS
@@ -205,7 +262,7 @@ class TestClassifyPartialReply:
         """Fallback to interrupted classification for legacy cancelled/error/restart bodies."""
         assert (
             _classify_partial_reply(
-                {"body": body},
+                _make_visible_message(body=body),
                 active_event_ids=set(),
             )
             is _PartialReplyKind.INTERRUPTED
@@ -215,7 +272,7 @@ class TestClassifyPartialReply:
         """Ignore messages that have neither metadata nor partial markers."""
         assert (
             _classify_partial_reply(
-                {"body": "Completed response"},
+                _make_visible_message(body="Completed response"),
                 active_event_ids=set(),
             )
             is None
@@ -225,7 +282,7 @@ class TestClassifyPartialReply:
         """Ignore malformed legacy bodies when there is no stream-status metadata to trust."""
         assert (
             _classify_partial_reply(
-                {"body": {"structured": True}},
+                _make_visible_message(body={"structured": True}),
                 active_event_ids=set(),
             )
             is None
@@ -266,8 +323,8 @@ class TestUnseenMessagesPartialReplies:
         prompt = _build_prompt_with_unseen(
             "Continue.",
             [
-                {"sender": "You (reply still streaming)", "body": "Live draft"},
-                {"sender": "You (interrupted reply draft)", "body": "Interrupted draft"},
+                _make_visible_message(sender="You (reply still streaming)", body="Live draft"),
+                _make_visible_message(sender="You (interrupted reply draft)", body="Interrupted draft"),
             ],
             partial_reply_kinds={_PartialReplyKind.IN_PROGRESS, _PartialReplyKind.INTERRUPTED},
         )
@@ -282,15 +339,14 @@ class TestUnseenMessagesPartialReplies:
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
 
         thread_history = [
-            {"event_id": "e1", "sender": "@user:localhost", "body": "Hello"},
-            {
-                "event_id": "e2",
-                "sender": agent_id,
-                "body": "Partial reply ⋯",
-                "stream_status": STREAM_STATUS_STREAMING,
-                "content": {STREAM_STATUS_KEY: STREAM_STATUS_STREAMING},
-            },
-            {"event_id": "e3", "sender": "@user:localhost", "body": "New question"},
+            _make_visible_message(event_id="e1", sender="@user:localhost", body="Hello"),
+            _make_visible_message(
+                event_id="e2",
+                sender=agent_id,
+                body="Partial reply ⋯",
+                stream_status=STREAM_STATUS_STREAMING,
+            ),
+            _make_visible_message(event_id="e3", sender="@user:localhost", body="New question"),
         ]
 
         unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
@@ -306,7 +362,7 @@ class TestUnseenMessagesPartialReplies:
         assert partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}
         assert in_progress_event_ids == {"e2"}
         assert len(unseen) == 1
-        assert unseen[0]["body"] == "Partial reply"
+        assert unseen[0].body == "Partial reply"
 
         prompt = _build_prompt_with_unseen("Answer the new question.", unseen, partial_reply_kinds=partial_reply_kinds)
         assert "Your previous response is still being delivered." in prompt
@@ -319,14 +375,13 @@ class TestUnseenMessagesPartialReplies:
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
 
         thread_history = [
-            {
-                "event_id": "e1",
-                "sender": agent_id,
-                "body": f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}",
-                "stream_status": STREAM_STATUS_CANCELLED,
-                "content": {STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED},
-            },
-            {"event_id": "e2", "sender": "@user:localhost", "body": "Continue"},
+            _make_visible_message(
+                event_id="e1",
+                sender=agent_id,
+                body=f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}",
+                stream_status=STREAM_STATUS_CANCELLED,
+            ),
+            _make_visible_message(event_id="e2", sender="@user:localhost", body="Continue"),
         ]
 
         unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
@@ -342,7 +397,7 @@ class TestUnseenMessagesPartialReplies:
         assert partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}
         assert in_progress_event_ids == set()
         assert len(unseen) == 1
-        assert unseen[0]["body"] == "Partial answer"
+        assert unseen[0].body == "Partial answer"
 
         prompt = _build_prompt_with_unseen("Continue.", unseen, partial_reply_kinds=partial_reply_kinds)
         assert "Your previous response was interrupted before completion." in prompt
@@ -356,14 +411,13 @@ class TestUnseenMessagesPartialReplies:
 
         unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
             [
-                {
-                    "event_id": "e1",
-                    "sender": agent_id,
-                    "body": "Partial reply ⋯",
-                    "stream_status": STREAM_STATUS_STREAMING,
-                    "content": {STREAM_STATUS_KEY: STREAM_STATUS_STREAMING},
-                },
-                {"event_id": "e2", "sender": "@user:localhost", "body": "Question"},
+                _make_visible_message(
+                    event_id="e1",
+                    sender=agent_id,
+                    body="Partial reply ⋯",
+                    stream_status=STREAM_STATUS_STREAMING,
+                ),
+                _make_visible_message(event_id="e2", sender="@user:localhost", body="Question"),
             ],
             "helper",
             config,
@@ -373,7 +427,7 @@ class TestUnseenMessagesPartialReplies:
             active_event_ids={"e1"},
         )
 
-        assert [msg["event_id"] for msg in unseen] == ["e1", "e2"]
+        assert [msg.event_id for msg in unseen] == ["e1", "e2"]
         assert partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}
         assert _get_unseen_event_ids_for_metadata(unseen, in_progress_event_ids=in_progress_event_ids) == ["e2"]
 
@@ -385,15 +439,14 @@ class TestUnseenMessagesPartialReplies:
 
         unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
             [
-                {
-                    "event_id": "e1",
-                    "sender": agent_id,
-                    "body": f"Partial reply\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}",
-                    "stream_status": STREAM_STATUS_STREAMING,
-                    "timestamp": 599_000,
-                    "content": {STREAM_STATUS_KEY: STREAM_STATUS_STREAMING},
-                },
-                {"event_id": "e2", "sender": "@user:localhost", "body": "Question"},
+                _make_visible_message(
+                    event_id="e1",
+                    sender=agent_id,
+                    body=f"Partial reply\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}",
+                    stream_status=STREAM_STATUS_STREAMING,
+                    timestamp=599_000,
+                ),
+                _make_visible_message(event_id="e2", sender="@user:localhost", body="Question"),
             ],
             "helper",
             config,
@@ -405,7 +458,7 @@ class TestUnseenMessagesPartialReplies:
 
         assert partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}
         assert in_progress_event_ids == set()
-        assert unseen[0]["body"] == "Partial reply"
+        assert unseen[0].body == "Partial reply"
 
     def test_placeholder_only_self_reply_is_not_injected(self) -> None:
         """Do not inject placeholder-only self replies as meaningful unseen context."""
@@ -415,14 +468,13 @@ class TestUnseenMessagesPartialReplies:
 
         unseen, partial_reply_kinds, _in_progress_event_ids = _get_unseen_messages(
             [
-                {
-                    "event_id": "e1",
-                    "sender": agent_id,
-                    "body": f"{_PROGRESS_PLACEHOLDER} ⋯",
-                    "stream_status": STREAM_STATUS_STREAMING,
-                    "content": {STREAM_STATUS_KEY: STREAM_STATUS_STREAMING},
-                },
-                {"event_id": "e2", "sender": "@user:localhost", "body": "Question"},
+                _make_visible_message(
+                    event_id="e1",
+                    sender=agent_id,
+                    body=f"{_PROGRESS_PLACEHOLDER} ⋯",
+                    stream_status=STREAM_STATUS_STREAMING,
+                ),
+                _make_visible_message(event_id="e2", sender="@user:localhost", body="Question"),
             ],
             "helper",
             config,
@@ -443,14 +495,13 @@ class TestUnseenMessagesPartialReplies:
 
         initial_unseen, initial_kinds, initial_in_progress_event_ids = _get_unseen_messages(
             [
-                {
-                    "event_id": "e1",
-                    "sender": agent_id,
-                    "body": f"Partial reply\n\n{_CANCELLED_RESPONSE_NOTE}",
-                    "stream_status": STREAM_STATUS_CANCELLED,
-                    "content": {STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED},
-                },
-                {"event_id": "e2", "sender": "@user:localhost", "body": "Continue"},
+                _make_visible_message(
+                    event_id="e1",
+                    sender=agent_id,
+                    body=f"Partial reply\n\n{_CANCELLED_RESPONSE_NOTE}",
+                    stream_status=STREAM_STATUS_CANCELLED,
+                ),
+                _make_visible_message(event_id="e2", sender="@user:localhost", body="Continue"),
             ],
             "helper",
             config,
@@ -468,14 +519,13 @@ class TestUnseenMessagesPartialReplies:
 
         repeated_unseen, repeated_kinds, _repeated_in_progress_event_ids = _get_unseen_messages(
             [
-                {
-                    "event_id": "e1",
-                    "sender": agent_id,
-                    "body": f"Partial reply\n\n{_CANCELLED_RESPONSE_NOTE}",
-                    "stream_status": STREAM_STATUS_CANCELLED,
-                    "content": {STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED},
-                },
-                {"event_id": "e3", "sender": "@user:localhost", "body": "New question"},
+                _make_visible_message(
+                    event_id="e1",
+                    sender=agent_id,
+                    body=f"Partial reply\n\n{_CANCELLED_RESPONSE_NOTE}",
+                    stream_status=STREAM_STATUS_CANCELLED,
+                ),
+                _make_visible_message(event_id="e3", sender="@user:localhost", body="New question"),
             ],
             "helper",
             config,
@@ -485,7 +535,7 @@ class TestUnseenMessagesPartialReplies:
             active_event_ids=set(),
         )
 
-        assert [msg["event_id"] for msg in initial_unseen] == ["e1"]
+        assert [msg.event_id for msg in initial_unseen] == ["e1"]
         assert initial_kinds == {_PartialReplyKind.INTERRUPTED}
         assert _get_unseen_event_ids_for_metadata(
             initial_unseen,
@@ -502,14 +552,13 @@ class TestUnseenMessagesPartialReplies:
 
         initial_unseen, _initial_kinds, initial_in_progress_event_ids = _get_unseen_messages(
             [
-                {
-                    "event_id": "e1",
-                    "sender": agent_id,
-                    "body": "Partial reply ⋯",
-                    "stream_status": STREAM_STATUS_STREAMING,
-                    "content": {STREAM_STATUS_KEY: STREAM_STATUS_STREAMING},
-                },
-                {"event_id": "e2", "sender": "@user:localhost", "body": "Question"},
+                _make_visible_message(
+                    event_id="e1",
+                    sender=agent_id,
+                    body="Partial reply ⋯",
+                    stream_status=STREAM_STATUS_STREAMING,
+                ),
+                _make_visible_message(event_id="e2", sender="@user:localhost", body="Question"),
             ],
             "helper",
             config,
@@ -527,14 +576,13 @@ class TestUnseenMessagesPartialReplies:
 
         updated_unseen, updated_kinds, updated_in_progress_event_ids = _get_unseen_messages(
             [
-                {
-                    "event_id": "e1",
-                    "sender": agent_id,
-                    "body": f"Partial reply\n\n{_CANCELLED_RESPONSE_NOTE}",
-                    "stream_status": STREAM_STATUS_CANCELLED,
-                    "content": {STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED},
-                },
-                {"event_id": "e3", "sender": "@user:localhost", "body": "Continue"},
+                _make_visible_message(
+                    event_id="e1",
+                    sender=agent_id,
+                    body=f"Partial reply\n\n{_CANCELLED_RESPONSE_NOTE}",
+                    stream_status=STREAM_STATUS_CANCELLED,
+                ),
+                _make_visible_message(event_id="e3", sender="@user:localhost", body="Continue"),
             ],
             "helper",
             config,
@@ -546,8 +594,8 @@ class TestUnseenMessagesPartialReplies:
 
         assert updated_kinds == {_PartialReplyKind.INTERRUPTED}
         assert updated_in_progress_event_ids == set()
-        assert [msg["event_id"] for msg in updated_unseen] == ["e1"]
-        assert updated_unseen[0]["body"] == "Partial reply"
+        assert [msg.event_id for msg in updated_unseen] == ["e1"]
+        assert updated_unseen[0].body == "Partial reply"
 
 
 class TestThreadHistoryStreamStatus:

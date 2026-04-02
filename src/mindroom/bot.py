@@ -1839,7 +1839,7 @@ class AgentBot:
             self.logger,
             fetch_thread_history,
         )
-        return is_thread, thread_id, cast("list[VisibleMessageLike]", thread_history)
+        return is_thread, thread_id, thread_history
 
     def _requester_user_id_for_event(
         self,
