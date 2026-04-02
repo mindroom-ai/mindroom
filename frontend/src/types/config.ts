@@ -135,18 +135,31 @@ function isEmptyCompactionOverride(compaction: CompactionConfig): boolean {
   );
 }
 
+function resolveAuthoredCompactionEnabled(
+  compaction: CompactionConfig | null | undefined
+): boolean {
+  if (compaction == null) {
+    return false;
+  }
+  if (compaction.enabled !== undefined) {
+    return compaction.enabled;
+  }
+  return true;
+}
+
 export function resolveEffectiveCompactionEnabled(
   compaction: CompactionConfig | null | undefined,
   defaultCompaction: CompactionConfig | null | undefined
 ): boolean {
+  const defaultEnabled = resolveAuthoredCompactionEnabled(defaultCompaction);
   if (compaction == null) {
-    return defaultCompaction?.enabled ?? false;
+    return defaultEnabled;
   }
   if (compaction.enabled !== undefined) {
     return compaction.enabled;
   }
   if (isEmptyCompactionOverride(compaction) || isPureCompactionModelClear(compaction)) {
-    return defaultCompaction?.enabled ?? false;
+    return defaultEnabled;
   }
   return true;
 }

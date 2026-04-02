@@ -530,6 +530,87 @@ describe('TeamEditor', () => {
     expect(screen.getByLabelText('Enable auto-compaction')).not.toBeChecked();
   });
 
+  it('shows auto-compaction as disabled when defaults.compaction is omitted', () => {
+    (useConfigStore as any).mockReturnValue({
+      teams: [mockTeam],
+      agents: mockAgents,
+      rooms: [
+        {
+          id: 'dev',
+          display_name: 'Dev',
+          description: 'Development room',
+          agents: ['code', 'shell'],
+        },
+        { id: 'lobby', display_name: 'Lobby', description: 'Main lobby', agents: [] },
+        {
+          id: 'research',
+          display_name: 'Research',
+          description: 'Research room',
+          agents: ['research'],
+        },
+      ],
+      config: {
+        ...mockConfig,
+        defaults: {},
+        teams: { dev_team: mockTeam },
+      },
+      selectedTeamId: 'dev_team',
+      updateTeam: mockUpdateTeam,
+      deleteTeam: mockDeleteTeam,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+      diagnostics: [],
+      agentPoliciesByAgent: mockAgentPoliciesByAgent,
+      selectTeam: vi.fn(),
+    });
+
+    render(<TeamEditor />);
+
+    expect(screen.getByLabelText('Enable auto-compaction')).not.toBeChecked();
+  });
+
+  it('shows auto-compaction as enabled when defaults.compaction is an authored empty object', () => {
+    (useConfigStore as any).mockReturnValue({
+      teams: [mockTeam],
+      agents: mockAgents,
+      rooms: [
+        {
+          id: 'dev',
+          display_name: 'Dev',
+          description: 'Development room',
+          agents: ['code', 'shell'],
+        },
+        { id: 'lobby', display_name: 'Lobby', description: 'Main lobby', agents: [] },
+        {
+          id: 'research',
+          display_name: 'Research',
+          description: 'Research room',
+          agents: ['research'],
+        },
+      ],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          compaction: {},
+        },
+        teams: { dev_team: mockTeam },
+      },
+      selectedTeamId: 'dev_team',
+      updateTeam: mockUpdateTeam,
+      deleteTeam: mockDeleteTeam,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+      diagnostics: [],
+      agentPoliciesByAgent: mockAgentPoliciesByAgent,
+      selectTeam: vi.fn(),
+    });
+
+    render(<TeamEditor />);
+
+    expect(screen.getByLabelText('Enable auto-compaction')).toBeChecked();
+  });
+
   it('displays team members with checkboxes', () => {
     render(<TeamEditor />);
 

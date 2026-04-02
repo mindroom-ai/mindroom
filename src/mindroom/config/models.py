@@ -354,7 +354,7 @@ class ModelConfig(BaseModel):
     context_window: int | None = Field(
         default=None,
         ge=1,
-        description="Context window size in tokens; when set, history is dynamically reduced toward an 80% target of this limit",
+        description="Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit compaction.model also needs its own context_window for destructive compaction",
     )
 
 

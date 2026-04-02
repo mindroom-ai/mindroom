@@ -1600,6 +1600,75 @@ def test_get_entity_compaction_config_merges_authored_overrides(tmp_path: Path) 
     assert resolved.notify is True
 
 
+def test_authored_empty_defaults_compaction_enables_destructive_compaction(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "agents": {
+                "test_agent": {
+                    "display_name": "Test Agent",
+                },
+            },
+            "defaults": {
+                "tools": [],
+                "compaction": {},
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "test-model",
+                    "context_window": 48_000,
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.get_entity_compaction_config("test_agent"),
+        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        active_model_name="default",
+        active_context_window=48_000,
+        static_prompt_tokens=2_000,
+    )
+
+    assert execution_plan.authored_compaction_enabled is True
+
+
+def test_authored_empty_agent_compaction_override_stays_disabled_without_defaults(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "agents": {
+                "test_agent": {
+                    "display_name": "Test Agent",
+                    "compaction": {},
+                },
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "test-model",
+                    "context_window": 48_000,
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.get_entity_compaction_config("test_agent"),
+        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        active_model_name="default",
+        active_context_window=48_000,
+        static_prompt_tokens=2_000,
+    )
+
+    assert execution_plan.authored_compaction_enabled is False
+
+
 def test_validate_compaction_model_references_does_not_emit_availability_warnings(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     with patch("mindroom.config.main.logger.warning") as mock_warning:
