@@ -1331,7 +1331,7 @@ class AgentBot:
             if self.agent_name == ROUTER_AGENT_NAME:
                 # Router always handles commands, even in single-agent rooms
                 # Commands like !schedule, !help, etc. need to work regardless
-                await self._handle_command(room, event, command)
+                await self._handle_command(room, event, command, requester_user_id=requester_user_id)
             return
         if self._has_newer_unresponded_in_scope(event, dispatch.context):
             self.response_tracker.mark_responded(event.event_id)
@@ -1638,11 +1638,14 @@ class AgentBot:
         """Handle image/file/video/audio events and dispatch media-aware responses."""
         assert self.client is not None
 
-        if isinstance(event, nio.RoomMessageFile | nio.RoomEncryptedFile):
-            prepared_text_event = await self._prepare_file_sidecar_text_event(event)
-            if prepared_text_event is not None:
-                await self._dispatch_text_message(room, prepared_text_event, event.sender)
-                return
+        if isinstance(
+            event,
+            nio.RoomMessageFile | nio.RoomEncryptedFile,
+        ) and await self._dispatch_file_sidecar_text_preview(
+            room,
+            event,
+        ):
+            return
 
         if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
             await self._on_audio_media_message(room, event)
@@ -1782,6 +1785,26 @@ class AgentBot:
             return attachment_record.attachment_id
 
         return None
+
+    async def _dispatch_file_sidecar_text_preview(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageFile | nio.RoomEncryptedFile,
+    ) -> bool:
+        """Dispatch one sidecar-backed file preview through the normal text pipeline."""
+        if not is_v2_sidecar_text_preview(event.source):
+            return False
+
+        requester_user_id = self._precheck_event(room, event)
+        if requester_user_id is None:
+            return True
+
+        prepared_text_event = await self._prepare_file_sidecar_text_event(event)
+        assert prepared_text_event is not None
+        assert self.client is not None
+        await interactive.handle_text_response(self.client, room, prepared_text_event, self.agent_name)
+        await self._dispatch_text_message(room, prepared_text_event, requester_user_id)
+        return True
 
     async def _prepare_file_sidecar_text_event(
         self,
@@ -4647,9 +4670,23 @@ class AgentBot:
         self.response_tracker.mark_responded(event_info.original_event_id, response_event_id)
         self.logger.info("Successfully regenerated response for edited message")
 
-    async def _handle_command(self, room: nio.MatrixRoom, event: _TextDispatchEvent, command: Command) -> None:
+    async def _handle_command(
+        self,
+        room: nio.MatrixRoom,
+        event: _TextDispatchEvent,
+        command: Command,
+        *,
+        requester_user_id: str | None = None,
+    ) -> None:
         assert self.client is not None
         event = await self._resolve_text_dispatch_event(event)
+        requester_user_id_for_event = self._requester_user_id_for_event
+        if requester_user_id is not None:
+
+            def _fixed_requester_user_id_for_event(_event: CommandEvent) -> str:
+                return requester_user_id
+
+            requester_user_id_for_event = _fixed_requester_user_id_for_event
         context = CommandHandlerContext(
             client=self.client,
             config=self.config,
@@ -4658,7 +4695,7 @@ class AgentBot:
             logger=self.logger,
             response_tracker=self.response_tracker,
             derive_conversation_context=self._derive_conversation_context,
-            requester_user_id_for_event=self._requester_user_id_for_event,
+            requester_user_id_for_event=requester_user_id_for_event,
             resolve_reply_thread_id=self._resolve_reply_thread_id,
             send_response=self._send_response,
             send_skill_command_response=self._send_skill_command_response,
