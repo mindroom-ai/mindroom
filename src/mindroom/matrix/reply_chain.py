@@ -16,6 +16,7 @@ import nio
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.message_content import resolve_event_source_content, visible_body_from_event_source
 
 if TYPE_CHECKING:
     import structlog
@@ -104,13 +105,22 @@ class ReplyChainCaches:
 # ---------------------------------------------------------------------------
 
 
-def _event_to_history_message(event: nio.Event) -> dict[str, Any]:
+async def _event_to_history_message(
+    event: nio.Event,
+    client: nio.AsyncClient,
+) -> dict[str, Any]:
     """Convert a Matrix event to normalized history message structure."""
-    content = event.source.get("content", {})
-    body = content.get("body", "") if isinstance(content, dict) else ""
+    event_source = event.source if isinstance(event.source, dict) else {}
+    resolved_source = await resolve_event_source_content(event_source, client)
+    content = resolved_source.get("content", {})
+    fallback_body = ""
+    if isinstance(content, dict):
+        raw_body = content.get("body")
+        if isinstance(raw_body, str):
+            fallback_body = raw_body
     return {
         "sender": event.sender,
-        "body": body if isinstance(body, str) else "",
+        "body": visible_body_from_event_source(resolved_source, fallback_body),
         "timestamp": event.server_timestamp,
         "event_id": event.event_id,
         "content": content if isinstance(content, dict) else {},
@@ -280,7 +290,7 @@ async def _fetch_node(
     target_event = response.event
     target_info = EventInfo.from_event(target_event.source)
     node = _ReplyChainNode(
-        message=_event_to_history_message(target_event),
+        message=await _event_to_history_message(target_event, client),
         parent_event_id=_next_reply_chain_event_id(target_info, event_id),
         thread_root_id=target_info.thread_id,
         has_relations=target_info.has_relations,

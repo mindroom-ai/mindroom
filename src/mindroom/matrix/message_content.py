@@ -50,6 +50,20 @@ def visible_body_from_event_source(event_source: dict[str, Any], fallback_body: 
     return _content_body(visible_content, fallback_body)
 
 
+def is_v2_sidecar_text_preview(event_source: dict[str, Any]) -> bool:
+    """Return whether one event source is a large-text preview transported as ``m.file``."""
+    content = _normalized_content_dict(event_source.get("content", {}))
+    if content.get("msgtype") != "m.file":
+        return False
+
+    long_text_meta = content.get("io.mindroom.long_text")
+    if not isinstance(long_text_meta, dict):
+        return False
+    if long_text_meta.get("version") != 2 or long_text_meta.get("encoding") != "matrix_event_content_json":
+        return False
+    return _sidecar_mxc_url(content) is not None
+
+
 def _sidecar_content_for_resolution(content: dict[str, Any]) -> dict[str, Any] | None:
     """Return the content dict that owns the long-text sidecar metadata."""
     if "io.mindroom.long_text" in content:

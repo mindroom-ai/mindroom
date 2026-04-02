@@ -255,11 +255,12 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
     bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
 
     room = _make_room("@mindroom_router:example.com", "@mindroom_home:localhost", "@alice:example.com")
-    event = nio.RoomMessageText.from_dict(
+    event = nio.Event.parse_event(
         {
             "event_id": "$sidecar-schedule",
             "sender": "@alice:example.com",
             "origin_server_ts": 1234567890,
+            "type": "m.room.message",
             "content": {
                 "msgtype": "m.file",
                 "body": "!schedule tomorrow [Message continues in attached file]",
@@ -281,7 +282,8 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
             return_value=("task123", "scheduled"),
         ) as mock_schedule,
     ):
-        await bot._on_message(room, event)
+        assert isinstance(event, nio.RoomMessageFile)
+        await bot._on_media_message(room, event)
 
     assert (
         mock_schedule.await_args.kwargs["full_text"] == "tomorrow at 9am @mindroom_home:localhost turn off the lights"
@@ -339,11 +341,12 @@ async def test_router_parses_sidecar_skill_command_mentions_from_canonical_body(
         "@mindroom_research:localhost",
         "@alice:example.com",
     )
-    event = nio.RoomMessageText.from_dict(
+    event = nio.Event.parse_event(
         {
             "event_id": "$sidecar-skill",
             "sender": "@alice:example.com",
             "origin_server_ts": 1234567890,
+            "type": "m.room.message",
             "content": {
                 "msgtype": "m.file",
                 "body": "!skill demo [Message continues in attached file]",
@@ -369,7 +372,8 @@ async def test_router_parses_sidecar_skill_command_mentions_from_canonical_body(
             ),
         ),
     ):
-        await bot._on_message(room, event)
+        assert isinstance(event, nio.RoomMessageFile)
+        await bot._on_media_message(room, event)
 
     assert bot._send_response.await_count == 0
     assert bot._send_skill_command_response.await_args.kwargs["agent_name"] == "home"

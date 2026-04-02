@@ -61,6 +61,7 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.message_content import (
     extract_edit_body,
+    is_v2_sidecar_text_preview,
     resolve_event_source_content,
     visible_body_from_event_source,
 )
@@ -1637,6 +1638,12 @@ class AgentBot:
         """Handle image/file/video/audio events and dispatch media-aware responses."""
         assert self.client is not None
 
+        if isinstance(event, nio.RoomMessageFile | nio.RoomEncryptedFile):
+            prepared_text_event = await self._prepare_file_sidecar_text_event(event)
+            if prepared_text_event is not None:
+                await self._dispatch_text_message(room, prepared_text_event, event.sender)
+                return
+
         if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
             await self._on_audio_media_message(room, event)
             return
@@ -1775,6 +1782,24 @@ class AgentBot:
             return attachment_record.attachment_id
 
         return None
+
+    async def _prepare_file_sidecar_text_event(
+        self,
+        event: nio.RoomMessageFile | nio.RoomEncryptedFile,
+    ) -> _PreparedTextEvent | None:
+        """Return a prepared text event when a file event is really a long-text preview."""
+        if not is_v2_sidecar_text_preview(event.source):
+            return None
+
+        assert self.client is not None
+        resolved_source = await resolve_event_source_content(event.source, self.client)
+        return _PreparedTextEvent(
+            sender=event.sender,
+            event_id=event.event_id,
+            body=visible_body_from_event_source(resolved_source, event.body),
+            source=resolved_source,
+            server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
+        )
 
     async def _derive_conversation_context(
         self,

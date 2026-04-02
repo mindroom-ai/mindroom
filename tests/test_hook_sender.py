@@ -507,11 +507,12 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
     bot._build_dispatch_payload_with_attachments = AsyncMock(return_value=_DispatchPayload(prompt="unused"))
     bot._execute_dispatch_action = AsyncMock()
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
-    event = nio.RoomMessageText.from_dict(
+    event = nio.Event.parse_event(
         {
             "event_id": "$sidecar-message",
             "sender": "@user:localhost",
             "origin_server_ts": 1234567890,
+            "type": "m.room.message",
             "content": {
                 "msgtype": "m.file",
                 "body": "@mindroom_code:localhost [Message continues in attached file]",
@@ -532,11 +533,8 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
 
-    await bot._dispatch_text_message(
-        room,
-        event,
-        requester_user_id="@user:localhost",
-    )
+    assert isinstance(event, nio.RoomMessageFile)
+    await bot._on_media_message(room, event)
 
     assert captured_bodies == ["@mindroom_code:localhost what is 99+1?"]
     assert (
