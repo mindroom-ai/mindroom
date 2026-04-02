@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,11 +16,20 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.routing import _AgentSuggestion
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_ACCESS_TOKEN,
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    make_visible_message,
+    runtime_paths_for,
+    test_runtime_paths,
+)
+
+if TYPE_CHECKING:
+    from mindroom.matrix.client import ResolvedVisibleMessage
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -59,12 +69,12 @@ def _message(
     content: dict[str, object] | None = None,
 ) -> ResolvedVisibleMessage:
     resolved_content = dict(content or {})
-    if body is not None:
-        resolved_content.setdefault("body", body)
-    return ResolvedVisibleMessage.synthetic(
+    resolved_body = body or ""
+    if resolved_body:
+        resolved_content.setdefault("body", resolved_body)
+    return make_visible_message(
         sender=sender,
-        body=body,
-        event_id=None,
+        body=resolved_body,
         content=resolved_content,
     )
 
