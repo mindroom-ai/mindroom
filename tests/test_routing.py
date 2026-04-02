@@ -15,6 +15,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.routing import _AgentSuggestion
@@ -30,7 +31,7 @@ async def suggest_agent_for_message(
     message: str,
     agents: list[MatrixID],
     config: Config,
-    thread_history: list[dict[str, str]] | None = None,
+    thread_history: list[ResolvedVisibleMessage] | None = None,
 ) -> str | None:
     """Run routing with the test config's bound runtime context."""
     return await mindroom.routing.suggest_agent_for_message(
@@ -51,12 +52,29 @@ def check_agent_mentioned(
     return mindroom.thread_utils.check_agent_mentioned(event_source, agent_id, config, runtime_paths_for(config))
 
 
-def _has_any_agent_mentions_in_thread(thread_history: list[dict[str, str]], config: Config) -> bool:
+def _message(
+    sender: str,
+    body: str | None = None,
+    *,
+    content: dict[str, object] | None = None,
+) -> ResolvedVisibleMessage:
+    resolved_content = dict(content or {})
+    if body is not None:
+        resolved_content.setdefault("body", body)
+    return ResolvedVisibleMessage.synthetic(
+        sender=sender,
+        body=body,
+        event_id=None,
+        content=resolved_content,
+    )
+
+
+def _has_any_agent_mentions_in_thread(thread_history: list[ResolvedVisibleMessage], config: Config) -> bool:
     """Check thread mentions with the test config's bound runtime context."""
     return mindroom.thread_utils._has_any_agent_mentions_in_thread(thread_history, config, runtime_paths_for(config))
 
 
-def has_multiple_non_agent_users_in_thread(thread_history: list[dict[str, str]], config: Config) -> bool:
+def has_multiple_non_agent_users_in_thread(thread_history: list[ResolvedVisibleMessage], config: Config) -> bool:
     """Check multi-human thread participation with the test config's bound runtime context."""
     return mindroom.thread_utils.has_multiple_non_agent_users_in_thread(
         thread_history,
@@ -156,8 +174,8 @@ class TestAIRouting:
             ),
         )
         thread_context = [
-            {"sender": "@user:localhost", "body": "I need help with my taxes"},
-            {"sender": "@mindroom_finance:localhost", "body": "I can help with that"},
+            _message("@user:localhost", "I need help with my taxes"),
+            _message("@mindroom_finance:localhost", "I can help with that"),
         ]
 
         with patch("mindroom.routing.get_model_instance"):
@@ -307,16 +325,12 @@ class TestThreadUtils:
     def test_has_any_agent_mentions_in_thread_with_mentions(self) -> None:
         """Test detecting agent mentions in thread."""
         thread_history = [
-            {
-                "sender": "@user:example.org",
-                "body": "Hello",
-                "content": {},
-            },
-            {
-                "sender": "@user:example.org",
-                "body": "@calculator help me",
-                "content": {"m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]}},
-            },
+            _message("@user:example.org", "Hello", content={}),
+            _message(
+                "@user:example.org",
+                "@calculator help me",
+                content={"m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]}},
+            ),
         ]
 
         assert _has_any_agent_mentions_in_thread(thread_history, self.config) is True
@@ -324,16 +338,8 @@ class TestThreadUtils:
     def test_has_any_agent_mentions_in_thread_no_mentions(self) -> None:
         """Test thread with no agent mentions."""
         thread_history = [
-            {
-                "sender": "@user:example.org",
-                "body": "Hello",
-                "content": {},
-            },
-            {
-                "sender": "@mindroom_calculator:localhost",
-                "body": "Hi there!",
-                "content": {},
-            },
+            _message("@user:example.org", "Hello", content={}),
+            _message("@mindroom_calculator:localhost", "Hi there!", content={}),
         ]
 
         assert _has_any_agent_mentions_in_thread(thread_history, self.config) is False
@@ -341,11 +347,11 @@ class TestThreadUtils:
     def test_has_any_agent_mentions_in_thread_user_mentions(self) -> None:
         """Test thread with only user mentions (not agents)."""
         thread_history = [
-            {
-                "sender": "@user:example.org",
-                "body": "@friend check this out",
-                "content": {"m.mentions": {"user_ids": ["@friend:example.org"]}},
-            },
+            _message(
+                "@user:example.org",
+                "@friend check this out",
+                content={"m.mentions": {"user_ids": ["@friend:example.org"]}},
+            ),
         ]
 
         assert _has_any_agent_mentions_in_thread(thread_history, self.config) is False
@@ -365,25 +371,25 @@ class TestThreadUtils:
     def test_has_multiple_non_agent_users_in_thread_true(self) -> None:
         """Detect more than one non-agent user posting in a thread."""
         history = [
-            {"sender": "@alice:localhost", "body": "hello"},
-            {"sender": "@bob:localhost", "body": "hi"},
+            _message("@alice:localhost", "hello"),
+            _message("@bob:localhost", "hi"),
         ]
         assert has_multiple_non_agent_users_in_thread(history, self.config) is True
 
     def test_has_multiple_non_agent_users_in_thread_false(self) -> None:
         """Do not trigger when only one non-agent user has posted."""
         history = [
-            {"sender": "@alice:localhost", "body": "hello"},
-            {"sender": "@mindroom_calculator:localhost", "body": "result"},
+            _message("@alice:localhost", "hello"),
+            _message("@mindroom_calculator:localhost", "result"),
         ]
         assert has_multiple_non_agent_users_in_thread(history, self.config) is False
 
     def test_has_multiple_non_agent_users_in_thread_ignores_agents(self) -> None:
         """Agent senders should not count toward the non-agent tally."""
         history = [
-            {"sender": "@alice:localhost", "body": "help"},
-            {"sender": "@mindroom_calculator:localhost", "body": "sure"},
-            {"sender": "@mindroom_general:localhost", "body": "me too"},
+            _message("@alice:localhost", "help"),
+            _message("@mindroom_calculator:localhost", "sure"),
+            _message("@mindroom_general:localhost", "me too"),
         ]
         assert has_multiple_non_agent_users_in_thread(history, self.config) is False
 
@@ -424,16 +430,16 @@ class TestThreadUtils:
             ),
         )
         history = [
-            {"sender": "@alice:localhost", "body": "hello"},
-            {"sender": "@telegram:localhost", "body": "relayed message"},
+            _message("@alice:localhost", "hello"),
+            _message("@telegram:localhost", "relayed message"),
         ]
         assert has_multiple_non_agent_users_in_thread(history, config) is False
 
     def test_bot_accounts_not_excluded_when_unlisted(self) -> None:
         """Without bot_accounts config, bridge bots count as non-agent users."""
         history = [
-            {"sender": "@alice:localhost", "body": "hello"},
-            {"sender": "@telegram:localhost", "body": "relayed message"},
+            _message("@alice:localhost", "hello"),
+            _message("@telegram:localhost", "relayed message"),
         ]
         assert has_multiple_non_agent_users_in_thread(history, self.config) is True
 
@@ -538,13 +544,13 @@ class TestBridgeMentionFallback:
     def test_html_pill_in_thread_history(self) -> None:
         """Bridge pills in thread history are detected by has_any_agent_mentions_in_thread."""
         thread_history = [
-            {
-                "sender": "@alice:localhost",
-                "content": {
+            _message(
+                "@alice:localhost",
+                content={
                     "body": "@mindroom_calculator compute",
                     "formatted_body": '<a href="https://matrix.to/#/@mindroom_calculator:localhost">@mindroom_calculator</a> compute',
                 },
-            },
+            ),
         ]
         assert _has_any_agent_mentions_in_thread(thread_history, self.config) is True
 
