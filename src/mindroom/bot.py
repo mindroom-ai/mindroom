@@ -4226,11 +4226,7 @@ class AgentBot:
         if self.client is None:
             return None
 
-        summary_line = (
-            "Conversation compacted "
-            f"(~{outcome.before_tokens:,} -> ~{outcome.after_tokens:,} / {outcome.window_tokens:,} tokens, "
-            f"{outcome.compacted_run_count} runs summarized)."
-        )
+        summary_line = outcome.format_notice()
         formatted_body = f"<em>{html_escape(summary_line)}</em>"
         effective_thread_id = self._resolve_reply_thread_id(
             thread_id,

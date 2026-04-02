@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -48,6 +48,7 @@ from mindroom.history import (
     CompactionOutcome,
     PreparedHistoryState,
 )
+from mindroom.history.compaction import compute_prompt_token_breakdown
 from mindroom.history.runtime import (
     ScopeSessionContext,
     apply_replay_plan,
@@ -673,6 +674,14 @@ async def _prepare_agent_and_prompt(
         apply_replay_plan(target=agent, replay_plan=prepared_execution.replay_plan)
     full_prompt = prepared_execution.final_prompt
     unseen_event_ids = prepared_execution.unseen_event_ids
+
+    if prepared_history.compaction_outcomes:
+        breakdown = compute_prompt_token_breakdown(agent=agent, full_prompt=full_prompt)
+        prepared_history = PreparedHistoryState(
+            compaction_outcomes=[replace(o, **breakdown) for o in prepared_history.compaction_outcomes],
+            replay_plan=prepared_history.replay_plan,
+            replays_persisted_history=prepared_history.replays_persisted_history,
+        )
 
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
     return agent, full_prompt, unseen_event_ids, prepared_history

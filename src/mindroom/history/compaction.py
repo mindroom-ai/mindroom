@@ -1090,3 +1090,35 @@ def _model_identifier(model: Model) -> str:
 
 def _iso_utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def compute_prompt_token_breakdown(
+    agent: Agent | None = None,
+    team: Team | None = None,
+    full_prompt: str | None = None,
+) -> dict[str, int]:
+    """Compute token breakdown for system prompt, tool defs, and current prompt."""
+    breakdown: dict[str, int] = {}
+
+    if agent is not None:
+        sys_chars = len(agent.role or "")
+        instructions = agent.instructions
+        if isinstance(instructions, str):
+            sys_chars += len(instructions)
+        elif isinstance(instructions, list):
+            for instruction in instructions:
+                sys_chars += len(str(instruction))
+        breakdown["role_instructions_tokens"] = sys_chars // 4
+
+    tool_tokens = 0
+    if agent is not None:
+        tool_tokens = estimate_tool_definition_tokens(agent)
+    elif team is not None:
+        prepared_tools, _tool_instructions = _prepare_tools_for_estimation(team.tools)
+        tool_tokens = _estimate_prepared_tool_definition_tokens(prepared_tools)
+    breakdown["tool_definition_tokens"] = tool_tokens
+
+    if full_prompt is not None:
+        breakdown["current_prompt_tokens"] = len(full_prompt) // 4
+
+    return breakdown
