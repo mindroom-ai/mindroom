@@ -1,15 +1,9 @@
-"""Centralized message content extraction with large message support.
-
-This module provides utilities to extract the full content from Matrix messages,
-including handling large messages that are stored as MXC attachments.
-"""
+"""Centralized message content extraction for Matrix sidecar-backed messages."""
 
 from __future__ import annotations
 
 import json
-import re
 import time
-from html import unescape
 from typing import Any
 
 import nio
@@ -23,76 +17,6 @@ logger = get_logger(__name__)
 # Key: mxc_url, Value: (content, timestamp)
 _mxc_cache: dict[str, tuple[str, float]] = {}
 _cache_ttl = 3600.0  # 1 hour TTL
-
-
-def _attachment_mimetype(content: dict[str, Any]) -> str | None:
-    """Return attachment mimetype when available."""
-    info = content.get("info")
-    if isinstance(info, dict):
-        mimetype = info.get("mimetype")
-        if isinstance(mimetype, str):
-            return mimetype
-
-    file_info = content.get("file")
-    if isinstance(file_info, dict):
-        mimetype = file_info.get("mimetype")
-        if isinstance(mimetype, str):
-            return mimetype
-
-    filename = content.get("filename")
-    if isinstance(filename, str):
-        normalized_filename = filename.lower()
-        if normalized_filename.endswith((".html", ".htm")):
-            return "text/html"
-        if normalized_filename.endswith(".txt"):
-            return "text/plain"
-        if normalized_filename.endswith(".json"):
-            return "application/json"
-
-    return None
-
-
-def _html_to_text(html_text: str) -> str:
-    """Convert HTML attachment content back to plain text for prompt history."""
-
-    def _anchor_to_text(match: re.Match[str]) -> str:
-        href = match.group(1) or match.group(2) or match.group(3) or ""
-        label = match.group(4).strip()
-        if not label:
-            return href
-        if label == href:
-            return href
-        return f"{label} ({href})"
-
-    text = re.sub(
-        r"""(?is)<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))[^>]*>(.*?)</a>""",
-        _anchor_to_text,
-        html_text,
-    )
-    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
-    text = re.sub(r"(?i)</(p|div|li|tr|h1|h2|h3|h4|h5|h6|pre|blockquote)>", "\n", text)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = unescape(text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def _extract_large_message_v2_body(payload_json: str) -> str | None:
-    """Extract prompt body text from a v2 large-message sidecar JSON payload."""
-    payload = _extract_large_message_v2_content(payload_json)
-    if payload is None:
-        return None
-
-    nested_new_content = payload.get("m.new_content")
-    if isinstance(nested_new_content, dict):
-        nested_body = nested_new_content.get("body")
-        if isinstance(nested_body, str):
-            return nested_body
-
-    body = payload.get("body")
-    if isinstance(body, str):
-        return body
-    return None
 
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
@@ -145,75 +69,10 @@ def _sidecar_mxc_url(content: dict[str, Any]) -> str | None:
     return file_url if isinstance(file_url, str) else None
 
 
-async def _get_full_message_body(
-    message_data: dict[str, Any],
-    client: nio.AsyncClient | None = None,
-) -> str:
-    """Extract the full message body, handling large message attachments.
-
-    For regular messages, returns the body directly.
-    For large messages with attachments, downloads and returns the full content.
-
-    Args:
-        message_data: Dict with message data including 'body' and 'content' keys
-        client: Optional Matrix client for downloading attachments
-
-    Returns:
-        The full message body text
-
-    """
-    content = message_data.get("content", {})
-    body = str(message_data.get("body", ""))
-
-    # Check if this is a large message with our custom metadata
-    if "io.mindroom.long_text" in content:
-        long_text_meta = content.get("io.mindroom.long_text")
-        long_text_version = long_text_meta.get("version") if isinstance(long_text_meta, dict) else None
-        # This is a large message - need to fetch the attachment
-        if not client:
-            logger.warning("Cannot fetch large message attachment without client, returning preview")
-            return body
-
-        # Get the MXC URL from either 'url' (unencrypted) or 'file' (encrypted)
-        mxc_url = None
-        if "url" in content:
-            mxc_url = content["url"]
-        elif "file" in content:
-            file_info = content["file"]
-            mxc_url = file_info.get("url")
-
-        if not mxc_url:
-            logger.warning("Large message missing MXC URL, returning preview")
-            return body
-
-        # Download the full content
-        full_text = await _download_mxc_text(
-            client,
-            mxc_url,
-            content.get("file"),
-            mimetype=_attachment_mimetype(content),
-        )
-        if full_text:
-            if long_text_version == 2:
-                extracted_body = _extract_large_message_v2_body(full_text)
-                if extracted_body is not None:
-                    return extracted_body
-                logger.warning("Invalid large-message v2 payload JSON, returning preview")
-            else:
-                return full_text
-        else:
-            logger.warning("Failed to download large message, returning preview")
-        return body
-
-    # Regular message or no custom metadata
-    return body
-
-
-async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
+async def _download_mxc_text(  # noqa: PLR0911, C901
     client: nio.AsyncClient,
     mxc_url: str,
     file_info: dict[str, Any] | None = None,
-    mimetype: str | None = None,
 ) -> str | None:
     """Download text content from an MXC URL with caching.
 
@@ -221,8 +80,6 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
         client: Matrix client
         mxc_url: The MXC URL to download from
         file_info: Optional encryption info for E2EE rooms
-        mimetype: Optional attachment MIME type
-
     Returns:
         The downloaded text content, or None if download failed
 
@@ -278,9 +135,6 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
         except UnicodeDecodeError:
             logger.exception("Downloaded content is not valid UTF-8 text")
             return None
-        if mimetype == "text/html":
-            decoded_text = _html_to_text(decoded_text)
-
         # Cache the result
         _mxc_cache[mxc_url] = (decoded_text, time.time())
         logger.debug(f"Cached MXC content for: {mxc_url}")
@@ -318,26 +172,13 @@ async def extract_and_resolve_message(
     # Extract basic message data
     preview_content = _normalized_content_dict(event.source.get("content", {}))
     resolved_content = await _resolve_canonical_content(preview_content, client)
-    data = {
+    return {
         "sender": event.sender,
-        "body": event.body,
+        "body": _content_body(resolved_content, event.body),
         "timestamp": event.server_timestamp,
         "event_id": event.event_id,
         "content": resolved_content,
     }
-
-    if resolved_content is not preview_content:
-        data["body"] = _content_body(resolved_content, event.body)
-        return data
-
-    # Check if this is a large message and resolve if we have a client
-    if client and "io.mindroom.long_text" in preview_content:
-        data["body"] = await _get_full_message_body(
-            {"body": event.body, "content": preview_content},
-            client,
-        )
-
-    return data
 
 
 async def extract_edit_body(
@@ -352,15 +193,22 @@ async def extract_edit_body(
     body = new_content.get("body")
     if not isinstance(body, str):
         return None, None
+    return body, dict(new_content)
 
-    resolved_body = body
-    if client and "io.mindroom.long_text" in new_content:
-        resolved_body = await _get_full_message_body(
-            {"body": body, "content": new_content},
-            client,
-        )
 
-    return resolved_body, dict(new_content)
+async def resolve_event_source_content(
+    event_source: dict[str, Any],
+    client: nio.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """Return an event source with canonical v2 sidecar content hydrated when available."""
+    preview_content = _normalized_content_dict(event_source.get("content", {}))
+    resolved_content = await _resolve_canonical_content(preview_content, client)
+    if resolved_content is preview_content:
+        return event_source
+
+    resolved_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
+    resolved_event_source["content"] = resolved_content
+    return resolved_event_source
 
 
 async def _resolve_canonical_content(
@@ -382,7 +230,6 @@ async def _resolve_canonical_content(
         client,
         mxc_url,
         sidecar_content.get("file") if isinstance(sidecar_content.get("file"), dict) else None,
-        mimetype=_attachment_mimetype(sidecar_content),
     )
     if full_text is None:
         return content

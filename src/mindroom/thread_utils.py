@@ -42,6 +42,14 @@ def _extract_mentioned_user_ids(content: dict[str, Any]) -> list[str]:
     return []
 
 
+def _visible_message_content(content: dict[str, Any]) -> dict[str, Any]:
+    """Return the visible message content layer for mention detection."""
+    new_content = content.get("m.new_content")
+    if isinstance(new_content, dict):
+        return new_content
+    return content
+
+
 def _is_bot_or_agent(sender: str, config: Config, runtime_paths: RuntimePaths) -> bool:
     """Return True when *sender* is a MindRoom agent **or** listed in ``bot_accounts``."""
     return bool(extract_agent_name(sender, config, runtime_paths)) or sender in config.bot_accounts
@@ -60,7 +68,8 @@ def check_agent_mentioned(
     user who is *not* a configured agent and not in ``config.bot_accounts``
     (i.e. a real human user).
     """
-    content = event_source.get("content", {})
+    raw_content = event_source.get("content", {})
+    content = _visible_message_content(raw_content) if isinstance(raw_content, dict) else {}
     all_mentioned_ids = _extract_mentioned_user_ids(content)
     mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config, runtime_paths)
     am_i_mentioned = agent_id in mentioned_agents

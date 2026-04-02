@@ -345,6 +345,100 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
     assert emitted_envelope.body == "@test_agent what is 99+1?"
 
 
+@pytest.mark.asyncio
+async def test_bot_edit_regeneration_uses_hydrated_mentions_for_response_gating(tmp_path: Path) -> None:
+    """Edit regeneration should route mention detection through canonical hydrated edit content."""
+    _clear_mxc_cache()
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path, agent_names=("test_agent", "other_agent"))
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "body": "* @test_agent what is 99+1?",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "@test_agent what is 99+1?",
+                        "msgtype": "m.text",
+                        "m.mentions": {
+                            "user_ids": ["@mindroom_test_agent:example.com"],
+                        },
+                    },
+                    "m.relates_to": {
+                        "event_id": "$original:example.com",
+                        "rel_type": "m.replace",
+                    },
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+    bot.logger = MagicMock()
+    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    bot.response_tracker.mark_responded("$original:example.com", "$response:example.com")
+
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* Preview edit",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "Preview edit",
+                    "msgtype": "m.file",
+                    "info": {"mimetype": "application/json"},
+                    "io.mindroom.long_text": {
+                        "version": 2,
+                        "encoding": "matrix_event_content_json",
+                    },
+                    "url": "mxc://server/edit-sidecar-gating",
+                },
+                "m.relates_to": {
+                    "event_id": "$original:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = edit_event.__dict__["source"]
+
+    with (
+        patch.object(bot, "_emit_message_received_hooks", new_callable=AsyncMock) as mock_emit_hooks,
+        patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+    ):
+        mock_emit_hooks.return_value = False
+
+        await bot._on_message(room, edit_event)
+
+    mock_should_respond.assert_called_once()
+    assert mock_should_respond.call_args.kwargs["am_i_mentioned"] is True
+    assert mock_should_respond.call_args.kwargs["mentioned_agents"] == [
+        MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config)),
+    ]
+
+
 def test_remove_run_by_event_id_removes_team_runs() -> None:
     """Team edit regeneration should be able to delete stale runs from TeamSession storage."""
     session = TeamSession(

@@ -325,6 +325,67 @@ class TestThreadHistory:
         }
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_history_leaves_legacy_v1_edit_preview_untouched(self) -> None:
+        """Unsupported v1 edit sidecars should keep preview body/content coherent."""
+        client = AsyncMock()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"body": "root"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$agent_msg",
+            sender="@agent:localhost",
+            body="Thinking...",
+            server_timestamp=2000,
+            source_content={
+                "body": "Thinking...",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+        edit_event = self._make_text_event(
+            event_id="$edit1",
+            sender="@agent:localhost",
+            body="* Preview edit",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Preview edit",
+                "m.new_content": {
+                    "msgtype": "m.file",
+                    "body": "Preview edit",
+                    "io.mindroom.long_text": {
+                        "version": 1,
+                        "original_size": 100000,
+                    },
+                    "url": "mxc://server/legacy-edit-sidecar",
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$agent_msg",
+                },
+            },
+        )
+
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [edit_event, thread_message, root_event]
+        response.end = None
+        client.room_messages.return_value = response
+        client.download = AsyncMock()
+
+        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+
+        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
+        assert history[1]["body"] == "Preview edit"
+        assert history[1]["content"]["body"] == "Preview edit"
+        client.download.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_multiple_edits_keeps_latest(self) -> None:
         """When multiple edits exist, keep the latest one deterministically."""
         client = AsyncMock()
