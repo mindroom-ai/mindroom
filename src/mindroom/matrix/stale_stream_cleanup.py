@@ -518,6 +518,14 @@ def _scanned_message_data_by_event_id(message_events: list[nio.RoomMessageText])
     return message_data_by_event_id
 
 
+def _scanned_message_requires_exact_requester_fetch(message_data: dict[str, object]) -> bool:
+    """Return whether requester resolution must fetch the exact event for this scanned message."""
+    content = _as_string_keyed_dict(message_data.get("content"))
+    if content is None or "m.new_content" not in content:
+        return False
+    return _reply_to_event_id_for_message(message_data) is None
+
+
 async def _derive_requester_ids_for_bot_messages(
     client: nio.AsyncClient,
     resolved_messages: dict[str, dict[str, object]],
@@ -757,15 +765,18 @@ async def _load_scanned_or_fetched_message_data(
 ) -> dict[str, object] | None:
     """Load one message from scanned room history before falling back to the Matrix API."""
     scanned_message_data = scanned_message_data_by_event_id.get(event_id)
-    if scanned_message_data is not None:
+    if scanned_message_data is not None and not _scanned_message_requires_exact_requester_fetch(scanned_message_data):
         return scanned_message_data
 
-    return await _fetch_message_data_for_event_id(
+    fetched_message_data = await _fetch_message_data_for_event_id(
         client,
         room_id=room_id,
         event_id=event_id,
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
     )
+    if fetched_message_data is not None:
+        return fetched_message_data
+    return scanned_message_data
 
 
 async def _fetch_message_data_for_event_id(

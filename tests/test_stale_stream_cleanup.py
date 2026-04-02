@@ -852,6 +852,89 @@ async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_cleanup_fetches_exact_scanned_edit_ancestor_for_requester_resolution(tmp_path: Path) -> None:
+    """Scanned edit ancestors should still fetch the exact event when the raw wrapper hides the reply edge."""
+    config = _make_config(tmp_path)
+    other_agent_user_id = config.get_ids(runtime_paths_for(config))["other"].full_id
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$original",
+            body="Needs cleanup ⋯",
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+            relates_to=_thread_reply_relation("$thread-root", "$agent-a-edit"),
+        ),
+        _make_message_event(
+            event_id="$latest-edit",
+            body="* Needs cleanup",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to={"rel_type": "m.replace", "event_id": "$original"},
+            new_content={"body": "Needs cleanup ⋯", "msgtype": "m.text"},
+        ),
+        _make_message_event(
+            event_id="$agent-a-edit",
+            body="* Preview handoff",
+            sender=other_agent_user_id,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+            relates_to={"rel_type": "m.replace", "event_id": "$agent-a-original"},
+            new_content={
+                "body": "Preview handoff",
+                "msgtype": "m.text",
+            },
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_get_event = AsyncMock(
+        side_effect=[
+            _room_get_event_response(
+                _make_message_event(
+                    event_id="$agent-a-edit",
+                    body="* Handoff",
+                    sender=other_agent_user_id,
+                    timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+                    relates_to={"rel_type": "m.replace", "event_id": "$agent-a-original"},
+                    new_content={
+                        "body": "Handoff",
+                        "msgtype": "m.text",
+                        "m.relates_to": _thread_reply_relation("$thread-root", "$user-root"),
+                    },
+                ),
+            ),
+            _room_get_event_response(
+                _make_message_event(
+                    event_id="$user-root",
+                    body="Start here",
+                    sender=USER_ID,
+                    timestamp_ms=NOW_MS - (STALE_AGE_MS + 30_000),
+                ),
+            ),
+        ],
+    )
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message",
+        new=AsyncMock(return_value="$edit"),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert interrupted == [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-root",
+            target_event_id="$original",
+            partial_text="Needs cleanup",
+            agent_name="test_agent",
+            original_sender_id=USER_ID,
+        ),
+    ]
+    assert [call.args[1] for call in client.room_get_event.await_args_list] == [
+        "$agent-a-edit",
+        "$user-root",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_cleanup_preserves_stream_status_and_tool_trace_metadata(tmp_path: Path) -> None:
     """Cleanup edits should preserve structured metadata needed by clients and continuation."""
     config = _make_config(tmp_path)
