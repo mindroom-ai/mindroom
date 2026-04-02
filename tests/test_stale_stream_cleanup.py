@@ -1313,6 +1313,7 @@ async def test_cleanup_sidecar_hydration_failure_falls_back_gracefully(tmp_path:
             "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
             "io.mindroom.ai_run": {"version": 1, "run_id": "run-preview"},
             "io.mindroom.stream_status": "error",
+            "url": "mxc://example.com/broken",
         },
     )
     new_content = cast("dict[str, object]", sent_content["m.new_content"])
@@ -1419,7 +1420,7 @@ async def test_auto_resume_dedupes_same_agent_and_thread_using_newest_target(tmp
 
 @pytest.mark.asyncio
 async def test_auto_resume_honors_cap_after_replacing_older_duplicate_targets(tmp_path: Path) -> None:
-    """Auto-resume should keep the newest target even when later duplicates arrive past the cap."""
+    """Auto-resume should keep the newest unique interrupted threads under the cap."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     interrupted = [
@@ -1469,10 +1470,10 @@ async def test_auto_resume_honors_cap_after_replacing_older_duplicate_targets(tm
     assert mock_send.await_count == 2
     first_content = mock_send.await_args_list[0].args[2]
     second_content = mock_send.await_args_list[1].args[2]
-    assert first_content["m.relates_to"]["event_id"] == "$thread-one"
-    assert first_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$newer-one"}
-    assert second_content["m.relates_to"]["event_id"] == "$thread-two"
-    assert second_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$thread-two-target"}
+    assert first_content["m.relates_to"]["event_id"] == "$thread-three"
+    assert first_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$thread-three-target"}
+    assert second_content["m.relates_to"]["event_id"] == "$thread-one"
+    assert second_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$newer-one"}
 
 
 @pytest.mark.asyncio

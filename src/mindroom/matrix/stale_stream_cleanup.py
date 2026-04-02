@@ -1033,6 +1033,16 @@ def _preserved_cleanup_content(content: dict[str, Any] | None) -> dict[str, Any]
         if key.startswith("io.mindroom.") or key in {ORIGINAL_SENDER_KEY, "m.mentions"}:
             preserved[key] = value
 
+    if "io.mindroom.long_text" in preserved:
+        url = content.get("url")
+        file_info = content.get("file")
+        if isinstance(url, str):
+            preserved["url"] = url
+        elif isinstance(file_info, dict):
+            preserved["file"] = file_info
+        else:
+            del preserved["io.mindroom.long_text"]
+
     return preserved or None
 
 
@@ -1176,17 +1186,23 @@ def _select_threads_to_resume(
     *,
     max_resumes: int,
 ) -> list[InterruptedThread]:
-    """Return unique threaded interruptions up to the resume cap."""
-    selected_by_key: dict[tuple[str, str, str], InterruptedThread] = {}
+    """Return the newest unique threaded interruptions up to the resume cap."""
+    selected_threads: list[InterruptedThread] = []
+    seen_keys: set[tuple[str, str, str]] = set()
 
-    for interrupted_thread in interrupted:
+    for interrupted_thread in reversed(interrupted):
         if interrupted_thread.thread_id is None:
             continue
-        selected_by_key[(interrupted_thread.room_id, interrupted_thread.thread_id, interrupted_thread.agent_name)] = (
-            interrupted_thread
-        )
+        key = (interrupted_thread.room_id, interrupted_thread.thread_id, interrupted_thread.agent_name)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        selected_threads.append(interrupted_thread)
+        if len(selected_threads) >= max_resumes:
+            break
 
-    return list(selected_by_key.values())[:max_resumes]
+    selected_threads.reverse()
+    return selected_threads
 
 
 def _has_restart_interrupted_note(body: str) -> bool:
