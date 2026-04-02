@@ -2729,15 +2729,6 @@ class AgentBot:
         full_history: bool = True,
     ) -> _MessageContext:
         """Extract message context, optionally using a lightweight thread snapshot."""
-        return await self._extract_message_context_impl(room, event, full_history=full_history)
-
-    async def _extract_message_context_impl(
-        self,
-        room: nio.MatrixRoom,
-        event: _DispatchEvent,
-        *,
-        full_history: bool,
-    ) -> _MessageContext:
         assert self.client is not None
         resolved_event_source = await resolve_event_source_content(event.source, self.client)
 

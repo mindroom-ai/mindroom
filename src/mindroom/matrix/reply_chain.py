@@ -102,7 +102,7 @@ class ReplyChainCaches:
 
 async def _node_to_history_message(
     node: _ReplyChainNode,
-    client: nio.AsyncClient | None,
+    client: nio.AsyncClient,
 ) -> ResolvedVisibleMessage:
     """Convert a Matrix event to normalized history message structure."""
     from mindroom.matrix.client import ResolvedVisibleMessage  # noqa: PLC0415
@@ -125,7 +125,7 @@ async def _node_to_history_message(
 
 async def _materialize_chain_history(
     chain_nodes: Sequence[_ReplyChainNode],
-    content_client: nio.AsyncClient | None,
+    content_client: nio.AsyncClient,
 ) -> list[ResolvedVisibleMessage]:
     """Convert cached reply-chain nodes into visible history messages."""
     return [await _node_to_history_message(node, content_client) for node in chain_nodes]
@@ -383,7 +383,7 @@ async def _build_context_result(
     chain_nodes: list[_ReplyChainNode],
     visited_event_ids: list[str],
     thread_root_id: str | None,
-    content_client: nio.AsyncClient | None,
+    content_client: nio.AsyncClient,
 ) -> tuple[str, list[ResolvedVisibleMessage], bool, bool]:
     """Build reply-chain context tuple after traversal is complete."""
     cached_root = _first_cached_root(caches, room_id, visited_event_ids)
@@ -411,7 +411,7 @@ async def _resolve_reply_chain(
     fetch_history: _FetchThreadHistory,
     room_id: str,
     reply_to_event_id: str,
-    content_client: nio.AsyncClient | None,
+    content_client: nio.AsyncClient,
 ) -> tuple[str, list[ResolvedVisibleMessage], bool, bool]:
     """Resolve reply-chain context for clients that don't send thread relations.
 

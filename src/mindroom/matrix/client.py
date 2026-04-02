@@ -1073,6 +1073,7 @@ def _sort_thread_history[TVisibleMessage: ResolvedVisibleMessage](
         if index != 0:
             messages.insert(0, messages.pop(index))
         return
+    # If the fetched slice did not include the root, chronological order is the fallback.
 
 
 def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
@@ -1108,7 +1109,7 @@ async def _record_thread_message(
     event: nio.RoomMessageText,
     *,
     event_info: EventInfo,
-    client: nio.AsyncClient | None,
+    client: nio.AsyncClient,
     thread_id: str,
     root_message_found: bool,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
@@ -1141,7 +1142,7 @@ async def _record_thread_message(
 
 
 async def _apply_latest_edits_to_messages(
-    client: nio.AsyncClient | None,
+    client: nio.AsyncClient,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText, str | None]],
@@ -1362,7 +1363,7 @@ async def _resolve_thread_history_edits_via_relations(
 
 
 async def _finalize_thread_messages(
-    content_client: nio.AsyncClient | None,
+    content_client: nio.AsyncClient,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText, str | None]],
