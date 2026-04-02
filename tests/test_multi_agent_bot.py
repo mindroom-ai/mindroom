@@ -33,6 +33,7 @@ from mindroom.bot import (
     TeamBot,
     _DispatchPayload,
     _get_or_create_lock,
+    _merge_response_extra_content,
     _MessageContext,
     _PreparedDispatch,
     _ResponseAction,
@@ -1438,27 +1439,41 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Streaming responses should persist attachment IDs in message metadata."""
-
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
-            yield "chunk"
-
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
 
+        captured_collector: dict[str, Any] = {}
+
         def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
-            kwargs["run_metadata_collector"]["io.mindroom.ai_run"] = {"version": 1}
-            return mock_streaming_response()
+            captured_collector.update({"ref": kwargs["run_metadata_collector"]})
+
+            async def _gen() -> AsyncGenerator[str, None]:
+                yield "chunk"
+                # Populate metadata during iteration, matching production ordering
+                # where ai.py populates metadata after streaming completes.
+                kwargs["run_metadata_collector"]["io.mindroom.ai_run"] = {"version": 1}
+
+            return _gen()
+
+        async def _consuming_send_streaming(*args: object, **_kwargs: object) -> tuple[str, str]:
+            stream = args[7]  # response_stream positional arg
+            async for _ in stream:
+                pass
+            return ("$response", "chunk")
 
         attachment_ids = ["att_image", "att_zip"]
         with (
             patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
-            patch("mindroom.bot.stream_agent_response", side_effect=fake_stream_agent_response),
-            patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
+            patch("mindroom.bot.stream_agent_response", fake_stream_agent_response),
+            patch(
+                "mindroom.bot.send_streaming_response",
+                new_callable=AsyncMock,
+                side_effect=_consuming_send_streaming,
+            ) as mock_send_streaming_response,
         ):
-            mock_send_streaming_response.return_value = ("$response", "chunk")
             await bot._process_and_respond_streaming(
                 room_id="!test:localhost",
                 prompt="Please inspect attachments",
@@ -1471,7 +1486,151 @@ class TestAgentBot:
 
         sent_extra_content = mock_send_streaming_response.await_args.kwargs["extra_content"]
         assert sent_extra_content[ATTACHMENT_IDS_KEY] == attachment_ids
+        # Metadata was populated during generator iteration (not synchronously),
+        # proving the mutable reference is preserved through _merge_response_extra_content.
         assert sent_extra_content["io.mindroom.ai_run"]["version"] == 1
+        # The extra_content dict IS the same object as the collector
+        assert sent_extra_content is captured_collector["ref"]
+
+    def test_merge_response_extra_content_preserves_mutable_reference(self) -> None:
+        """_merge_response_extra_content must return the SAME dict object when extra_content is provided."""
+        collector: dict[str, Any] = {}
+        result = _merge_response_extra_content(collector, None)
+        assert result is collector
+
+    def test_merge_response_extra_content_returns_none_when_both_absent(self) -> None:
+        """_merge_response_extra_content returns None when no extra_content and no attachment_ids."""
+        assert _merge_response_extra_content(None, None) is None
+        assert _merge_response_extra_content(None, []) is None
+
+    def test_merge_response_extra_content_merges_attachment_ids(self) -> None:
+        """_merge_response_extra_content merges attachment_ids into extra_content."""
+        collector: dict[str, Any] = {}
+        result = _merge_response_extra_content(collector, ["att_1"])
+        assert result is collector
+        assert result[ATTACHMENT_IDS_KEY] == ["att_1"]
+
+    def test_merge_response_extra_content_creates_dict_for_attachment_ids_only(self) -> None:
+        """_merge_response_extra_content creates a dict when only attachment_ids are provided."""
+        result = _merge_response_extra_content(None, ["att_1"])
+        assert result is not None
+        assert result[ATTACHMENT_IDS_KEY] == ["att_1"]
+
+    @pytest.mark.asyncio
+    async def test_streaming_metadata_propagation_through_mutable_reference(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Metadata populated during generator iteration must appear in extra_content via mutable reference."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._handle_interactive_question = AsyncMock()
+
+        def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
+            async def _gen() -> AsyncGenerator[str, None]:
+                yield "hello"
+                # Populate after first yield, mimicking production ai.py ordering
+                kwargs["run_metadata_collector"]["io.mindroom.ai_run"] = {
+                    "version": 1,
+                    "model": "test-model",
+                    "tokens": {"input": 10, "output": 5},
+                }
+
+            return _gen()
+
+        async def _consuming_send_streaming(*args: object, **_kwargs: object) -> tuple[str, str]:
+            stream = args[7]
+            async for _ in stream:
+                pass
+            return ("$response", "hello")
+
+        with (
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.stream_agent_response", fake_stream_agent_response),
+            patch(
+                "mindroom.bot.send_streaming_response",
+                new_callable=AsyncMock,
+                side_effect=_consuming_send_streaming,
+            ) as mock_send_streaming_response,
+        ):
+            await bot._process_and_respond_streaming(
+                room_id="!test:localhost",
+                prompt="Hello",
+                reply_to_event_id="$event789",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+            )
+
+        sent_extra_content = mock_send_streaming_response.await_args.kwargs["extra_content"]
+        assert sent_extra_content is not None
+        ai_run = sent_extra_content["io.mindroom.ai_run"]
+        assert ai_run["version"] == 1
+        assert ai_run["model"] == "test-model"
+        assert ai_run["tokens"] == {"input": 10, "output": 5}
+
+    @pytest.mark.asyncio
+    async def test_streaming_cancelled_response_preserves_metadata(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """CancelledError during streaming must still carry io.mindroom.ai_run in extra_content."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._handle_interactive_question = AsyncMock()
+
+        def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
+            async def _gen() -> AsyncGenerator[str, None]:
+                kwargs["run_metadata_collector"]["io.mindroom.ai_run"] = {"version": 1}
+                yield "partial"
+                raise asyncio.CancelledError
+
+            return _gen()
+
+        captured_extra_content_ref: list[dict[str, Any] | None] = [None]
+
+        async def _consuming_send_streaming(*args: object, **kwargs: object) -> tuple[str, str]:
+            captured_extra_content_ref[0] = kwargs.get("extra_content")
+            stream = args[7]
+            try:
+                async for _ in stream:
+                    pass
+            except asyncio.CancelledError:
+                pass
+            # In production, send_streaming_response catches CancelledError,
+            # sends the final edit, then re-raises. We simulate the re-raise.
+            raise asyncio.CancelledError
+
+        with (
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.stream_agent_response", fake_stream_agent_response),
+            patch(
+                "mindroom.bot.send_streaming_response",
+                new_callable=AsyncMock,
+                side_effect=_consuming_send_streaming,
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await bot._process_and_respond_streaming(
+                room_id="!test:localhost",
+                prompt="Cancel me",
+                reply_to_event_id="$event_cancel",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+            )
+
+        # The extra_content dict (mutable reference) was populated during iteration
+        extra = captured_extra_content_ref[0]
+        assert extra is not None
+        assert "io.mindroom.ai_run" in extra
+        assert extra["io.mindroom.ai_run"]["version"] == 1
 
     @pytest.mark.asyncio
     async def test_process_and_respond_applies_before_and_after_hooks_non_streaming(
