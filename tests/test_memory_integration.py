@@ -69,7 +69,7 @@ class TestMemoryIntegration:
         runtime_paths = self._runtime_paths(tmp_path)
 
         with (
-            patch("mindroom.ai._run_agent_turn", mock_agent_run),
+            patch("mindroom.ai.cached_agent_run", mock_agent_run),
             patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
         ):
             response = await ai_response(
@@ -114,7 +114,7 @@ class TestMemoryIntegration:
         runtime_paths = self._runtime_paths(tmp_path)
 
         with (
-            patch("mindroom.ai._run_agent_turn", mock_agent_run),
+            patch("mindroom.ai.cached_agent_run", mock_agent_run),
             patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
         ):
             await ai_response(
@@ -171,7 +171,7 @@ class TestMemoryIntegration:
 
         with (
             patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
-            patch("mindroom.ai._run_agent_turn", AsyncMock(return_value=MagicMock(content="First response"))),
+            patch("mindroom.ai.cached_agent_run", AsyncMock(return_value=MagicMock(content="First response"))),
             patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
             patch("mindroom.agents.create_agent", return_value=MagicMock()),
         ):

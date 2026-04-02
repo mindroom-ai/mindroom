@@ -292,7 +292,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._run_agent_turn", new_callable=AsyncMock, return_value=mock_run_output),
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
@@ -421,7 +421,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._run_agent_turn", new_callable=AsyncMock, return_value=mock_run_output),
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
@@ -445,7 +445,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._run_agent_turn", new_callable=AsyncMock, return_value=mock_run_output),
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
             patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly-error") as mock_friendly_error,
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -607,7 +607,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._run_agent_turn", side_effect=fake_run),
+            patch("mindroom.ai.cached_agent_run", side_effect=fake_run),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             response = await ai_response(
@@ -1058,7 +1058,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._run_agent_turn", new_callable=AsyncMock, return_value=mock_run_output),
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
             patch("mindroom.matrix.rooms.get_room_alias_from_id", return_value="lobby"),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
