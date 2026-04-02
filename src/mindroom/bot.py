@@ -59,7 +59,11 @@ from mindroom.matrix.identity import (
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.matrix.message_content import extract_edit_body, resolve_event_source_content
+from mindroom.matrix.message_content import (
+    extract_edit_body,
+    resolve_event_source_content,
+    visible_body_from_event_source,
+)
 from mindroom.matrix.presence import (
     build_agent_status_message,
     is_user_online,
@@ -441,8 +445,8 @@ class _PreparedHookedPayload:
 
 
 @dataclass(frozen=True)
-class _SyntheticTextEvent:
-    """Minimal text-event shape for internal normalized-media dispatch.
+class _PreparedTextEvent:
+    """Normalized inbound text event with canonical body/source for dispatch.
 
     This intentionally satisfies the ``CommandEvent`` protocol used by command handling.
     """
@@ -451,9 +455,11 @@ class _SyntheticTextEvent:
     event_id: str
     body: str
     source: dict[str, Any]
+    server_timestamp: int | None = None
+    is_synthetic: bool = False
 
 
-type _TextDispatchEvent = nio.RoomMessageText | _SyntheticTextEvent
+type _TextDispatchEvent = nio.RoomMessageText | _PreparedTextEvent
 
 type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
 
@@ -625,7 +631,7 @@ class AgentBot:
         resolved_source_kind = source_kind
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = content.get("com.mindroom.source_kind")
-            source_kind_sender_is_trusted = isinstance(event, _SyntheticTextEvent) or (
+            source_kind_sender_is_trusted = (isinstance(event, _PreparedTextEvent) and event.is_synthetic) or (
                 extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
             )
             if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
@@ -1289,8 +1295,9 @@ class AgentBot:
             await self._handle_message_edit(room, event, event_info)
             return
 
-        await interactive.handle_text_response(self.client, room, event, self.agent_name)
-        await self._dispatch_text_message(room, event, requester_user_id)
+        prepared_event = await self._resolve_text_dispatch_event(event)
+        await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
+        await self._dispatch_text_message(room, prepared_event, requester_user_id)
 
     async def _dispatch_text_message(
         self,
@@ -1299,7 +1306,7 @@ class AgentBot:
         requester_user_id: str,
     ) -> None:
         """Run the normal text/command dispatch pipeline for a prepared text event."""
-        assert isinstance(event.body, str)
+        event = await self._resolve_text_dispatch_event(event)
 
         dispatch = await self._prepare_dispatch(
             room,
@@ -1571,7 +1578,7 @@ class AgentBot:
 
         await self._dispatch_text_message(
             room,
-            _SyntheticTextEvent(
+            _PreparedTextEvent(
                 sender=event.sender,
                 event_id=event.event_id,
                 body=prepared_voice.text,
@@ -1582,6 +1589,8 @@ class AgentBot:
                         "com.mindroom.source_kind": "voice",
                     },
                 },
+                server_timestamp=None,
+                is_synthetic=True,
             ),
             requester_user_id,
         )
@@ -1887,9 +1896,14 @@ class AgentBot:
         return False
 
     def _coalescing_candidate_timestamp(self, event: _DispatchEvent) -> int | None:
-        if isinstance(event, _SyntheticTextEvent):
-            return None
-        current_ts = event.server_timestamp
+        if isinstance(event, _PreparedTextEvent):
+            if event.is_synthetic:
+                return None
+            current_ts = event.server_timestamp
+            if current_ts is None:
+                return None
+        else:
+            current_ts = event.server_timestamp
         if not isinstance(current_ts, int):
             return None
         # Automation messages (scheduled tasks, hooks) are one-shot synthetic events
@@ -1960,6 +1974,21 @@ class AgentBot:
             context=context,
             correlation_id=correlation_id,
             envelope=envelope,
+        )
+
+    async def _resolve_text_dispatch_event(self, event: _TextDispatchEvent) -> _PreparedTextEvent:
+        """Return one canonical text event for hooks, routing, and command handling."""
+        if isinstance(event, _PreparedTextEvent):
+            return event
+
+        assert self.client is not None
+        resolved_source = await resolve_event_source_content(event.source, self.client)
+        return _PreparedTextEvent(
+            sender=event.sender,
+            event_id=event.event_id,
+            body=visible_body_from_event_source(resolved_source, event.body),
+            source=resolved_source,
+            server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
         )
 
     async def _resolve_dispatch_action(
@@ -4581,6 +4610,7 @@ class AgentBot:
 
     async def _handle_command(self, room: nio.MatrixRoom, event: _TextDispatchEvent, command: Command) -> None:
         assert self.client is not None
+        event = await self._resolve_text_dispatch_event(event)
         context = CommandHandlerContext(
             client=self.client,
             config=self.config,

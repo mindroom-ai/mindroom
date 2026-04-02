@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,6 +13,7 @@ from agno.media import Audio
 
 from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -159,6 +162,7 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     event.sender = "@mindroom_router:example.com"
     event.body = "🎤 !schedule daily"
     event.event_id = "test_event"
+    event.server_timestamp = 1234567890
     event.source = {"content": {"body": "🎤 !schedule daily", ORIGINAL_SENDER_KEY: "@alice:example.com"}}
 
     with (
@@ -197,6 +201,7 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
     event.sender = "@mindroom_router:example.com"
     event.body = "Regular message from router"
     event.event_id = "test_event"
+    event.server_timestamp = 1234567890
     event.source = {"content": {"body": "Regular message from router"}}
 
     with (
@@ -208,6 +213,167 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
         await bot._on_message(room, event)
 
     mock_handle.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_path) -> None:  # noqa: ANN001
+    """Router should schedule from the hydrated sidecar body and mentions."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_router:example.com"
+    agent_user.agent_name = ROUTER_AGENT_NAME
+    agent_user.matrix_id = MatrixID.parse("@mindroom_router:example.com")
+
+    bot = _agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=_attach_runtime_paths(
+            Config(
+                agents={"home": AgentConfig(display_name="Home", rooms=["!test:example.com"])},
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        ),
+        rooms=["!test:example.com"],
+    )
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot.logger = MagicMock()
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "msgtype": "m.text",
+                    "body": "!schedule tomorrow at 9am @mindroom_home:localhost turn off the lights",
+                    "m.mentions": {"user_ids": ["@mindroom_home:localhost"]},
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    bot._send_response = AsyncMock(return_value="$reply")
+    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+
+    room = _make_room("@mindroom_router:example.com", "@mindroom_home:localhost", "@alice:example.com")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$sidecar-schedule",
+            "sender": "@alice:example.com",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.file",
+                "body": "!schedule tomorrow [Message continues in attached file]",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/sidecar-schedule",
+            },
+        },
+    )
+
+    with (
+        patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
+        patch(
+            "mindroom.commands.handler.schedule_task",
+            new_callable=AsyncMock,
+            return_value=("task123", "scheduled"),
+        ) as mock_schedule,
+    ):
+        await bot._on_message(room, event)
+
+    assert (
+        mock_schedule.await_args.kwargs["full_text"] == "tomorrow at 9am @mindroom_home:localhost turn off the lights"
+    )
+    mentioned_agents = mock_schedule.await_args.kwargs["mentioned_agents"]
+    assert [agent.full_id for agent in mentioned_agents] == ["@mindroom_home:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_router_parses_sidecar_skill_command_mentions_from_canonical_body(tmp_path) -> None:  # noqa: ANN001
+    """Router should target the agent mentioned only in hydrated sidecar command content."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_router:example.com"
+    agent_user.agent_name = ROUTER_AGENT_NAME
+    agent_user.matrix_id = MatrixID.parse("@mindroom_router:example.com")
+
+    bot = _agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=_attach_runtime_paths(
+            Config(
+                agents={
+                    "home": AgentConfig(display_name="Home", rooms=["!test:example.com"], skills=["demo"]),
+                    "research": AgentConfig(display_name="Research", rooms=["!test:example.com"], skills=["demo"]),
+                },
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        ),
+        rooms=["!test:example.com"],
+    )
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot.logger = MagicMock()
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "msgtype": "m.text",
+                    "body": "!skill demo summarize the release notes",
+                    "m.mentions": {"user_ids": ["@mindroom_home:localhost"]},
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    bot._send_skill_command_response = AsyncMock(return_value="$skill-reply")
+    bot._send_response = AsyncMock(return_value="$fallback")
+    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+
+    room = _make_room(
+        "@mindroom_router:example.com",
+        "@mindroom_home:localhost",
+        "@mindroom_research:localhost",
+        "@alice:example.com",
+    )
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$sidecar-skill",
+            "sender": "@alice:example.com",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.file",
+                "body": "!skill demo [Message continues in attached file]",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/sidecar-skill",
+            },
+        },
+    )
+
+    with (
+        patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
+        patch(
+            "mindroom.commands.handler.resolve_skill_command_spec",
+            return_value=SimpleNamespace(
+                name="demo",
+                user_invocable=True,
+                dispatch=None,
+                disable_model_invocation=False,
+            ),
+        ),
+    ):
+        await bot._on_message(room, event)
+
+    assert bot._send_response.await_count == 0
+    assert bot._send_skill_command_response.await_args.kwargs["agent_name"] == "home"
+    assert "summarize the release notes" in bot._send_skill_command_response.await_args.kwargs["prompt"]
 
 
 @pytest.mark.asyncio

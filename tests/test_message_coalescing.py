@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
-from mindroom.bot import AgentBot, _MessageContext, _SyntheticTextEvent
+from mindroom.bot import AgentBot, _MessageContext, _PreparedTextEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -41,7 +41,9 @@ def _make_bot(tmp_path: Path) -> AgentBot:
         display_name="TestAgent",
         user_id="@mindroom_test_agent:localhost",
     )
-    return AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    return bot
 
 
 def _make_event(
@@ -322,10 +324,10 @@ class TestHasNewerUnrespondedInScope:
         assert bot._has_newer_unresponded_in_scope(event, context) is True
 
     def test_synthetic_event_no_server_timestamp(self, tmp_path: Path) -> None:
-        """Events without server_timestamp (e.g. _SyntheticTextEvent for voice) should not skip."""
+        """Events without server_timestamp (e.g. prepared voice text events) should not skip."""
         bot = _make_bot(tmp_path)
 
-        class _SyntheticEventWithoutTimestampAccess(_SyntheticTextEvent):
+        class _SyntheticEventWithoutTimestampAccess(_PreparedTextEvent):
             def __getattribute__(self, name: str) -> object:
                 if name == "server_timestamp":
                     msg = "Synthetic events should not access server_timestamp."
@@ -337,6 +339,7 @@ class TestHasNewerUnrespondedInScope:
             event_id="$m1",
             body="hello",
             source={"content": {"body": "hello"}},
+            is_synthetic=True,
         )
         context = _make_context(
             [

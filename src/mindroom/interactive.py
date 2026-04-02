@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from contextlib import suppress
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 import nio
 
@@ -18,6 +18,14 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+
+
+class TextResponseEvent(Protocol):
+    """Minimal normalized text-event shape used for interactive replies."""
+
+    sender: str
+    body: str
+    source: dict[str, Any]
 
 
 class _InteractiveQuestion(NamedTuple):
@@ -138,7 +146,7 @@ async def handle_reaction(
 async def handle_text_response(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
-    event: nio.RoomMessageText,
+    event: TextResponseEvent,
     agent_name: str,
 ) -> tuple[str, str | None] | None:
     """Handle text responses to interactive questions (e.g., "1", "2", "3").
