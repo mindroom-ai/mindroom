@@ -146,9 +146,6 @@ class ResolvedVisibleMessage:
         return message_data
 
 
-type VisibleMessageLike = ResolvedVisibleMessage
-
-
 def _reply_to_event_id_from_content(content: Mapping[str, Any] | None) -> str | None:
     """Return the explicit reply target encoded on one visible content payload."""
     if content is None:
@@ -163,65 +160,15 @@ def _reply_to_event_id_from_content(content: Mapping[str, Any] | None) -> str | 
     return reply_to_event_id if isinstance(reply_to_event_id, str) else None
 
 
-def visible_message_event_id(message: VisibleMessageLike) -> str | None:
-    """Return the original/root event ID for one visible message."""
-    return message.event_id
-
-
-def visible_message_sender(message: VisibleMessageLike) -> str | None:
-    """Return the sender ID for one visible message."""
-    return message.sender
-
-
-def visible_message_body(message: VisibleMessageLike) -> str | None:
-    """Return the resolved visible body for one message."""
-    return message.body
-
-
-def visible_message_timestamp(message: VisibleMessageLike) -> int | None:
-    """Return the visible-message timestamp when available."""
-    return message.timestamp
-
-
-def visible_message_content(message: VisibleMessageLike) -> dict[str, Any] | None:
-    """Return the canonical visible content payload for one message."""
-    return message.content
-
-
-def visible_message_thread_id(message: VisibleMessageLike) -> str | None:
-    """Return the thread root ID associated with one visible message."""
-    return message.thread_id
-
-
-def visible_message_stream_status(message: VisibleMessageLike) -> str | None:
-    """Return normalized stream status metadata for one visible message."""
-    return message.stream_status
-
-
-def visible_message_visible_event_id(message: VisibleMessageLike) -> str | None:
-    """Return the event ID for the currently visible event state."""
-    return message.visible_event_id
-
-
-def visible_message_reply_to_event_id(message: VisibleMessageLike) -> str | None:
-    """Return the explicit reply target encoded on one visible message."""
-    return message.reply_to_event_id
-
-
-def visible_message_to_dict(message: VisibleMessageLike) -> dict[str, Any]:
-    """Serialize one visible message into the public JSON-safe shape."""
-    return message.to_dict()
-
-
 def replace_visible_message(
-    message: VisibleMessageLike,
+    message: ResolvedVisibleMessage,
     *,
     sender: str | None = None,
     body: str | None = None,
-) -> VisibleMessageLike:
+) -> ResolvedVisibleMessage:
     """Return one visible-message copy while keeping body/content coherent."""
     updated_content: dict[str, Any] | None = None
-    if body is not None and (content := visible_message_content(message)) is not None:
+    if body is not None and (content := message.content) is not None:
         updated_content = dict(content)
         updated_content["body"] = body
 

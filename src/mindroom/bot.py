@@ -173,7 +173,7 @@ from .logging_config import emoji, get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
     PermanentMatrixStartupError,
-    VisibleMessageLike,
+    ResolvedVisibleMessage,
     build_threaded_edit_content,
     edit_message,
     fetch_thread_history,
@@ -182,11 +182,6 @@ from .matrix.client import (
     join_room,
     replace_visible_message,
     send_message,
-    visible_message_body,
-    visible_message_content,
-    visible_message_event_id,
-    visible_message_sender,
-    visible_message_timestamp,
 )
 from .media_inputs import MediaInputs
 from .response_tracker import ResponseTracker
@@ -394,7 +389,7 @@ class _MessageContext:
     am_i_mentioned: bool
     is_thread: bool
     thread_id: str | None
-    thread_history: Sequence[VisibleMessageLike]
+    thread_history: Sequence[ResolvedVisibleMessage]
     mentioned_agents: list[MatrixID]
     has_non_agent_mentions: bool
 
@@ -1884,7 +1879,7 @@ class AgentBot:
         self,
         room_id: str,
         event_info: EventInfo,
-    ) -> tuple[bool, str | None, list[VisibleMessageLike]]:
+    ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
         """Derive conversation context from threads or reply chains."""
         assert self.client is not None
         is_thread, thread_id, thread_history = await derive_conversation_context(
@@ -2007,7 +2002,7 @@ class AgentBot:
             return False
 
         for msg in context.thread_history:
-            if visible_message_event_id(msg) == event.event_id:
+            if msg.event_id == event.event_id:
                 continue
             newer_event_id = self._coalescing_replacement_event_id(
                 msg,
@@ -2044,22 +2039,22 @@ class AgentBot:
 
     def _coalescing_replacement_event_id(
         self,
-        msg: VisibleMessageLike,
+        msg: ResolvedVisibleMessage,
         *,
         sender: str,
         current_ts: int,
     ) -> str | None:
-        event_id = visible_message_event_id(msg)
+        event_id = msg.event_id
         if not isinstance(event_id, str):
             return None
-        if visible_message_sender(msg) != sender:
+        if msg.sender != sender:
             return None
-        msg_ts = visible_message_timestamp(msg)
+        msg_ts = msg.timestamp
         if not isinstance(msg_ts, int) or msg_ts <= current_ts:
             return None
         # Skip commands — they exit early without generating an AI response,
         # so coalescing against them would permanently lose the older message.
-        msg_body = visible_message_body(msg) or ""
+        msg_body = msg.body or ""
         if isinstance(msg_body, str) and msg_body.lstrip().startswith("!"):
             return None
         if self.response_tracker.has_responded(event_id):
@@ -2486,7 +2481,7 @@ class AgentBot:
         if self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room.room_id) == "room":
             is_thread = False
             thread_id = None
-            thread_history: list[VisibleMessageLike] = []
+            thread_history: list[ResolvedVisibleMessage] = []
         else:
             is_thread, thread_id, thread_history = await self._derive_conversation_context(
                 room.room_id,
@@ -2672,14 +2667,14 @@ class AgentBot:
 
     def _timestamp_thread_history_user_turns(
         self,
-        thread_history: Sequence[VisibleMessageLike],
-    ) -> list[VisibleMessageLike]:
+        thread_history: Sequence[ResolvedVisibleMessage],
+    ) -> list[ResolvedVisibleMessage]:
         """Add time prefixes to user-authored thread-history entries."""
-        timestamped_history: list[VisibleMessageLike] = []
+        timestamped_history: list[ResolvedVisibleMessage] = []
         for message in thread_history:
-            body = visible_message_body(message)
-            content = visible_message_content(message)
-            sender = visible_message_sender(message)
+            body = message.body
+            content = message.content
+            sender = message.sender
             is_user_turn = (isinstance(content, dict) and isinstance(content.get(ORIGINAL_SENDER_KEY), str)) or (
                 isinstance(sender, str) and not is_agent_id(sender, self.config, self.runtime_paths)
             )
@@ -2687,7 +2682,7 @@ class AgentBot:
                 timestamped_history.append(message)
                 continue
 
-            message_timestamp = visible_message_timestamp(message)
+            message_timestamp = message.timestamp
             timestamp_ms = message_timestamp if isinstance(message_timestamp, int | float) else None
             timestamped_body = self._prefix_user_turn_time(body, timestamp_ms=timestamp_ms)
             timestamped_history.append(replace_visible_message(message, body=timestamped_body))
@@ -2696,18 +2691,18 @@ class AgentBot:
     def _timestamp_model_user_context(
         self,
         prompt: str,
-        thread_history: Sequence[VisibleMessageLike],
-    ) -> tuple[str, list[VisibleMessageLike]]:
+        thread_history: Sequence[ResolvedVisibleMessage],
+    ) -> tuple[str, list[ResolvedVisibleMessage]]:
         """Return model-facing prompt/history with local timestamps added to user turns."""
         return self._prefix_user_turn_time(prompt), self._timestamp_thread_history_user_turns(thread_history)
 
     def _prepare_memory_and_model_context(
         self,
         prompt: str,
-        thread_history: Sequence[VisibleMessageLike],
+        thread_history: Sequence[ResolvedVisibleMessage],
         *,
         model_prompt: str | None = None,
-    ) -> tuple[str, Sequence[VisibleMessageLike], str, list[VisibleMessageLike]]:
+    ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
         """Return raw memory inputs alongside timestamped model-facing context."""
         model_prompt_text, model_thread_history = self._timestamp_model_user_context(
             model_prompt or prompt,
@@ -2827,7 +2822,7 @@ class AgentBot:
         thread_id: str | None,
         team_agents: list[MatrixID],
         team_mode: str,
-        thread_history: Sequence[VisibleMessageLike],
+        thread_history: Sequence[ResolvedVisibleMessage],
         requester_user_id: str,
         existing_event_id: str | None = None,
         *,
@@ -2866,7 +2861,7 @@ class AgentBot:
         thread_id: str | None,
         team_agents: list[MatrixID],
         team_mode: str,
-        thread_history: Sequence[VisibleMessageLike],
+        thread_history: Sequence[ResolvedVisibleMessage],
         requester_user_id: str,
         existing_event_id: str | None = None,
         *,
@@ -3309,7 +3304,7 @@ class AgentBot:
         prompt: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: Sequence[VisibleMessageLike],
+        thread_history: Sequence[ResolvedVisibleMessage],
         existing_event_id: str | None = None,
         user_id: str | None = None,
         run_id: str | None = None,
@@ -3474,7 +3469,7 @@ class AgentBot:
         room_id: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: Sequence[VisibleMessageLike],
+        thread_history: Sequence[ResolvedVisibleMessage],
         prompt: str,
         agent_name: str,
         user_id: str | None,
@@ -3500,7 +3495,7 @@ class AgentBot:
         room_id: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: Sequence[VisibleMessageLike],
+        thread_history: Sequence[ResolvedVisibleMessage],
         prompt: str,
         agent_name: str,
         user_id: str | None,
@@ -3784,7 +3779,7 @@ class AgentBot:
         prompt: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: Sequence[VisibleMessageLike],
+        thread_history: Sequence[ResolvedVisibleMessage],
         existing_event_id: str | None = None,
         *,
         adopt_existing_placeholder: bool = False,
@@ -4045,7 +4040,7 @@ class AgentBot:
         prompt: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: Sequence[VisibleMessageLike],
+        thread_history: Sequence[ResolvedVisibleMessage],
         existing_event_id: str | None = None,
         user_id: str | None = None,
         media: MediaInputs | None = None,
@@ -4102,7 +4097,7 @@ class AgentBot:
         prompt: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: Sequence[VisibleMessageLike],
+        thread_history: Sequence[ResolvedVisibleMessage],
         existing_event_id: str | None = None,
         user_id: str | None = None,
         media: MediaInputs | None = None,
@@ -4513,7 +4508,7 @@ class AgentBot:
         self,
         room: nio.MatrixRoom,
         event: _DispatchEvent,
-        thread_history: Sequence[VisibleMessageLike],
+        thread_history: Sequence[ResolvedVisibleMessage],
         thread_id: str | None = None,
         message: str | None = None,
         *,
@@ -4793,7 +4788,7 @@ class TeamBot(AgentBot):
         prompt: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        thread_history: Sequence[VisibleMessageLike],
+        thread_history: Sequence[ResolvedVisibleMessage],
         existing_event_id: str | None = None,
         user_id: str | None = None,
         media: MediaInputs | None = None,

@@ -43,7 +43,7 @@ from mindroom.history.runtime import (
 from mindroom.knowledge.manager import initialize_shared_knowledge_managers
 from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import ResolvedVisibleMessage, VisibleMessageLike
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.routing import suggest_agent
 from mindroom.team_runtime_resolution import materialize_exact_requested_team_members
 from mindroom.teams import TeamMode, TeamOutcome, _create_team_instance, format_team_response, resolve_configured_team
@@ -596,7 +596,7 @@ async def _resolve_auto_route(
     prompt: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: Sequence[VisibleMessageLike] | None,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
 ) -> str | JSONResponse:
     """Resolve auto-routing to a specific agent name.
 
@@ -854,7 +854,7 @@ async def _non_stream_completion(
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: Sequence[VisibleMessageLike] | None,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -1034,7 +1034,7 @@ async def _stream_completion(
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: Sequence[VisibleMessageLike] | None,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -1180,7 +1180,7 @@ async def _prepare_openai_team_prompt(
     prompt: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: Sequence[VisibleMessageLike] | None,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
 ) -> str:
     """Prepare the final prompt for one OpenAI-compatible team run."""
     fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
@@ -1210,7 +1210,7 @@ async def _non_stream_team_completion(
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: Sequence[VisibleMessageLike] | None,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> JSONResponse:
@@ -1300,7 +1300,7 @@ async def _stream_team_completion(  # noqa: C901
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: Sequence[VisibleMessageLike] | None,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> StreamingResponse | JSONResponse:

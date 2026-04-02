@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.client import VisibleMessageLike
+    from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
     from ._shared import ScopedMemoryCrud
@@ -322,7 +322,7 @@ async def store_conversation_memory(
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: Sequence[VisibleMessageLike] | None = None,
+    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     user_id: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
