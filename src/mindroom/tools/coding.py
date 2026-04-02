@@ -37,6 +37,14 @@ if TYPE_CHECKING:
             description="Working directory for file operations. Defaults to current directory.",
             authored_override=False,
         ),
+        ConfigField(
+            name="restrict_to_base_dir",
+            label="Restrict To Base Dir",
+            type="boolean",
+            required=False,
+            default=True,
+            description="Whether file access must stay under base_dir. Relative paths still resolve from base_dir.",
+        ),
     ],
     dependencies=[],
 )

@@ -1364,6 +1364,18 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Whether file access must stay under base_dir. Relative paths still resolve from base_dir.",
+          "label": "Restrict To Base Dir",
+          "name": "restrict_to_base_dir",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "default_execution_target": "worker",
@@ -2337,6 +2349,18 @@
           "placeholder": null,
           "required": false,
           "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Whether file access must stay under base_dir. Relative paths still resolve from base_dir.",
+          "label": "Restrict To Base Dir",
+          "name": "restrict_to_base_dir",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         },
         {

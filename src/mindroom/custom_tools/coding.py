@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import unicodedata
 from dataclasses import dataclass
+from glob import has_magic
 from pathlib import Path
 
 from agno.tools import Toolkit
@@ -338,17 +339,28 @@ def _make_diff(
     return "\n".join(diff_lines)
 
 
-def _resolve_path(base_dir: Path, path: str) -> Path:
-    """Resolve a path relative to base_dir, preventing traversal."""
+def _outside_base_dir_message(path: str, resolved: Path, base_dir: Path) -> str:
+    """Explain why a path was blocked by the base-dir restriction."""
+    return (
+        f"Path '{path}' resolves to '{resolved}', which is outside base_dir '{base_dir}'. "
+        "Set restrict_to_base_dir=false to allow access outside base_dir."
+    )
+
+
+def _resolve_path(base_dir: Path, path: str, restrict_to_base_dir: bool = True) -> Path:
+    """Resolve a path relative to base_dir, optionally preventing traversal."""
     p = Path(path)
     if not p.is_absolute():
         p = base_dir / p
     resolved = p.resolve()
+    if not restrict_to_base_dir:
+        return resolved
+
     base_resolved = base_dir.resolve()
     try:
         resolved.relative_to(base_resolved)
     except ValueError:
-        msg = f"Path '{path}' resolves outside the base directory."
+        msg = _outside_base_dir_message(path, resolved, base_resolved)
         raise ValueError(msg) from None
     return resolved
 
@@ -474,7 +486,13 @@ def _list_directory(target: Path, limit: int) -> str:
     return result
 
 
-def _find_files_in(search_path: Path, base_dir: Path, pattern: str, limit: int) -> str:
+def _find_files_in(
+    search_path: Path,
+    base_dir: Path,
+    pattern: str,
+    limit: int,
+    restrict_to_base_dir: bool = True,
+) -> str:
     """Glob for files, filter gitignored, and format results."""
     glob_error = _validate_glob_pattern(pattern)
     if glob_error:
@@ -485,7 +503,8 @@ def _find_files_in(search_path: Path, base_dir: Path, pattern: str, limit: int) 
     except (NotImplementedError, ValueError) as e:
         return f"Error: Invalid glob pattern '{pattern}': {e}"
 
-    filtered = _filter_hidden_and_ignored(candidates, base_dir)
+    filter_root = base_dir if restrict_to_base_dir else search_path
+    filtered = _filter_hidden_and_ignored(candidates, filter_root)
     matches: list[str] = []
     for candidate in filtered:
         try:
@@ -509,10 +528,10 @@ def _find_files_in(search_path: Path, base_dir: Path, pattern: str, limit: int) 
     return result
 
 
-def _resolve_and_read(base_dir: Path, path: str) -> tuple[Path, str] | str:
+def _resolve_and_read(base_dir: Path, path: str, restrict_to_base_dir: bool = True) -> tuple[Path, str] | str:
     """Resolve path and read file content. Returns (resolved, content) or error string."""
     try:
-        resolved = _resolve_path(base_dir, path)
+        resolved = _resolve_path(base_dir, path, restrict_to_base_dir)
     except ValueError as e:
         return f"Error: {e}"
 
@@ -527,6 +546,20 @@ def _resolve_and_read(base_dir: Path, path: str) -> tuple[Path, str] | str:
         return f"Error reading file: {e}"
 
 
+def _normalize_search_root(search_path: Path, pattern: str) -> tuple[Path, str]:
+    """Resolve parent-traversal prefixes out of a glob pattern."""
+    parts = list(Path(pattern).parts)
+    first_glob_index = next((index for index, part in enumerate(parts) if has_magic(part)), len(parts))
+    static_parts = parts[:first_glob_index]
+    glob_parts = parts[first_glob_index:]
+    if not glob_parts and static_parts:
+        glob_parts = [static_parts.pop()]
+
+    normalized_root = search_path.joinpath(*static_parts).resolve()
+    normalized_pattern = str(Path(*glob_parts)) if glob_parts else "."
+    return normalized_root, normalized_pattern
+
+
 class CodingTools(Toolkit):
     """Ergonomic coding tools for LLM agents.
 
@@ -534,8 +567,9 @@ class CodingTools(Toolkit):
     smart truncation, fuzzy matching, and actionable pagination hints.
     """
 
-    def __init__(self, base_dir: str | None = None) -> None:
+    def __init__(self, base_dir: str | None = None, restrict_to_base_dir: bool = True) -> None:
         self.base_dir = Path(base_dir).resolve() if base_dir else Path.cwd().resolve()
+        self.restrict_to_base_dir = restrict_to_base_dir
         super().__init__(
             name="coding",
             tools=[
@@ -565,7 +599,7 @@ class CodingTools(Toolkit):
             Line-numbered file content with pagination hints if truncated.
 
         """
-        result = _resolve_and_read(self.base_dir, path)
+        result = _resolve_and_read(self.base_dir, path, self.restrict_to_base_dir)
         if isinstance(result, str):
             return result
         return _format_read_output(result[1], offset, limit)
@@ -588,7 +622,7 @@ class CodingTools(Toolkit):
         if not old_text:
             return "Error: old_text must be non-empty."
 
-        result = _resolve_and_read(self.base_dir, path)
+        result = _resolve_and_read(self.base_dir, path, self.restrict_to_base_dir)
         if isinstance(result, str):
             return result
         resolved, content = result
@@ -624,7 +658,7 @@ class CodingTools(Toolkit):
 
         """
         try:
-            resolved = _resolve_path(self.base_dir, path)
+            resolved = _resolve_path(self.base_dir, path, self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
 
@@ -667,23 +701,38 @@ class CodingTools(Toolkit):
 
         """
         try:
-            search_path = _resolve_path(self.base_dir, path) if path else self.base_dir
+            search_path = _resolve_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
         except ValueError as e:
             return f"Error: {e}"
+        effective_glob = glob
+        if not self.restrict_to_base_dir and glob is not None:
+            normalized_path, normalized_glob = _normalize_search_root(search_path, glob)
+            if normalized_path.exists():
+                search_path = normalized_path
+                effective_glob = normalized_glob
 
-        validation_error = _validate_grep_request(search_path, path, glob, limit, context)
+        validation_error = _validate_grep_request(search_path, path, effective_glob, limit, context)
         if validation_error:
             return validation_error
 
         # Try ripgrep first
-        rg_result = _run_ripgrep(pattern, search_path, self.base_dir, glob, ignore_case, literal, context, limit)
+        rg_result = _run_ripgrep(
+            pattern,
+            search_path,
+            self.base_dir,
+            effective_glob,
+            ignore_case,
+            literal,
+            context,
+            limit,
+        )
         if rg_result is None:
             # Python fallback
             return _python_grep_fallback(
                 pattern,
                 search_path,
                 self.base_dir,
-                glob,
+                effective_glob,
                 ignore_case,
                 literal,
                 context,
@@ -711,16 +760,28 @@ class CodingTools(Toolkit):
 
         """
         try:
-            search_path = _resolve_path(self.base_dir, path) if path else self.base_dir
+            search_path = _resolve_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
         except ValueError as e:
             return f"Error: {e}"
+        search_pattern = pattern
+        if not self.restrict_to_base_dir:
+            normalized_path, normalized_pattern = _normalize_search_root(search_path, pattern)
+            if normalized_path.exists():
+                search_path = normalized_path
+                search_pattern = normalized_pattern
 
         if not search_path.exists():
             return f"Error: Path not found: {path or '.'}"
         if limit < 1:
             return "Error: limit must be >= 1."
 
-        return _find_files_in(search_path, self.base_dir, pattern, limit)
+        return _find_files_in(
+            search_path,
+            self.base_dir,
+            search_pattern,
+            limit,
+            restrict_to_base_dir=self.restrict_to_base_dir,
+        )
 
     def ls(self, path: str | None = None, limit: int = _DEFAULT_LS_LIMIT) -> str:
         """List directory contents with directory indicators.
@@ -735,7 +796,7 @@ class CodingTools(Toolkit):
 
         """
         try:
-            target = _resolve_path(self.base_dir, path) if path else self.base_dir
+            target = _resolve_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
         except ValueError as e:
             return f"Error: {e}"
 
