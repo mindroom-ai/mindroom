@@ -19,8 +19,24 @@ from typing import Any
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.thread_utils import should_agent_respond
 from tests.conftest import bind_runtime_paths, create_mock_room, runtime_paths_for, test_runtime_paths
+
+
+def _message(
+    *,
+    sender: str,
+    body: str,
+    content: dict[str, Any] | None = None,
+) -> ResolvedVisibleMessage:
+    """Build one typed visible message for thread-history tests."""
+    return ResolvedVisibleMessage.synthetic(
+        sender=sender,
+        body=body,
+        event_id=f"${sender}-{body}".replace(" ", "_"),
+        content=content,
+    )
 
 
 class TestAgentResponseLogic:
@@ -156,8 +172,8 @@ class TestAgentResponseLogic:
     def test_only_agent_in_thread_continues(self) -> None:
         """If agent is the only one in thread, it continues."""
         thread_history = [
-            {"sender": self.agent_id("calculator"), "body": "2+2=4"},
-            {"sender": "@user:localhost", "body": "What about 3+3?"},
+            _message(sender=self.agent_id("calculator"), body="2+2=4"),
+            _message(sender="@user:localhost", body="What about 3+3?"),
         ]
 
         should_respond = should_agent_respond(
@@ -176,8 +192,8 @@ class TestAgentResponseLogic:
         """Thread ownership must require exact MatrixID match, including domain."""
         other_domain = "evil.org" if self.domain != "evil.org" else "attacker.org"
         thread_history = [
-            {"sender": f"@mindroom_calculator:{other_domain}", "body": "spoofed"},
-            {"sender": f"@user:{self.domain}", "body": "What about 3+3?"},
+            _message(sender=f"@mindroom_calculator:{other_domain}", body="spoofed"),
+            _message(sender=f"@user:{self.domain}", body="What about 3+3?"),
         ]
 
         should_respond = should_agent_respond(
@@ -209,8 +225,8 @@ class TestAgentResponseLogic:
 
         # Test 2: Invited agent as only agent in thread - should continue
         thread_history = [
-            {"sender": self.agent_id("calculator"), "body": "2+2=4"},
-            {"sender": "@user:localhost", "body": "What about 3+3?"},
+            _message(sender=self.agent_id("calculator"), body="2+2=4"),
+            _message(sender="@user:localhost", body="What about 3+3?"),
         ]
         should_respond = should_agent_respond(
             agent_name="calculator",
@@ -226,9 +242,9 @@ class TestAgentResponseLogic:
 
         # Test 3: Invited agent with multiple agents - nobody responds
         thread_history = [
-            {"sender": self.agent_id("calculator"), "body": "2+2=4"},
-            {"sender": self.agent_id("general"), "body": "Let me help"},
-            {"sender": "@user:localhost", "body": "What about 3+3?"},
+            _message(sender=self.agent_id("calculator"), body="2+2=4"),
+            _message(sender=self.agent_id("general"), body="Let me help"),
+            _message(sender="@user:localhost", body="What about 3+3?"),
         ]
         should_respond = should_agent_respond(
             agent_name="calculator",
@@ -301,9 +317,9 @@ class TestAgentResponseLogic:
     def test_multiple_agents_nobody_responds(self) -> None:
         """If multiple agents in thread, nobody responds unless mentioned."""
         thread_history = [
-            {"sender": self.agent_id("calculator"), "body": "2+2=4"},
-            {"sender": self.agent_id("general"), "body": "Let me help"},
-            {"sender": "@user:localhost", "body": "What about 3+3?"},
+            _message(sender=self.agent_id("calculator"), body="2+2=4"),
+            _message(sender=self.agent_id("general"), body="Let me help"),
+            _message(sender="@user:localhost", body="What about 3+3?"),
         ]
 
         should_respond = should_agent_respond(
@@ -325,9 +341,9 @@ class TestAgentResponseLogic:
             "general": [f"@bob:{self.domain}"],
         }
         thread_history = [
-            {"sender": self.agent_id("calculator"), "body": "2+2=4"},
-            {"sender": self.agent_id("general"), "body": "I'll help too"},
-            {"sender": f"@alice:{self.domain}", "body": "What about 3+3?"},
+            _message(sender=self.agent_id("calculator"), body="2+2=4"),
+            _message(sender=self.agent_id("general"), body="I'll help too"),
+            _message(sender=f"@alice:{self.domain}", body="What about 3+3?"),
         ]
 
         should_respond = should_agent_respond(
@@ -387,14 +403,14 @@ class TestAgentResponseLogic:
     def test_agent_mentioned_in_thread_history(self) -> None:
         """When any agent is mentioned in thread, only mentioned agents respond."""
         # Thread history with agent mentions
-        thread_history: list[dict[str, Any]] = [
-            {
-                "sender": "@user:localhost",
-                "body": "@mindroom_calculator help",
-                "content": {"m.mentions": {"user_ids": [self.agent_id("calculator")]}},
-            },
-            {"sender": self.agent_id("calculator"), "body": "2+2=4"},
-            {"sender": "@user:localhost", "body": "what about 3+3?"},
+        thread_history = [
+            _message(
+                sender="@user:localhost",
+                body="@mindroom_calculator help",
+                content={"m.mentions": {"user_ids": [self.agent_id("calculator")]}},
+            ),
+            _message(sender=self.agent_id("calculator"), body="2+2=4"),
+            _message(sender="@user:localhost", body="what about 3+3?"),
         ]
 
         # Non-mentioned agent should not respond
@@ -427,8 +443,8 @@ class TestAgentResponseLogic:
 
         # Scenario 2: Thread with only user messages
         thread_history = [
-            {"sender": "@user:localhost", "body": "I need help with math"},
-            {"sender": "@user:localhost", "body": "Can someone help?"},
+            _message(sender="@user:localhost", body="I need help with math"),
+            _message(sender="@user:localhost", body="Can someone help?"),
         ]
         should_respond = should_agent_respond(
             agent_name="calculator",
@@ -474,12 +490,12 @@ class TestAgentResponseLogic:
     def test_mixed_agent_and_user_messages(self) -> None:
         """Test thread with interleaved agent and user messages."""
         thread_history = [
-            {"sender": "@user:localhost", "body": "Help with math"},
-            {"sender": self.agent_id("calculator"), "body": "I can help!"},
-            {"sender": "@user:localhost", "body": "Great, what's 2+2?"},
-            {"sender": self.agent_id("calculator"), "body": "2+2=4"},
-            {"sender": self.agent_id("general"), "body": "I can also help"},
-            {"sender": "@user:localhost", "body": "What about 3+3?"},
+            _message(sender="@user:localhost", body="Help with math"),
+            _message(sender=self.agent_id("calculator"), body="I can help!"),
+            _message(sender="@user:localhost", body="Great, what's 2+2?"),
+            _message(sender=self.agent_id("calculator"), body="2+2=4"),
+            _message(sender=self.agent_id("general"), body="I can also help"),
+            _message(sender="@user:localhost", body="What about 3+3?"),
         ]
 
         # Multiple agents present, nobody should respond without mention
@@ -557,8 +573,8 @@ class TestAgentResponseLogic:
 
         # Thread with only user messages - single agent should also take ownership
         thread_history = [
-            {"sender": "@user:localhost", "body": "I need help"},
-            {"sender": "@user:localhost", "body": "Anyone there?"},
+            _message(sender="@user:localhost", body="I need help"),
+            _message(sender="@user:localhost", body="Anyone there?"),
         ]
         should_respond = should_agent_respond(
             agent_name="calculator",
@@ -578,8 +594,8 @@ class TestAgentResponseLogic:
 
         # Thread with two different human senders and no agent yet → require mention
         multi_human_thread = [
-            {"sender": "@alice:localhost", "body": "Can someone help?"},
-            {"sender": "@bob:localhost", "body": "I also need help"},
+            _message(sender="@alice:localhost", body="Can someone help?"),
+            _message(sender="@bob:localhost", body="I also need help"),
         ]
         assert (
             should_agent_respond(
@@ -612,7 +628,7 @@ class TestAgentResponseLogic:
 
         # Thread with only one human sender → auto-respond (single agent room)
         single_human_thread = [
-            {"sender": "@alice:localhost", "body": "Can someone help?"},
+            _message(sender="@alice:localhost", body="Can someone help?"),
         ]
         assert (
             should_agent_respond(
@@ -630,10 +646,10 @@ class TestAgentResponseLogic:
 
         # Agent already participating in multi-human thread → still require mention
         owned_thread_history = [
-            {"sender": "@alice:localhost", "body": "help"},
-            {"sender": "@bob:localhost", "body": "me too"},
-            {"sender": self.agent_id("calculator"), "body": "Sure, I can help."},
-            {"sender": "@alice:localhost", "body": "Can you continue?"},
+            _message(sender="@alice:localhost", body="help"),
+            _message(sender="@bob:localhost", body="me too"),
+            _message(sender=self.agent_id("calculator"), body="Sure, I can help."),
+            _message(sender="@alice:localhost", body="Can you continue?"),
         ]
         assert (
             should_agent_respond(
@@ -703,8 +719,8 @@ class TestAgentResponseLogic:
         room = create_mock_room("!room:localhost", ["calculator"], config)
 
         thread_with_bot = [
-            {"sender": "@alice:localhost", "body": "hello"},
-            {"sender": "@telegram:localhost", "body": "relayed message"},
+            _message(sender="@alice:localhost", body="hello"),
+            _message(sender="@telegram:localhost", body="relayed message"),
         ]
         # Only one real human — agent should auto-respond
         assert (
@@ -729,9 +745,9 @@ class TestAgentResponseLogic:
         """
         # Thread history: GeneralAgent was initially mentioned by router and responded
         thread_history = [
-            {"sender": "@user:localhost", "body": "hi"},
-            {"sender": self.agent_id("router"), "body": "@general could you help with this?"},
-            {"sender": self.agent_id("general"), "body": "Hello! How can I help?"},
+            _message(sender="@user:localhost", body="hi"),
+            _message(sender=self.agent_id("router"), body="@general could you help with this?"),
+            _message(sender=self.agent_id("general"), body="Hello! How can I help?"),
         ]
 
         # GeneralAgent should NOT respond because ResearchAgent is mentioned

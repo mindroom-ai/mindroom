@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.main import Config
+    from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_tracker import ResponseTracker
 
@@ -64,7 +65,10 @@ class CommandHandlerContext:
     storage_path: Path
     logger: structlog.stdlib.BoundLogger
     response_tracker: ResponseTracker
-    derive_conversation_context: Callable[[str, EventInfo], Awaitable[tuple[bool, str | None, list[dict[str, Any]]]]]
+    derive_conversation_context: Callable[
+        [str, EventInfo],
+        Awaitable[tuple[bool, str | None, list[ResolvedVisibleMessage]]],
+    ]
     resolve_reply_thread_id: Callable[..., str | None]
     send_response: Callable[..., Awaitable[str | None]]
     send_skill_command_response: Callable[..., Awaitable[str | None]]

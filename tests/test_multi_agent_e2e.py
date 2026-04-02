@@ -20,7 +20,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamMode
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, make_visible_message, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -316,13 +316,13 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         ):
             # Only this agent in the thread
             mock_fetch.return_value = [
-                {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
-                {
-                    "sender": mock_calculator_agent.user_id,
-                    "body": "10% of 100 is 10",
-                    "timestamp": 124,
-                    "event_id": "msg2",
-                },
+                make_visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
+                make_visible_message(
+                    sender=mock_calculator_agent.user_id,
+                    body="10% of 100 is 10",
+                    timestamp=124,
+                    event_id="msg2",
+                ),
             ]
 
             # Mock non-streaming response
@@ -370,19 +370,19 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         ):
             # Multiple agents in the thread
             mock_fetch.return_value = [
-                {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
-                {
-                    "sender": mock_calculator_agent.user_id,
-                    "body": "10% of 100 is 10",
-                    "timestamp": 124,
-                    "event_id": "msg2",
-                },
-                {
-                    "sender": f"@mindroom_general:{domain}",
-                    "body": "I can also help",
-                    "timestamp": 125,
-                    "event_id": "msg3",
-                },
+                make_visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
+                make_visible_message(
+                    sender=mock_calculator_agent.user_id,
+                    body="10% of 100 is 10",
+                    timestamp=124,
+                    event_id="msg2",
+                ),
+                make_visible_message(
+                    sender=f"@mindroom_general:{domain}",
+                    body="I can also help",
+                    timestamp=125,
+                    event_id="msg3",
+                ),
             ]
 
             await bot._on_message(room, message_event_2)
@@ -427,19 +427,19 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             patch("mindroom.bot.should_use_streaming", return_value=False),  # No streaming
         ):
             mock_fetch.return_value = [
-                {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
-                {
-                    "sender": mock_calculator_agent.user_id,
-                    "body": "10% of 100 is 10",
-                    "timestamp": 124,
-                    "event_id": "msg2",
-                },
-                {
-                    "sender": f"@mindroom_general:{domain}",
-                    "body": "I can also help",
-                    "timestamp": 125,
-                    "event_id": "msg3",
-                },
+                make_visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
+                make_visible_message(
+                    sender=mock_calculator_agent.user_id,
+                    body="10% of 100 is 10",
+                    timestamp=124,
+                    event_id="msg2",
+                ),
+                make_visible_message(
+                    sender=f"@mindroom_general:{domain}",
+                    body="I can also help",
+                    timestamp=125,
+                    event_id="msg3",
+                ),
             ]
 
             # Mock non-streaming response for mention case
@@ -454,10 +454,10 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             assert ai_kwargs["prompt"].startswith("[")
             assert ai_kwargs["prompt"].endswith(f"@mindroom_calculator:{domain} What about 20% of 300?")
             assert ai_kwargs["session_id"] == f"{test_room_id}:{thread_root_id}"
-            assert ai_kwargs["thread_history"][0]["body"].startswith("[")
-            assert ai_kwargs["thread_history"][0]["body"].endswith("What's 10% of 100?")
-            assert ai_kwargs["thread_history"][1]["body"] == "10% of 100 is 10"
-            assert ai_kwargs["thread_history"][2]["body"] == "I can also help"
+            assert ai_kwargs["thread_history"][0].body.startswith("[")
+            assert ai_kwargs["thread_history"][0].body.endswith("What's 10% of 100?")
+            assert ai_kwargs["thread_history"][1].body == "10% of 100 is 10"
+            assert ai_kwargs["thread_history"][2].body == "I can also help"
             assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
             assert ai_kwargs["room_id"] == test_room_id

@@ -14,6 +14,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -61,7 +62,22 @@ def _make_event(
     return event
 
 
-def _make_context(thread_history: list[dict] | None = None) -> _MessageContext:
+def _message(
+    *,
+    sender: str,
+    event_id: str,
+    timestamp: int,
+    body: str,
+) -> ResolvedVisibleMessage:
+    return ResolvedVisibleMessage.synthetic(
+        sender=sender,
+        event_id=event_id,
+        timestamp=timestamp,
+        body=body,
+    )
+
+
+def _make_context(thread_history: list[ResolvedVisibleMessage] | None = None) -> _MessageContext:
     return _MessageContext(
         am_i_mentioned=True,
         is_thread=bool(thread_history),
@@ -81,8 +97,8 @@ class TestHasNewerUnrespondedInScope:
         event = _make_event(event_id="$m1", server_timestamp=1000)
         context = _make_context(
             [
-                {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "first"},
-                {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "second"},
+                _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="first"),
+                _message(sender="@user:localhost", event_id="$m2", timestamp=2000, body="second"),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is True
@@ -93,8 +109,8 @@ class TestHasNewerUnrespondedInScope:
         event = _make_event(event_id="$m2", server_timestamp=2000)
         context = _make_context(
             [
-                {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "first"},
-                {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "second"},
+                _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="first"),
+                _message(sender="@user:localhost", event_id="$m2", timestamp=2000, body="second"),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is False
@@ -105,8 +121,8 @@ class TestHasNewerUnrespondedInScope:
         event = _make_event(sender="@alice:localhost", event_id="$m1", server_timestamp=1000)
         context = _make_context(
             [
-                {"sender": "@alice:localhost", "event_id": "$m1", "timestamp": 1000, "body": "alice msg"},
-                {"sender": "@bob:localhost", "event_id": "$m2", "timestamp": 2000, "body": "bob msg"},
+                _message(sender="@alice:localhost", event_id="$m1", timestamp=1000, body="alice msg"),
+                _message(sender="@bob:localhost", event_id="$m2", timestamp=2000, body="bob msg"),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is False
@@ -118,8 +134,8 @@ class TestHasNewerUnrespondedInScope:
         event = _make_event(event_id="$m1", server_timestamp=1000)
         context = _make_context(
             [
-                {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "first"},
-                {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "second"},
+                _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="first"),
+                _message(sender="@user:localhost", event_id="$m2", timestamp=2000, body="second"),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is False
@@ -137,7 +153,7 @@ class TestHasNewerUnrespondedInScope:
         event = _make_event(event_id="$m1", server_timestamp=1000)
         context = _make_context(
             [
-                {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "only msg"},
+                _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="only msg"),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is False
@@ -146,9 +162,9 @@ class TestHasNewerUnrespondedInScope:
         """With 3 messages from same sender, only the latest should not be skipped."""
         bot = _make_bot(tmp_path)
         history = [
-            {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "first"},
-            {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "second"},
-            {"sender": "@user:localhost", "event_id": "$m3", "timestamp": 3000, "body": "third"},
+            _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="first"),
+            _message(sender="@user:localhost", event_id="$m2", timestamp=2000, body="second"),
+            _message(sender="@user:localhost", event_id="$m3", timestamp=3000, body="third"),
         ]
         context = _make_context(history)
 
@@ -181,8 +197,8 @@ class TestHasNewerUnrespondedInScope:
         event = _make_event(event_id="$m1", server_timestamp=1000)
         context = _make_context(
             [
-                {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "question"},
-                {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "!help"},
+                _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="question"),
+                _message(sender="@user:localhost", event_id="$m2", timestamp=2000, body="!help"),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is False
@@ -193,8 +209,8 @@ class TestHasNewerUnrespondedInScope:
         event = _make_event(event_id="$m1", server_timestamp=1000)
         context = _make_context(
             [
-                {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "question"},
-                {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "  !schedule 5m"},
+                _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="question"),
+                _message(sender="@user:localhost", event_id="$m2", timestamp=2000, body="  !schedule 5m"),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is False
@@ -206,18 +222,18 @@ class TestHasNewerUnrespondedInScope:
         event.source["content"]["com.mindroom.source_kind"] = "scheduled"
         context = _make_context(
             [
-                {
-                    "sender": "@mindroom_router:localhost",
-                    "event_id": "$m1",
-                    "timestamp": 1000,
-                    "body": "scheduled task fire",
-                },
-                {
-                    "sender": "@mindroom_router:localhost",
-                    "event_id": "$m2",
-                    "timestamp": 2000,
-                    "body": "newer bot activity",
-                },
+                _message(
+                    sender="@mindroom_router:localhost",
+                    event_id="$m1",
+                    timestamp=1000,
+                    body="scheduled task fire",
+                ),
+                _message(
+                    sender="@mindroom_router:localhost",
+                    event_id="$m2",
+                    timestamp=2000,
+                    body="newer bot activity",
+                ),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is False
@@ -229,18 +245,13 @@ class TestHasNewerUnrespondedInScope:
         event.source["content"]["com.mindroom.source_kind"] = "hook"
         context = _make_context(
             [
-                {
-                    "sender": "@mindroom_router:localhost",
-                    "event_id": "$m1",
-                    "timestamp": 1000,
-                    "body": "hook fire",
-                },
-                {
-                    "sender": "@mindroom_router:localhost",
-                    "event_id": "$m2",
-                    "timestamp": 2000,
-                    "body": "newer bot activity",
-                },
+                _message(sender="@mindroom_router:localhost", event_id="$m1", timestamp=1000, body="hook fire"),
+                _message(
+                    sender="@mindroom_router:localhost",
+                    event_id="$m2",
+                    timestamp=2000,
+                    body="newer bot activity",
+                ),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is False
@@ -250,18 +261,18 @@ class TestHasNewerUnrespondedInScope:
         bot = _make_bot(tmp_path)
         context = _make_context(
             [
-                {
-                    "sender": "@mindroom_router:localhost",
-                    "event_id": "$m1",
-                    "timestamp": 1000,
-                    "body": "scheduled fire one",
-                },
-                {
-                    "sender": "@mindroom_router:localhost",
-                    "event_id": "$m2",
-                    "timestamp": 2000,
-                    "body": "scheduled fire two",
-                },
+                _message(
+                    sender="@mindroom_router:localhost",
+                    event_id="$m1",
+                    timestamp=1000,
+                    body="scheduled fire one",
+                ),
+                _message(
+                    sender="@mindroom_router:localhost",
+                    event_id="$m2",
+                    timestamp=2000,
+                    body="scheduled fire two",
+                ),
             ],
         )
 
@@ -280,9 +291,9 @@ class TestHasNewerUnrespondedInScope:
         event = _make_event(event_id="$m1", server_timestamp=1000)
         context = _make_context(
             [
-                {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "first question"},
-                {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "!help"},
-                {"sender": "@user:localhost", "event_id": "$m3", "timestamp": 3000, "body": "second question"},
+                _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="first question"),
+                _message(sender="@user:localhost", event_id="$m2", timestamp=2000, body="!help"),
+                _message(sender="@user:localhost", event_id="$m3", timestamp=3000, body="second question"),
             ],
         )
         # $m1 should be coalesced because $m3 is a newer normal message
@@ -294,8 +305,8 @@ class TestHasNewerUnrespondedInScope:
         event = _make_event(event_id="$m1", server_timestamp=1000)
         context = _make_context(
             [
-                {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "first"},
-                {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "second"},
+                _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="first"),
+                _message(sender="@user:localhost", event_id="$m2", timestamp=2000, body="second"),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is True
@@ -307,18 +318,8 @@ class TestHasNewerUnrespondedInScope:
         event.source["content"][ORIGINAL_SENDER_KEY] = "@user:localhost"
         context = _make_context(
             [
-                {
-                    "sender": "@mindroom_router:localhost",
-                    "event_id": "$m1",
-                    "timestamp": 1000,
-                    "body": "relay one",
-                },
-                {
-                    "sender": "@mindroom_router:localhost",
-                    "event_id": "$m2",
-                    "timestamp": 2000,
-                    "body": "relay two",
-                },
+                _message(sender="@mindroom_router:localhost", event_id="$m1", timestamp=1000, body="relay one"),
+                _message(sender="@mindroom_router:localhost", event_id="$m2", timestamp=2000, body="relay two"),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is True
@@ -343,8 +344,8 @@ class TestHasNewerUnrespondedInScope:
         )
         context = _make_context(
             [
-                {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "first"},
-                {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "second"},
+                _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="first"),
+                _message(sender="@user:localhost", event_id="$m2", timestamp=2000, body="second"),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is False
@@ -356,8 +357,8 @@ class TestHasNewerUnrespondedInScope:
         event.server_timestamp = MagicMock()
         context = _make_context(
             [
-                {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "first"},
-                {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "second"},
+                _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="first"),
+                _message(sender="@user:localhost", event_id="$m2", timestamp=2000, body="second"),
             ],
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is False
@@ -375,8 +376,8 @@ class TestCoalescingInDispatch:
         event = _make_event(event_id="$m1", server_timestamp=1000)
 
         thread_history = [
-            {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "first"},
-            {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "second"},
+            _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="first"),
+            _message(sender="@user:localhost", event_id="$m2", timestamp=2000, body="second"),
         ]
         context = _make_context(thread_history)
         dispatch = MagicMock()
@@ -407,8 +408,8 @@ class TestCoalescingInDispatch:
         event = _make_event(event_id="$m2", server_timestamp=2000)
 
         thread_history = [
-            {"sender": "@user:localhost", "event_id": "$m1", "timestamp": 1000, "body": "first"},
-            {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "second"},
+            _message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="first"),
+            _message(sender="@user:localhost", event_id="$m2", timestamp=2000, body="second"),
         ]
         context = _make_context(thread_history)
         dispatch = MagicMock()

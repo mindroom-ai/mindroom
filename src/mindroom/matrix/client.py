@@ -73,6 +73,30 @@ class ResolvedVisibleMessage:
         message.refresh_stream_status()
         return message
 
+    @classmethod
+    def synthetic(
+        cls,
+        *,
+        sender: str,
+        body: str,
+        event_id: str,
+        timestamp: int = 0,
+        content: dict[str, Any] | None = None,
+        thread_id: str | None = None,
+    ) -> "ResolvedVisibleMessage":
+        """Build a synthetic visible message for non-Matrix history inputs."""
+        message = cls(
+            sender=sender,
+            body=body,
+            timestamp=timestamp,
+            event_id=event_id,
+            content=content or {"body": body},
+            thread_id=thread_id,
+            latest_event_id=event_id,
+        )
+        message.refresh_stream_status()
+        return message
+
     def refresh_stream_status(self) -> None:
         """Refresh normalized stream status from message content."""
         self.stream_status = _stream_status_from_content(self.content)
@@ -122,9 +146,6 @@ class ResolvedVisibleMessage:
         return message_data
 
 
-type VisibleMessageLike = ResolvedVisibleMessage | Mapping[str, Any]
-
-
 def _reply_to_event_id_from_content(content: Mapping[str, Any] | None) -> str | None:
     """Return the explicit reply target encoded on one visible content payload."""
     if content is None:
@@ -139,116 +160,26 @@ def _reply_to_event_id_from_content(content: Mapping[str, Any] | None) -> str | 
     return reply_to_event_id if isinstance(reply_to_event_id, str) else None
 
 
-def visible_message_event_id(message: VisibleMessageLike) -> str | None:
-    """Return the original/root event ID for one visible message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.event_id
-    event_id = message.get("event_id")
-    return event_id if isinstance(event_id, str) else None
-
-
-def visible_message_sender(message: VisibleMessageLike) -> str | None:
-    """Return the sender ID for one visible message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.sender
-    sender = message.get("sender")
-    return sender if isinstance(sender, str) else None
-
-
-def visible_message_body(message: VisibleMessageLike) -> str | None:
-    """Return the resolved visible body for one message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.body
-    body = message.get("body")
-    return body if isinstance(body, str) else None
-
-
-def visible_message_timestamp(message: VisibleMessageLike) -> int | None:
-    """Return the visible-message timestamp when available."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.timestamp
-    timestamp = message.get("timestamp")
-    return timestamp if isinstance(timestamp, int) else None
-
-
-def visible_message_content(message: VisibleMessageLike) -> dict[str, Any] | None:
-    """Return the canonical visible content payload for one message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.content
-    content = message.get("content")
-    return content if isinstance(content, dict) else None
-
-
-def visible_message_thread_id(message: VisibleMessageLike) -> str | None:
-    """Return the thread root ID associated with one visible message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.thread_id
-    thread_id = message.get("thread_id")
-    return thread_id if isinstance(thread_id, str) else None
-
-
-def visible_message_stream_status(message: VisibleMessageLike) -> str | None:
-    """Return normalized stream status metadata for one visible message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.stream_status
-    stream_status = message.get("stream_status")
-    return stream_status if isinstance(stream_status, str) else None
-
-
-def visible_message_visible_event_id(message: VisibleMessageLike) -> str | None:
-    """Return the event ID for the currently visible event state."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.visible_event_id
-    latest_event_id = message.get("latest_event_id")
-    if isinstance(latest_event_id, str):
-        return latest_event_id
-    return visible_message_event_id(message)
-
-
-def visible_message_reply_to_event_id(message: VisibleMessageLike) -> str | None:
-    """Return the explicit reply target encoded on one visible message."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.reply_to_event_id
-    return _reply_to_event_id_from_content(visible_message_content(message))
-
-
-def visible_message_to_dict(message: VisibleMessageLike) -> dict[str, Any]:
-    """Serialize one visible message into the public JSON-safe shape."""
-    if isinstance(message, ResolvedVisibleMessage):
-        return message.to_dict()
-    return dict(message)
-
-
 def replace_visible_message(
-    message: VisibleMessageLike,
+    message: ResolvedVisibleMessage,
     *,
     sender: str | None = None,
     body: str | None = None,
-) -> VisibleMessageLike:
+) -> ResolvedVisibleMessage:
     """Return one visible-message copy while keeping body/content coherent."""
     updated_content: dict[str, Any] | None = None
-    if body is not None and (content := visible_message_content(message)) is not None:
+    if body is not None and (content := message.content) is not None:
         updated_content = dict(content)
         updated_content["body"] = body
 
-    if isinstance(message, ResolvedVisibleMessage):
-        updates: dict[str, str | dict[str, Any]] = {}
-        if sender is not None:
-            updates["sender"] = sender
-        if body is not None:
-            updates["body"] = body
-        if updated_content is not None:
-            updates["content"] = updated_content
-        return replace(message, **updates)
-
-    copied = dict(message)
+    updates: dict[str, str | dict[str, Any]] = {}
     if sender is not None:
-        copied["sender"] = sender
+        updates["sender"] = sender
     if body is not None:
-        copied["body"] = body
+        updates["body"] = body
     if updated_content is not None:
-        copied["content"] = updated_content
-    return copied
+        updates["content"] = updated_content
+    return replace(message, **updates)
 
 
 class PermanentMatrixStartupError(ValueError):

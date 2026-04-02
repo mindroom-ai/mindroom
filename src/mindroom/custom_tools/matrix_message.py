@@ -25,16 +25,11 @@ from mindroom.interactive import (
     should_create_interactive_question,
 )
 from mindroom.matrix.client import (
-    VisibleMessageLike,
+    ResolvedVisibleMessage,
     edit_message,
     fetch_thread_history,
     get_latest_thread_event_id_if_needed,
     send_message,
-    visible_message_body,
-    visible_message_event_id,
-    visible_message_sender,
-    visible_message_to_dict,
-    visible_message_visible_event_id,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
@@ -426,13 +421,13 @@ class MatrixMessageTools(Toolkit):
         self,
         context: ToolRuntimeContext,
         *,
-        messages: Sequence[VisibleMessageLike],
+        messages: Sequence[ResolvedVisibleMessage],
     ) -> list[dict[str, object]]:
         current_user_id = context.client.user_id
         options: list[dict[str, object]] = []
         for message in reversed(messages):
-            event_id = visible_message_event_id(message)
-            sender = visible_message_sender(message)
+            event_id = message.event_id
+            sender = message.sender
             if not isinstance(event_id, str) or not isinstance(sender, str):
                 continue
             can_edit = current_user_id is not None and sender == current_user_id
@@ -440,7 +435,7 @@ class MatrixMessageTools(Toolkit):
                 "event_id": event_id,
                 "sender": sender,
                 "can_edit": can_edit,
-                "body_preview": self._message_preview(visible_message_body(message)),
+                "body_preview": self._message_preview(message.body),
             }
             if can_edit:
                 option["edit_action"] = {"action": "edit", "target": event_id}
@@ -464,7 +459,7 @@ class MatrixMessageTools(Toolkit):
             room_id=room_id,
             thread_id=thread_id,
             limit=read_limit,
-            messages=[visible_message_to_dict(message) for message in recent_messages],
+            messages=[message.to_dict() for message in recent_messages],
             edit_options=self._build_edit_options(context, messages=recent_messages),
         )
 
@@ -510,7 +505,7 @@ class MatrixMessageTools(Toolkit):
         if thread_id is not None:
             thread_messages = await fetch_thread_history(context.client, room_id, thread_id)
             if thread_messages:
-                latest_thread_event_id = visible_message_visible_event_id(thread_messages[-1])
+                latest_thread_event_id = thread_messages[-1].visible_event_id
             if latest_thread_event_id is None:
                 latest_thread_event_id = target
 

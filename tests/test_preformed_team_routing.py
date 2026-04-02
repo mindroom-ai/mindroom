@@ -21,7 +21,7 @@ from mindroom.config.models import RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -212,7 +212,7 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
     store_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     seen_requesters: list[str | None] = []
     scheduled_tasks: list[asyncio.Task[Any]] = []
-    thread_history = [{"sender": "@bob:localhost", "body": "Earlier note", "event_id": "$bob1"}]
+    thread_history = [make_visible_message(sender="@bob:localhost", body="Earlier note", event_id="$bob1")]
 
     async def fake_store_conversation_memory(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
         identity = get_tool_execution_identity()

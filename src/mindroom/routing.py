@@ -11,12 +11,6 @@ from pydantic import BaseModel, Field
 from mindroom.agents import describe_agent
 from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import (
-    ResolvedVisibleMessage,
-    VisibleMessageLike,
-    visible_message_body,
-    visible_message_sender,
-)
 from mindroom.matrix.identity import MatrixID
 
 if TYPE_CHECKING:
@@ -24,6 +18,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.client import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
 
@@ -40,7 +35,7 @@ async def suggest_agent(
     available_agent_names: list[str],
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_context: Sequence[VisibleMessageLike] | None = None,
+    thread_context: Sequence[ResolvedVisibleMessage] | None = None,
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message.
 
@@ -80,8 +75,8 @@ Choose the most appropriate agent based on their role, tools, and instructions."
         if thread_context:
             context = "Previous messages:\n"
             for msg in thread_context[-3:]:  # Last 3 messages
-                sender = visible_message_sender(msg) or ""
-                body = (visible_message_body(msg) or "")[:100]
+                sender = msg.sender or ""
+                body = (msg.body or "")[:100]
                 context += f"{sender}: {body}\n"
             prompt = context + "\n" + prompt
 
@@ -133,7 +128,7 @@ async def suggest_agent_for_message(
     available_agents: list[MatrixID],
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_context: Sequence[VisibleMessageLike] | None = None,
+    thread_context: Sequence[ResolvedVisibleMessage] | None = None,
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message.
 
@@ -148,13 +143,10 @@ async def suggest_agent_for_message(
     if thread_context:
         resolved_context = []
         for msg in thread_context:
-            sender = visible_message_sender(msg) or ""
+            sender = msg.sender or ""
             if sender.startswith("@") and ":" in sender:
                 sender_id = MatrixID.parse(sender)
                 sender = sender_id.agent_name(config, runtime_paths) or sender_id.domain
-            if isinstance(msg, ResolvedVisibleMessage):
-                resolved_context.append(replace(msg, sender=sender))
-            else:
-                resolved_context.append({"sender": sender, "body": visible_message_body(msg) or ""})
+            resolved_context.append(replace(msg, sender=sender))
 
     return await suggest_agent(message, agent_names, config, runtime_paths, resolved_context)

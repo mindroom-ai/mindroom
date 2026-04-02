@@ -19,7 +19,13 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    make_visible_message,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -596,10 +602,7 @@ class TestRoutingRegression:
                     is_thread=True,
                     thread_id="$thread_root",
                     thread_history=[
-                        {
-                            "sender": "@mindroom_news:localhost",
-                            "body": "Latest update from news agent",
-                        },
+                        make_visible_message(sender="@mindroom_news:localhost", body="Latest update from news agent"),
                     ],
                     mentioned_agents=[],
                     has_non_agent_mentions=False,
