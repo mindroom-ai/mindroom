@@ -11,11 +11,9 @@ import pytest
 from nio.api import RelationshipType
 
 from mindroom.matrix.client import (
-    ThreadHistoryResult,
     _latest_thread_event_id,
-    _ThreadHistoryFastPathUnavailableError,
+    build_threaded_edit_content,
     fetch_thread_history,
-    fetch_thread_snapshot,
 )
 from tests.conftest import make_visible_message
 
@@ -315,182 +313,6 @@ class TestThreadHistory:
         mock_fallback.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_marks_room_scan_fallback_as_full_history(self) -> None:
-        """Snapshot fallback should go straight to the room-scan helper."""
-        fallback_history = [make_visible_message(event_id="$thread_root", body="fallback")]
-        client = AsyncMock()
-
-        with (
-            patch(
-                "mindroom.matrix.client._fetch_thread_snapshot_via_relations",
-                new=AsyncMock(side_effect=_ThreadHistoryFastPathUnavailableError("unsupported")),
-            ),
-            patch(
-                "mindroom.matrix.client._fetch_thread_history_via_room_messages",
-                new=AsyncMock(return_value=fallback_history),
-            ) as mock_room_scan,
-            patch(
-                "mindroom.matrix.client.fetch_thread_history",
-                new=AsyncMock(side_effect=AssertionError("should skip fetch_thread_history")),
-            ) as mock_fetch_history,
-        ):
-            snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
-
-        assert snapshot == fallback_history
-        assert isinstance(snapshot, ThreadHistoryResult)
-        assert snapshot.is_full_history is True
-        mock_room_scan.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
-        mock_fetch_history.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_falls_back_when_relations_return_only_root(self) -> None:
-        """A root-only relations result should not count as a usable snapshot."""
-        root_event = self._make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="Root message",
-            server_timestamp=1000,
-            source_content={"body": "Root message"},
-        )
-        client = self._make_relations_client(root_event=root_event, relations={})
-        fallback_history = [make_visible_message(event_id="$thread_root", body="fallback")]
-
-        with patch(
-            "mindroom.matrix.client._fetch_thread_history_via_room_messages",
-            new=AsyncMock(return_value=fallback_history),
-        ) as mock_room_scan:
-            snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
-
-        assert snapshot == fallback_history
-        assert snapshot.is_full_history is True
-        mock_room_scan.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
-        client.room_messages.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_keeps_sidecar_preview_without_download(self) -> None:
-        """Snapshot fetch should stay preview-only even when it checks visible edits."""
-        root_event = self._make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="preview root",
-            server_timestamp=1000,
-            source_content={
-                "body": "preview root",
-                "io.mindroom.long_text": {
-                    "version": 2,
-                    "encoding": "matrix_event_content_json",
-                },
-                "url": "mxc://server/root-sidecar",
-            },
-        )
-        thread_event = self._make_text_event(
-            event_id="$reply",
-            sender="@agent:localhost",
-            body="reply",
-            server_timestamp=2000,
-            source_content={
-                "body": "reply",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
-        client = self._make_relations_client(
-            root_event=root_event,
-            relations={
-                self._relation_key("$thread_root", RelationshipType.thread): [thread_event],
-            },
-        )
-        client.download = AsyncMock()
-
-        snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
-
-        assert isinstance(snapshot, ThreadHistoryResult)
-        assert snapshot.is_full_history is False
-        assert [message.body for message in snapshot] == ["preview root", "reply"]
-        client.download.assert_not_awaited()
-        assert client.room_get_event_relations.call_args_list == [
-            call(
-                "!room:localhost",
-                "$thread_root",
-                rel_type=RelationshipType.thread,
-                event_type="m.room.message",
-                direction=nio.MessageDirection.back,
-                limit=None,
-            ),
-            call(
-                "!room:localhost",
-                "$thread_root",
-                rel_type=RelationshipType.replacement,
-                event_type="m.room.message",
-                direction=nio.MessageDirection.back,
-                limit=None,
-            ),
-            call(
-                "!room:localhost",
-                "$reply",
-                rel_type=RelationshipType.replacement,
-                event_type="m.room.message",
-                direction=nio.MessageDirection.back,
-                limit=None,
-            ),
-        ]
-
-    @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_applies_latest_visible_reply_edit_without_sidecar_download(self) -> None:
-        """Snapshot fetch should follow latest reply edits while keeping preview-only content resolution."""
-        root_event = self._make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="Root message",
-            server_timestamp=1000,
-            source_content={"body": "Root message"},
-        )
-        thread_event = self._make_text_event(
-            event_id="$reply",
-            sender="@agent:localhost",
-            body="draft",
-            server_timestamp=2000,
-            source_content={
-                "body": "draft",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
-        edit_event = self._make_text_event(
-            event_id="$edit",
-            sender="@agent:localhost",
-            body="* final mention @mindroom_calculator:localhost",
-            server_timestamp=3000,
-            source_content={
-                "body": "* final mention @mindroom_calculator:localhost",
-                "m.new_content": {
-                    "body": "final mention @mindroom_calculator:localhost",
-                    "msgtype": "m.text",
-                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-                },
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
-            },
-        )
-        client = self._make_relations_client(
-            root_event=root_event,
-            relations={
-                self._relation_key("$thread_root", RelationshipType.thread): [thread_event],
-                self._relation_key("$thread_root", RelationshipType.replacement): [],
-                self._relation_key("$reply", RelationshipType.replacement): [edit_event],
-            },
-        )
-        client.download = AsyncMock()
-
-        snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
-
-        assert isinstance(snapshot, ThreadHistoryResult)
-        assert snapshot.is_full_history is False
-        assert [(message.event_id, message.body, message.visible_event_id) for message in snapshot] == [
-            ("$thread_root", "Root message", "$thread_root"),
-            ("$reply", "final mention @mindroom_calculator:localhost", "$edit"),
-        ]
-        assert snapshot[1].content["m.mentions"] == {"user_ids": ["@mindroom_calculator:localhost"]}
-        client.download.assert_not_awaited()
-
-    @pytest.mark.asyncio
     async def test_latest_thread_event_id_uses_relations_fast_path(self) -> None:
         """The latest-thread lookup should inspect the newest child for edits."""
         root_event = self._make_text_event(
@@ -699,6 +521,35 @@ class TestThreadHistory:
         assert event_id == "$edit_latest"
         client.room_get_event.assert_not_awaited()
         client.room_messages.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_build_threaded_edit_content_uses_latest_thread_event_id_for_fallback(self) -> None:
+        """Threaded edits should preserve MSC3440 fallback semantics through the latest visible event."""
+        client = AsyncMock()
+
+        with (
+            patch(
+                "mindroom.matrix.client._latest_thread_event_id",
+                new=AsyncMock(return_value="$latest"),
+            ) as mock_latest,
+            patch(
+                "mindroom.matrix.client.format_message_with_mentions",
+                return_value={"body": "edited"},
+            ) as mock_format,
+        ):
+            content = await build_threaded_edit_content(
+                client,
+                room_id="!room:localhost",
+                new_text="edited",
+                thread_id="$thread_root",
+                config=MagicMock(),
+                runtime_paths=MagicMock(),
+                sender_domain="localhost",
+            )
+
+        assert content == {"body": "edited"}
+        mock_latest.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
+        assert mock_format.call_args.kwargs["latest_thread_event_id"] == "$latest"
 
     @pytest.mark.asyncio
     async def test_latest_thread_event_id_returns_root_when_thread_has_no_children(self) -> None:

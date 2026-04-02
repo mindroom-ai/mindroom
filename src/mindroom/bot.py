@@ -2329,6 +2329,13 @@ class AgentBot:
         if not dispatch.context.am_i_mentioned:
             self.logger.info("Will respond: only agent in thread")
 
+        response_target = self._prepare_response_target(
+            room_id=room.room_id,
+            thread_id=dispatch.context.thread_id,
+            reply_to_event_id=event.event_id,
+            resolved_thread_id=dispatch.envelope.resolved_thread_id,
+            response_envelope=dispatch.envelope,
+        )
         placeholder_text = "Thinking..."
         target_member_names: tuple[str, ...] | None = None
         if action.kind == "team":
@@ -2344,7 +2351,7 @@ class AgentBot:
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
             response_text=f"{placeholder_text} {IN_PROGRESS_MARKER}",
-            thread_id=dispatch.context.thread_id,
+            thread_id=response_target.delivery_thread_id,
             extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
         )
         placeholder_ready_monotonic = time.monotonic()
@@ -2362,7 +2369,7 @@ class AgentBot:
             response_event_id = await self._finalize_dispatch_failure(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
-                thread_id=dispatch.context.thread_id,
+                response_target=response_target,
                 placeholder_event_id=placeholder_event_id,
                 error=error,
             )
@@ -2433,7 +2440,7 @@ class AgentBot:
         *,
         room_id: str,
         reply_to_event_id: str,
-        thread_id: str | None,
+        response_target: _ResponseTarget,
         placeholder_event_id: str | None,
         error: Exception,
     ) -> str | None:
@@ -2445,7 +2452,7 @@ class AgentBot:
                 room_id,
                 reply_to_event_id,
                 error_text,
-                thread_id,
+                response_target.delivery_thread_id,
                 extra_content=terminal_extra_content,
             )
 
@@ -2453,7 +2460,7 @@ class AgentBot:
             room_id,
             placeholder_event_id,
             error_text,
-            thread_id,
+            response_target.delivery_thread_id,
             extra_content=terminal_extra_content,
         )
         if placeholder_updated:
@@ -2463,7 +2470,7 @@ class AgentBot:
             room_id,
             reply_to_event_id,
             error_text,
-            thread_id,
+            response_target.delivery_thread_id,
             extra_content=terminal_extra_content,
         )
 
@@ -4103,7 +4110,7 @@ class AgentBot:
                     reason="Suppressed placeholder response",
                 )
             return _ResponseDispatchResult(
-                event_id=existing_event_id,
+                event_id=None,
                 response_text=draft.response_text,
                 delivery_kind=None,
                 suppressed=True,
@@ -4589,6 +4596,15 @@ class AgentBot:
             requester_user_id=user_id,
             enable_streaming=self.enable_streaming,
         )
+        if (
+            use_streaming
+            and existing_event_id is not None
+            and not existing_event_is_placeholder
+            and response_envelope is not None
+            and correlation_id is not None
+            and self.hook_registry.has_hooks(EVENT_MESSAGE_BEFORE_RESPONSE)
+        ):
+            use_streaming = False
         delivery_result: _ResponseDispatchResult | None = None
         response_run_id = str(uuid4())
         delivery_thread_id = response_target.delivery_thread_id
@@ -4934,7 +4950,6 @@ class AgentBot:
             content = await build_threaded_edit_content(
                 self.client,
                 room_id=room_id,
-                event_id=event_id,
                 new_text=new_text,
                 thread_id=thread_id,
                 config=self.config,
@@ -5141,13 +5156,51 @@ class AgentBot:
             self.logger.debug("Agent should not respond to edited message")
             return
 
-        # Remove the stale run from Agno history before regenerating.
-        # The original run stored reply_to_event_id (= original_event_id) as
-        # matrix_event_id in its metadata, so we look up by that key.
+        self._remove_stale_runs_for_edited_message(
+            room=room,
+            thread_id=context.thread_id,
+            original_event_id=event_info.original_event_id,
+            requester_user_id=requester_user_id,
+        )
+
+        # Generate new response
+        regenerated_event_id = await self._generate_response(
+            room_id=room.room_id,
+            prompt=edited_content,
+            reply_to_event_id=event_info.original_event_id,
+            thread_id=context.thread_id,
+            thread_history=context.thread_history,
+            existing_event_id=response_event_id,
+            existing_event_is_placeholder=False,
+            user_id=requester_user_id,
+            response_envelope=envelope,
+            correlation_id=event.event_id,
+        )
+
+        # Update the response tracker
+        if regenerated_event_id is not None:
+            self.response_tracker.mark_responded(event_info.original_event_id, regenerated_event_id)
+            self.logger.info("Successfully regenerated response for edited message")
+        else:
+            self.logger.info(
+                "Suppressed regeneration left existing response unchanged",
+                original_event_id=event_info.original_event_id,
+                response_event_id=response_event_id,
+            )
+
+    def _remove_stale_runs_for_edited_message(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        thread_id: str | None,
+        original_event_id: str,
+        requester_user_id: str,
+    ) -> None:
+        """Remove persisted runs tied to the pre-edit message before regenerating."""
         resolved_thread_id = self._resolved_conversation_thread_id(
             room_id=room.room_id,
-            thread_id=context.thread_id,
-            reply_to_event_id=event_info.original_event_id,
+            thread_id=thread_id,
+            reply_to_event_id=original_event_id,
         )
         session_contexts = [
             (
@@ -5164,7 +5217,7 @@ class AgentBot:
             execution_identity = self._build_tool_execution_identity(
                 room_id=room.room_id,
                 thread_id=candidate_thread_id,
-                reply_to_event_id=event_info.original_event_id,
+                reply_to_event_id=original_event_id,
                 user_id=requester_user_id,
                 session_id=session_id,
             )
@@ -5173,7 +5226,7 @@ class AgentBot:
                 removed = remove_run_by_event_id(
                     storage,
                     session_id,
-                    event_info.original_event_id,
+                    original_event_id,
                     session_type=self._history_session_type(),
                 )
             finally:
@@ -5181,27 +5234,9 @@ class AgentBot:
             if removed:
                 self.logger.info(
                     "Removed stale run for edited message",
-                    event_id=event_info.original_event_id,
+                    event_id=original_event_id,
                     session_id=session_id,
                 )
-
-        # Generate new response
-        await self._generate_response(
-            room_id=room.room_id,
-            prompt=edited_content,
-            reply_to_event_id=event_info.original_event_id,
-            thread_id=context.thread_id,
-            thread_history=context.thread_history,
-            existing_event_id=response_event_id,
-            existing_event_is_placeholder=False,
-            user_id=requester_user_id,
-            response_envelope=envelope,
-            correlation_id=event.event_id,
-        )
-
-        # Update the response tracker
-        self.response_tracker.mark_responded(event_info.original_event_id, response_event_id)
-        self.logger.info("Successfully regenerated response for edited message")
 
     async def _handle_command(
         self,

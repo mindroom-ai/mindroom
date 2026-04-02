@@ -23,7 +23,6 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
-from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.thread_resolution import THREAD_RESOLUTION_EVENT_TYPE
 
 logger = get_logger(__name__)
@@ -1381,14 +1380,12 @@ async def _finalize_thread_messages(
     return messages
 
 
-async def _fetch_thread_history_via_relations_mode(
+async def _fetch_thread_history_via_relations(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-    *,
-    content_client: nio.AsyncClient | None,
 ) -> list[ResolvedVisibleMessage]:
-    """Fetch thread history through relations, optionally hydrating canonical content."""
+    """Fetch thread history through relations plus explicit root lookup."""
     try:
         root_response = await client.room_get_event(room_id, thread_id)
     except Exception as exc:
@@ -1430,7 +1427,7 @@ async def _fetch_thread_history_via_relations_mode(
         await _record_thread_message(
             root_message_event,
             event_info=EventInfo.from_event(root_message_event.source),
-            client=content_client,
+            client=client,
             thread_id=thread_id,
             root_message_found=False,
             messages_by_event_id=messages_by_event_id,
@@ -1441,7 +1438,7 @@ async def _fetch_thread_history_via_relations_mode(
         root_message_found = await _record_thread_message(
             thread_event,
             event_info=EventInfo.from_event(thread_event.source),
-            client=content_client,
+            client=client,
             thread_id=thread_id,
             root_message_found=root_message_found,
             messages_by_event_id=messages_by_event_id,
@@ -1456,38 +1453,10 @@ async def _fetch_thread_history_via_relations_mode(
         ),
     )
     return await _finalize_thread_messages(
-        content_client,
+        client,
         messages_by_event_id=messages_by_event_id,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
         thread_id=thread_id,
-    )
-
-
-async def _fetch_thread_snapshot_via_relations(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> list[ResolvedVisibleMessage]:
-    """Fetch preview-only thread context through relations plus the root event."""
-    return await _fetch_thread_history_via_relations_mode(
-        client,
-        room_id,
-        thread_id,
-        content_client=None,
-    )
-
-
-async def _fetch_thread_history_via_relations(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> list[ResolvedVisibleMessage]:
-    """Fetch thread history through relations plus explicit root lookup."""
-    return await _fetch_thread_history_via_relations_mode(
-        client,
-        room_id,
-        thread_id,
-        content_client=client,
     )
 
 
@@ -1549,22 +1518,6 @@ async def _fetch_thread_history_via_room_messages(
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
         thread_id=thread_id,
     )
-
-
-async def fetch_thread_snapshot(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> ThreadHistoryResult[ResolvedVisibleMessage]:
-    """Fetch lightweight thread context for dispatch decisions."""
-    try:
-        return thread_history_result(
-            await _fetch_thread_snapshot_via_relations(client, room_id, thread_id),
-            is_full_history=False,
-        )
-    except _ThreadHistoryFastPathUnavailableError:
-        fallback_history = await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
-        return thread_history_result(fallback_history, is_full_history=True)
 
 
 async def fetch_thread_history(
@@ -1687,7 +1640,6 @@ async def build_threaded_edit_content(
     client: nio.AsyncClient,
     *,
     room_id: str,
-    event_id: str,
     new_text: str,
     thread_id: str | None,
     config: Config,
@@ -1695,10 +1647,12 @@ async def build_threaded_edit_content(
     sender_domain: str,
     tool_trace: list[Any] | None = None,
     extra_content: dict[str, Any] | None = None,
+    latest_thread_event_id: str | None = None,
 ) -> dict[str, Any]:
     """Build edit content that preserves thread fallback semantics when needed."""
-    _ = client, room_id
-    latest_thread_event_id = event_id if thread_id else None
+    latest_visible_thread_event_id = latest_thread_event_id
+    if thread_id is not None and latest_visible_thread_event_id is None:
+        latest_visible_thread_event_id = await _latest_thread_event_id(client, room_id, thread_id)
 
     return format_message_with_mentions(
         config,
@@ -1706,7 +1660,7 @@ async def build_threaded_edit_content(
         new_text,
         sender_domain=sender_domain,
         thread_event_id=thread_id,
-        latest_thread_event_id=latest_thread_event_id,
+        latest_thread_event_id=latest_visible_thread_event_id,
         tool_trace=tool_trace,
         extra_content=extra_content,
     )

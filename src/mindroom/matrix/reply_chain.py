@@ -17,7 +17,6 @@ import nio
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import resolve_event_source_content, visible_body_from_event_source
-from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 if TYPE_CHECKING:
     import structlog
@@ -146,13 +145,6 @@ def _next_reply_chain_event_id(event_info: EventInfo, current_event_id: str) -> 
 def _thread_history_has_replies(thread_history: Sequence[ResolvedVisibleMessage], root_event_id: str) -> bool:
     """Return whether a root event already has thread replies."""
     return any(_history_message_event_id(msg) != root_event_id for msg in thread_history)
-
-
-def _thread_history_is_full(thread_history: Sequence[ResolvedVisibleMessage], *, default: bool) -> bool:
-    """Return whether *thread_history* is already fully hydrated."""
-    if isinstance(thread_history, ThreadHistoryResult):
-        return bool(thread_history.is_full_history)
-    return default
 
 
 def _unique_history_event_ids(messages: Sequence[ResolvedVisibleMessage]) -> list[str]:
@@ -315,8 +307,6 @@ async def _resolve_direct_thread_root(
     node: _ReplyChainNode,
     visited_event_ids: list[str],
     chain_history_length: int,
-    *,
-    default_history_is_full: bool,
 ) -> tuple[str, Sequence[ResolvedVisibleMessage], bool, bool] | None:
     """Resolve clients that reply to an existing thread root without m.thread metadata."""
     if chain_history_length != 1 or node.parent_event_id or node.thread_root_id or node.has_relations:
@@ -344,7 +334,7 @@ async def _resolve_direct_thread_root(
         event_id,
         thread_history,
         True,
-        _thread_history_is_full(thread_history, default=default_history_is_full),
+        True,
     )
 
 
@@ -421,8 +411,6 @@ async def _resolve_reply_chain(
     fetch_history: _FetchThreadHistory,
     room_id: str,
     reply_to_event_id: str,
-    *,
-    default_history_is_full: bool,
     content_client: nio.AsyncClient | None,
 ) -> tuple[str, list[ResolvedVisibleMessage], bool, bool]:
     """Resolve reply-chain context for clients that don't send thread relations.
@@ -476,7 +464,6 @@ async def _resolve_reply_chain(
             node=node,
             visited_event_ids=visited_event_ids,
             chain_history_length=len(chain_nodes),
-            default_history_is_full=default_history_is_full,
         )
         if direct_thread_root_context is not None:
             break
@@ -594,7 +581,6 @@ async def derive_conversation_context(
         fetch_history,
         room_id,
         reply_chain_seed,
-        default_history_is_full=True,
         content_client=client,
     )
     if points_to_thread:
