@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot, _DispatchPayload, _MessageContext, _ResponseAction
+from mindroom.bot import AgentBot, _DispatchPayload, _MessageContext, _PrecheckedEvent, _ResponseAction
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -350,8 +350,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
 
     dispatch = await bot._prepare_dispatch(
         room,
-        event,
-        requester_user_id="@mindroom_router:localhost",
+        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
         event_label="message",
     )
 
@@ -393,8 +392,7 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
 
     await bot._dispatch_text_message(
         room,
-        event,
-        requester_user_id="@mindroom_router:localhost",
+        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
     )
 
     bot._resolve_dispatch_action.assert_awaited_once()
@@ -434,8 +432,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
 
     await bot._dispatch_text_message(
         room,
-        event,
-        requester_user_id="@user:localhost",
+        _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
     )
 
     assert hook_calls == ["called"]
@@ -474,8 +471,7 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
 
     await bot._dispatch_text_message(
         room,
-        event,
-        requester_user_id="@user:localhost",
+        _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
     )
 
     assert hook_calls == ["called"]

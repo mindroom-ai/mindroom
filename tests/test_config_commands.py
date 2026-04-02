@@ -255,7 +255,13 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         "mindroom.commands.handler.handle_config_command",
         AsyncMock(return_value=("ok", None)),
     ) as mock_handle_config_command:
-        await handle_command(context=context, room=room, event=event, command=command)
+        await handle_command(
+            context=context,
+            room=room,
+            event=event,
+            command=command,
+            requester_user_id="@alice:example.org",
+        )
 
     mock_handle_config_command.assert_awaited_once_with("show", runtime_paths=context.runtime_paths)
 

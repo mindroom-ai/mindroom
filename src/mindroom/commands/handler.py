@@ -453,13 +453,13 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     room: nio.MatrixRoom,
     event: CommandEvent,
     command: Command,
+    requester_user_id: str,
 ) -> None:
     """Dispatch chat commands using injected bot context."""
     context.logger.info("Handling command", command_type=command.type.value)
 
     event_info = EventInfo.from_event(event.source)
     _, thread_id, thread_history = await context.derive_conversation_context(room.room_id, event_info)
-    requester_user_id = context.requester_user_id_for_event(event)
 
     # Commands/tools that persist conversation context should use the same
     # thread-root policy as outgoing replies.
