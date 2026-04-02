@@ -1176,7 +1176,7 @@ def _select_threads_to_resume(
     *,
     max_resumes: int,
 ) -> list[InterruptedThread]:
-    """Return the first unique threaded interruptions up to the resume cap."""
+    """Return unique threaded interruptions up to the resume cap."""
     selected_by_key: dict[tuple[str, str, str], InterruptedThread] = {}
 
     for interrupted_thread in interrupted:
@@ -1185,10 +1185,8 @@ def _select_threads_to_resume(
         selected_by_key[(interrupted_thread.room_id, interrupted_thread.thread_id, interrupted_thread.agent_name)] = (
             interrupted_thread
         )
-        if len(selected_by_key) >= max_resumes:
-            return list(selected_by_key.values())
 
-    return list(selected_by_key.values())
+    return list(selected_by_key.values())[:max_resumes]
 
 
 def _has_restart_interrupted_note(body: str) -> bool:

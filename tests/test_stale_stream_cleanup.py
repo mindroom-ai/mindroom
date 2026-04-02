@@ -1418,6 +1418,64 @@ async def test_auto_resume_dedupes_same_agent_and_thread_using_newest_target(tmp
 
 
 @pytest.mark.asyncio
+async def test_auto_resume_honors_cap_after_replacing_older_duplicate_targets(tmp_path: Path) -> None:
+    """Auto-resume should keep the newest target even when later duplicates arrive past the cap."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-one",
+            target_event_id="$older-one",
+            partial_text="Older one",
+            agent_name="test_agent",
+        ),
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-two",
+            target_event_id="$thread-two-target",
+            partial_text="Two",
+            agent_name="test_agent",
+        ),
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-three",
+            target_event_id="$thread-three-target",
+            partial_text="Three",
+            agent_name="test_agent",
+        ),
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-one",
+            target_event_id="$newer-one",
+            partial_text="Newer one",
+            agent_name="test_agent",
+        ),
+    ]
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message",
+        new=AsyncMock(return_value="$resume"),
+    ) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            max_resumes=2,
+        )
+
+    assert resumed_count == 2
+    assert mock_send.await_count == 2
+    first_content = mock_send.await_args_list[0].args[2]
+    second_content = mock_send.await_args_list[1].args[2]
+    assert first_content["m.relates_to"]["event_id"] == "$thread-one"
+    assert first_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$newer-one"}
+    assert second_content["m.relates_to"]["event_id"] == "$thread-two"
+    assert second_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$thread-two-target"}
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: Path) -> None:
     """Startup should clean stale streams and queue resumes before sync loops begin."""
     config = _make_config(tmp_path)
