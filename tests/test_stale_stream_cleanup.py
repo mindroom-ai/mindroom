@@ -1310,13 +1310,15 @@ async def test_cleanup_sidecar_hydration_failure_falls_back_gracefully(tmp_path:
     _assert_preserved_edit_payload(
         sent_content,
         {
-            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
             "io.mindroom.ai_run": {"version": 1, "run_id": "run-preview"},
             "io.mindroom.stream_status": "error",
-            "url": "mxc://example.com/broken",
         },
     )
     new_content = cast("dict[str, object]", sent_content["m.new_content"])
+    assert "io.mindroom.long_text" not in sent_content
+    assert "io.mindroom.long_text" not in new_content
+    assert "url" not in sent_content
+    assert "url" not in new_content
     assert "io.mindroom.tool_trace" not in new_content
 
 
@@ -1430,6 +1432,7 @@ async def test_auto_resume_honors_cap_after_replacing_older_duplicate_targets(tm
             target_event_id="$older-one",
             partial_text="Older one",
             agent_name="test_agent",
+            timestamp_ms=100,
         ),
         InterruptedThread(
             room_id=ROOM_ID,
@@ -1437,6 +1440,7 @@ async def test_auto_resume_honors_cap_after_replacing_older_duplicate_targets(tm
             target_event_id="$thread-two-target",
             partial_text="Two",
             agent_name="test_agent",
+            timestamp_ms=200,
         ),
         InterruptedThread(
             room_id=ROOM_ID,
@@ -1444,6 +1448,7 @@ async def test_auto_resume_honors_cap_after_replacing_older_duplicate_targets(tm
             target_event_id="$thread-three-target",
             partial_text="Three",
             agent_name="test_agent",
+            timestamp_ms=300,
         ),
         InterruptedThread(
             room_id=ROOM_ID,
@@ -1451,6 +1456,7 @@ async def test_auto_resume_honors_cap_after_replacing_older_duplicate_targets(tm
             target_event_id="$newer-one",
             partial_text="Newer one",
             agent_name="test_agent",
+            timestamp_ms=400,
         ),
     ]
 
@@ -1474,6 +1480,49 @@ async def test_auto_resume_honors_cap_after_replacing_older_duplicate_targets(tm
     assert first_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$thread-three-target"}
     assert second_content["m.relates_to"]["event_id"] == "$thread-one"
     assert second_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$newer-one"}
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_cap_uses_timestamps_not_room_iteration_order(tmp_path: Path) -> None:
+    """Auto-resume should prefer genuinely newer interruptions even if older rooms were appended later."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    interrupted = [
+        InterruptedThread(
+            room_id="!room-a:example.com",
+            thread_id="$thread-new",
+            target_event_id="$target-new",
+            partial_text="New",
+            agent_name="test_agent",
+            timestamp_ms=500,
+        ),
+        InterruptedThread(
+            room_id="!room-b:example.com",
+            thread_id="$thread-old",
+            target_event_id="$target-old",
+            partial_text="Old",
+            agent_name="test_agent",
+            timestamp_ms=100,
+        ),
+    ]
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message",
+        new=AsyncMock(return_value="$resume"),
+    ) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            max_resumes=1,
+        )
+
+    assert resumed_count == 1
+    mock_send.assert_awaited_once()
+    sent_content = mock_send.await_args.args[2]
+    assert sent_content["m.relates_to"]["event_id"] == "$thread-new"
+    assert sent_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$target-new"}
 
 
 @pytest.mark.asyncio

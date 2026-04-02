@@ -75,6 +75,7 @@ class InterruptedThread:
     partial_text: str
     agent_name: str
     original_sender_id: str | None = None
+    timestamp_ms: int = field(default=0, compare=False)
 
 
 @dataclass
@@ -348,6 +349,7 @@ async def _cleanup_one_stale_message(
             partial_text=_truncate_partial_text(_extract_partial_text(state.latest_body)),
             agent_name=agent_name,
             original_sender_id=state.requester_user_id,
+            timestamp_ms=state.latest_timestamp,
         )
     await _redact_stop_reactions(
         client,
@@ -1030,18 +1032,11 @@ def _preserved_cleanup_content(content: dict[str, Any] | None) -> dict[str, Any]
     for key, value in content.items():
         if not isinstance(key, str):
             continue
-        if key.startswith("io.mindroom.") or key in {ORIGINAL_SENDER_KEY, "m.mentions"}:
+        if (key.startswith("io.mindroom.") and key != "io.mindroom.long_text") or key in {
+            ORIGINAL_SENDER_KEY,
+            "m.mentions",
+        }:
             preserved[key] = value
-
-    if "io.mindroom.long_text" in preserved:
-        url = content.get("url")
-        file_info = content.get("file")
-        if isinstance(url, str):
-            preserved["url"] = url
-        elif isinstance(file_info, dict):
-            preserved["file"] = file_info
-        else:
-            del preserved["io.mindroom.long_text"]
 
     return preserved or None
 
@@ -1187,22 +1182,28 @@ def _select_threads_to_resume(
     max_resumes: int,
 ) -> list[InterruptedThread]:
     """Return the newest unique threaded interruptions up to the resume cap."""
-    selected_threads: list[InterruptedThread] = []
-    seen_keys: set[tuple[str, str, str]] = set()
+    latest_by_key: dict[tuple[str, str, str], InterruptedThread] = {}
 
-    for interrupted_thread in reversed(interrupted):
+    for interrupted_thread in interrupted:
         if interrupted_thread.thread_id is None:
             continue
         key = (interrupted_thread.room_id, interrupted_thread.thread_id, interrupted_thread.agent_name)
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-        selected_threads.append(interrupted_thread)
-        if len(selected_threads) >= max_resumes:
-            break
+        existing = latest_by_key.get(key)
+        if existing is None or interrupted_thread.timestamp_ms >= existing.timestamp_ms:
+            latest_by_key[key] = interrupted_thread
 
-    selected_threads.reverse()
-    return selected_threads
+    unique_threads = sorted(
+        latest_by_key.values(),
+        key=lambda interrupted_thread: (
+            interrupted_thread.timestamp_ms,
+            interrupted_thread.room_id,
+            interrupted_thread.thread_id or "",
+            interrupted_thread.agent_name,
+        ),
+    )
+    if max_resumes >= len(unique_threads):
+        return unique_threads
+    return unique_threads[-max_resumes:]
 
 
 def _has_restart_interrupted_note(body: str) -> bool:
