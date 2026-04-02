@@ -59,6 +59,7 @@ from mindroom.matrix.identity import (
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.message_content import extract_edit_body, resolve_event_source_content
 from mindroom.matrix.presence import (
     build_agent_status_message,
     is_user_online,
@@ -289,7 +290,13 @@ def _should_skip_mentions(event_source: dict) -> bool:
 
     """
     content = event_source.get("content", {})
-    return bool(content.get("com.mindroom.skip_mentions", False))
+    if not isinstance(content, dict):
+        return False
+    if bool(content.get("com.mindroom.skip_mentions", False)):
+        return True
+
+    new_content = content.get("m.new_content")
+    return isinstance(new_content, dict) and bool(new_content.get("com.mindroom.skip_mentions", False))
 
 
 def create_bot_for_entity(
@@ -2297,9 +2304,10 @@ class AgentBot:
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: _DispatchEvent) -> _MessageContext:
         assert self.client is not None
+        resolved_event_source = await resolve_event_source_content(event.source, self.client)
 
         # Check if mentions should be ignored for this message
-        skip_mentions = _should_skip_mentions(event.source)
+        skip_mentions = _should_skip_mentions(resolved_event_source)
 
         if skip_mentions:
             # Don't detect mentions if the message has skip_mentions metadata
@@ -2308,7 +2316,7 @@ class AgentBot:
             has_non_agent_mentions = False
         else:
             mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
-                event.source,
+                resolved_event_source,
                 self.matrix_id,
                 self.config,
                 self.runtime_paths,
@@ -2317,7 +2325,7 @@ class AgentBot:
         if am_i_mentioned:
             self.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
 
-        event_info = EventInfo.from_event(event.source)
+        event_info = EventInfo.from_event(resolved_event_source)
         if self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room.room_id) == "room":
             is_thread = False
             thread_id = None
@@ -4466,7 +4474,10 @@ class AgentBot:
 
         context = await self._extract_message_context(room, event)
         requester_user_id = self._requester_user_id_for_event(event)
-        edited_content = event.source["content"]["m.new_content"]["body"]
+        edited_content, _ = await extract_edit_body(event.source, self.client)
+        if edited_content is None:
+            self.logger.debug("Edited message missing resolved body", event_id=event.event_id)
+            return
         envelope = self._build_message_envelope(
             room_id=room.room_id,
             event=event,

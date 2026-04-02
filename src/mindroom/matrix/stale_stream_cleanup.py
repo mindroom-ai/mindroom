@@ -28,6 +28,7 @@ from mindroom.matrix.client import (
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
 from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
@@ -355,9 +356,11 @@ async def _scan_room_message_states(
     )
 
     resolved_messages = await resolve_latest_visible_messages(message_events, client)
+    scanned_message_data_by_event_id = _scanned_message_data_by_event_id(message_events)
     requester_ids_by_event_id = await _derive_requester_ids_for_bot_messages(
         client,
         resolved_messages=resolved_messages,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         room_id=room_id,
         bot_user_id=bot_user_id,
         config=config,
@@ -495,9 +498,38 @@ def _merge_resolved_message_state(
     state.requester_user_id = requester_user_id
 
 
+def _scanned_message_data_by_event_id(message_events: list[nio.RoomMessageText]) -> dict[str, dict[str, object]]:
+    """Return raw scanned room-history messages keyed by exact event ID."""
+    message_data_by_event_id: dict[str, dict[str, object]] = {}
+    for event in message_events:
+        event_id = event.event_id
+        sender = event.sender
+        if not isinstance(event_id, str) or not isinstance(sender, str):
+            continue
+
+        raw_content = _as_string_keyed_dict(event.source.get("content")) or {}
+        message_data_by_event_id[event_id] = {
+            "event_id": event_id,
+            "sender": sender,
+            "content": raw_content,
+            "body": event.body,
+            "timestamp": event.server_timestamp,
+        }
+    return message_data_by_event_id
+
+
+def _scanned_message_requires_exact_requester_fetch(message_data: dict[str, object]) -> bool:
+    """Return whether requester resolution must fetch the exact event for this scanned message."""
+    content = _as_string_keyed_dict(message_data.get("content"))
+    if content is None or "m.new_content" not in content:
+        return False
+    return _reply_to_event_id_for_message(message_data) is None
+
+
 async def _derive_requester_ids_for_bot_messages(
     client: nio.AsyncClient,
     resolved_messages: dict[str, dict[str, object]],
+    scanned_message_data_by_event_id: dict[str, dict[str, object]],
     *,
     room_id: str,
     bot_user_id: str,
@@ -530,6 +562,7 @@ async def _derive_requester_ids_for_bot_messages(
                 target_event_id=target_event_id,
                 message_data=message_data,
                 resolved_messages=resolved_messages,
+                scanned_message_data_by_event_id=scanned_message_data_by_event_id,
                 requester_cache=requester_cache,
                 fetched_message_data_by_event_id=fetched_message_data_by_event_id,
                 config=config,
@@ -557,6 +590,7 @@ async def _resolve_requester_for_bot_message(
     target_event_id: str,
     message_data: dict[str, object],
     resolved_messages: dict[str, dict[str, object]],
+    scanned_message_data_by_event_id: dict[str, dict[str, object]],
     requester_cache: dict[str, str | None],
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
     config: Config,
@@ -565,10 +599,11 @@ async def _resolve_requester_for_bot_message(
     """Resolve the requester for one bot-authored message from its exact reply target."""
     reply_to_event_id = _reply_to_event_id_for_message(message_data)
     if reply_to_event_id is None:
-        original_message_data = await _fetch_message_data_for_event_id(
+        original_message_data = await _load_scanned_or_fetched_message_data(
             client,
             room_id=room_id,
             event_id=target_event_id,
+            scanned_message_data_by_event_id=scanned_message_data_by_event_id,
             fetched_message_data_by_event_id=fetched_message_data_by_event_id,
         )
         if original_message_data is None:
@@ -581,6 +616,7 @@ async def _resolve_requester_for_bot_message(
         room_id=room_id,
         event_id=reply_to_event_id,
         resolved_messages=resolved_messages,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         requester_cache=requester_cache,
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
         config=config,
@@ -595,6 +631,7 @@ async def _resolve_requester_for_event_id(
     room_id: str,
     event_id: str,
     resolved_messages: dict[str, dict[str, object]],
+    scanned_message_data_by_event_id: dict[str, dict[str, object]],
     requester_cache: dict[str, str | None],
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
     config: Config,
@@ -616,6 +653,7 @@ async def _resolve_requester_for_event_id(
         room_id=room_id,
         event_id=event_id,
         resolved_messages=resolved_messages,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
     )
     if message_data is not None and sender is not None:
@@ -635,6 +673,7 @@ async def _resolve_requester_for_event_id(
                 event_id=event_id,
                 message_data=message_data,
                 resolved_messages=resolved_messages,
+                scanned_message_data_by_event_id=scanned_message_data_by_event_id,
                 requester_cache=requester_cache,
                 fetched_message_data_by_event_id=fetched_message_data_by_event_id,
                 config=config,
@@ -652,6 +691,7 @@ async def _load_message_data_for_requester_resolution(
     room_id: str,
     event_id: str,
     resolved_messages: dict[str, dict[str, object]],
+    scanned_message_data_by_event_id: dict[str, dict[str, object]],
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
 ) -> tuple[dict[str, object] | None, str | None]:
     """Load one message from scanned history or the Matrix API with its sender ID."""
@@ -660,10 +700,11 @@ async def _load_message_data_for_requester_resolution(
     if sender is not None:
         return message_data, sender
 
-    message_data = await _fetch_message_data_for_event_id(
+    message_data = await _load_scanned_or_fetched_message_data(
         client,
         room_id=room_id,
         event_id=event_id,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
     )
     return message_data, _sender_id_for_message(message_data)
@@ -676,6 +717,7 @@ async def _resolve_requester_from_internal_reply(
     event_id: str,
     message_data: dict[str, object],
     resolved_messages: dict[str, dict[str, object]],
+    scanned_message_data_by_event_id: dict[str, dict[str, object]],
     requester_cache: dict[str, str | None],
     fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
     config: Config,
@@ -686,10 +728,11 @@ async def _resolve_requester_from_internal_reply(
     """Follow an internal sender's reply edge until a real requester is found."""
     reply_to_event_id = _reply_to_event_id_for_message(message_data)
     if reply_to_event_id is None:
-        original_message_data = await _fetch_message_data_for_event_id(
+        original_message_data = await _load_scanned_or_fetched_message_data(
             client,
             room_id=room_id,
             event_id=event_id,
+            scanned_message_data_by_event_id=scanned_message_data_by_event_id,
             fetched_message_data_by_event_id=fetched_message_data_by_event_id,
         )
         if original_message_data is not None:
@@ -702,6 +745,7 @@ async def _resolve_requester_from_internal_reply(
         room_id=room_id,
         event_id=reply_to_event_id,
         resolved_messages=resolved_messages,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         requester_cache=requester_cache,
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
         config=config,
@@ -709,6 +753,30 @@ async def _resolve_requester_from_internal_reply(
         visited_event_ids=visited_event_ids | {event_id},
         max_depth=max_depth - 1,
     )
+
+
+async def _load_scanned_or_fetched_message_data(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    event_id: str,
+    scanned_message_data_by_event_id: dict[str, dict[str, object]],
+    fetched_message_data_by_event_id: dict[str, dict[str, object] | None],
+) -> dict[str, object] | None:
+    """Load one message from scanned room history before falling back to the Matrix API."""
+    scanned_message_data = scanned_message_data_by_event_id.get(event_id)
+    if scanned_message_data is not None and not _scanned_message_requires_exact_requester_fetch(scanned_message_data):
+        return scanned_message_data
+
+    fetched_message_data = await _fetch_message_data_for_event_id(
+        client,
+        room_id=room_id,
+        event_id=event_id,
+        fetched_message_data_by_event_id=fetched_message_data_by_event_id,
+    )
+    if fetched_message_data is not None:
+        return fetched_message_data
+    return scanned_message_data
 
 
 async def _fetch_message_data_for_event_id(
@@ -733,6 +801,24 @@ async def _fetch_message_data_for_event_id(
     if not isinstance(event_source, dict) or not isinstance(sender, str):
         fetched_message_data_by_event_id[event_id] = None
         return None
+
+    event_info = EventInfo.from_event(event_source)
+    if isinstance(event, nio.RoomMessageText):
+        if event_info.is_edit:
+            edited_body, edited_content = await extract_edit_body(event_source, client)
+            if edited_body is not None and edited_content is not None:
+                message_data = {
+                    "event_id": event_id,
+                    "sender": sender,
+                    "content": edited_content,
+                    "body": edited_body,
+                }
+                fetched_message_data_by_event_id[event_id] = message_data
+                return message_data
+
+        message_data = await extract_and_resolve_message(event, client)
+        fetched_message_data_by_event_id[event_id] = message_data
+        return message_data
 
     content = event_source.get("content")
     body: str | None = None

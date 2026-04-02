@@ -7,6 +7,7 @@ import mimetypes
 import ssl as ssl_module
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,79 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
 _THREAD_RESOLUTION_POWER_LEVEL = 0
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
+
+
+@dataclass(slots=True)
+class ResolvedVisibleMessage:
+    """Canonical visible message state used during history reconstruction."""
+
+    sender: str
+    body: str
+    timestamp: int
+    event_id: str
+    content: dict[str, Any]
+    thread_id: str | None
+    latest_event_id: str
+    stream_status: str | None = None
+
+    @classmethod
+    def from_message_data(
+        cls,
+        message_data: dict[str, Any],
+        *,
+        thread_id: str | None,
+        latest_event_id: str,
+    ) -> "ResolvedVisibleMessage":
+        """Build a resolved visible message from extracted message data."""
+        message = cls(
+            sender=message_data["sender"],
+            body=message_data["body"],
+            timestamp=message_data["timestamp"],
+            event_id=message_data["event_id"],
+            content=message_data["content"],
+            thread_id=thread_id,
+            latest_event_id=latest_event_id,
+        )
+        message.refresh_stream_status()
+        return message
+
+    def refresh_stream_status(self) -> None:
+        """Refresh normalized stream status from message content."""
+        self.stream_status = _stream_status_from_content(self.content)
+
+    def apply_edit(
+        self,
+        *,
+        body: str,
+        timestamp: int,
+        latest_event_id: str,
+        thread_id: str | None,
+        content: dict[str, Any] | None,
+    ) -> None:
+        """Apply the newest visible edit state to this message."""
+        self.body = body
+        self.timestamp = timestamp
+        self.latest_event_id = latest_event_id
+        if thread_id is not None:
+            self.thread_id = thread_id
+        if content is not None:
+            self.content = content
+        self.refresh_stream_status()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the resolved message back to the public dictionary shape."""
+        message_data = {
+            "sender": self.sender,
+            "body": self.body,
+            "timestamp": self.timestamp,
+            "event_id": self.event_id,
+            "content": self.content,
+            "thread_id": self.thread_id,
+            "latest_event_id": self.latest_event_id,
+        }
+        if self.stream_status is not None:
+            message_data["stream_status"] = self.stream_status
+        return message_data
 
 
 class PermanentMatrixStartupError(ValueError):
@@ -904,9 +978,9 @@ async def send_file_message(
     return await send_message(client, room_id, content)
 
 
-def _history_message_sort_key(message: dict[str, Any]) -> tuple[int, str]:
+def _history_message_sort_key(message: ResolvedVisibleMessage) -> tuple[int, str]:
     """Sort thread history messages by timestamp and event ID."""
-    return (message["timestamp"], message["event_id"])
+    return (message.timestamp, message.event_id)
 
 
 def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
@@ -915,15 +989,6 @@ def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
         return None
     status = content.get(STREAM_STATUS_KEY)
     return status if isinstance(status, str) else None
-
-
-def _apply_message_stream_status(message_data: dict[str, Any]) -> None:
-    """Set or clear normalized stream status based on message content."""
-    stream_status = _stream_status_from_content(message_data.get("content"))
-    if stream_status is None:
-        message_data.pop("stream_status", None)
-        return
-    message_data["stream_status"] = stream_status
 
 
 def _record_latest_thread_edit(
@@ -954,7 +1019,7 @@ async def _record_thread_message(
     client: nio.AsyncClient,
     thread_id: str,
     root_message_found: bool,
-    messages_by_event_id: dict[str, dict[str, Any]],
+    messages_by_event_id: dict[str, ResolvedVisibleMessage],
 ) -> bool:
     """Record root/thread message into history and return updated root flag."""
     if event.event_id in messages_by_event_id:
@@ -965,18 +1030,20 @@ async def _record_thread_message(
 
     if is_root_message and not root_message_found:
         message_data = await extract_and_resolve_message(event, client)
-        message_data["thread_id"] = event_info.thread_id
-        message_data["latest_event_id"] = event.event_id
-        _apply_message_stream_status(message_data)
-        messages_by_event_id[event.event_id] = message_data
+        messages_by_event_id[event.event_id] = ResolvedVisibleMessage.from_message_data(
+            message_data,
+            thread_id=event_info.thread_id,
+            latest_event_id=event.event_id,
+        )
         return True
 
     if is_thread_message:
         message_data = await extract_and_resolve_message(event, client)
-        message_data["thread_id"] = event_info.thread_id
-        message_data["latest_event_id"] = event.event_id
-        _apply_message_stream_status(message_data)
-        messages_by_event_id[event.event_id] = message_data
+        messages_by_event_id[event.event_id] = ResolvedVisibleMessage.from_message_data(
+            message_data,
+            thread_id=event_info.thread_id,
+            latest_event_id=event.event_id,
+        )
 
     return root_message_found
 
@@ -984,7 +1051,7 @@ async def _record_thread_message(
 async def _apply_latest_edits_to_messages(
     client: nio.AsyncClient,
     *,
-    messages_by_event_id: dict[str, dict[str, Any]],
+    messages_by_event_id: dict[str, ResolvedVisibleMessage],
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText, str | None]],
     required_thread_id: str | None = None,
 ) -> None:
@@ -1002,26 +1069,25 @@ async def _apply_latest_edits_to_messages(
             continue
 
         if existing_message is not None:
-            existing_message["body"] = edited_body
-            existing_message["timestamp"] = edit_event.server_timestamp
-            existing_message["latest_event_id"] = edit_event.event_id
-            if edit_thread_id is not None:
-                existing_message["thread_id"] = edit_thread_id
-            if edited_content is not None:
-                existing_message["content"] = edited_content
-            _apply_message_stream_status(existing_message)
+            existing_message.apply_edit(
+                body=edited_body,
+                timestamp=edit_event.server_timestamp,
+                latest_event_id=edit_event.event_id,
+                thread_id=edit_thread_id,
+                content=edited_content,
+            )
             continue
 
-        synthesized_message = {
-            "sender": edit_event.sender,
-            "body": edited_body,
-            "timestamp": edit_event.server_timestamp,
-            "event_id": original_event_id,
-            "content": edited_content if edited_content is not None else {},
-            "thread_id": edit_thread_id,
-            "latest_event_id": edit_event.event_id,
-        }
-        _apply_message_stream_status(synthesized_message)
+        synthesized_message = ResolvedVisibleMessage(
+            sender=edit_event.sender,
+            body=edited_body,
+            timestamp=edit_event.server_timestamp,
+            event_id=original_event_id,
+            content=edited_content if edited_content is not None else {},
+            thread_id=edit_thread_id,
+            latest_event_id=edit_event.event_id,
+        )
+        synthesized_message.refresh_stream_status()
         messages_by_event_id[original_event_id] = synthesized_message
 
 
@@ -1032,7 +1098,7 @@ async def resolve_latest_visible_messages(
     sender: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Resolve the latest visible message state by original event ID for a set of message events."""
-    messages_by_event_id: dict[str, dict[str, Any]] = {}
+    messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText, str | None]] = {}
 
     for event in events:
@@ -1051,17 +1117,18 @@ async def resolve_latest_visible_messages(
             continue
 
         message_data = await extract_and_resolve_message(event, client)
-        message_data["thread_id"] = event_info.thread_id
-        message_data["latest_event_id"] = event.event_id
-        _apply_message_stream_status(message_data)
-        messages_by_event_id[event.event_id] = message_data
+        messages_by_event_id[event.event_id] = ResolvedVisibleMessage.from_message_data(
+            message_data,
+            thread_id=event_info.thread_id,
+            latest_event_id=event.event_id,
+        )
 
     await _apply_latest_edits_to_messages(
         client,
         messages_by_event_id=messages_by_event_id,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
     )
-    return messages_by_event_id
+    return {event_id: message.to_dict() for event_id, message in messages_by_event_id.items()}
 
 
 async def fetch_thread_history(
@@ -1080,7 +1147,7 @@ async def fetch_thread_history(
         List of messages in chronological order, each containing sender, body, timestamp, and event_id
 
     """
-    messages_by_event_id: dict[str, dict[str, Any]] = {}
+    messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText, str | None]] = {}
     from_token = None
     root_message_found = False
@@ -1136,7 +1203,7 @@ async def fetch_thread_history(
     )
     messages = list(messages_by_event_id.values())
     messages.sort(key=_history_message_sort_key)
-    return messages
+    return [message.to_dict() for message in messages]
 
 
 async def _latest_thread_event_id(
