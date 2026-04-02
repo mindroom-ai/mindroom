@@ -73,7 +73,6 @@ from mindroom.matrix.client import (
     PermanentMatrixStartupError,
     ResolvedVisibleMessage,
     ThreadHistoryResult,
-    _ThreadHistoryFastPathUnavailableError,
 )
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
@@ -1952,6 +1951,18 @@ class TestAgentBot:
         )
         assert bot._resolve_response_event_id(delivery, "$streaming", None) is None
 
+    def test_resolve_response_event_id_does_not_preserve_placeholder_after_failed_edit(self) -> None:
+        """A failed edit must not report the placeholder as the final delivered event."""
+        delivery = _ResponseDispatchResult(
+            event_id=None,
+            response_text="Handled",
+            delivery_kind=None,
+            suppressed=False,
+        )
+        bot = MagicMock(spec=AgentBot)
+
+        assert AgentBot._resolve_response_event_id(bot, delivery, "$placeholder", "$placeholder") is None
+
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_applies_before_and_after_hooks_once(
         self,
@@ -2727,6 +2738,48 @@ class TestAgentBot:
         process_kwargs = bot._process_and_respond_streaming.await_args.kwargs
         assert process_args[5] == "$thinking"
         assert process_kwargs["adopt_existing_placeholder"] is True
+
+    @pytest.mark.asyncio
+    async def test_generate_response_marks_fresh_non_streaming_thinking_message_as_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Non-streaming generation should redact a fresh thinking placeholder on suppression."""
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function("$thinking")
+            return "$thinking"
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        bot._process_and_respond = AsyncMock(
+            return_value=_ResponseDispatchResult(
+                event_id=None,
+                response_text="",
+                delivery_kind=None,
+                suppressed=True,
+            ),
+        )
+        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
+
+        with patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False):
+            await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Continue",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                user_id="@alice:localhost",
+            )
+
+        process_args = bot._process_and_respond.await_args.args
+        process_kwargs = bot._process_and_respond.await_args.kwargs
+        assert process_args[5] == "$thinking"
+        assert process_kwargs["existing_event_is_placeholder"] is True
 
     @pytest.mark.asyncio
     async def test_generate_response_uses_resolved_thread_root_for_thinking_placeholder(
@@ -5101,12 +5154,60 @@ class TestAgentBot:
         bot.response_tracker.mark_responded.assert_called_once_with("$event", "$reply")
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_uses_thread_snapshot_without_full_history(
+    async def test_execute_dispatch_action_reject_send_failure_leaves_event_retryable(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Dispatch startup should derive thread identity without keeping preview history."""
+        """Reject handling should not mark the source responded when the visible reply fails to send."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.response_tracker = MagicMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$event"
+        dispatch = _PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=_MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            correlation_id="corr-reject-send-fails",
+            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+        )
+        action = _ResponseAction(kind="reject", rejection_message="nope")
+
+        async def unused_payload_builder(_context: _MessageContext) -> _DispatchPayload:
+            msg = "reject path should not build payloads"
+            raise AssertionError(msg)
+
+        with patch.object(bot, "_send_response", new=AsyncMock(return_value=None)) as mock_send_response:
+            await bot._execute_dispatch_action(
+                room,
+                event,
+                dispatch,
+                action,
+                unused_payload_builder,
+                processing_log="processing",
+                dispatch_started_monotonic=0.0,
+                context_ready_monotonic=0.0,
+            )
+
+        mock_send_response.assert_awaited_once()
+        bot.response_tracker.mark_responded.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_extract_dispatch_context_derives_thread_target_without_prefetching_history(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Dispatch startup should derive thread identity without reconstructing thread history."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -5126,36 +5227,24 @@ class TestAgentBot:
                 "type": "m.room.message",
             },
         )
-        snapshot = [
-            _visible_message(
-                event_id="$thread_root",
-                sender="@user:localhost",
-                body="Root",
-                timestamp=1234567889,
-                content={"body": "Root"},
-            ),
-        ]
 
-        with (
-            patch("mindroom.bot.fetch_thread_snapshot", new=AsyncMock(return_value=snapshot)) as mock_snapshot,
-            patch("mindroom.bot.fetch_thread_history", new=AsyncMock()) as mock_history,
-        ):
+        with patch("mindroom.bot.fetch_thread_history", new=AsyncMock()) as mock_history:
             context = await bot._extract_dispatch_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
         assert context.thread_history == []
         assert context.requires_full_thread_history is True
-        mock_snapshot.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
         mock_history.assert_not_awaited()
+        bot.client.room_get_event.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_skips_rehydration_after_snapshot_fallback(
+    async def test_extract_dispatch_context_hydrates_thread_history_once_when_needed(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Fallback snapshots should not trigger a second full-history fetch during hydration."""
+        """Hydration should fetch full thread history exactly once after target derivation."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -5195,17 +5284,7 @@ class TestAgentBot:
             is_full_history=True,
         )
 
-        with (
-            patch(
-                "mindroom.matrix.client._fetch_thread_snapshot_via_relations",
-                new=AsyncMock(side_effect=_ThreadHistoryFastPathUnavailableError("unsupported")),
-            ),
-            patch(
-                "mindroom.matrix.client._fetch_thread_history_via_room_messages",
-                new=AsyncMock(return_value=full_history),
-            ) as mock_snapshot_fallback,
-            patch("mindroom.bot.fetch_thread_history", new=AsyncMock()) as mock_hydrate_fetch,
-        ):
+        with patch("mindroom.bot.fetch_thread_history", new=AsyncMock(return_value=full_history)) as mock_history:
             context = await bot._extract_dispatch_context(room, event)
             await bot._hydrate_dispatch_context(room, event, context)
 
@@ -5213,8 +5292,8 @@ class TestAgentBot:
         assert context.thread_id == "$thread_root"
         assert context.thread_history == full_history
         assert context.requires_full_thread_history is False
-        mock_snapshot_fallback.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
-        mock_hydrate_fetch.assert_not_awaited()
+        mock_history.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
+        bot.client.room_get_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_dispatch_text_message_hydrates_full_history_before_action_selection(
@@ -5853,7 +5932,6 @@ class TestAgentBot:
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.stream_agent_response")
-    @patch("mindroom.bot.fetch_thread_snapshot")
     @patch("mindroom.bot.fetch_thread_history")
     @patch("mindroom.bot.should_use_streaming")
     @patch("mindroom.bot.get_latest_thread_event_id_if_needed")
@@ -5862,7 +5940,6 @@ class TestAgentBot:
         mock_get_latest_thread: AsyncMock,
         mock_should_use_streaming: AsyncMock,
         mock_fetch_history: AsyncMock,
-        mock_fetch_snapshot: AsyncMock,
         mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
         mock_team_arun: AsyncMock,
@@ -5936,7 +6013,6 @@ class TestAgentBot:
             ),
         ]
         mock_fetch_history.return_value = test1_history
-        mock_fetch_snapshot.return_value = test1_history
 
         # Mock streaming response - return an async generator
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
@@ -6027,7 +6103,6 @@ class TestAgentBot:
             ),
         ]
         mock_fetch_history.return_value = test2_history
-        mock_fetch_snapshot.return_value = test2_history
 
         # Create a new event with a different ID for Test 2
         mock_event_2 = MagicMock()

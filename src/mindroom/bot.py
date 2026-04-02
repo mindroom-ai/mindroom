@@ -180,7 +180,6 @@ from .matrix.client import (
     build_threaded_edit_content,
     edit_message,
     fetch_thread_history,
-    fetch_thread_snapshot,
     get_joined_rooms,
     get_latest_thread_event_id_if_needed,
     join_room,
@@ -2024,7 +2023,7 @@ class AgentBot:
         room_id: str,
         event_info: EventInfo,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
-        """Derive dispatch target using lightweight thread snapshots."""
+        """Derive dispatch target metadata without reconstructing preview history."""
         assert self.client is not None
         is_thread, thread_id, thread_history, requires_full_thread_history = await derive_conversation_target(
             self.client,
@@ -2032,7 +2031,6 @@ class AgentBot:
             event_info,
             self._reply_chain,
             self.logger,
-            fetch_thread_snapshot,
         )
         return is_thread, thread_id, thread_history, requires_full_thread_history
 
@@ -2324,7 +2322,8 @@ class AgentBot:
                 response_text=action.rejection_message,
                 thread_id=dispatch.context.thread_id,
             )
-            self.response_tracker.mark_responded(event.event_id, response_event_id)
+            if response_event_id is not None:
+                self.response_tracker.mark_responded(event.event_id, response_event_id)
             return
 
         if not dispatch.context.am_i_mentioned:
@@ -2776,8 +2775,6 @@ class AgentBot:
                 room.room_id,
                 event_info,
             )
-            if requires_full_thread_history:
-                thread_history = []
 
         return _MessageContext(
             am_i_mentioned=am_i_mentioned,
@@ -3559,13 +3556,11 @@ class AgentBot:
                 compaction_outcomes=compaction_outcomes,
             )
 
-        if delivery_result is not None and delivery_result.event_id is not None:
-            return delivery_result.event_id
-        if delivery_result is not None and delivery_result.suppressed:
-            return None
-        if delivery_result is not None and existing_event_id is not None:
-            return existing_event_id
-        return tracked_event_id or existing_event_id
+        return self._resolve_response_event_id(
+            delivery_result=delivery_result,
+            tracked_event_id=tracked_event_id,
+            existing_event_id=existing_event_id,
+        )
 
     async def _run_cancellable_response(
         self,
@@ -4458,12 +4453,10 @@ class AgentBot:
         tracked_event_id: str | None,
         existing_event_id: str | None,
     ) -> str | None:
-        if delivery_result is not None and delivery_result.event_id is not None:
-            return delivery_result.event_id
-        if delivery_result is not None and delivery_result.suppressed:
+        if delivery_result is not None:
+            if delivery_result.event_id is not None:
+                return delivery_result.event_id
             return None
-        if delivery_result is not None and existing_event_id is not None:
-            return existing_event_id
         return tracked_event_id or existing_event_id
 
     async def _generate_response(
@@ -4630,7 +4623,8 @@ class AgentBot:
                     thread_id,
                     model_thread_history,
                     message_id,  # Edit the thinking message or existing
-                    existing_event_is_placeholder=existing_event_is_placeholder,
+                    existing_event_is_placeholder=message_id is not None
+                    and (existing_event_is_placeholder or existing_event_id is None),
                     user_id=user_id,
                     run_id=response_run_id,
                     media=media_inputs,
@@ -4951,12 +4945,12 @@ class AgentBot:
             )
 
         assert self.client is not None
-        response = await edit_message(self.client, room_id, event_id, content, new_text)
+        response_event_id = await edit_message(self.client, room_id, event_id, content, new_text)
 
-        if isinstance(response, nio.RoomSendResponse):
-            self.logger.info("Edited message", event_id=event_id)
+        if isinstance(response_event_id, str):
+            self.logger.info("Edited message", event_id=event_id, edit_event_id=response_event_id)
             return True
-        self.logger.error("Failed to edit message", event_id=event_id, error=str(response))
+        self.logger.error("Failed to edit message", event_id=event_id, error=str(response_event_id))
         return False
 
     async def _redact_message_event(

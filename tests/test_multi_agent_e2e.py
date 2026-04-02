@@ -87,16 +87,13 @@ def mock_general_agent() -> AgentMatrixUser:
 
 
 @pytest.mark.asyncio
-@patch("mindroom.bot.fetch_thread_snapshot")
 @patch("mindroom.bot.fetch_thread_history")
 async def test_agent_processes_direct_mention(
-    mock_fetch_snapshot: AsyncMock,
     mock_fetch_history: AsyncMock,
     mock_calculator_agent: AgentMatrixUser,
     tmp_path: Path,
 ) -> None:
     """Test that an agent processes messages where it's directly mentioned."""
-    mock_fetch_snapshot.return_value = []
     mock_fetch_history.return_value = []
     test_room_id = "!test:localhost"
     test_user_id = "@alice:localhost"
@@ -323,7 +320,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
-            patch("mindroom.bot.fetch_thread_snapshot") as mock_fetch_snapshot,
             patch("mindroom.bot.fetch_thread_history") as mock_fetch,
             patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
@@ -340,7 +336,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history
-            mock_fetch_snapshot.return_value = thread_history
 
             # Mock non-streaming response
             mock_ai.return_value = "20% of 300 is 60"
@@ -380,7 +375,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
-            patch("mindroom.bot.fetch_thread_snapshot") as mock_fetch_snapshot,
             patch("mindroom.bot.fetch_thread_history") as mock_fetch,
             patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
@@ -404,7 +398,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history
-            mock_fetch_snapshot.return_value = thread_history
             bot.client.room_send.side_effect = [
                 nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, test_room_id),
                 nio.RoomSendResponse.from_dict({"event_id": "$edit"}, test_room_id),
@@ -454,7 +447,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
-            patch("mindroom.bot.fetch_thread_snapshot") as mock_fetch_snapshot,
             patch("mindroom.bot.fetch_thread_history") as mock_fetch,
             patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
@@ -476,7 +468,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history
-            mock_fetch_snapshot.return_value = thread_history
 
             # Mock non-streaming response for mention case
             mock_ai.return_value = "20% of 300 is 60"
