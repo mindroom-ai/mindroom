@@ -13,7 +13,10 @@ from nio.api import RelationshipType
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
+    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
@@ -44,7 +47,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _ROOM_HISTORY_PAGE_SIZE = 100
-_MAX_ROOM_HISTORY_PAGES = 2
+_MAX_ROOM_HISTORY_PAGES = 10
 # Startup cleanup runs before this process starts its Matrix sync loop, so it cannot
 # clobber streams created by the same process. The remaining race is another
 # concurrently running instance cleaning up a message during a long provider/tool stall
@@ -56,6 +59,9 @@ _MAX_REQUESTER_RESOLUTION_DEPTH = 10
 _INTERRUPTED_PARTIAL_TEXT_LIMIT = 280
 _AUTO_RESUME_MESSAGE = (
     "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
+)
+_TERMINAL_STREAM_STATUSES = frozenset(
+    {STREAM_STATUS_CANCELLED, STREAM_STATUS_COMPLETED, STREAM_STATUS_ERROR},
 )
 
 
@@ -76,10 +82,9 @@ class _MessageState:
     """Latest visible state for one original Matrix message."""
 
     latest_body: str | None = None
-    custom_content: dict[str, Any] = field(default_factory=dict)
     latest_timestamp: int = 0
     latest_event_id: str = ""
-    latest_content: dict[str, object] | None = None
+    latest_content: dict[str, Any] | None = None
     thread_id: str | None = None
     stream_status: str | None = None
     requester_user_id: str | None = None
@@ -206,7 +211,7 @@ async def _cleanup_room_stale_streaming_messages(
 
     cleaned_count = 0
     prior_edit_succeeded = False
-    interrupted_threads_by_key: dict[tuple[str, str], InterruptedThread] = {}
+    interrupted_threads: list[InterruptedThread] = []
     agent_name = _agent_name_for_bot_user_id(bot_user_id, config, runtime_paths)
     if agent_name is None:
         return 0, []
@@ -238,10 +243,23 @@ async def _cleanup_room_stale_streaming_messages(
             cleaned_count += 1
             prior_edit_succeeded = True
             if interrupted is not None:
-                interrupted_threads_by_key[(interrupted.thread_id or "", interrupted.agent_name)] = interrupted
+                interrupted_threads.append(interrupted)
             continue
 
         if _has_restart_interrupted_note(state.latest_body):
+            repaired = await _repair_restart_marked_message_metadata(
+                client,
+                room_id=room_id,
+                target_event_id=target_event_id,
+                state=state,
+                sender_domain=sender_domain,
+                config=config,
+                runtime_paths=runtime_paths,
+                prior_edit_succeeded=prior_edit_succeeded,
+            )
+            if repaired:
+                cleaned_count += 1
+                prior_edit_succeeded = True
             await _redact_stop_reactions(
                 client,
                 room_id=room_id,
@@ -250,7 +268,47 @@ async def _cleanup_room_stale_streaming_messages(
                 bot_user_ids=bot_user_ids,
             )
 
-    return cleaned_count, list(interrupted_threads_by_key.values())
+    return cleaned_count, interrupted_threads
+
+
+async def _repair_restart_marked_message_metadata(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    target_event_id: str,
+    state: _MessageState,
+    sender_domain: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    prior_edit_succeeded: bool,
+) -> bool:
+    """Repair non-terminal stream metadata on already restart-marked messages."""
+    assert state.latest_body is not None
+    if not _has_non_terminal_stream_status(state.latest_content):
+        return False
+
+    try:
+        if prior_edit_succeeded:
+            await asyncio.sleep(_RATE_LIMIT_DELAY_SECONDS)
+        return await _edit_stale_message(
+            client,
+            room_id=room_id,
+            target_event_id=target_event_id,
+            new_text=state.latest_body,
+            preserved_content=_terminal_stream_content(state.latest_content),
+            thread_id=state.thread_id,
+            sender_domain=sender_domain,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed stale message metadata repair",
+            room_id=room_id,
+            event_id=target_event_id,
+            error=str(exc),
+        )
+        return False
 
 
 async def _cleanup_one_stale_message(
@@ -272,12 +330,11 @@ async def _cleanup_one_stale_message(
         room_id=room_id,
         target_event_id=target_event_id,
         new_text=build_restart_interrupted_body(state.latest_body),
-        custom_content=state.custom_content,
+        preserved_content=_terminal_stream_content(state.latest_content),
         thread_id=state.thread_id,
         sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
-        preserved_content=state.latest_content,
     )
     if not edit_succeeded:
         return False, None
@@ -478,18 +535,12 @@ def _merge_resolved_message_state(
     if requester_user_id is not None and not isinstance(requester_user_id, str):
         requester_user_id = None
     latest_content = message_data.get("content")
-    normalized_latest_content: dict[str, object] | None = None
+    normalized_latest_content: dict[str, Any] | None = None
     if isinstance(latest_content, dict):
-        normalized_latest_content = {}
-        for key, value in latest_content.items():
-            if isinstance(key, str):
-                normalized_latest_content[key] = value
-
-    custom_content = _extract_mindroom_custom_content(normalized_latest_content)
+        normalized_latest_content = {key: value for key, value in latest_content.items() if isinstance(key, str)}
 
     state = message_states.setdefault(target_event_id, _MessageState())
     state.latest_body = body
-    state.custom_content = dict(custom_content)
     state.latest_timestamp = timestamp
     state.latest_event_id = latest_event_id
     state.latest_content = normalized_latest_content
@@ -925,28 +976,20 @@ def _record_stop_reaction(
     message_states.setdefault(target_event_id, _MessageState()).stop_reaction_event_ids.add(reaction_event_id)
 
 
-def _extract_mindroom_custom_content(content: object) -> dict[str, Any]:
-    """Return io.mindroom.* keys from the canonical content payload."""
-    if not isinstance(content, dict):
-        return {}
-
-    return {key: value for key, value in content.items() if isinstance(key, str) and key.startswith("io.mindroom.")}
-
-
 async def _edit_stale_message(
     client: nio.AsyncClient,
     *,
     room_id: str,
     target_event_id: str,
     new_text: str,
-    custom_content: dict[str, Any] | None = None,
+    preserved_content: dict[str, Any] | None,
     thread_id: str | None,
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    preserved_content: dict[str, object] | None,
 ) -> bool:
     """Edit a stale message while preserving thread context when present."""
+    extra_content = _preserved_cleanup_content(preserved_content)
     content = await build_threaded_edit_content(
         client,
         room_id=room_id,
@@ -956,7 +999,7 @@ async def _edit_stale_message(
         config=config,
         runtime_paths=runtime_paths,
         sender_domain=sender_domain,
-        extra_content=_preserved_cleanup_content(preserved_content),
+        extra_content=extra_content,
     )
 
     response_event_id = await edit_message(
@@ -965,7 +1008,7 @@ async def _edit_stale_message(
         target_event_id,
         content,
         new_text,
-        extra_content=custom_content or None,
+        extra_content=extra_content,
     )
     if response_event_id:
         return True
@@ -978,12 +1021,12 @@ async def _edit_stale_message(
     return False
 
 
-def _preserved_cleanup_content(content: dict[str, object] | None) -> dict[str, object] | None:
+def _preserved_cleanup_content(content: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return the metadata fields that should survive a restart cleanup edit."""
     if content is None:
         return None
 
-    preserved: dict[str, object] = {}
+    preserved: dict[str, Any] = {}
     for key, value in content.items():
         if not isinstance(key, str):
             continue
@@ -991,6 +1034,21 @@ def _preserved_cleanup_content(content: dict[str, object] | None) -> dict[str, o
             preserved[key] = value
 
     return preserved or None
+
+
+def _has_non_terminal_stream_status(content: dict[str, Any] | None) -> bool:
+    """Return whether the message still advertises an active stream state."""
+    if content is None:
+        return False
+    stream_status = content.get(STREAM_STATUS_KEY)
+    return isinstance(stream_status, str) and stream_status not in _TERMINAL_STREAM_STATUSES
+
+
+def _terminal_stream_content(content: dict[str, Any] | None) -> dict[str, Any]:
+    """Return metadata with a terminal stream status for cleanup edits."""
+    if content is None:
+        return {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
+    return {**content, STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
 
 
 async def _redact_stop_reactions(

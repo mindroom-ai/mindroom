@@ -20,6 +20,7 @@ from mindroom.matrix.stale_stream_cleanup import (
     cleanup_stale_streaming_messages,
 )
 from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.streaming import build_restart_interrupted_body
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -163,12 +164,14 @@ async def _run_cleanup(
     *,
     joined_rooms: list[str],
     bot_user_ids: set[str] | None = None,
+    now_ms: int = NOW_MS,
 ) -> tuple[int, list[InterruptedThread]]:
     with (
         patch(
             "mindroom.matrix.stale_stream_cleanup.get_joined_rooms",
             new=AsyncMock(return_value=joined_rooms),
         ),
+        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000),
     ):
         return await cleanup_stale_streaming_messages(
             client,
@@ -346,28 +349,71 @@ async def test_cleanup_skips_completed_stream_status_even_with_trailing_marker(t
 
 
 @pytest.mark.asyncio
-async def test_cleanup_keeps_latest_interrupted_thread_per_agent_and_thread(tmp_path: Path) -> None:
-    """Cleanup should keep only the newest interrupted record for each agent in a thread."""
+async def test_cleanup_scans_beyond_first_two_history_pages(tmp_path: Path) -> None:
+    """Cleanup should keep paginating until it reaches stale messages beyond page 2."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    filler_page_one = [
+        _make_message_event(
+            event_id=f"$page1-{index}",
+            body="Ignore me",
+            timestamp_ms=NOW_MS - index,
+            sender="@user:example.com",
+        )
+        for index in range(100)
+    ]
+    filler_page_two = [
+        _make_message_event(
+            event_id=f"$page2-{index}",
+            body="Still ignore me",
+            timestamp_ms=NOW_MS - 1_000 - index,
+            sender="@user:example.com",
+        )
+        for index in range(100)
+    ]
+    stale_message = _make_message_event(
+        event_id="$page3-stale",
+        body="Deep history partial ⋯",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+    )
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _room_messages_response(*filler_page_one, end="page-2"),
+            _room_messages_response(*filler_page_two, end="page-3"),
+            _room_messages_response(stale_message),
+        ],
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message",
+        new=AsyncMock(return_value="$edit"),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert interrupted == []
+    assert client.room_messages.await_count == 3
+    assert mock_edit.await_args.args[2] == "$page3-stale"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_returns_interrupted_thread_per_cleaned_threaded_message(tmp_path: Path) -> None:
+    """Cleanup should return one interrupted-thread record per cleaned threaded message."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
-            event_id="$thread-root",
-            body="Please continue",
-            sender=USER_ID,
-            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
-        ),
-        _make_message_event(
             event_id="$older",
             body="First partial ⋯",
             timestamp_ms=NOW_MS - (STALE_AGE_MS + 5_000),
-            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
         ),
         _make_message_event(
             event_id="$newer",
             body="Second partial ⋯",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
-            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
         ),
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -383,10 +429,18 @@ async def test_cleanup_keeps_latest_interrupted_thread_per_agent_and_thread(tmp_
         InterruptedThread(
             room_id=ROOM_ID,
             thread_id="$thread-root",
+            target_event_id="$older",
+            partial_text="First partial",
+            agent_name="test_agent",
+            original_sender_id=None,
+        ),
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-root",
             target_event_id="$newer",
             partial_text="Second partial",
             agent_name="test_agent",
-            original_sender_id=USER_ID,
+            original_sender_id=None,
         ),
     ]
 
@@ -975,7 +1029,7 @@ async def test_cleanup_preserves_stream_status_and_tool_trace_metadata(tmp_path:
 
     assert cleaned == 1
     edit_content = mock_edit.await_args.args[3]
-    assert edit_content[STREAM_STATUS_KEY] == "streaming"
+    assert edit_content[STREAM_STATUS_KEY] == "error"
     assert edit_content[_TOOL_TRACE_KEY] == {
         "version": 1,
         "events": [{"type": "tool_started", "tool_name": "shell"}],
@@ -983,46 +1037,42 @@ async def test_cleanup_preserves_stream_status_and_tool_trace_metadata(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_cleanup_skips_restart_marked_streaming_message(tmp_path: Path) -> None:
-    """Cleanup should not re-edit a message that already carries the restart interruption note."""
+async def test_cleanup_repairs_pending_stream_status_on_restart_note_messages(tmp_path: Path) -> None:
+    """Restart-note messages should still get a metadata-only repair when status is pending."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+    interrupted_body = build_restart_interrupted_body("Working ⋯")
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
-            event_id="$thread-root",
-            body="Question",
-            sender=USER_ID,
-            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
-        ),
-        _make_message_event(
-            event_id="$original",
-            body="Working ⋯",
-            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
-            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
-        ),
-        _make_message_event(
-            event_id="$latest-edit",
-            body="* Working",
+            event_id="$message",
+            body=interrupted_body,
             timestamp_ms=NOW_MS - STALE_AGE_MS,
-            relates_to={"rel_type": "m.replace", "event_id": "$original"},
-            new_content={
-                "body": stale_stream_cleanup_module.build_restart_interrupted_body("Working ⋯"),
-                "msgtype": "m.text",
-                STREAM_STATUS_KEY: "streaming",
+            extra_content={
+                STREAM_STATUS_KEY: "pending",
+                "io.mindroom.ai_run": {"version": 1, "run_id": "run-123"},
             },
+        ),
+        _make_reaction_event(
+            event_id="$history-stop",
+            target_event_id="$message",
+            key="🛑",
+            timestamp_ms=NOW_MS - 1_000,
         ),
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
 
-    with patch(
-        "mindroom.matrix.stale_stream_cleanup.edit_message",
-        new=AsyncMock(return_value="$cleanup-edit"),
-    ) as mock_edit:
-        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
 
-    assert cleaned == 0
+    assert cleaned == 1
     assert interrupted == []
-    mock_edit.assert_not_awaited()
+    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    assert sent_content[STREAM_STATUS_KEY] == "error"
+    assert sent_content["io.mindroom.ai_run"] == {"version": 1, "run_id": "run-123"}
+    assert cast("dict[str, object]", sent_content["m.new_content"])["body"] == interrupted_body
+    client.room_redact.assert_awaited_once()
+    assert client.room_redact.await_args.kwargs["event_id"] == "$history-stop"
 
 
 @pytest.mark.asyncio
@@ -1064,17 +1114,18 @@ async def test_cleanup_preserves_multiple_mindroom_metadata_keys(tmp_path: Path)
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     client.rooms = {}
-    expected_keys = {
+    input_keys = {
         "io.mindroom.stream_status": "streaming",
         "io.mindroom.compaction": {"version": 1, "compacted": False},
         "io.mindroom.thread_summary": {"version": 1, "summary": "Draft summary"},
     }
+    expected_keys = {**input_keys, "io.mindroom.stream_status": "error"}
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$message",
             body="More streaming output ⋯",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
-            extra_content=expected_keys,
+            extra_content=input_keys,
         ),
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -1102,17 +1153,18 @@ async def test_cleanup_prefers_latest_mindroom_metadata_from_edit_chain(tmp_path
             "io.mindroom.ai_run": {"version": 1, "run_id": "run-old"},
         },
     )
-    latest_keys = {
+    input_latest_keys = {
         "io.mindroom.tool_trace": {"version": 2, "events": [{"tool": "shell"}]},
         "io.mindroom.ai_run": {"version": 1, "run_id": "run-new"},
         "io.mindroom.stream_status": "streaming",
     }
+    expected_latest_keys = {**input_latest_keys, "io.mindroom.stream_status": "error"}
     edit = _make_message_event(
         event_id="$edit-1",
         body="* Updated partial",
         timestamp_ms=NOW_MS - STALE_AGE_MS,
         relates_to={"rel_type": "m.replace", "event_id": "$original"},
-        new_content={"body": "Updated partial ⋯", "msgtype": "m.text", **latest_keys},
+        new_content={"body": "Updated partial ⋯", "msgtype": "m.text", **input_latest_keys},
     )
     client.room_messages.return_value = _room_messages_response(original, edit)
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -1122,8 +1174,209 @@ async def test_cleanup_prefers_latest_mindroom_metadata_from_edit_chain(tmp_path
 
     assert cleaned == 1
     sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
-    _assert_preserved_edit_payload(sent_content, latest_keys)
+    _assert_preserved_edit_payload(sent_content, expected_latest_keys)
     assert sent_content["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$original"}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_sets_terminal_stream_status(tmp_path: Path) -> None:
+    """Cleanup must override io.mindroom.stream_status to error, even when it is missing."""
+    config = _make_config(tmp_path)
+
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$msg-streaming",
+            body="Still typing ⋯",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            extra_content={
+                "io.mindroom.stream_status": "streaming",
+                "io.mindroom.tool_trace": {"version": 1},
+            },
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$c1", room_id=ROOM_ID))
+
+    cleaned, _ = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    sent = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    assert sent["io.mindroom.stream_status"] == "error"
+    assert sent["io.mindroom.tool_trace"] == {"version": 1}
+    new_content = cast("dict[str, object]", sent["m.new_content"])
+    assert new_content["io.mindroom.stream_status"] == "error"
+    assert new_content["io.mindroom.tool_trace"] == {"version": 1}
+
+    client2 = AsyncMock(spec=nio.AsyncClient)
+    client2.rooms = {}
+    client2.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$msg-no-status",
+            body="Still typing ⋯",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            extra_content={"io.mindroom.tool_trace": {"version": 2}},
+        ),
+    )
+    client2.room_get_event_relations = MagicMock(return_value=_aiter())
+    client2.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$c2", room_id=ROOM_ID))
+
+    cleaned2, _ = await _run_cleanup(client2, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned2 == 1
+    sent2 = cast("dict[str, object]", client2.room_send.await_args.kwargs["content"])
+    assert sent2["io.mindroom.stream_status"] == "error"
+    assert sent2["io.mindroom.tool_trace"] == {"version": 2}
+    new_content2 = cast("dict[str, object]", sent2["m.new_content"])
+    assert new_content2["io.mindroom.stream_status"] == "error"
+    assert new_content2["io.mindroom.tool_trace"] == {"version": 2}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preserves_tool_trace_from_v2_sidecar(tmp_path: Path) -> None:
+    """Cleanup should hydrate a v2 sidecar and preserve metadata that only exists there."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+
+    sidecar_tool_trace = {"version": 1, "events": [{"tool": "web_search"}]}
+    sidecar_payload = {
+        "msgtype": "m.text",
+        "body": "A very long response with tool traces ⋯",
+        "io.mindroom.tool_trace": sidecar_tool_trace,
+        "io.mindroom.ai_run": {"version": 1, "run_id": "run-sidecar"},
+    }
+
+    preview_event = _make_message_event(
+        event_id="$message",
+        body="Preview of long text ⋯",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+        extra_content={
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            "url": "mxc://example.com/sidecar123",
+        },
+    )
+    client.room_messages.return_value = _room_messages_response(preview_event)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(sidecar_payload).encode("utf-8"),
+        ),
+    )
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
+
+    cleaned, _ = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    _assert_preserved_edit_payload(
+        sent_content,
+        {
+            "io.mindroom.tool_trace": sidecar_tool_trace,
+            "io.mindroom.ai_run": {"version": 1, "run_id": "run-sidecar"},
+            "io.mindroom.stream_status": "error",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_sidecar_hydration_failure_falls_back_gracefully(tmp_path: Path) -> None:
+    """Cleanup should still work when sidecar hydration fails."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+
+    preview_event = _make_message_event(
+        event_id="$message",
+        body="Preview text ⋯",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+        extra_content={
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            "io.mindroom.ai_run": {"version": 1, "run_id": "run-preview"},
+            "url": "mxc://example.com/broken",
+        },
+    )
+    client.room_messages.return_value = _room_messages_response(preview_event)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.download = AsyncMock(return_value=MagicMock(spec=nio.DownloadError))
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
+
+    cleaned, _ = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    _assert_preserved_edit_payload(
+        sent_content,
+        {
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            "io.mindroom.ai_run": {"version": 1, "run_id": "run-preview"},
+            "io.mindroom.stream_status": "error",
+        },
+    )
+    new_content = cast("dict[str, object]", sent_content["m.new_content"])
+    assert "io.mindroom.tool_trace" not in new_content
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preserves_sidecar_tool_trace_from_edit_chain(tmp_path: Path) -> None:
+    """For edit-based sidecars, tool_trace should come from the latest edit sidecar."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+
+    sidecar_tool_trace = {"version": 1, "events": [{"tool": "shell"}, {"tool": "file"}]}
+    sidecar_inner = {
+        "msgtype": "m.text",
+        "body": "Full response text with streaming indicator ⋯",
+        "io.mindroom.tool_trace": sidecar_tool_trace,
+    }
+    sidecar_payload = {
+        "msgtype": "m.text",
+        "body": "* Full response text with streaming indicator ⋯",
+        "m.new_content": sidecar_inner,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+    }
+
+    original = _make_message_event(
+        event_id="$original",
+        body="Initial short text",
+        timestamp_ms=NOW_MS - (STALE_AGE_MS + 5_000),
+    )
+    edit = _make_message_event(
+        event_id="$latest-edit",
+        body="* Preview of long edit",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$original"},
+        new_content={
+            "body": "Preview of long edit ⋯",
+            "msgtype": "m.file",
+            "url": "mxc://example.com/edit-sidecar",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+        },
+    )
+    client.room_messages.return_value = _room_messages_response(original, edit)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(sidecar_payload).encode("utf-8"),
+        ),
+    )
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
+
+    cleaned, _ = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    _assert_preserved_edit_payload(
+        sent_content,
+        {
+            "io.mindroom.tool_trace": sidecar_tool_trace,
+            "io.mindroom.stream_status": "error",
+        },
+    )
 
 
 @pytest.mark.asyncio
