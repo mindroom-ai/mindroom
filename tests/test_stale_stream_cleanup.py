@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -735,6 +736,88 @@ async def test_cleanup_follows_agent_reply_chain_outside_scanned_history(tmp_pat
         "$agent-a",
         "$user-root",
     ]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Path) -> None:
+    """Requester resolution should use canonical visible content for fetched edit events."""
+    config = _make_config(tmp_path)
+    other_agent_user_id = config.get_ids(runtime_paths_for(config))["other"].full_id
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$original",
+            body="Needs cleanup ⋯",
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+            relates_to=_thread_reply_relation("$thread-root", "$agent-a-edit"),
+        ),
+        _make_message_event(
+            event_id="$latest-edit",
+            body="* Needs cleanup",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to={"rel_type": "m.replace", "event_id": "$original"},
+            new_content={"body": "Needs cleanup ⋯", "msgtype": "m.text"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_get_event = AsyncMock(
+        return_value=_room_get_event_response(
+            _make_message_event(
+                event_id="$agent-a-edit",
+                body="* Preview handoff",
+                sender=other_agent_user_id,
+                timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+                relates_to={"rel_type": "m.replace", "event_id": "$agent-a-original"},
+                new_content={
+                    "body": "Preview handoff",
+                    "msgtype": "m.file",
+                    "info": {"mimetype": "application/json"},
+                    "io.mindroom.long_text": {
+                        "version": 2,
+                        "encoding": "matrix_event_content_json",
+                    },
+                    "url": "mxc://server/agent-a-edit-sidecar",
+                },
+            ),
+        ),
+    )
+    client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "body": "* Handoff",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "Handoff",
+                        "msgtype": "m.text",
+                        ORIGINAL_SENDER_KEY: USER_ID,
+                        "m.relates_to": _thread_reply_relation("$thread-root", "$user-root"),
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$agent-a-original"},
+                },
+            ).encode("utf-8"),
+        ),
+    )
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message",
+        new=AsyncMock(return_value="$edit"),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert interrupted == [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-root",
+            target_event_id="$original",
+            partial_text="Needs cleanup",
+            agent_name="test_agent",
+            original_sender_id=USER_ID,
+        ),
+    ]
+    client.download.assert_awaited()
 
 
 @pytest.mark.asyncio

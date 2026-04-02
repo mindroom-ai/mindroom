@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003
@@ -244,6 +245,102 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
 
         # Verify that the response tracker still maps to the same response
         assert bot.response_tracker.get_response_event_id(original_event.event_id) == response_event_id
+
+
+@pytest.mark.asyncio
+async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> None:
+    """Edit regeneration should use the resolved edited body from a v2 sidecar."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path)
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "body": "* @test_agent what is 99+1?",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "@test_agent what is 99+1?",
+                        "msgtype": "m.text",
+                    },
+                    "m.relates_to": {
+                        "event_id": "$original:example.com",
+                        "rel_type": "m.replace",
+                    },
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+    bot.logger = MagicMock()
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    bot.response_tracker.mark_responded("$original:example.com", "$response:example.com")
+
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* Preview edit",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "Preview edit",
+                    "msgtype": "m.file",
+                    "info": {"mimetype": "application/json"},
+                    "io.mindroom.long_text": {
+                        "version": 2,
+                        "encoding": "matrix_event_content_json",
+                    },
+                    "url": "mxc://server/edit-sidecar",
+                },
+                "m.relates_to": {
+                    "event_id": "$original:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = edit_event.__dict__["source"]
+
+    with (
+        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot, "_emit_message_received_hooks", new_callable=AsyncMock) as mock_emit_hooks,
+        patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+    ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
+            has_non_agent_mentions=False,
+        )
+        mock_emit_hooks.return_value = False
+
+        await bot._on_message(room, edit_event)
+
+    mock_should_respond.assert_called_once()
+    emitted_envelope = mock_emit_hooks.await_args.kwargs["envelope"]
+    assert emitted_envelope.body == "@test_agent what is 99+1?"
 
 
 def test_remove_run_by_event_id_removes_team_runs() -> None:

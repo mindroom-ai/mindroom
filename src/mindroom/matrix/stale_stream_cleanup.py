@@ -28,6 +28,7 @@ from mindroom.matrix.client import (
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
 from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
@@ -733,6 +734,24 @@ async def _fetch_message_data_for_event_id(
     if not isinstance(event_source, dict) or not isinstance(sender, str):
         fetched_message_data_by_event_id[event_id] = None
         return None
+
+    event_info = EventInfo.from_event(event_source)
+    if isinstance(event, nio.RoomMessageText):
+        if event_info.is_edit:
+            edited_body, edited_content = await extract_edit_body(event_source, client)
+            if edited_body is not None and edited_content is not None:
+                message_data = {
+                    "event_id": event_id,
+                    "sender": sender,
+                    "content": edited_content,
+                    "body": edited_body,
+                }
+                fetched_message_data_by_event_id[event_id] = message_data
+                return message_data
+
+        message_data = await extract_and_resolve_message(event, client)
+        fetched_message_data_by_event_id[event_id] = message_data
+        return message_data
 
     content = event_source.get("content")
     body: str | None = None

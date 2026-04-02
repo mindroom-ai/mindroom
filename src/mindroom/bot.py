@@ -59,6 +59,7 @@ from mindroom.matrix.identity import (
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.presence import (
     build_agent_status_message,
     is_user_online,
@@ -4466,7 +4467,10 @@ class AgentBot:
 
         context = await self._extract_message_context(room, event)
         requester_user_id = self._requester_user_id_for_event(event)
-        edited_content = event.source["content"]["m.new_content"]["body"]
+        edited_content, _ = await extract_edit_body(event.source, self.client)
+        if edited_content is None:
+            self.logger.debug("Edited message missing resolved body", event_id=event.event_id)
+            return
         envelope = self._build_message_envelope(
             room_id=room.room_id,
             event=event,
