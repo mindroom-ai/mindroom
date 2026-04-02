@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ from mindroom.tool_system.metadata import (
     ToolStatus,
     get_tool_by_name,
 )
+from mindroom.tools.openbb import openbb_tools
 
 HOOK_SCRIPT = Path(__file__).parent.parent / ".github" / "scripts" / "check_tool_extras_sync.py"
 TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"))
@@ -55,6 +57,32 @@ def test_all_tools_can_be_imported() -> None:
         for tool_name, error in failed:
             error_msg += f"  - {tool_name}: {error}\n"
         pytest.fail(error_msg)
+
+
+@pytest.mark.parametrize("existing_value", [None, "true"])
+def test_openbb_tool_import_disables_auto_build(monkeypatch: pytest.MonkeyPatch, existing_value: str | None) -> None:
+    """OpenBB imports should disable upstream auto-build to avoid cross-process lock races."""
+
+    class DummyOpenBBTools:
+        pass
+
+    def fake_import_module(module_name: str) -> SimpleNamespace:
+        assert module_name == "agno.tools.openbb"
+        assert os.environ["OPENBB_AUTO_BUILD"] == "false"
+        return SimpleNamespace(OpenBBTools=DummyOpenBBTools)
+
+    if existing_value is None:
+        monkeypatch.delenv("OPENBB_AUTO_BUILD", raising=False)
+    else:
+        monkeypatch.setenv("OPENBB_AUTO_BUILD", existing_value)
+
+    monkeypatch.setattr("mindroom.tools.openbb.importlib.import_module", fake_import_module)
+
+    assert openbb_tools() is DummyOpenBBTools
+    if existing_value is None:
+        assert "OPENBB_AUTO_BUILD" not in os.environ
+    else:
+        assert os.environ["OPENBB_AUTO_BUILD"] == existing_value
 
 
 def test_tool_extras_in_sync_with_pyproject() -> None:
