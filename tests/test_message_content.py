@@ -1,5 +1,6 @@
 """Tests for centralized message content extraction with large message support."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -9,7 +10,34 @@ from mindroom.matrix.message_content import (
     _clear_mxc_cache,
     _download_mxc_text,
     _get_full_message_body,
+    extract_and_resolve_message,
+    extract_edit_body,
 )
+
+
+def _make_message_event(
+    *,
+    body: str,
+    content: dict[str, object],
+    event_id: str = "$event",
+    sender: str = "@alice:example.com",
+    timestamp_ms: int = 1234567890,
+) -> nio.RoomMessageText:
+    """Create a Matrix text event for message content tests."""
+    event = nio.RoomMessageText(
+        source={
+            "content": content,
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": timestamp_ms,
+            "type": "m.room.message",
+        },
+        body=body,
+        formatted_body=None,
+        format=None,
+    )
+    event.sender = sender
+    return event
 
 
 class TestGetFullMessageBody:
@@ -293,6 +321,138 @@ class TestGetFullMessageBody:
         result = await _get_full_message_body(message, client)
         # Without proper crypto mocking, it will return preview
         assert result == "Preview..."
+
+
+class TestResolvedMessageExtraction:
+    """Tests for coherent visible message extraction."""
+
+    def setup_method(self) -> None:
+        """Clear cache before each test."""
+        _clear_mxc_cache()
+
+    @pytest.mark.asyncio
+    async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:
+        """Regular v2 sidecars should return the canonical content and body."""
+        original_content = {
+            "msgtype": "m.text",
+            "body": "Full response body",
+            "io.mindroom.tool_trace": {"version": 1, "events": [{"tool": "shell"}]},
+        }
+        event = _make_message_event(
+            body="Preview body",
+            content={
+                "msgtype": "m.file",
+                "body": "Preview body",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/sidecar",
+            },
+        )
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(original_content).encode("utf-8"),
+            ),
+        )
+
+        resolved = await extract_and_resolve_message(event, client)
+
+        assert resolved["body"] == "Full response body"
+        assert resolved["content"] == original_content
+
+    @pytest.mark.asyncio
+    async def test_extract_and_resolve_message_hydrates_v2_edit_wrapper(self) -> None:
+        """Edit-sidecar events should resolve to the canonical outer replacement payload."""
+        canonical_content = {
+            "msgtype": "m.text",
+            "body": "* Full edit body",
+            "m.new_content": {
+                "msgtype": "m.text",
+                "body": "Full edit body",
+                "io.mindroom.tool_trace": {"version": 1, "events": [{"tool": "shell"}]},
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+        }
+        event = _make_message_event(
+            body="* Preview edit",
+            content={
+                "msgtype": "m.text",
+                "body": "* Preview edit",
+                "m.new_content": {
+                    "msgtype": "m.file",
+                    "body": "Preview edit",
+                    "info": {"mimetype": "application/json"},
+                    "io.mindroom.long_text": {
+                        "version": 2,
+                        "encoding": "matrix_event_content_json",
+                    },
+                    "url": "mxc://server/edit-sidecar",
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            },
+        )
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(canonical_content).encode("utf-8"),
+            ),
+        )
+
+        resolved = await extract_and_resolve_message(event, client)
+
+        assert resolved["body"] == "* Full edit body"
+        assert resolved["content"] == canonical_content
+        assert resolved["content"]["body"] == resolved["body"]
+
+    @pytest.mark.asyncio
+    async def test_extract_edit_body_hydrates_v2_edit_sidecar(self) -> None:
+        """Edit extraction should return the canonical m.new_content from a v2 sidecar."""
+        canonical_content = {
+            "msgtype": "m.text",
+            "body": "* Full edit body",
+            "m.new_content": {
+                "msgtype": "m.text",
+                "body": "Full edit body",
+                "io.mindroom.tool_trace": {"version": 1, "events": [{"tool": "shell"}]},
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+        }
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(canonical_content).encode("utf-8"),
+            ),
+        )
+
+        body, content = await extract_edit_body(
+            {
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "* Preview edit",
+                    "m.new_content": {
+                        "msgtype": "m.file",
+                        "body": "Preview edit",
+                        "info": {"mimetype": "application/json"},
+                        "io.mindroom.long_text": {
+                            "version": 2,
+                            "encoding": "matrix_event_content_json",
+                        },
+                        "url": "mxc://server/edit-sidecar",
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+                },
+            },
+            client,
+        )
+
+        assert body == "Full edit body"
+        assert content == canonical_content["m.new_content"]
 
 
 class TestDownloadMxcText:

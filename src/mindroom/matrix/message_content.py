@@ -79,11 +79,8 @@ def _html_to_text(html_text: str) -> str:
 
 def _extract_large_message_v2_body(payload_json: str) -> str | None:
     """Extract prompt body text from a v2 large-message sidecar JSON payload."""
-    try:
-        payload = json.loads(payload_json)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
+    payload = _extract_large_message_v2_content(payload_json)
+    if payload is None:
         return None
 
     nested_new_content = payload.get("m.new_content")
@@ -96,6 +93,56 @@ def _extract_large_message_v2_body(payload_json: str) -> str | None:
     if isinstance(body, str):
         return body
     return None
+
+
+def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
+    """Extract canonical content dict from a v2 large-message sidecar JSON payload."""
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return {key: value for key, value in payload.items() if isinstance(key, str)}
+
+
+def _normalized_content_dict(content: object) -> dict[str, Any]:
+    """Return a string-keyed content dict."""
+    if not isinstance(content, dict):
+        return {}
+    return {key: value for key, value in content.items() if isinstance(key, str)}
+
+
+def _content_body(content: dict[str, Any], fallback_body: str) -> str:
+    """Return the body from content when present, otherwise the provided fallback."""
+    body = content.get("body")
+    return body if isinstance(body, str) else fallback_body
+
+
+def _sidecar_content_for_resolution(content: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the content dict that owns the long-text sidecar metadata."""
+    if "io.mindroom.long_text" in content:
+        return content
+
+    new_content = content.get("m.new_content")
+    if isinstance(new_content, dict) and "io.mindroom.long_text" in new_content:
+        return new_content
+
+    return None
+
+
+def _sidecar_mxc_url(content: dict[str, Any]) -> str | None:
+    """Return the MXC URL referenced by one sidecar-backed content dict."""
+    url = content.get("url")
+    if isinstance(url, str):
+        return url
+
+    file_info = content.get("file")
+    if not isinstance(file_info, dict):
+        return None
+
+    file_url = file_info.get("url")
+    return file_url if isinstance(file_url, str) else None
 
 
 async def _get_full_message_body(
@@ -269,17 +316,26 @@ async def extract_and_resolve_message(
 
     """
     # Extract basic message data
+    preview_content = _normalized_content_dict(event.source.get("content", {}))
+    resolved_content = await _resolve_canonical_content(preview_content, client)
     data = {
         "sender": event.sender,
         "body": event.body,
         "timestamp": event.server_timestamp,
         "event_id": event.event_id,
-        "content": event.source.get("content", {}),
+        "content": resolved_content,
     }
 
+    if resolved_content is not preview_content:
+        data["body"] = _content_body(resolved_content, event.body)
+        return data
+
     # Check if this is a large message and resolve if we have a client
-    if client and "io.mindroom.long_text" in data["content"]:
-        data["body"] = await _get_full_message_body(data, client)
+    if client and "io.mindroom.long_text" in preview_content:
+        data["body"] = await _get_full_message_body(
+            {"body": event.body, "content": preview_content},
+            client,
+        )
 
     return data
 
@@ -289,8 +345,9 @@ async def extract_edit_body(
     client: nio.AsyncClient | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
-    content = event_source.get("content", {})
-    new_content = content.get("m.new_content", {})
+    content = _normalized_content_dict(event_source.get("content", {}))
+    resolved_content = await _resolve_canonical_content(content, client)
+    new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
 
     body = new_content.get("body")
     if not isinstance(body, str):
@@ -304,6 +361,38 @@ async def extract_edit_body(
         )
 
     return resolved_body, dict(new_content)
+
+
+async def _resolve_canonical_content(
+    content: dict[str, Any],
+    client: nio.AsyncClient | None,
+) -> dict[str, Any]:
+    """Hydrate canonical event content from a v2 JSON sidecar when available."""
+    sidecar_content = _sidecar_content_for_resolution(content)
+    if client is None or sidecar_content is None:
+        return content
+
+    long_text_meta = sidecar_content.get("io.mindroom.long_text")
+    long_text_version = long_text_meta.get("version") if isinstance(long_text_meta, dict) else None
+    mxc_url = _sidecar_mxc_url(sidecar_content) if long_text_version == 2 else None
+    if mxc_url is None:
+        return content
+
+    full_text = await _download_mxc_text(
+        client,
+        mxc_url,
+        sidecar_content.get("file") if isinstance(sidecar_content.get("file"), dict) else None,
+        mimetype=_attachment_mimetype(sidecar_content),
+    )
+    if full_text is None:
+        return content
+
+    resolved_content = _extract_large_message_v2_content(full_text)
+    if resolved_content is None:
+        logger.warning("Invalid large-message v2 payload JSON, returning preview content")
+        return content
+
+    return resolved_content
 
 
 def _clean_expired_cache() -> None:
