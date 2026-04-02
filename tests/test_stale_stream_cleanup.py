@@ -349,39 +349,29 @@ async def test_cleanup_skips_completed_stream_status_even_with_trailing_marker(t
 
 
 @pytest.mark.asyncio
-async def test_cleanup_scans_beyond_first_two_history_pages(tmp_path: Path) -> None:
-    """Cleanup should keep paginating until it reaches stale messages beyond page 2."""
+async def test_cleanup_scans_until_history_end_for_deep_stale_messages(tmp_path: Path) -> None:
+    """Cleanup should keep paginating until history ends, not stop after an arbitrary page cap."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
-    filler_page_one = [
-        _make_message_event(
-            event_id=f"$page1-{index}",
-            body="Ignore me",
-            timestamp_ms=NOW_MS - index,
-            sender="@user:example.com",
-        )
-        for index in range(100)
-    ]
-    filler_page_two = [
-        _make_message_event(
-            event_id=f"$page2-{index}",
-            body="Still ignore me",
-            timestamp_ms=NOW_MS - 1_000 - index,
-            sender="@user:example.com",
-        )
-        for index in range(100)
-    ]
     stale_message = _make_message_event(
-        event_id="$page3-stale",
+        event_id="$page12-stale",
         body="Deep history partial ⋯",
         timestamp_ms=NOW_MS - STALE_AGE_MS,
     )
+    history_pages = [
+        _room_messages_response(
+            _make_message_event(
+                event_id=f"$page{page_number}-filler",
+                body="Ignore me",
+                timestamp_ms=NOW_MS - page_number,
+                sender="@user:example.com",
+            ),
+            end=f"page-{page_number + 1}",
+        )
+        for page_number in range(1, 12)
+    ]
     client.room_messages = AsyncMock(
-        side_effect=[
-            _room_messages_response(*filler_page_one, end="page-2"),
-            _room_messages_response(*filler_page_two, end="page-3"),
-            _room_messages_response(stale_message),
-        ],
+        side_effect=[*history_pages, _room_messages_response(stale_message)],
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
 
@@ -393,8 +383,8 @@ async def test_cleanup_scans_beyond_first_two_history_pages(tmp_path: Path) -> N
 
     assert cleaned == 1
     assert interrupted == []
-    assert client.room_messages.await_count == 3
-    assert mock_edit.await_args.args[2] == "$page3-stale"
+    assert client.room_messages.await_count == 12
+    assert mock_edit.await_args.args[2] == "$page12-stale"
 
 
 @pytest.mark.asyncio
@@ -1279,6 +1269,44 @@ async def test_cleanup_preserves_tool_trace_from_v2_sidecar(tmp_path: Path) -> N
             "io.mindroom.stream_status": "error",
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_does_not_hydrate_sidecars_for_unrelated_user_messages(tmp_path: Path) -> None:
+    """Cleanup should resolve visible message state only for the current bot's messages."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+
+    user_sidecar_event = _make_message_event(
+        event_id="$user-preview",
+        body="User preview [Message continues in attached file]",
+        timestamp_ms=NOW_MS - STALE_AGE_MS - 10,
+        sender="@user:example.com",
+        extra_content={
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            "url": "mxc://example.com/user-sidecar",
+        },
+    )
+    stale_bot_message = _make_message_event(
+        event_id="$bot-message",
+        body="Bot partial ⋯",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+    )
+    client.room_messages.return_value = _room_messages_response(user_sidecar_event, stale_bot_message)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.download = AsyncMock()
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message",
+        new=AsyncMock(return_value="$cleanup-edit"),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert interrupted == []
+    client.download.assert_not_awaited()
+    assert mock_edit.await_args.args[2] == "$bot-message"
 
 
 @pytest.mark.asyncio

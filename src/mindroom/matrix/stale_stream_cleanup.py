@@ -47,7 +47,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _ROOM_HISTORY_PAGE_SIZE = 100
-_MAX_ROOM_HISTORY_PAGES = 10
 # Startup cleanup runs before this process starts its Matrix sync loop, so it cannot
 # clobber streams created by the same process. The remaining race is another
 # concurrently running instance cleaning up a message during a long provider/tool stall
@@ -414,7 +413,7 @@ async def _scan_room_message_states(
         bot_user_id=bot_user_id,
     )
 
-    resolved_messages = await resolve_latest_visible_messages(message_events, client)
+    resolved_messages = await resolve_latest_visible_messages(message_events, client, sender=bot_user_id)
     scanned_message_data_by_event_id = _scanned_message_data_by_event_id(message_events)
     requester_ids_by_event_id = await _derive_requester_ids_for_bot_messages(
         client,
@@ -446,7 +445,7 @@ async def _collect_room_history_events(
     message_events: list[nio.RoomMessageText] = []
     from_token: str | None = None
 
-    for _ in range(_MAX_ROOM_HISTORY_PAGES):
+    while True:
         response = await client.room_messages(
             room_id,
             start=from_token,
