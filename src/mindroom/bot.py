@@ -4026,19 +4026,11 @@ class AgentBot:
                 correlation_id=correlation_id,
             )
             if existing_event_id is not None and existing_event_is_placeholder:
-                redacted = await self._redact_message_event(
+                return await self._redact_suppressed_response_event(
                     room_id=room_id,
                     event_id=existing_event_id,
-                    reason="Suppressed placeholder response",
-                )
-                if not redacted:
-                    msg = f"failed to redact suppressed placeholder {existing_event_id}"
-                    raise _SuppressedPlaceholderCleanupError(msg)
-                return _ResponseDispatchResult(
-                    event_id=None,
                     response_text=draft.response_text,
-                    delivery_kind=None,
-                    suppressed=True,
+                    reason="Suppressed placeholder response",
                 )
             return _ResponseDispatchResult(
                 event_id=existing_event_id,
@@ -4089,6 +4081,30 @@ class AgentBot:
             options_list=interactive_response.options_list,
         )
 
+    async def _redact_suppressed_response_event(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        response_text: str,
+        reason: str,
+    ) -> _ResponseDispatchResult:
+        """Redact one provisional response and report a suppressed no-final-event outcome."""
+        redacted = await self._redact_message_event(
+            room_id=room_id,
+            event_id=event_id,
+            reason=reason,
+        )
+        if not redacted:
+            msg = f"failed to redact suppressed response {event_id}"
+            raise _SuppressedPlaceholderCleanupError(msg)
+        return _ResponseDispatchResult(
+            event_id=None,
+            response_text=response_text,
+            delivery_kind=None,
+            suppressed=True,
+        )
+
     async def _cleanup_suppressed_streamed_response(
         self,
         *,
@@ -4106,19 +4122,11 @@ class AgentBot:
             source_event_id=response_envelope.source_event_id,
             correlation_id=correlation_id,
         )
-        redacted = await self._redact_message_event(
+        return await self._redact_suppressed_response_event(
             room_id=room_id,
             event_id=event_id,
-            reason="Suppressed streamed response",
-        )
-        if not redacted:
-            msg = f"failed to redact suppressed streamed response {event_id}"
-            raise _SuppressedPlaceholderCleanupError(msg)
-        return _ResponseDispatchResult(
-            event_id=None,
             response_text=response_text,
-            delivery_kind=None,
-            suppressed=True,
+            reason="Suppressed streamed response",
         )
 
     async def _process_and_respond_streaming(  # noqa: C901, PLR0911, PLR0915
