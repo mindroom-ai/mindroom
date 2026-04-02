@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
+from mindroom.bot import AgentBot, _PrecheckedEvent
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -105,7 +105,11 @@ class TestResponseTrackingRegression:
         mock_room.room_id = test_room_id
 
         # Process command first time
-        await bot._handle_command(mock_room, command_event, command)
+        await bot._handle_command(
+            mock_room,
+            _PrecheckedEvent(event=command_event, requester_user_id="@user:localhost"),
+            command,
+        )
 
         # Verify response was sent
         assert bot.client.room_send.call_count == 1
@@ -120,7 +124,11 @@ class TestResponseTrackingRegression:
         bot.client.room_send.reset_mock()
 
         # Process same command again (simulating restart)
-        await bot._handle_command(mock_room, command_event, command)
+        await bot._handle_command(
+            mock_room,
+            _PrecheckedEvent(event=command_event, requester_user_id="@user:localhost"),
+            command,
+        )
 
         # Should NOT send another response if properly tracked
         # (In real scenario, _should_skip_duplicate_response would prevent this)

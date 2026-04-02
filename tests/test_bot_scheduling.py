@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
+from mindroom.bot import AgentBot, _PrecheckedEvent
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -87,7 +87,11 @@ class TestBotScheduleCommands:
             mock_agent_bot.response_tracker = MagicMock()
             mock_agent_bot.response_tracker.has_responded.return_value = False
 
-            await mock_agent_bot._handle_command(room, event, command)
+            await mock_agent_bot._handle_command(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:server"),
+                command,
+            )
 
             # Verify schedule_task was called correctly
             mock_schedule.assert_called_once()
@@ -125,7 +129,11 @@ class TestBotScheduleCommands:
         with patch("mindroom.commands.handler.schedule_task") as mock_schedule:
             mock_schedule.return_value = ("task456", "✅ Scheduled for tomorrow")
 
-            await mock_agent_bot._handle_command(room, event, command)
+            await mock_agent_bot._handle_command(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:server"),
+                command,
+            )
 
             # Verify the full text was passed
             call_args = mock_schedule.call_args
@@ -149,7 +157,11 @@ class TestBotScheduleCommands:
         with patch("mindroom.commands.handler.list_scheduled_tasks") as mock_list:
             mock_list.return_value = "**Scheduled Tasks:**\n• task123 - Tomorrow: Test"
 
-            await mock_agent_bot._handle_command(room, event, command)
+            await mock_agent_bot._handle_command(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:server"),
+                command,
+            )
 
             mock_list.assert_called_once_with(
                 client=mock_agent_bot.client,
@@ -178,7 +190,11 @@ class TestBotScheduleCommands:
         with patch("mindroom.commands.handler.cancel_scheduled_task") as mock_cancel:
             mock_cancel.return_value = "✅ Cancelled task `task123`"
 
-            await mock_agent_bot._handle_command(room, event, command)
+            await mock_agent_bot._handle_command(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:server"),
+                command,
+            )
 
             mock_cancel.assert_called_once_with(client=mock_agent_bot.client, room_id="!test:server", task_id="task123")
 
@@ -204,7 +220,11 @@ class TestBotScheduleCommands:
         with patch("mindroom.commands.handler.cancel_all_scheduled_tasks") as mock_cancel_all:
             mock_cancel_all.return_value = "✅ Cancelled 3 scheduled task(s)"
 
-            await mock_agent_bot._handle_command(room, event, command)
+            await mock_agent_bot._handle_command(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:server"),
+                command,
+            )
 
             mock_cancel_all.assert_called_once_with(client=mock_agent_bot.client, room_id="!test:server")
 
@@ -235,7 +255,11 @@ class TestBotScheduleCommands:
         with patch("mindroom.commands.handler.edit_scheduled_task") as mock_edit:
             mock_edit.return_value = "✅ Updated task `task123`."
 
-            await mock_agent_bot._handle_command(room, event, command)
+            await mock_agent_bot._handle_command(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:server"),
+                command,
+            )
 
             mock_edit.assert_called_once()
             edit_kwargs = mock_edit.call_args.kwargs
@@ -269,7 +293,11 @@ class TestBotScheduleCommands:
         with patch("mindroom.commands.handler.schedule_task") as mock_schedule:
             mock_schedule.return_value = ("task123", "✅ Scheduled: 5 minutes from now")
 
-            await mock_agent_bot._handle_command(room, event, command)
+            await mock_agent_bot._handle_command(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:server"),
+                command,
+            )
 
         # Should successfully schedule the task (auto-creates thread)
         mock_agent_bot._send_response.assert_called_once()

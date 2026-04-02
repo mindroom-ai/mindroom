@@ -11,7 +11,7 @@ import nio
 import pytest
 from pydantic import ValidationError
 
-from mindroom.bot import AgentBot
+from mindroom.bot import AgentBot, _PrecheckedEvent
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -775,7 +775,11 @@ class TestCommandThreadContextRoomMode:
                 return_value=("task123", "scheduled"),
             ) as mock_schedule,
         ):
-            await bot._handle_command(room, event, command)
+            await bot._handle_command(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                command,
+            )
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None
         assert bot._send_response.await_args.args[3] is None
