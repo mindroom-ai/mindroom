@@ -52,6 +52,10 @@ _ROOM_HISTORY_PAGE_SIZE = 100
 # concurrently running instance cleaning up a message during a long provider/tool stall
 # where no new chunks arrive for a while, so keep a generous recency guard here.
 _STALE_STREAM_RECENCY_GUARD_MS = 10_000
+# Restart cleanup should only touch messages from the current outage window.
+# Older interrupted replies are better left untouched than unexpectedly edited
+# and auto-resumed on some later restart.
+_STALE_STREAM_LOOKBACK_MS = 6 * 60 * 60 * 1000
 _RATE_LIMIT_DELAY_SECONDS = 0.15
 _STOP_REACTION_KEYS = frozenset({"🛑", "⏹️"})
 _MAX_REQUESTER_RESOLUTION_DEPTH = 10
@@ -199,12 +203,14 @@ async def _cleanup_room_stale_streaming_messages(
     runtime_paths: RuntimePaths,
 ) -> tuple[int, list[InterruptedThread]]:
     """Clean stale bot messages in one room."""
+    current_time_ms = int(time.time() * 1000)
     message_states = await _scan_room_message_states(
         client,
         room_id=room_id,
         bot_user_id=bot_user_id,
         config=config,
         runtime_paths=runtime_paths,
+        now_ms=current_time_ms,
     )
     if not message_states:
         return 0, []
@@ -222,9 +228,12 @@ async def _cleanup_room_stale_streaming_messages(
 
     for target_event_id, state in candidate_items:
         assert state.latest_body is not None  # guaranteed by filter above
+        if _is_recent_timestamp(state.latest_timestamp, now_ms=current_time_ms) or _is_older_than_cleanup_window(
+            state.latest_timestamp,
+            now_ms=current_time_ms,
+        ):
+            continue
         if _is_cleanup_candidate(state):
-            if _is_recent_timestamp(state.latest_timestamp):
-                continue
             edited, interrupted = await _cleanup_candidate_message(
                 client,
                 room_id=room_id,
@@ -405,12 +414,14 @@ async def _scan_room_message_states(
     bot_user_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    now_ms: int,
 ) -> dict[str, _MessageState]:
     """Scan recent room history and return latest state by original event ID."""
     message_states, message_events = await _collect_room_history_events(
         client,
         room_id=room_id,
         bot_user_id=bot_user_id,
+        now_ms=now_ms,
     )
 
     resolved_messages = await resolve_latest_visible_messages(message_events, client, sender=bot_user_id)
@@ -439,6 +450,7 @@ async def _collect_room_history_events(
     *,
     room_id: str,
     bot_user_id: str,
+    now_ms: int,
 ) -> tuple[dict[str, _MessageState], list[nio.RoomMessageText]]:
     """Return room history text events plus tracked stop reactions."""
     message_states: dict[str, _MessageState] = {}
@@ -483,6 +495,8 @@ async def _collect_room_history_events(
                 )
 
         if not response.end:
+            break
+        if _chunk_reaches_cleanup_lookback_limit(response.chunk, now_ms=now_ms):
             break
         from_token = response.end
 
@@ -1226,6 +1240,25 @@ def _is_recent_timestamp(timestamp_ms: int, *, now_ms: int | None = None) -> boo
     """Return whether a timestamp is still within the startup recency guard."""
     current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
     return current_time_ms - timestamp_ms < _STALE_STREAM_RECENCY_GUARD_MS
+
+
+def _is_older_than_cleanup_window(timestamp_ms: int, *, now_ms: int | None = None) -> bool:
+    """Return whether a timestamp is older than the restart cleanup lookback window."""
+    current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    return current_time_ms - timestamp_ms > _STALE_STREAM_LOOKBACK_MS
+
+
+def _chunk_reaches_cleanup_lookback_limit(events: list[object], *, now_ms: int) -> bool:
+    """Return whether the oldest event in this page is beyond the cleanup lookback window."""
+    oldest_timestamp = min(
+        (
+            event.server_timestamp
+            for event in events
+            if isinstance(event, nio.Event) and isinstance(event.server_timestamp, int)
+        ),
+        default=None,
+    )
+    return oldest_timestamp is not None and _is_older_than_cleanup_window(oldest_timestamp, now_ms=now_ms)
 
 
 def _build_auto_resume_content(

@@ -32,6 +32,7 @@ OTHER_BOT_USER_ID = "@mindroom_other:example.com"
 ROOM_ID = "!room:example.com"
 NOW_MS = 1_000_000
 STALE_AGE_MS = stale_stream_cleanup_module._STALE_STREAM_RECENCY_GUARD_MS + 60_000
+OLD_STALE_AGE_MS = stale_stream_cleanup_module._STALE_STREAM_LOOKBACK_MS + 60_000
 AUTO_RESUME_MESSAGE = (
     "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
 )
@@ -385,6 +386,31 @@ async def test_cleanup_scans_until_history_end_for_deep_stale_messages(tmp_path:
     assert interrupted == []
     assert client.room_messages.await_count == 12
     assert mock_edit.await_args.args[2] == "$page12-stale"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_messages_older_than_restart_window(tmp_path: Path) -> None:
+    """Cleanup should not edit or resume very old interrupted replies from previous outages."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    old_thread_message = _make_message_event(
+        event_id="$ancient-stale",
+        body="Ancient partial ⋯",
+        timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
+        relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+    )
+    client.room_messages.return_value = _room_messages_response(old_thread_message)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message",
+        new=AsyncMock(return_value="$edit"),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID], now_ms=NOW_MS)
+
+    assert cleaned == 0
+    assert interrupted == []
+    mock_edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
