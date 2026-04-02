@@ -2,8 +2,8 @@
 
 Last updated: 2026-04-02
 Owner: MindRoom backend
-Status: In progress
-Applies to: PR #447 and the follow-up cleanup work that lands with it
+Status: Implemented in PR #447 and same-series cleanup commits
+Applies to: PR #447 and future maintenance of the same response lifecycle seams
 
 ## Objective
 
@@ -40,20 +40,17 @@ Suppressed responses, redacted placeholders, cleanup failures, and streamed-firs
 
 ## Current Branch Status
 
-Phase 1 is partially landed already.
-The preview snapshot path now preserves latest visible edits without sidecar downloads.
-That is the right visible-state boundary for preview mode.
+Phase 1 is landed on the current branch.
+The preview snapshot path preserves latest visible edits without sidecar downloads, and the shared thread-view helpers now define the visible-state policy.
 
-Phase 4 is also partially landed already.
-`resolved_thread_id` already flows through locks, session IDs, tool runtime context, and most delivery paths.
-The remaining work there is cleanup and removal of the last ad hoc recomputation points.
+Phase 2 is landed on the current branch.
+Dispatch hydrates canonical thread history before router, team, and individual-response decisions consume thread bodies.
 
-Phase 2 is partially landed in the current worktree.
-Dispatch now hydrates canonical thread history before router, team, and individual-response decisions consume thread bodies.
-The remaining work there is cleanup and simplification of the phase boundary rather than proving the boundary itself.
+Phase 3 is landed on the current branch.
+Streaming, non-streaming, and team delivery now share `_ResponseDispatchResult` semantics for suppression and final response identity.
 
-Phase 3 also has partial progress.
-Streaming suppression now uses the shared response result path more consistently, but the broader outcome cleanup still remains.
+Phase 4 is landed on the current branch.
+The response lifecycle now carries one canonical response target through locks, sessions, runtime context, and delivery instead of recomputing those values in each path.
 
 ## Non-Negotiable Invariants
 
@@ -181,8 +178,7 @@ Make `_latest_thread_event_id()` consume the same visible-state rules.
 Keep preview mode sidecar-free.
 Keep preview mode latest-edit aware.
 
-Status on current branch: partially landed.
-The remaining work is to finish consolidation so snapshot/history/latest-thread all use one shared visible-state policy rather than multiple subtly different helpers.
+Status on current branch: landed.
 
 ### Phase 1 tests
 
@@ -244,8 +240,7 @@ Use that value for:
 Keep this change local to the response lifecycle code.
 Do not spread a new type across unrelated modules unless it removes real duplication immediately.
 
-Status on current branch: partially landed.
-The work here is to finish consolidation and remove the last ad hoc recomputation points rather than to build resolved-thread propagation from scratch.
+Status on current branch: landed.
 
 ### Phase 4 tests
 
@@ -255,15 +250,15 @@ Add or keep coverage for:
 - team and individual delivery parity
 - room-mode scoping remains room-scoped
 
-## Commit Strategy
+## Landed Series
 
 1. Finish the dispatch-phase split on top of the landed thread-view groundwork.
 2. Finish shared response-outcome semantics on `_ResponseDispatchResult`.
 3. Complete canonical thread-target cleanup.
 4. Dead-code removal, test-harness cleanup, and docs updates.
 
-Each commit must leave the touched suites green.
-Each commit must remove duplication rather than layering more branches on top of it.
+Each landed commit leaves the touched suites green.
+Each landed commit removes duplication rather than layering more branches on top of it.
 
 ## Acceptance Criteria
 
@@ -279,8 +274,8 @@ The refactor is done when all of the following are true.
 - Placeholder event IDs are never preserved as final response IDs after suppression.
 - The touched test surface is warning-clean except for acknowledged third-party warnings outside this code.
 
-## Immediate Next Step
+## Maintenance Guidance
 
-Finish Phase 2 immediately on top of the already-landed Phase 1 groundwork.
-Do not continue stacking local fixes on the old split paths.
-Once the dispatch boundary is clean, finish Phase 3 and Phase 4 on the same shared foundations.
+Do not reintroduce preview-thread bodies into decision-time context.
+Do not add a second response-outcome type alongside `_ResponseDispatchResult`.
+Do not add new ad hoc thread-target recomputation in downstream response helpers.
