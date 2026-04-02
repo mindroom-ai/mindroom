@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import importlib
+import os
+from typing import TYPE_CHECKING, cast
 
 from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
     from agno.tools.openbb import OpenBBTools
+
+
+def _load_openbb_tools() -> type[OpenBBTools]:
+    """Import OpenBB tools without triggering OpenBB's package auto-build in this process."""
+    previous_auto_build = os.environ.get("OPENBB_AUTO_BUILD")
+    os.environ["OPENBB_AUTO_BUILD"] = "false"
+    try:
+        module = importlib.import_module("agno.tools.openbb")
+    finally:
+        if previous_auto_build is None:
+            os.environ.pop("OPENBB_AUTO_BUILD", None)
+        else:
+            os.environ["OPENBB_AUTO_BUILD"] = previous_auto_build
+    return cast("type[OpenBBTools]", module.OpenBBTools)
 
 
 @register_tool_with_metadata(
@@ -92,6 +108,4 @@ if TYPE_CHECKING:
 )
 def openbb_tools() -> type[OpenBBTools]:
     """Return OpenBB tools for financial data."""
-    from agno.tools.openbb import OpenBBTools
-
-    return OpenBBTools
+    return _load_openbb_tools()
