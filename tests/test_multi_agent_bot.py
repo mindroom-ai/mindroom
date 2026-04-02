@@ -2964,6 +2964,52 @@ class TestAgentBot:
         assert send_kwargs["adopt_existing_placeholder"] is True
 
     @pytest.mark.asyncio
+    async def test_generate_team_response_helper_returns_none_when_suppressed_placeholder_is_redacted(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Suppressed team placeholder responses should not leak the redacted placeholder id."""
+
+        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+        async def before_hook(ctx: BeforeResponseContext) -> None:
+            ctx.draft.suppress = True
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock()
+        bot._redact_message_event = AsyncMock(return_value=True)
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
+
+        with (
+            patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=False)),
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.team_response", new=AsyncMock(return_value="Team handled")),
+        ):
+            event_id = await bot._generate_team_response_helper(
+                room_id="!test:localhost",
+                reply_to_event_id="$event",
+                thread_id="$thread_root",
+                payload=_DispatchPayload(prompt="Continue"),
+                team_agents=[bot.matrix_id],
+                team_mode="coordinate",
+                thread_history=[],
+                requester_user_id="@alice:localhost",
+                existing_event_id="$placeholder",
+                existing_event_is_placeholder=True,
+                response_envelope=_hook_envelope(body="Continue", source_event_id="$event"),
+                correlation_id="corr-team-suppress",
+            )
+
+        assert event_id is None
+        bot._redact_message_event.assert_awaited_once_with(
+            room_id="!test:localhost",
+            event_id="$placeholder",
+            reason="Suppressed placeholder response",
+        )
+
+    @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test agent bot not responding when not mentioned."""
         config = self._config_for_storage(tmp_path)
@@ -5036,7 +5082,7 @@ class TestAgentBot:
 
         with (
             patch(
-                "mindroom.matrix.client._fetch_thread_context_via_relations",
+                "mindroom.matrix.client._fetch_thread_history_via_relations",
                 new=AsyncMock(side_effect=_ThreadHistoryFastPathUnavailableError("unsupported")),
             ),
             patch(

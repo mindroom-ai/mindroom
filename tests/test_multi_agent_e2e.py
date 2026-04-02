@@ -48,6 +48,20 @@ def _make_config(storage_path: Path) -> Config:
     )
 
 
+async def _empty_event_iterator() -> AsyncGenerator[object, None]:
+    if False:
+        yield None
+
+
+def _make_matrix_client_mock() -> AsyncMock:
+    client = AsyncMock()
+    client.rooms = {}
+    client.add_event_callback = MagicMock()
+    client.add_response_callback = MagicMock()
+    client.room_get_event_relations = MagicMock(return_value=_empty_event_iterator())
+    return client
+
+
 @pytest.fixture
 def mock_calculator_agent() -> AgentMatrixUser:
     """Create a mock calculator agent user."""
@@ -89,8 +103,7 @@ async def test_agent_processes_direct_mention(
 
     with patch("mindroom.bot.login_agent_user") as mock_login:
         # Mock the client
-        mock_client = AsyncMock()
-        mock_client.add_event_callback = MagicMock()
+        mock_client = _make_matrix_client_mock()
         mock_client.user_id = mock_calculator_agent.user_id
         mock_client.access_token = mock_calculator_agent.access_token
         mock_login.return_value = mock_client
@@ -182,8 +195,7 @@ async def test_agent_ignores_other_agents(
     test_room_id = "!test:localhost"
 
     with patch("mindroom.bot.login_agent_user") as mock_login:
-        mock_client = AsyncMock()
-        mock_client.add_event_callback = MagicMock()
+        mock_client = _make_matrix_client_mock()
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
@@ -252,8 +264,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         patch("mindroom.config.main.Config.from_yaml", return_value=mock_config),
         patch("mindroom.teams._select_team_mode", new=AsyncMock()) as mock_select_mode,
     ):
-        mock_client = AsyncMock()
-        mock_client.add_event_callback = MagicMock()
+        mock_client = _make_matrix_client_mock()
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
         mock_select_mode.return_value = TeamMode.COLLABORATE
@@ -552,8 +563,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
             patch("mindroom.bot.login_agent_user") as mock_login,
             patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock()),
         ):
-            mock_client = AsyncMock()
-            mock_client.add_event_callback = MagicMock()
+            mock_client = _make_matrix_client_mock()
             mock_client.user_id = "@mindroom_calculator:localhost"
             mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id="!test:localhost"))
             # Don't run sync_forever, just verify setup
@@ -577,8 +587,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
     invite_room = "!invite:localhost"
 
     with patch("mindroom.bot.login_agent_user") as mock_login:
-        mock_client = AsyncMock()
-        mock_client.add_event_callback = MagicMock()
+        mock_client = _make_matrix_client_mock()
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 

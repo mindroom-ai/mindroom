@@ -322,7 +322,7 @@ class TestThreadHistory:
 
         with (
             patch(
-                "mindroom.matrix.client._fetch_thread_context_via_relations",
+                "mindroom.matrix.client._fetch_thread_history_via_relations",
                 new=AsyncMock(side_effect=_ThreadHistoryFastPathUnavailableError("unsupported")),
             ),
             patch(
