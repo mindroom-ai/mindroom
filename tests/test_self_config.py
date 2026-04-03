@@ -133,6 +133,26 @@ class TestGetOwnConfig:
         assert "Invalid configuration" in result
         assert "Invalid plugin name" in result
 
+    def test_get_own_config_returns_malformed_yaml_error(self, tmp_path: Path) -> None:
+        """Malformed YAML should return one user-facing invalid-config message, not raise."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
+        tool = _self_config_tools(agent_name="writer", config_path=config_path)
+
+        result = tool.get_own_config()
+
+        assert "Invalid configuration" in result
+        assert "Could not parse configuration YAML" in result
+
+    def test_get_own_config_returns_missing_config_error(self, tmp_path: Path) -> None:
+        """Missing config files should return one user-facing invalid-config message, not raise."""
+        tool = _self_config_tools(agent_name="writer", config_path=tmp_path / "missing.yaml")
+
+        result = tool.get_own_config()
+
+        assert "Invalid configuration" in result
+        assert "Could not load configuration" in result
+
 
 class TestUpdateOwnConfig:
     """Tests for SelfConfigTools.update_own_config."""
@@ -307,6 +327,18 @@ class TestUpdateOwnConfig:
 
         assert "Invalid configuration" in result
         assert "Invalid plugin name" in result
+        assert "Changes were NOT applied." in result
+
+    def test_update_own_config_returns_malformed_yaml_error(self, tmp_path: Path) -> None:
+        """Malformed YAML should be reported through the invalid-config path on writes too."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
+        tool = _self_config_tools(agent_name="writer", config_path=config_path)
+
+        result = tool.update_own_config(role="Updated role")
+
+        assert "Invalid configuration" in result
+        assert "Could not parse configuration YAML" in result
         assert "Changes were NOT applied." in result
 
     def test_update_knowledge_bases_valid(self) -> None:

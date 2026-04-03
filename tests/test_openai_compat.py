@@ -201,6 +201,29 @@ def test_list_models_returns_runtime_validation_errors(tmp_path: Path) -> None:
     assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
 
 
+def test_list_models_returns_malformed_yaml_errors(tmp_path: Path) -> None:
+    """OpenAI-compatible routes should surface malformed YAML as 422."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
+    app = FastAPI()
+    app.include_router(router)
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+    )
+    initialize_api_app(app, runtime_paths)
+
+    with TestClient(app) as client:
+        response = client.get("/v1/models")
+
+    assert response.status_code == 422
+    assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
+
+
 def test_openai_incompatible_agents_is_order_independent_for_cycles() -> None:
     """Cyclic delegation should not change which /v1 agents are rejected."""
     config = Config(

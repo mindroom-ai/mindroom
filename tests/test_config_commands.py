@@ -355,6 +355,19 @@ async def test_handle_config_command_show_returns_invalid_plugin_manifest_error(
 
 
 @pytest.mark.asyncio
+async def test_handle_config_command_show_returns_malformed_yaml_error(tmp_path: Path) -> None:
+    """Show should return a user-facing error when the config YAML is malformed."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
+
+    response, change_info = await handle_config_command("show", _runtime_paths_for_config(config_path))
+
+    assert change_info is None
+    assert "Invalid configuration" in response
+    assert "Could not parse configuration YAML" in response
+
+
+@pytest.mark.asyncio
 async def test_handle_config_command_set_returns_invalid_plugin_manifest_error(tmp_path: Path) -> None:
     """Set previews should surface plugin manifest validation failures as user errors."""
     plugin_root = tmp_path / "plugins" / "bad-name"

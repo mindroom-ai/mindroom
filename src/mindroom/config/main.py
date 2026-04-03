@@ -83,16 +83,22 @@ class ConfigRuntimeValidationError(ValueError):
 
 
 def iter_config_validation_messages(
-    exc: ValidationError | ConfigRuntimeValidationError,
+    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
 ) -> list[tuple[str, str]]:
     """Return user-facing validation messages from one config validation exception."""
     if isinstance(exc, ValidationError):
         return [(" → ".join(str(x) for x in error["loc"]), error["msg"]) for error in exc.errors(include_context=False)]
-    return [("config", str(exc))]
+    if isinstance(exc, ConfigRuntimeValidationError):
+        return [("config", str(exc))]
+    if isinstance(exc, yaml.YAMLError):
+        return [("config", f"Could not parse configuration YAML: {exc}")]
+    if isinstance(exc, UnicodeError):
+        return [("config", f"Could not read configuration text: {exc}")]
+    return [("config", f"Could not load configuration: {exc}")]
 
 
 def format_invalid_config_message(
-    exc: ValidationError | ConfigRuntimeValidationError,
+    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
     *,
     footer: str | None = None,
 ) -> str:
@@ -1544,5 +1550,5 @@ def load_config_or_user_error(
     """Load config or return one shared user-facing invalid-configuration message."""
     try:
         return load_config(runtime_paths), None
-    except (ValidationError, ConfigRuntimeValidationError) as exc:
+    except (ValidationError, ConfigRuntimeValidationError, yaml.YAMLError, OSError, UnicodeError) as exc:
         return None, format_invalid_config_message(exc, footer=footer)

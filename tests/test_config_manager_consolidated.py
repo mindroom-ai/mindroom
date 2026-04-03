@@ -118,6 +118,17 @@ class TestConsolidatedConfigManager:
         assert "Invalid configuration" in result
         assert "Invalid plugin name" in result
 
+    def test_get_info_agents_returns_malformed_yaml_error(self, tmp_path: Path) -> None:
+        """Malformed YAML should return one user-facing invalid-config message."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
+        cm = _config_manager(config_path)
+
+        result = cm.get_info(info_type="agents")
+
+        assert "Invalid configuration" in result
+        assert "Could not parse configuration YAML" in result
+
     def test_get_info_teams(self) -> None:
         """Test get_info with teams info type."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -221,6 +232,25 @@ class TestConsolidatedConfigManager:
 
         assert "Invalid configuration" in result
         assert "Invalid plugin name" in result
+        assert "Changes were NOT applied." in result
+
+    def test_manage_agent_create_returns_malformed_yaml_error(self, tmp_path: Path) -> None:
+        """Malformed YAML should be reported through the invalid-config path for mutating flows."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
+        cm = _config_manager(config_path)
+
+        result = cm.manage_agent(
+            operation="create",
+            agent_name="test_agent",
+            display_name="Test Agent",
+            role="Test role",
+            tools=[],
+            model="default",
+        )
+
+        assert "Invalid configuration" in result
+        assert "Could not parse configuration YAML" in result
         assert "Changes were NOT applied." in result
 
     def test_manage_agent_create_accepts_openclaw_preset_tool(self) -> None:

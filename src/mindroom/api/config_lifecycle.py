@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
 from mindroom import constants
-from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.main import Config, ConfigRuntimeValidationError, iter_config_validation_messages
 from mindroom.config.main import load_config as load_runtime_config_model
 from mindroom.file_watcher import watch_file
 from mindroom.logging_config import get_logger
@@ -69,14 +69,26 @@ class _ApiConfigContext(Protocol):
     config_load_result: ConfigLoadResult | None
 
 
+def _config_error_detail(
+    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+) -> list[dict[str, object]]:
+    """Return one shared API error payload for invalid current config."""
+    return [
+        {
+            "loc": tuple(location.split(" → ")) if " → " in location else (location,),
+            "msg": message,
+            "type": "value_error",
+        }
+        for location, message in iter_config_validation_messages(exc)
+    ]
+
+
 def load_runtime_config(runtime_paths: constants.RuntimePaths) -> tuple[Config, constants.RuntimePaths]:
     """Load the current runtime config and raise HTTPException on user-facing failures."""
     try:
         return load_runtime_config_model(runtime_paths), runtime_paths
-    except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
-    except ConfigRuntimeValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except (ValidationError, ConfigRuntimeValidationError, yaml.YAMLError, OSError, UnicodeError) as exc:
+        raise HTTPException(status_code=422, detail=_config_error_detail(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to load configuration: {exc!s}") from exc
 
@@ -208,18 +220,10 @@ def load_config_from_file(
         with config_lock:
             config_data.clear()
             config_data.update(validated_payload)
-    except ValidationError as exc:
-        detail = exc.errors(include_context=False)
+    except (ValidationError, ConfigRuntimeValidationError, yaml.YAMLError, OSError, UnicodeError) as exc:
+        detail = _config_error_detail(exc)
         logger.warning(
-            "Failed to load API config due to schema validation",
-            config_path=str(runtime_paths.config_path),
-            errors=detail,
-        )
-        return ConfigLoadResult(success=False, error_status_code=422, error_detail=detail)
-    except ConfigRuntimeValidationError as exc:
-        detail = exc.errors()
-        logger.warning(
-            "Failed to load API config due to runtime validation",
+            "Failed to load API config due to validation",
             config_path=str(runtime_paths.config_path),
             errors=detail,
         )

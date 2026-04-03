@@ -1973,6 +1973,21 @@ def test_api_config_load_returns_422_for_runtime_validation_error(temp_config_fi
     assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
 
 
+def test_api_config_load_returns_422_for_malformed_yaml(temp_config_file: Path) -> None:
+    """API config loads should surface malformed YAML as a user config error too."""
+    temp_config_file.write_text("agents:\n  bad: [\n", encoding="utf-8")
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    main.initialize_api_app(main.app, runtime_paths)
+    main._load_config_from_file(runtime_paths, main.app)
+    client = TestClient(main.app)
+
+    response = client.post("/api/config/load")
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["config"]
+    assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
+
+
 def test_api_config_load_does_not_serve_stale_cache_after_invalid_reload(temp_config_file: Path) -> None:
     """API config loads should return the latest validation error instead of stale last-known-good data."""
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})

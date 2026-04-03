@@ -86,6 +86,18 @@ def _hook_display_name(callback: HookCallback) -> str:
     return cast("Any", callback).__name__
 
 
+def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
+    """Remove plugin tool registrations for plugins no longer present in config."""
+    from mindroom.tool_system.metadata import synchronize_plugin_tools  # noqa: PLC0415
+
+    active_tool_modules = {
+        _module_name(plugin.name, plugin.tools_module_path)
+        for plugin in plugins
+        if plugin.tools_module_path is not None
+    }
+    synchronize_plugin_tools(active_tool_modules)
+
+
 def load_plugins(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -95,6 +107,7 @@ def load_plugins(
     """Load plugins from config and register their tools and skills."""
     plugin_entries = config.plugins
     if not plugin_entries:
+        _sync_loaded_plugin_tools([])
         if set_skill_roots:
             set_plugin_skill_roots([])
         return []
@@ -119,6 +132,8 @@ def load_plugins(
 
     if plugins:
         logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
+
+    _sync_loaded_plugin_tools(plugins)
 
     if set_skill_roots:
         set_plugin_skill_roots(skill_roots)
