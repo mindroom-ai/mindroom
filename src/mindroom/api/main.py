@@ -20,10 +20,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom import constants
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.api.config_lifecycle import ApiConfigLock, ConfigLoadResult
-from mindroom.api.config_lifecycle import load_config_from_file as load_api_config_from_file
+from mindroom.api.config_lifecycle import api_runtime_paths as api_request_runtime_paths
+from mindroom.api.config_lifecycle import load_config_into_app as load_api_config_into_app
 from mindroom.api.config_lifecycle import raise_for_config_load_result as raise_api_config_load_result
-from mindroom.api.config_lifecycle import run_config_write as run_api_config_write
+from mindroom.api.config_lifecycle import read_app_committed_config as read_api_app_committed_config
+from mindroom.api.config_lifecycle import read_committed_config as read_api_committed_config
+from mindroom.api.config_lifecycle import replace_committed_config as replace_api_committed_config
 from mindroom.api.config_lifecycle import watch_config as watch_api_config
+from mindroom.api.config_lifecycle import write_app_committed_config as write_api_app_committed_config
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
@@ -180,7 +184,7 @@ async def _worker_cleanup_loop(stop_event: asyncio.Event, runtime_paths: constan
 
 def api_runtime_paths(request: Request) -> constants.RuntimePaths:
     """Return the API request's committed runtime paths."""
-    return _app_runtime_paths(request.app)
+    return api_request_runtime_paths(request)
 
 
 def _app_context(api_app: FastAPI) -> _ApiContext:
@@ -195,6 +199,16 @@ def _app_context(api_app: FastAPI) -> _ApiContext:
 def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
     """Return the committed runtime paths for one API app instance."""
     return _app_context(api_app).runtime_paths
+
+
+def _app_config_data(api_app: FastAPI) -> dict[str, Any]:
+    """Return the mutable config cache for one app instance."""
+    return _app_context(api_app).config_data
+
+
+def _app_config_lock(api_app: FastAPI) -> ApiConfigLock:
+    """Return the config lock for one app instance."""
+    return _app_context(api_app).config_lock
 
 
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
@@ -221,26 +235,6 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         auth_state=auth_state,
         config_load_result=config_load_result,
     )
-
-
-def api_config_data(request: Request) -> dict[str, Any]:
-    """Return the mutable API config cache for one request."""
-    return _app_config_data(request.app)
-
-
-def api_config_lock(request: Request) -> ApiConfigLock:
-    """Return the API config lock for one request."""
-    return _app_config_lock(request.app)
-
-
-def _app_config_data(api_app: FastAPI) -> dict[str, Any]:
-    """Return the mutable config cache for one app instance."""
-    return _app_context(api_app).config_data
-
-
-def _app_config_lock(api_app: FastAPI) -> ApiConfigLock:
-    """Return the config lock for one app instance."""
-    return _app_context(api_app).config_lock
 
 
 def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSettings:
@@ -351,17 +345,7 @@ def _run_config_write[T](
     error_prefix: str,
 ) -> T:
     """Validate, save, and swap config under lock."""
-    context = _app_context(api_app)
-    result = run_api_config_write(
-        context.runtime_paths,
-        context.config_data,
-        context.config_lock,
-        mutate,
-        error_prefix=error_prefix,
-        config_load_result=context.config_load_result,
-    )
-    context.config_load_result = ConfigLoadResult(success=True)
-    return result
+    return write_api_app_committed_config(api_app, mutate, error_prefix=error_prefix)
 
 
 def _read_committed_config[T](
@@ -369,12 +353,7 @@ def _read_committed_config[T](
     reader: Callable[[dict[str, Any]], T],
 ) -> T:
     """Read the committed API config only when the current on-disk config is valid."""
-    context = _app_context(api_app)
-    with context.config_lock:
-        raise_api_config_load_result(context.config_load_result)
-        if not context.config_data:
-            raise HTTPException(status_code=500, detail="Failed to load configuration")
-        return reader(context.config_data)
+    return read_api_app_committed_config(api_app, reader)
 
 
 def _reload_api_runtime_config(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
@@ -722,14 +701,7 @@ async def verify_user(
 
 def _load_config_from_file(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> bool:
     """Load config from YAML file."""
-    context = _app_context(api_app)
-    result = load_api_config_from_file(
-        runtime_paths,
-        config_data=context.config_data,
-        config_lock=context.config_lock,
-    )
-    context.config_load_result = result
-    return result.success
+    return load_api_config_into_app(runtime_paths, api_app)
 
 
 # Include routers
@@ -825,7 +797,7 @@ async def standalone_login(request: Request, next: str = "/") -> Response:  # no
 @app.post("/api/config/load")
 async def load_config(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Load configuration from file."""
-    return _read_committed_config(request.app, lambda config_data: dict(config_data))
+    return read_api_committed_config(request, lambda config_data: dict(config_data))
 
 
 @app.put("/api/config/save")
@@ -835,14 +807,9 @@ async def save_config(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Save configuration to file."""
-
-    def mutate(candidate_config: dict[str, Any]) -> None:
-        candidate_config.clear()
-        candidate_config.update(new_config)
-
-    _run_config_write(
-        request.app,
-        mutate,
+    replace_api_committed_config(
+        request,
+        new_config,
         error_prefix="Failed to save configuration",
     )
     return {"success": True}

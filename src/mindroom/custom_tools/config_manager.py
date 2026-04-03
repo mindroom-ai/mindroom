@@ -9,10 +9,16 @@ from typing import TYPE_CHECKING, Literal
 
 import yaml
 from agno.tools import Toolkit
+from pydantic import ValidationError
 
 from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import (
+    Config,
+    ConfigRuntimeValidationError,
+    format_invalid_config_message,
+    load_config_or_user_error,
+)
 from mindroom.config.models import AgentLearningMode, ToolConfigEntry
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import TOOL_METADATA, ToolCategory, ToolStatus
@@ -21,6 +27,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+_CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
 
 
 def _is_known_tool_entry(tool_name: str) -> bool:
@@ -288,42 +295,50 @@ class ConfigManagerTools(Toolkit):
             self._help_text = get_command_help()
         return self._help_text
 
+    def _load_config_or_error(
+        self,
+        *,
+        footer: str | None = None,
+    ) -> tuple[Config | None, str | None]:
+        """Load config or return one shared invalid-config response."""
+        return load_config_or_user_error(self.runtime_paths, footer=footer)
+
     def _get_available_models(self) -> str:
         """Get the list of configured models from the current configuration."""
-        try:
-            config = load_config(self.runtime_paths)
+        config, load_error = self._load_config_or_error()
+        if load_error:
+            return load_error
+        assert config is not None
 
-            output = ["# Available Models\n"]
+        output = ["# Available Models\n"]
 
-            if not config.models:
-                return "No models configured in the system."
+        if not config.models:
+            return "No models configured in the system."
 
-            output.append("These models are currently configured and can be used:\n")
+        output.append("These models are currently configured and can be used:\n")
 
-            for model_name, model_config in config.models.items():
-                provider = model_config.provider
-                model_id = model_config.id
+        for model_name, model_config in config.models.items():
+            provider = model_config.provider
+            model_id = model_config.id
 
-                output.append(f"## `{model_name}`")
-                output.append(f"- **Provider**: {provider}")
-                output.append(f"- **Model ID**: {model_id}")
+            output.append(f"## `{model_name}`")
+            output.append(f"- **Provider**: {provider}")
+            output.append(f"- **Model ID**: {model_id}")
 
-                if model_config.host:
-                    output.append(f"- **Host**: {model_config.host}")
+            if model_config.host:
+                output.append(f"- **Host**: {model_config.host}")
 
-                if model_name == "default":
-                    output.append("- **Note**: This is typically the system default model")
+            if model_name == "default":
+                output.append("- **Note**: This is typically the system default model")
 
-                output.append("")
+            output.append("")
 
-            if config.router and config.router.model:
-                output.append("## Router Configuration")
-                output.append(f"The router uses model: `{config.router.model}`")
-                output.append("")
+        if config.router and config.router.model:
+            output.append("## Router Configuration")
+            output.append(f"The router uses model: `{config.router.model}`")
+            output.append("")
 
-            return "\n".join(output)
-        except Exception as e:
-            return f"Error loading model configuration: {e}"
+        return "\n".join(output)
 
     def _format_schema_field(self, field: str, info: dict, required_fields: list) -> list[str]:
         """Format a single schema field for display."""
@@ -399,48 +414,47 @@ class ConfigManagerTools(Toolkit):
 
     def _list_agents(self) -> str:
         """List all configured agents and their details."""
-        try:
-            config = load_config(self.runtime_paths)
-            agents_info = []
+        config, load_error = self._load_config_or_error()
+        if load_error:
+            return load_error
+        assert config is not None
 
-            for name, agent in config.agents.items():
-                tools_str = ", ".join(agent.tool_names) if agent.tools else "No tools"
-                role_line = f"  - Role: {agent.role[:100]}..." if len(agent.role) > 100 else f"  - Role: {agent.role}"
-                agents_info.append(
-                    f"**{name}** ({agent.display_name})\n"
-                    f"{role_line}\n"
-                    f"  - Tools: {tools_str}\n"
-                    f"  - Model: {agent.model}\n",
-                )
+        agents_info = []
 
-            if not agents_info:
-                return "No agents configured yet."
+        for name, agent in config.agents.items():
+            tools_str = ", ".join(agent.tool_names) if agent.tools else "No tools"
+            role_line = f"  - Role: {agent.role[:100]}..." if len(agent.role) > 100 else f"  - Role: {agent.role}"
+            agents_info.append(
+                f"**{name}** ({agent.display_name})\n{role_line}\n  - Tools: {tools_str}\n  - Model: {agent.model}\n",
+            )
 
-            return "## Configured Agents:\n\n" + "\n".join(agents_info)
-        except Exception as e:
-            return f"Error loading agents: {e}"
+        if not agents_info:
+            return "No agents configured yet."
+
+        return "## Configured Agents:\n\n" + "\n".join(agents_info)
 
     def _list_teams(self) -> str:
         """List all configured teams and their composition."""
-        try:
-            config = load_config(self.runtime_paths)
-            teams_info = []
+        config, load_error = self._load_config_or_error()
+        if load_error:
+            return load_error
+        assert config is not None
 
-            for name, team in config.teams.items():
-                agents_str = ", ".join(team.agents)
-                teams_info.append(
-                    f"**{name}** ({team.display_name})\n"
-                    f"  - Role: {team.role}\n"
-                    f"  - Agents: {agents_str}\n"
-                    f"  - Mode: {team.mode}\n",
-                )
+        teams_info = []
 
-            if not teams_info:
-                return "No teams configured yet."
+        for name, team in config.teams.items():
+            agents_str = ", ".join(team.agents)
+            teams_info.append(
+                f"**{name}** ({team.display_name})\n"
+                f"  - Role: {team.role}\n"
+                f"  - Agents: {agents_str}\n"
+                f"  - Mode: {team.mode}\n",
+            )
 
-            return "## Configured Teams:\n\n" + "\n".join(teams_info)
-        except Exception as e:
-            return f"Error loading teams: {e}"
+        if not teams_info:
+            return "No teams configured yet."
+
+        return "## Configured Teams:\n\n" + "\n".join(teams_info)
 
     def _list_available_tools(self) -> str:
         """List all available tools that can be used by agents."""
@@ -496,7 +510,7 @@ class ConfigManagerTools(Toolkit):
 
         return "\n".join(output)
 
-    def _create_agent_config(
+    def _create_agent_config(  # noqa: PLR0911
         self,
         agent_name: str,
         display_name: str,
@@ -521,9 +535,12 @@ class ConfigManagerTools(Toolkit):
         if invalid_tools:
             return f"Error: Unknown tools: {', '.join(invalid_tools)}\n\nUse get_info with info_type='available_tools' to see valid tools."
 
-        try:
-            config = load_config(self.runtime_paths)
+        config, load_error = self._load_config_or_error(footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+        if load_error:
+            return load_error
+        assert config is not None
 
+        try:
             if agent_name in config.agents:
                 return f"Error: Agent '{agent_name}' already exists. Use manage_agent with operation='update' to modify it."
 
@@ -565,11 +582,13 @@ class ConfigManagerTools(Toolkit):
                 f"- Rooms: {rooms_str}\n\n"
                 f"The agent is now available and can be mentioned with @{agent_name}"
             )
+        except (ValidationError, ConfigRuntimeValidationError) as exc:
+            return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
         except Exception as e:
             logger.exception("Failed to create agent")
             return f"Error creating agent: {e}"
 
-    def _update_agent_config(  # noqa: C901, PLR0912, PLR0915
+    def _update_agent_config(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         agent_name: str,
         display_name: str | None,
@@ -585,9 +604,12 @@ class ConfigManagerTools(Toolkit):
         learning_mode: AgentLearningMode | None,
     ) -> str:
         """Update an existing agent configuration."""
-        try:
-            config = load_config(self.runtime_paths)
+        config, load_error = self._load_config_or_error(footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+        if load_error:
+            return load_error
+        assert config is not None
 
+        try:
             if agent_name not in config.agents:
                 return f"Error: Agent '{agent_name}' not found. Use manage_agent with operation='create' to create it."
 
@@ -662,11 +684,13 @@ class ConfigManagerTools(Toolkit):
             return f"✅ Successfully updated agent '{agent_name}'!\n\n**Changes:**\n" + "\n".join(
                 f"- {c}" for c in changes
             )
+        except (ValidationError, ConfigRuntimeValidationError) as exc:
+            return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
         except Exception as e:
             logger.exception("Failed to update agent")
             return f"Error updating agent: {e}"
 
-    def _create_team_config(
+    def _create_team_config(  # noqa: PLR0911
         self,
         team_name: str,
         display_name: str,
@@ -678,9 +702,12 @@ class ConfigManagerTools(Toolkit):
         if mode not in ["coordinate", "collaborate"]:
             return "Error: Team mode must be 'coordinate' or 'collaborate'"
 
-        try:
-            config = load_config(self.runtime_paths)
+        config, load_error = self._load_config_or_error(footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+        if load_error:
+            return load_error
+        assert config is not None
 
+        try:
             if team_name in config.teams:
                 return f"Error: Team '{team_name}' already exists."
 
@@ -712,86 +739,87 @@ class ConfigManagerTools(Toolkit):
                 f"- Mode: {mode}\n\n"
                 f"The team can now be mentioned with @{team_name}"
             )
+        except (ValidationError, ConfigRuntimeValidationError) as exc:
+            return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
         except Exception as e:
             logger.exception("Failed to create team")
             return f"Error creating team: {e}"
 
     def _validate_agent_config(self, agent_name: str) -> str:  # noqa: C901, PLR0912
         """Validate an agent's configuration."""
-        try:
-            config = load_config(self.runtime_paths)
+        config, load_error = self._load_config_or_error()
+        if load_error:
+            return load_error
+        assert config is not None
 
-            if agent_name not in config.agents:
-                return f"Error: Agent '{agent_name}' not found."
+        if agent_name not in config.agents:
+            return f"Error: Agent '{agent_name}' not found."
 
-            agent = config.agents[agent_name]
-            issues = []
-            warnings = []
+        agent = config.agents[agent_name]
+        issues = []
+        warnings = []
 
-            # Check display name
-            if not agent.display_name:
-                issues.append("Missing display name")
+        # Check display name
+        if not agent.display_name:
+            issues.append("Missing display name")
 
-            # Check role
-            if not agent.role:
-                warnings.append("No role description provided")
-            elif len(agent.role) < 20:
-                warnings.append("Role description is very short")
+        # Check role
+        if not agent.role:
+            warnings.append("No role description provided")
+        elif len(agent.role) < 20:
+            warnings.append("Role description is very short")
 
-            # Check tools
-            if not agent.tools:
-                warnings.append("No tools configured")
-            else:
-                invalid_tools = [t for t in agent.tool_names if not _is_known_tool_entry(t)]
-                if invalid_tools:
-                    issues.append(f"Invalid tools: {', '.join(invalid_tools)}")
+        # Check tools
+        if not agent.tools:
+            warnings.append("No tools configured")
+        else:
+            invalid_tools = [t for t in agent.tool_names if not _is_known_tool_entry(t)]
+            if invalid_tools:
+                issues.append(f"Invalid tools: {', '.join(invalid_tools)}")
 
-            # Check model
-            available_models = list(config.models.keys()) if config.models else []
-            if available_models and agent.model not in available_models:
-                warnings.append(f"Model '{agent.model}' not in configured models: {', '.join(available_models)}")
+        # Check model
+        available_models = list(config.models.keys()) if config.models else []
+        if available_models and agent.model not in available_models:
+            warnings.append(f"Model '{agent.model}' not in configured models: {', '.join(available_models)}")
 
-            # Format results
-            output = [f"## Validation Results for '{agent_name}':\n"]
+        # Format results
+        output = [f"## Validation Results for '{agent_name}':\n"]
 
-            if not issues and not warnings:
-                output.append("✅ Configuration is valid!")
-            else:
-                if issues:
-                    output.append("### ❌ Issues (must fix):")
-                    output.extend(f"- {issue}" for issue in issues)
+        if not issues and not warnings:
+            output.append("✅ Configuration is valid!")
+        else:
+            if issues:
+                output.append("### ❌ Issues (must fix):")
+                output.extend(f"- {issue}" for issue in issues)
 
-                if warnings:
-                    output.append("\n### ⚠️ Warnings (consider fixing):")
-                    output.extend(f"- {warning}" for warning in warnings)
+            if warnings:
+                output.append("\n### ⚠️ Warnings (consider fixing):")
+                output.extend(f"- {warning}" for warning in warnings)
 
-            # Add summary
-            output.append("\n### Configuration Summary:")
-            output.append(f"- Display Name: {agent.display_name}")
-            output.append(f"- Role: {agent.role[:100]}..." if len(agent.role) > 100 else f"- Role: {agent.role}")
-            output.append(f"- Tools: {', '.join(agent.tool_names) if agent.tools else 'None'}")
-            output.append(f"- Model: {agent.model}")
+        # Add summary
+        output.append("\n### Configuration Summary:")
+        output.append(f"- Display Name: {agent.display_name}")
+        output.append(f"- Role: {agent.role[:100]}..." if len(agent.role) > 100 else f"- Role: {agent.role}")
+        output.append(f"- Tools: {', '.join(agent.tool_names) if agent.tools else 'None'}")
+        output.append(f"- Model: {agent.model}")
 
-            return "\n".join(output)
-        except Exception as e:
-            return f"Error validating agent: {e}"
+        return "\n".join(output)
 
     def _get_agent_config(self, agent_name: str) -> str:
         """Get the full configuration for a specific agent."""
-        try:
-            config = load_config(self.runtime_paths)
+        config, load_error = self._load_config_or_error()
+        if load_error:
+            return load_error
+        assert config is not None
 
-            if agent_name not in config.agents:
-                return f"Error: Agent '{agent_name}' not found."
+        if agent_name not in config.agents:
+            return f"Error: Agent '{agent_name}' not found."
 
-            agent = config.agents[agent_name]
-            agent_dict = agent.authored_model_dump()
+        agent = config.agents[agent_name]
+        agent_dict = agent.authored_model_dump()
 
-            yaml_str = yaml.dump(agent_dict, default_flow_style=False, sort_keys=False)
-        except Exception as e:
-            return f"Error loading agent config: {e}"
-        else:
-            return f"## Configuration for '{agent_name}':\n\n```yaml\n{yaml_str}```"
+        yaml_str = yaml.dump(agent_dict, default_flow_style=False, sort_keys=False)
+        return f"## Configuration for '{agent_name}':\n\n```yaml\n{yaml_str}```"
 
     def _generate_agent_template(self, agent_type: str) -> str:
         """Generate a template configuration for common agent types."""

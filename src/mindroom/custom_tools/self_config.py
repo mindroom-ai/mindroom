@@ -9,7 +9,11 @@ from agno.tools import Toolkit
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import load_config
+from mindroom.config.main import (
+    ConfigRuntimeValidationError,
+    format_invalid_config_message,
+    load_config_or_user_error,
+)
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.custom_tools.config_manager import (
     _is_known_tool_entry,
@@ -25,6 +29,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _SELF_CONFIG_BLOCKED_TOOLS = {"config_manager"}
+_CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
 
 
 class SelfConfigTools(Toolkit):
@@ -46,10 +51,10 @@ class SelfConfigTools(Toolkit):
             The agent's configuration formatted as YAML, or an error message.
 
         """
-        try:
-            config = load_config(self.runtime_paths)
-        except Exception as e:
-            return f"Error loading configuration: {e}"
+        config, load_error = load_config_or_user_error(self.runtime_paths)
+        if load_error:
+            return load_error
+        assert config is not None
 
         if self.agent_name not in config.agents:
             return f"Error: Agent '{self.agent_name}' not found in configuration."
@@ -107,10 +112,13 @@ class SelfConfigTools(Toolkit):
             Success message with changes or an error message.
 
         """
-        try:
-            config = load_config(self.runtime_paths)
-        except Exception as e:
-            return f"Error loading configuration: {e}"
+        config, load_error = load_config_or_user_error(
+            self.runtime_paths,
+            footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
+        )
+        if load_error:
+            return load_error
+        assert config is not None
 
         if self.agent_name not in config.agents:
             return f"Error: Agent '{self.agent_name}' not found in configuration."
@@ -196,6 +204,8 @@ class SelfConfigTools(Toolkit):
         config.agents[self.agent_name] = validated_agent
         try:
             _save_runtime_validated_config(config, self.runtime_paths, self.config_path)
+        except (ValidationError, ConfigRuntimeValidationError) as exc:
+            return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
         except Exception as e:
             return f"Error saving configuration: {e}"
 

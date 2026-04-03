@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import yaml
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from mindroom.agent_policy import (
     build_agent_policy_seeds,
@@ -80,6 +80,28 @@ class ConfigRuntimeValidationError(ValueError):
         """Return one ValidationError-like payload for shared config UX code."""
         del include_context
         return [{"loc": ("config",), "msg": str(self), "type": "value_error"}]
+
+
+def iter_config_validation_messages(
+    exc: ValidationError | ConfigRuntimeValidationError,
+) -> list[tuple[str, str]]:
+    """Return user-facing validation messages from one config validation exception."""
+    if isinstance(exc, ValidationError):
+        return [(" → ".join(str(x) for x in error["loc"]), error["msg"]) for error in exc.errors(include_context=False)]
+    return [("config", str(exc))]
+
+
+def format_invalid_config_message(
+    exc: ValidationError | ConfigRuntimeValidationError,
+    *,
+    footer: str | None = None,
+) -> str:
+    """Return one shared invalid-configuration message for user-facing surfaces."""
+    errors = [f"• {location}: {message}" for location, message in iter_config_validation_messages(exc)]
+    response = f"❌ Invalid configuration:\n{'\n'.join(errors)}"
+    if footer:
+        response = f"{response}\n\n{footer}"
+    return response
 
 
 @dataclass(frozen=True)
@@ -1512,3 +1534,15 @@ def load_config(runtime_paths: RuntimePaths) -> Config:
     logger.info(f"Loaded agent configuration from {path}")
     logger.info(f"Found {len(config.agents)} agent configurations")
     return config
+
+
+def load_config_or_user_error(
+    runtime_paths: RuntimePaths,
+    *,
+    footer: str | None = None,
+) -> tuple[Config | None, str | None]:
+    """Load config or return one shared user-facing invalid-configuration message."""
+    try:
+        return load_config(runtime_paths), None
+    except (ValidationError, ConfigRuntimeValidationError) as exc:
+        return None, format_invalid_config_message(exc, footer=footer)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -32,6 +33,23 @@ def _runtime_paths() -> RuntimePaths:
 def _config_manager(config_path: Path) -> ConfigManagerTools:
     """Construct ConfigManagerTools with explicit RuntimePaths."""
     return ConfigManagerTools(resolve_runtime_paths(config_path=config_path, process_env={}))
+
+
+def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> Path:
+    """Write one config whose plugin manifest fails runtime validation."""
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    Config(
+        agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
+        models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        plugins=["./plugins/bad-name"],
+    ).save_to_yaml(config_path)
+    return config_path
 
 
 class TestConsolidatedConfigManager:
@@ -90,6 +108,15 @@ class TestConsolidatedConfigManager:
             assert "googlesearch" in result
         finally:
             config_path.unlink(missing_ok=True)
+
+    def test_get_info_agents_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
+        """Read-only config-manager info should surface runtime plugin validation failures."""
+        cm = _config_manager(_invalid_plugin_config_path(tmp_path))
+
+        result = cm.get_info(info_type="agents")
+
+        assert "Invalid configuration" in result
+        assert "Invalid plugin name" in result
 
     def test_get_info_teams(self) -> None:
         """Test get_info with teams info type."""
@@ -178,6 +205,23 @@ class TestConsolidatedConfigManager:
             assert config.agents["test_agent"].display_name == "Test Agent"
         finally:
             config_path.unlink(missing_ok=True)
+
+    def test_manage_agent_create_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
+        """Write config-manager flows should keep runtime plugin validation in the invalid-config channel."""
+        cm = _config_manager(_invalid_plugin_config_path(tmp_path, with_agent=False))
+
+        result = cm.manage_agent(
+            operation="create",
+            agent_name="test_agent",
+            display_name="Test Agent",
+            role="Test role",
+            tools=[],
+            model="default",
+        )
+
+        assert "Invalid configuration" in result
+        assert "Invalid plugin name" in result
+        assert "Changes were NOT applied." in result
 
     def test_manage_agent_create_accepts_openclaw_preset_tool(self) -> None:
         """Agent create should accept preset entries in tools."""
@@ -277,8 +321,9 @@ class TestConsolidatedConfigManager:
                 model="default",
             )
 
-            assert "Error" in result
+            assert "Invalid configuration" in result
             assert "conflicts" in result
+            assert "Changes were NOT applied." in result
             config = Config.from_yaml(config_path)
             assert "assistant" not in config.agents
         finally:

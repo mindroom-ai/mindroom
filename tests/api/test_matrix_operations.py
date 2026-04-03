@@ -1,11 +1,15 @@
 """Tests for Matrix operations API endpoints."""
 
+import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
+from mindroom import constants
 from mindroom.api import main
 
 
@@ -277,3 +281,61 @@ class TestMatrixOperations:
             assert len(data["results"]) == 2
             assert data["results"][0]["success"] is True
             assert data["results"][1]["success"] is False
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("get", "/api/matrix/agents/rooms", None),
+        ("get", "/api/matrix/agents/test_agent/rooms", None),
+        ("post", "/api/matrix/rooms/leave", {"agent_id": "test_agent", "room_id": "!room:localhost"}),
+        (
+            "post",
+            "/api/matrix/rooms/leave-bulk",
+            [{"agent_id": "test_agent", "room_id": "!room:localhost"}],
+        ),
+    ],
+)
+def test_matrix_operations_refuse_stale_config_after_invalid_reload(
+    test_client: TestClient,
+    temp_config_file: Path,
+    mock_agent_user: Any,  # noqa: ANN401
+    mock_matrix_client: Any,  # noqa: ANN401
+    method: str,
+    path: str,
+    payload: dict[str, Any] | list[dict[str, Any]] | None,
+) -> None:
+    """Matrix operations should surface invalid current config instead of stale cached entities."""
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    temp_config_file.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": ["./plugins/bad-name"],
+            },
+        ),
+        encoding="utf-8",
+    )
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    with (
+        patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
+        patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
+        patch("mindroom.api.matrix_operations.get_joined_rooms", return_value=["test_room"]),
+        patch("mindroom.api.matrix_operations.leave_room", return_value=True),
+    ):
+        if payload is None:
+            response = getattr(test_client, method)(path)
+        else:
+            response = getattr(test_client, method)(path, json=payload)
+
+    assert response.status_code == 422
+    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]

@@ -1579,6 +1579,76 @@ def test_spotify_status_rejects_isolating_worker_scope(test_client: TestClient) 
     assert "worker_scope=user" in response.json()["detail"]
 
 
+def test_spotify_callback_preserves_runtime_validation_error(
+    api_key_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spotify callback should pass through structured runtime config validation errors."""
+    config = _config_with_worker_scope("shared")
+
+    class _FakeSpotifyOAuth:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_authorize_url(self, state: str | None = None) -> str:
+            return f"https://accounts.spotify.test/authorize?state={state}"
+
+        def get_access_token(self, _code: str) -> dict[str, Any]:
+            return {"access_token": "spotify-token"}
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            return {"display_name": "Spotify User"}
+
+    main.initialize_api_app(
+        main.app,
+        constants.resolve_primary_runtime_paths(
+            config_path=main._app_runtime_paths(main.app).config_path,
+            storage_path=main._app_runtime_paths(main.app).storage_root,
+            process_env={
+                **dict(main._app_runtime_paths(main.app).process_env),
+                "SPOTIFY_CLIENT_ID": "client-id",
+                "SPOTIFY_CLIENT_SECRET": "client-secret",
+            },
+        ),
+    )
+    main._app_context(main.app).auth_state = main._ApiAuthState(
+        runtime_paths=main._app_runtime_paths(main.app),
+        settings=main._ApiAuthSettings(
+            platform_login_url=None,
+            supabase_url=None,
+            supabase_anon_key=None,
+            account_id=None,
+            mindroom_api_key="test-key",
+        ),
+        supabase_auth=None,
+    )
+    monkeypatch.setattr(
+        "mindroom.api.integrations._ensure_spotify_packages",
+        lambda _runtime_paths: (_FakeSpotify, _FakeSpotifyOAuth),
+    )
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    invalid_detail = [{"loc": ["config"], "msg": "Invalid plugin name: BadName", "type": "value_error"}]
+    with patch(
+        "mindroom.api.config_lifecycle.load_runtime_config",
+        side_effect=[
+            (config, Path("config.yaml")),
+            HTTPException(status_code=422, detail=invalid_detail),
+        ],
+    ):
+        connect_response = api_key_client.post("/api/integrations/spotify/connect?agent_name=general")
+        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
+        callback_response = api_key_client.get(f"/api/integrations/spotify/callback?code=test-code&state={state}")
+
+    assert callback_response.status_code == 422
+    assert callback_response.json()["detail"] == invalid_detail
+
+
 def test_get_tools_includes_openclaw_compat_metadata(test_client: TestClient) -> None:
     """openclaw_compat should appear as a registered tool in the tools response."""
     response = test_client.get("/api/tools/")
@@ -1740,6 +1810,54 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     assert response.status_code == 422
     saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert "mindroom_user" not in saved_config
+
+
+def test_save_config_can_recover_from_invalid_reload(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Full config replacement should recover from an invalid on-disk config."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    temp_config_file.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": ["./plugins/bad-name"],
+            },
+        ),
+        encoding="utf-8",
+    )
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    valid_config = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {
+            "recovered_agent": {
+                "display_name": "Recovered Agent",
+                "role": "Recovered role",
+                "tools": [],
+                "instructions": [],
+                "rooms": ["recovery_room"],
+            },
+        },
+    }
+
+    response = test_client.put("/api/config/save", json=valid_config)
+
+    assert response.status_code == 200
+    saved_config = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+    assert saved_config["agents"]["recovered_agent"]["display_name"] == "Recovered Agent"
+    assert "plugins" not in saved_config
+    assert main._app_context(main.app).config_load_result == main.ConfigLoadResult(success=True)
 
 
 def test_run_config_write_restores_original_config_before_releasing_lock(tmp_path: Path) -> None:

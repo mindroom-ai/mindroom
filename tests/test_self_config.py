@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -61,6 +62,23 @@ def _self_config_tools(agent_name: str, config_path: Path) -> SelfConfigTools:
     return SelfConfigTools(agent_name=agent_name, runtime_paths=resolve_runtime_paths(config_path=config_path))
 
 
+def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> Path:
+    """Write one config whose plugin manifest fails runtime validation."""
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    Config(
+        agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
+        models=_DEFAULT_MODELS,
+        plugins=["./plugins/bad-name"],
+    ).save_to_yaml(config_path)
+    return config_path
+
+
 class TestGetOwnConfig:
     """Tests for SelfConfigTools.get_own_config."""
 
@@ -104,6 +122,16 @@ class TestGetOwnConfig:
             assert "ghost" in result
         finally:
             config_path.unlink(missing_ok=True)
+
+    def test_get_own_config_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
+        """Read-only self-config should surface runtime plugin validation failures consistently."""
+        config_path = _invalid_plugin_config_path(tmp_path)
+        tool = _self_config_tools(agent_name="writer", config_path=config_path)
+
+        result = tool.get_own_config()
+
+        assert "Invalid configuration" in result
+        assert "Invalid plugin name" in result
 
 
 class TestUpdateOwnConfig:
@@ -270,6 +298,17 @@ class TestUpdateOwnConfig:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_update_own_config_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
+        """Write self-config should keep runtime plugin validation in the invalid-config channel."""
+        config_path = _invalid_plugin_config_path(tmp_path)
+        tool = _self_config_tools(agent_name="writer", config_path=config_path)
+
+        result = tool.update_own_config(role="Updated role")
+
+        assert "Invalid configuration" in result
+        assert "Invalid plugin name" in result
+        assert "Changes were NOT applied." in result
+
     def test_update_knowledge_bases_valid(self) -> None:
         """Valid knowledge base IDs should be accepted."""
         _, config_path = _make_config(
@@ -375,8 +414,9 @@ class TestUpdateOwnConfig:
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
             result = tool.update_own_config(rooms=["_mindroom_root_space"])
-            assert "Error" in result
+            assert "Invalid configuration" in result
             assert "reserved root Space alias" in result
+            assert "Changes were NOT applied." in result
 
             reloaded = Config.from_yaml(config_path)
             assert reloaded.agents["coder"].rooms == ["lobby"]

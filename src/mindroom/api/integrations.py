@@ -225,6 +225,8 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
         )
 
         return RedirectResponse(url=f"{get_dashboard_url(request)}/?spotify=connected")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OAuth failed: {e!s}") from e
 

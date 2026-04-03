@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING, Any
 import yaml
 from pydantic import ValidationError
 
-from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
+from mindroom.config.main import (
+    Config,
+    ConfigRuntimeValidationError,
+    format_invalid_config_message,
+    load_config_or_user_error,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -16,17 +21,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-
-def _format_invalid_config_response(exc: ValidationError | ConfigRuntimeValidationError) -> str:
-    """Return one user-facing invalid-config response."""
-    errors: list[str] = []
-    if isinstance(exc, ValidationError):
-        for error in exc.errors(include_context=False):
-            location = " → ".join(str(loc) for loc in error["loc"])
-            errors.append(f"• {location}: {error['msg']}")
-    else:
-        errors.append(f"• {exc}")
-    return f"❌ Invalid configuration:\n{'\n'.join(errors)}\n\nChanges were NOT applied."
+_CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
 
 
 def _parse_config_args(args_text: str) -> tuple[str, list[str]]:
@@ -189,10 +184,10 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     path = runtime_paths.config_path
 
     # Load current config
-    try:
-        config = load_config(runtime_paths)
-    except (ValidationError, ConfigRuntimeValidationError) as exc:
-        return _format_invalid_config_response(exc), None
+    config, load_error = load_config_or_user_error(runtime_paths, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+    if load_error:
+        return load_error, None
+    assert config is not None
     config_dict = config.authored_model_dump()
 
     if operation == "show":
@@ -248,7 +243,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
         except (ValidationError, ConfigRuntimeValidationError) as e:
-            return _format_invalid_config_response(e), None
+            return format_invalid_config_message(e, footer=_CONFIG_CHANGE_REJECTED_MESSAGE), None
         else:
             # Format the preview message
             formatted_old = _format_value(old_value) if old_value is not None else "Not set"
@@ -314,10 +309,10 @@ async def apply_config_change(
 
     try:
         # Load the current configuration
-        try:
-            config = load_config(runtime_paths)
-        except (ValidationError, ConfigRuntimeValidationError) as exc:
-            return _format_invalid_config_response(exc)
+        config, load_error = load_config_or_user_error(runtime_paths, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+        if load_error:
+            return load_error
+        assert config is not None
         config_dict = config.model_dump()
 
         # Apply the specific change
@@ -327,7 +322,7 @@ async def apply_config_change(
         try:
             new_config = _validate_config_dict(config_dict, runtime_paths)
         except (ValidationError, ConfigRuntimeValidationError) as ve:
-            return _format_invalid_config_response(ve)
+            return format_invalid_config_message(ve, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
 
         # Save to file
         new_config.save_to_yaml(path)
