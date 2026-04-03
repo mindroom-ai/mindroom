@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom import interactive
 from mindroom.authorization import is_authorized_sender as real_is_authorized_sender
 from mindroom.bot import (
     AgentBot,
@@ -1071,6 +1072,48 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
     )
 
     bot._resolve_dispatch_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message_path(tmp_path: Path) -> None:
+    """Deep synthetic relays should stop before interactive answers are consumed."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$deep-hook-interactive",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "1",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:message:before_response",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
+            },
+        },
+    )
+    interactive._active_questions.clear()
+    interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
+        room_id=room.room_id,
+        thread_id=None,
+        options={"1": "first"},
+        creator_agent=bot.agent_name,
+    )
+    bot._precheck_dispatch_event = MagicMock(
+        return_value=_PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+    )
+    bot._resolve_text_dispatch_event = AsyncMock(return_value=event)
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._dispatch_text_message = AsyncMock()
+
+    try:
+        await bot._on_message(room, event)
+    finally:
+        assert "$question123" in interactive._active_questions
+        interactive._active_questions.clear()
+
+    bot._dispatch_text_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

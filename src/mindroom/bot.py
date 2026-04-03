@@ -799,6 +799,41 @@ class AgentBot:
             message_received_depth=message_received_depth,
         )
 
+    async def _build_dispatch_envelope(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+        requester_user_id: str,
+    ) -> MessageEnvelope:
+        """Build the normalized inbound envelope for one prepared dispatch event."""
+        context = await self._extract_dispatch_context(room, event)
+        return self._build_message_envelope(
+            room_id=room.room_id,
+            event=event,
+            requester_user_id=requester_user_id,
+            context=context,
+        )
+
+    def _should_skip_deep_synthetic_full_dispatch(
+        self,
+        *,
+        event_id: str,
+        envelope: MessageEnvelope,
+    ) -> bool:
+        """Return True when a deep synthetic hook relay must stop before dispatch."""
+        ingress_policy = _hook_ingress_policy(envelope)
+        if ingress_policy.allow_full_dispatch:
+            return False
+        self.logger.debug(
+            "Ignoring deep synthetic hook relay before command/response dispatch",
+            event_id=event_id,
+            source_kind=envelope.source_kind,
+            hook_source=envelope.hook_source,
+            message_received_depth=envelope.message_received_depth,
+        )
+        return True
+
     def _default_response_envelope(
         self,
         *,
@@ -1507,6 +1542,16 @@ class AgentBot:
             return
 
         prepared_event = await self._resolve_text_dispatch_event(prechecked_event.event)
+        envelope = await self._build_dispatch_envelope(
+            room=room,
+            event=prepared_event,
+            requester_user_id=prechecked_event.requester_user_id,
+        )
+        if self._should_skip_deep_synthetic_full_dispatch(
+            event_id=prepared_event.event_id,
+            envelope=envelope,
+        ):
+            return
         await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
         await self._dispatch_text_message(
             room,
@@ -1536,15 +1581,10 @@ class AgentBot:
         )
         if dispatch is None:
             return
-        ingress_policy = _hook_ingress_policy(dispatch.envelope)
-        if not ingress_policy.allow_full_dispatch:
-            self.logger.debug(
-                "Ignoring deep synthetic hook relay before command/response dispatch",
-                event_id=event.event_id,
-                source_kind=dispatch.envelope.source_kind,
-                hook_source=dispatch.envelope.hook_source,
-                message_received_depth=dispatch.envelope.message_received_depth,
-            )
+        if self._should_skip_deep_synthetic_full_dispatch(
+            event_id=event.event_id,
+            envelope=dispatch.envelope,
+        ):
             return
 
         # Router handles commands exclusively
@@ -2069,6 +2109,16 @@ class AgentBot:
         prepared_text_event = await self._prepare_file_sidecar_text_event(event)
         assert prepared_text_event is not None
         assert self.client is not None
+        envelope = await self._build_dispatch_envelope(
+            room=room,
+            event=prepared_text_event,
+            requester_user_id=prechecked_event.requester_user_id,
+        )
+        if self._should_skip_deep_synthetic_full_dispatch(
+            event_id=prepared_text_event.event_id,
+            envelope=envelope,
+        ):
+            return True
         await interactive.handle_text_response(self.client, room, prepared_text_event, self.agent_name)
         await self._dispatch_text_message(
             room,
