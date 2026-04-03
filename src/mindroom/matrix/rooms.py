@@ -17,7 +17,7 @@ from mindroom.matrix.client import (
     ensure_room_directory_visibility,
     ensure_room_join_rule,
     ensure_room_name,
-    ensure_thread_resolution_power_level,
+    ensure_thread_tags_power_level,
     get_joined_rooms,
     join_room,
     leave_room,
@@ -297,7 +297,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
             if room_name is None:
                 room_name = _room_key_to_name(room_key)
             await ensure_room_has_topic(client, room_id, room_key, room_name, config, runtime_paths)
-            await ensure_thread_resolution_power_level(client, room_id)
+            await ensure_thread_tags_power_level(client, room_id)
 
             if config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.reconcile_existing_rooms:
                 await _configure_managed_room_access(

@@ -408,7 +408,7 @@ timezone: America/Los_Angeles      # Default: UTC
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
 - `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
 - In `multi_user` mode, MindRoom sets managed room join rules and directory visibility from config
-- In `multi_user` mode, MindRoom also reconciles managed room power levels so `com.mindroom.thread.resolution` can be written at PL0
+- In `multi_user` mode, MindRoom also reconciles managed room power levels so `com.mindroom.thread.tags` can be written at PL0
 - Publishing to the room directory requires the managing service account (typically router) to have moderator/admin power in each room
-- Thread-resolution power-level reconciliation also requires the managing service account to be joined and able to update `m.room.power_levels`
+- Thread-tag power-level reconciliation also requires the managing service account to be joined and able to update `m.room.power_levels`
 - The `memory` system works out of the box with OpenAI; use `memory.llm` for memory summarization with a different provider

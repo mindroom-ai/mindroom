@@ -12,7 +12,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
-from mindroom.thread_resolution import THREAD_RESOLUTION_EVENT_TYPE
+from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from tests.conftest import TEST_ACCESS_TOKEN, bind_runtime_paths, runtime_paths_for
 
 
@@ -172,11 +172,11 @@ async def test_existing_room_reconciliation_respects_flag(
     monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=["!lobby:example.com"]))
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
-    ensure_thread_resolution_power_level = AsyncMock(return_value=True)
+    ensure_thread_tags_power_level = AsyncMock(return_value=True)
     monkeypatch.setattr(
         matrix_rooms,
-        "ensure_thread_resolution_power_level",
-        ensure_thread_resolution_power_level,
+        "ensure_thread_tags_power_level",
+        ensure_thread_tags_power_level,
     )
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
@@ -191,7 +191,7 @@ async def test_existing_room_reconciliation_respects_flag(
     )
 
     assert room_id == "!lobby:example.com"
-    ensure_thread_resolution_power_level.assert_awaited_once_with(
+    ensure_thread_tags_power_level.assert_awaited_once_with(
         mock_client,
         "!lobby:example.com",
     )
@@ -245,7 +245,7 @@ async def test_new_room_creation_applies_access_policy_in_multi_user_mode(
 
 
 @pytest.mark.asyncio
-async def test_create_room_seeds_thread_resolution_power_level(
+async def test_create_room_seeds_thread_tags_power_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Managed room creation should seed the custom state-event override."""
@@ -270,14 +270,14 @@ async def test_create_room_seeds_thread_resolution_power_level(
     assert initial_state[0]["type"] == "m.room.power_levels"
     power_levels = initial_state[0]["content"]
     assert power_levels["state_default"] == 50
-    assert power_levels["events"][THREAD_RESOLUTION_EVENT_TYPE] == 0
+    assert power_levels["events"][THREAD_TAGS_EVENT_TYPE] == 0
     assert power_levels["users"]["@agent:example.com"] == 50
     assert power_levels["users"]["@router:example.com"] == 100
     invite_to_room.assert_awaited_once_with(mock_client, "!lobby:example.com", "@agent:example.com")
 
 
 @pytest.mark.asyncio
-async def test_ensure_thread_resolution_power_level_preserves_existing_content() -> None:
+async def test_ensure_thread_tags_power_level_preserves_existing_content() -> None:
     """Reconciliation should preserve existing power-level content while adding the override."""
     mock_client = AsyncMock()
     mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
@@ -295,7 +295,7 @@ async def test_ensure_thread_resolution_power_level_preserves_existing_content()
         room_id="!room:example.com",
     )
 
-    result = await matrix_client.ensure_thread_resolution_power_level(mock_client, "!room:example.com")
+    result = await matrix_client.ensure_thread_tags_power_level(mock_client, "!room:example.com")
 
     assert result is True
     mock_client.room_put_state.assert_awaited_once()
@@ -305,16 +305,16 @@ async def test_ensure_thread_resolution_power_level_preserves_existing_content()
     assert kwargs["content"]["users"] == {"@router:example.com": 100}
     assert kwargs["content"]["state_default"] == 50
     assert kwargs["content"]["events"]["m.room.name"] == 50
-    assert kwargs["content"]["events"][THREAD_RESOLUTION_EVENT_TYPE] == 0
+    assert kwargs["content"]["events"][THREAD_TAGS_EVENT_TYPE] == 0
 
 
 @pytest.mark.asyncio
-async def test_ensure_thread_resolution_power_level_idempotent() -> None:
+async def test_ensure_thread_tags_power_level_idempotent() -> None:
     """Reconciliation should skip writes when the override already exists."""
     mock_client = AsyncMock()
     mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
         content={
-            "events": {THREAD_RESOLUTION_EVENT_TYPE: 0},
+            "events": {THREAD_TAGS_EVENT_TYPE: 0},
             "state_default": 50,
             "users": {"@router:example.com": 100},
         },
@@ -323,7 +323,7 @@ async def test_ensure_thread_resolution_power_level_idempotent() -> None:
         room_id="!room:example.com",
     )
 
-    result = await matrix_client.ensure_thread_resolution_power_level(mock_client, "!room:example.com")
+    result = await matrix_client.ensure_thread_tags_power_level(mock_client, "!room:example.com")
 
     assert result is True
     mock_client.room_put_state.assert_not_awaited()
@@ -438,11 +438,11 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(
     monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=[]))
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
-    ensure_thread_resolution_power_level = AsyncMock(return_value=True)
+    ensure_thread_tags_power_level = AsyncMock(return_value=True)
     monkeypatch.setattr(
         matrix_rooms,
-        "ensure_thread_resolution_power_level",
-        ensure_thread_resolution_power_level,
+        "ensure_thread_tags_power_level",
+        ensure_thread_tags_power_level,
     )
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
@@ -457,7 +457,7 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(
     )
 
     assert room_id == "!lobby:example.com"
-    ensure_thread_resolution_power_level.assert_not_awaited()
+    ensure_thread_tags_power_level.assert_not_awaited()
     configure_access.assert_not_awaited()
 
 
@@ -543,11 +543,11 @@ async def test_existing_room_reconciliation_runs_after_later_join(
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(side_effect=[[], ["!lobby:example.com"]]))
     ensure_room_has_topic = AsyncMock()
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", ensure_room_has_topic)
-    ensure_thread_resolution_power_level = AsyncMock(return_value=True)
+    ensure_thread_tags_power_level = AsyncMock(return_value=True)
     monkeypatch.setattr(
         matrix_rooms,
-        "ensure_thread_resolution_power_level",
-        ensure_thread_resolution_power_level,
+        "ensure_thread_tags_power_level",
+        ensure_thread_tags_power_level,
     )
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
@@ -563,7 +563,7 @@ async def test_existing_room_reconciliation_runs_after_later_join(
 
     assert first_room_id == "!lobby:example.com"
     ensure_room_has_topic.assert_not_awaited()
-    ensure_thread_resolution_power_level.assert_not_awaited()
+    ensure_thread_tags_power_level.assert_not_awaited()
     configure_access.assert_not_awaited()
 
     mock_client.rooms = {"!lobby:example.com": object()}
@@ -586,7 +586,7 @@ async def test_existing_room_reconciliation_runs_after_later_join(
         config,
         runtime_paths_for(config),
     )
-    ensure_thread_resolution_power_level.assert_awaited_once_with(
+    ensure_thread_tags_power_level.assert_awaited_once_with(
         mock_client,
         "!lobby:example.com",
     )
