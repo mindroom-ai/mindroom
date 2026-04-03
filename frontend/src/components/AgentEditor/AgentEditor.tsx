@@ -332,7 +332,7 @@ export function AgentEditor() {
   };
 
   const handleSave = async () => {
-    await saveConfig();
+    return saveConfig();
   };
 
   const handleAddInstruction = () => {

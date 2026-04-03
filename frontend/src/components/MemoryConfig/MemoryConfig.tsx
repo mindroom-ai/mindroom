@@ -284,7 +284,7 @@ export function MemoryConfig() {
   };
 
   const handleSave = async () => {
-    await saveConfig();
+    return saveConfig();
   };
 
   return (

@@ -50,7 +50,7 @@ describe('ModelConfig', () => {
     },
     updateModel: vi.fn(),
     deleteModel: vi.fn(),
-    saveConfig: vi.fn().mockResolvedValue(undefined),
+    saveConfig: vi.fn().mockResolvedValue({ status: 'saved' }),
   };
 
   let keyStatusByService: Record<string, KeyStatusResponse>;
@@ -566,5 +566,22 @@ describe('ModelConfig', () => {
     expect(within(defaultRow).queryByTitle('Delete')).toBeNull();
 
     confirmSpy.mockRestore();
+  });
+
+  it('shows a toast when Save All Changes is superseded by newer draft edits', async () => {
+    mockStore.saveConfig.mockResolvedValueOnce({ status: 'stale' });
+
+    render(<ModelConfig />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save All Changes' }));
+
+    const { toast } = await import('@/components/ui/toaster');
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith({
+        title: 'Save Failed',
+        description: 'Save was superseded by newer draft edits.',
+        variant: 'destructive',
+      });
+    });
   });
 });

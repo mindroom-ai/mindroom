@@ -12,6 +12,7 @@ export { ItemCard } from './ItemCard';
 export type { ItemCardProps, ItemCardBadge } from './ItemCard';
 
 export { EditorPanel, EditorPanelEmptyState } from './EditorPanel';
+export { showSaveFailureToastIfNeeded } from './EditorPanel';
 export type { EditorPanelProps, EditorPanelEmptyStateProps } from './EditorPanel';
 
 export { FieldGroup } from './FieldGroup';

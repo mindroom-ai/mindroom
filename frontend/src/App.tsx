@@ -53,6 +53,7 @@ import {
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/contexts/ThemeContext';
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
+import { showSaveFailureToastIfNeeded } from '@/components/shared';
 import {
   getConfigValidationIssues,
   getGlobalConfigDiagnostics,
@@ -166,6 +167,14 @@ function AppContent() {
   const visibleGlobalDiagnostics = showBlockingDiagnosticOverlay
     ? globalDiagnostics.filter(diagnostic => !diagnostic.blocking)
     : globalDiagnostics;
+
+  const handleRecoverySave = async () => {
+    const result = await saveRecoveryConfigSource();
+    showSaveFailureToastIfNeeded(result, {
+      staleMessage: 'Save was superseded by newer recovery edits.',
+      fallbackMessage: 'Failed to save replacement configuration.',
+    });
+  };
 
   useEffect(() => {
     // Load configuration on mount
@@ -296,7 +305,7 @@ function AppContent() {
                   Retry
                 </Button>
                 <Button
-                  onClick={() => void saveRecoveryConfigSource()}
+                  onClick={() => void handleRecoverySave()}
                   disabled={isLoading || !recoveryConfigIsDirty}
                 >
                   Save Replacement Config

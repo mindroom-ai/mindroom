@@ -122,7 +122,7 @@ export function TeamEditor() {
   };
 
   const handleSave = async () => {
-    await saveConfig();
+    return saveConfig();
   };
 
   if (!selectedTeam) {

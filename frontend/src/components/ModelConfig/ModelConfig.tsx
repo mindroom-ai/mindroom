@@ -26,6 +26,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { EditorPanel } from '@/components/shared/EditorPanel';
+import { showSaveFailureToastIfNeeded } from '@/components/shared';
 import { ArrowUpDown, Copy, Pencil, Plus, Save, Settings, Trash2, X } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
 import { Badge } from '@/components/ui/badge';
@@ -749,6 +750,11 @@ export function ModelConfig() {
     }
   };
 
+  const handleSaveAllChanges = async () => {
+    const result = await saveConfig();
+    showSaveFailureToastIfNeeded(result);
+  };
+
   const rows = useMemo<ModelRowData[]>(() => {
     return Object.entries(models).map(([modelName, modelConfig]) => {
       const keyDisplay = getKeyStatusDisplay(
@@ -1236,7 +1242,7 @@ export function ModelConfig() {
       icon={Settings}
       title="Model Configuration"
       isDirty={false}
-      onSave={() => saveConfig()}
+      onSave={handleSaveAllChanges}
       onDelete={() => {}}
       showActions={false}
       disableSave={isLoading}
@@ -1418,7 +1424,7 @@ export function ModelConfig() {
         </div>
 
         <Button
-          onClick={() => saveConfig()}
+          onClick={() => void handleSaveAllChanges()}
           variant="default"
           className="w-full"
           disabled={isLoading}

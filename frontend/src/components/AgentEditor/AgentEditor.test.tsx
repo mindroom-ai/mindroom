@@ -15,6 +15,10 @@ vi.mock('@/store/configStore', () => ({
   useConfigStore: vi.fn(),
 }));
 
+vi.mock('@/components/ui/toaster', () => ({
+  toast: vi.fn(),
+}));
+
 // Mock useTools hook
 vi.mock('@/hooks/useTools', () => ({
   useTools: vi.fn(() => ({
@@ -130,7 +134,7 @@ describe('AgentEditor', () => {
     updateAgent: vi.fn(),
     setAgentPrivateEnabled: vi.fn(),
     deleteAgent: vi.fn(),
-    saveConfig: vi.fn().mockResolvedValue(undefined),
+    saveConfig: vi.fn().mockResolvedValue({ status: 'saved' }),
     config: mockConfig,
     agentPoliciesByAgent: makeAgentPolicies(),
     isDirty: false,
@@ -471,6 +475,28 @@ describe('AgentEditor', () => {
 
     await waitFor(() => {
       expect(mockStore.saveConfig).toHaveBeenCalled();
+    });
+  });
+
+  it('shows a toast when a save is superseded by newer draft edits', async () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      isDirty: true,
+      rooms: mockStore.rooms,
+      saveConfig: vi.fn().mockResolvedValue({ status: 'stale' }),
+    });
+
+    render(<AgentEditor />);
+
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    const { toast } = await import('@/components/ui/toaster');
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith({
+        title: 'Save Failed',
+        description: 'Save was superseded by newer draft edits.',
+        variant: 'destructive',
+      });
     });
   });
 

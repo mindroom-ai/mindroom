@@ -69,7 +69,7 @@ export function CultureEditor() {
   };
 
   const handleSave = async () => {
-    await saveConfig();
+    return saveConfig();
   };
 
   if (!selectedCulture) {

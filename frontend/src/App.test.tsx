@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useConfigStore } from '@/store/configStore';
@@ -7,6 +7,11 @@ import App, { resolveCurrentTab, shouldShowBlockingDiagnosticOverlay } from './A
 
 vi.mock('@/store/configStore', () => ({
   useConfigStore: vi.fn(),
+}));
+
+vi.mock('@/components/ui/toaster', () => ({
+  toast: vi.fn(),
+  Toaster: () => null,
 }));
 
 describe('resolveCurrentTab', () => {
@@ -97,7 +102,10 @@ describe('shouldShowBlockingDiagnosticOverlay', () => {
 });
 
 describe('App recovery mode', () => {
+  const mockSaveRecoveryConfigSource = vi.fn();
+
   beforeEach(() => {
+    mockSaveRecoveryConfigSource.mockReset();
     Object.defineProperty(window, 'localStorage', {
       configurable: true,
       value: {
@@ -123,7 +131,7 @@ describe('App recovery mode', () => {
       recoveryConfigSource: 'agents:\n  broken: true\n',
       recoveryConfigSourceOriginal: 'agents:\n  broken: false\n',
       updateRecoveryConfigSource: vi.fn(),
-      saveRecoveryConfigSource: vi.fn(),
+      saveRecoveryConfigSource: mockSaveRecoveryConfigSource,
       syncStatus: 'error',
       diagnostics: [
         {
@@ -148,5 +156,22 @@ describe('App recovery mode', () => {
       screen.getByText(/could not be loaded\. edit the raw configuration/i)
     ).toBeInTheDocument();
     expect(screen.getByRole('textbox')).toHaveValue('agents:\n  broken: true\n');
+  });
+
+  it('surfaces stale recovery save results', async () => {
+    mockSaveRecoveryConfigSource.mockResolvedValue({ status: 'stale' });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Replacement Config' }));
+
+    const { toast } = await import('@/components/ui/toaster');
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith({
+        title: 'Save Failed',
+        description: 'Save was superseded by newer recovery edits.',
+        variant: 'destructive',
+      });
+    });
   });
 });
