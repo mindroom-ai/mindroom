@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.authorization import is_authorized_sender as real_is_authorized_sender
 from mindroom.bot import AgentBot, _DispatchPayload, _MessageContext, _PrecheckedEvent, _ResponseAction
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -322,7 +323,7 @@ async def test_hook_send_message_preserves_original_sender_for_downstream_dispat
 
 @pytest.mark.asyncio
 async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tmp_path: Path) -> None:
-    """Hook-originated messages should bypass message:received hooks but still prepare normal dispatch."""
+    """Hook-originated messages should not immediately re-run the source plugin's message:received hooks."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
     event = nio.RoomMessageText.from_dict(
@@ -655,7 +656,7 @@ async def test_prepare_dispatch_allows_hook_dispatch_without_mention(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_prepare_dispatch_skips_message_received_hooks_for_hook_dispatch(tmp_path: Path) -> None:
-    """hook_dispatch should enter normal dispatch without re-triggering message:received hooks."""
+    """hook_dispatch from non-message hooks should still run message:received hooks."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
     event = nio.RoomMessageText.from_dict(
@@ -696,7 +697,60 @@ async def test_prepare_dispatch_skips_message_received_hooks_for_hook_dispatch(t
     )
 
     assert dispatch is not None
-    assert hook_calls == []
+    assert hook_calls == ["called"]
+    assert dispatch.envelope.source_kind == "hook_dispatch"
+
+
+@pytest.mark.asyncio
+async def test_hook_dispatch_from_message_received_skips_only_origin_plugin_on_reentry(tmp_path: Path) -> None:
+    """hook_dispatch should re-enter message:received while avoiding immediate same-plugin recursion."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$hook-dispatch-msg",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "restart notification",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:message:received",
+            },
+        },
+    )
+    hook_calls: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def origin(_ctx: MessageReceivedContext) -> None:
+        hook_calls.append("origin")
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def other(_ctx: MessageReceivedContext) -> None:
+        hook_calls.append("other")
+
+    bot.hook_registry = HookRegistry.from_plugins(
+        [_plugin("origin-plugin", [origin]), _plugin("other-plugin", [other])],
+    )
+    bot._extract_message_context = AsyncMock(
+        return_value=_MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+    )
+
+    dispatch = await bot._prepare_dispatch(
+        room,
+        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        event_label="message",
+    )
+
+    assert dispatch is not None
+    assert hook_calls == ["other"]
     assert dispatch.envelope.source_kind == "hook_dispatch"
 
 
@@ -779,3 +833,33 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
     assert dispatch is not None
     assert dispatch.requester_user_id == "@mindroom_router:localhost"
     assert dispatch.envelope.source_kind == "hook_dispatch"
+
+
+@pytest.mark.asyncio
+async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(tmp_path: Path) -> None:
+    """hook_dispatch should enforce room authorization against the preserved requester."""
+    bot = _hook_bot(tmp_path)
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    room.canonical_alias = None
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$unauthorized-hook-dispatch",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "restart notification",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "hook-plugin:agent:started",
+                ORIGINAL_SENDER_KEY: "@unauthorized:localhost",
+            },
+        },
+    )
+
+    with patch("mindroom.bot.is_authorized_sender", side_effect=real_is_authorized_sender):
+        prechecked = bot._precheck_dispatch_event(room, event)
+
+    assert prechecked is None
+    bot.response_tracker.mark_responded.assert_called_once_with(event.event_id)

@@ -211,6 +211,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.history import CompactionOutcome
+    from mindroom.hooks.types import HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
@@ -527,6 +528,27 @@ def _is_coalescing_exempt_source_kind(event: _DispatchEvent) -> bool:
     return isinstance(source_kind, str) and source_kind in _COALESCING_EXEMPT_SOURCE_KINDS
 
 
+def _message_received_skip_plugin_names(
+    event: _DispatchEvent,
+    envelope: MessageEnvelope,
+) -> frozenset[str]:
+    """Return plugins whose message:received hooks should be skipped on re-entry."""
+    if envelope.source_kind not in {"hook", "hook_dispatch"}:
+        return frozenset()
+    if not isinstance(event.source, dict):
+        return frozenset()
+    content = event.source.get("content")
+    if not isinstance(content, dict):
+        return frozenset()
+    hook_source = content.get("com.mindroom.hook_source")
+    if not isinstance(hook_source, str):
+        return frozenset()
+    plugin_name, _, source_event_name = hook_source.partition(":")
+    if not plugin_name or source_event_name != EVENT_MESSAGE_RECEIVED:
+        return frozenset()
+    return frozenset({plugin_name})
+
+
 def _merge_response_extra_content(
     extra_content: dict[str, Any] | None,
     attachment_ids: list[str] | None,
@@ -659,8 +681,8 @@ class AgentBot:
             "logger": self.logger.bind(event_name=event_name),
             "correlation_id": correlation_id,
             "message_sender": self._hook_message_sender(),
-            "room_state_querier": build_hook_room_state_querier(self.client) if self.client is not None else None,
-            "room_state_putter": build_hook_room_state_putter(self.client) if self.client is not None else None,
+            "room_state_querier": self._hook_room_state_querier(),
+            "room_state_putter": self._hook_room_state_putter(),
         }
 
     def _hook_message_sender(self) -> HookMessageSender | None:
@@ -671,6 +693,26 @@ class AgentBot:
                 return sender
         if self.agent_name == ROUTER_AGENT_NAME and self.client is not None:
             return self._hook_send_message
+        return None
+
+    def _hook_room_state_querier(self) -> HookRoomStateQuerier | None:
+        """Return the room-state querier bound into hook contexts for this bot."""
+        if self.orchestrator is not None:
+            querier = self.orchestrator._hook_room_state_querier()
+            if querier is not None:
+                return querier
+        if self.client is not None:
+            return build_hook_room_state_querier(self.client)
+        return None
+
+    def _hook_room_state_putter(self) -> HookRoomStatePutter | None:
+        """Return the room-state putter bound into hook contexts for this bot."""
+        if self.orchestrator is not None:
+            putter = self.orchestrator._hook_room_state_putter()
+            if putter is not None:
+                return putter
+        if self.client is not None:
+            return build_hook_room_state_putter(self.client)
         return None
 
     def _build_message_envelope(
@@ -755,24 +797,18 @@ class AgentBot:
     async def _emit_message_received_hooks(
         self,
         *,
+        event: _DispatchEvent,
         envelope: MessageEnvelope,
         correlation_id: str,
     ) -> bool:
         """Emit message:received and return whether hooks suppressed processing."""
-        if envelope.source_kind in {"hook", "hook_dispatch"}:
-            self.logger.debug(
-                "Skipping message:received hooks for hook-originated automation message",
-                event_id=envelope.source_event_id,
-                room_id=envelope.room_id,
-            )
-            return False
-
         if not self.hook_registry.has_hooks(EVENT_MESSAGE_RECEIVED):
             return False
 
         context = MessageReceivedContext(
             **self._hook_base_kwargs(EVENT_MESSAGE_RECEIVED, correlation_id),
             envelope=envelope,
+            skip_plugin_names=_message_received_skip_plugin_names(event, envelope),
         )
         await emit(self.hook_registry, EVENT_MESSAGE_RECEIVED, context)
         return context.suppress
@@ -2081,8 +2117,8 @@ class AgentBot:
         processed, or ``None`` when the event should be skipped.
 
         Checks (in order): self-authored, already processed (skipped for
-        edits so restart recovery works), sender authorization, and
-        per-agent reply permissions.
+        edits so restart recovery works), effective requester
+        authorization, and per-agent reply permissions.
         """
         requester_user_id = self._requester_user_id_for_event(event)
         content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -2097,7 +2133,7 @@ class AgentBot:
             return None
 
         if not is_authorized_sender(
-            event.sender,
+            requester_user_id,
             self.config,
             room.room_id,
             self.runtime_paths,
@@ -2240,6 +2276,7 @@ class AgentBot:
             context=context,
         )
         if await self._emit_message_received_hooks(
+            event=event,
             envelope=envelope,
             correlation_id=correlation_id,
         ):
@@ -5136,6 +5173,7 @@ class AgentBot:
             source_kind="edit",
         )
         if await self._emit_message_received_hooks(
+            event=event,
             envelope=envelope,
             correlation_id=event.event_id,
         ):

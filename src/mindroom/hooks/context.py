@@ -229,7 +229,10 @@ class HookContext:
         usual routing rules. When *trigger_dispatch* is True the message
         uses source_kind ``hook_dispatch``, which also bypasses the
         normal "ignore other agent unless mentioned" ingress gate before
-        continuing through dispatch.
+        re-entering the normal dispatch pipeline. If a
+        ``message:received`` hook emitted the synthetic event, MindRoom
+        skips re-running that same plugin's ``message:received`` hooks
+        on the relay to avoid immediate recursion.
         """
         return await _send_bound_message(
             self.logger,
@@ -250,6 +253,7 @@ class MessageReceivedContext(HookContext):
     """Context for message:received hooks."""
 
     envelope: MessageEnvelope
+    skip_plugin_names: frozenset[str] = field(default_factory=frozenset)
     suppress: bool = False
 
 

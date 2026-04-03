@@ -438,7 +438,8 @@ For message-derived contexts, MindRoom automatically preserves the original requ
 For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while passing `thread_id=None` explicitly posts at room level.
 Plain `hook` sends can still dispatch when they satisfy the usual routing rules, for example if the message explicitly mentions an agent or otherwise qualifies as a normal addressed message.
 When `trigger_dispatch=True`, MindRoom sends the message as source kind `hook_dispatch`.
-That variant still skips `message:received` hook re-emission and bypasses the usual "ignore other agent unless mentioned" ingress gate before continuing through normal permissions, routing, and should-respond checks.
+That variant still re-enters the normal ingress pipeline, including `message:received`, and bypasses the usual "ignore other agent unless mentioned" ingress gate before continuing through normal permissions, routing, and should-respond checks.
+To prevent immediate recursion, when a `message:received` hook emits hook-originated automation, MindRoom skips re-running that same plugin's `message:received` hooks on the synthetic event.
 
 **`await ctx.query_room_state(room_id, event_type, state_key=None)`**
 Queries Matrix room state events.
