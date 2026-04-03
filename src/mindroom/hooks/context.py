@@ -240,7 +240,7 @@ class HookContext:
             text,
             thread_id=thread_id,
             extra_content=extra_content,
-            requester_id=_requester_id_for_hook_send(self),
+            requester_id=_requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch),
             trigger_dispatch=trigger_dispatch,
         )
 
@@ -330,7 +330,7 @@ class ScheduleFiredContext(HookContext):
             text,
             thread_id=resolved_thread_id,
             extra_content=extra_content,
-            requester_id=_requester_id_for_hook_send(self),
+            requester_id=_requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch),
             trigger_dispatch=trigger_dispatch,
         )
 
@@ -545,16 +545,26 @@ class ToolAfterCallContext:
         )
 
 
-def _requester_id_for_hook_send(context: HookContext) -> str | None:
+def _requester_id_for_hook_send(
+    context: HookContext,
+    *,
+    trigger_dispatch: bool = False,
+) -> str | None:
     """Return the requester identity to preserve on hook-originated sends."""
     if isinstance(context, MessageReceivedContext | MessageEnrichContext):
-        return context.envelope.requester_id
-    if isinstance(context, BeforeResponseContext):
-        return context.draft.envelope.requester_id
-    if isinstance(context, AfterResponseContext):
-        return context.result.envelope.requester_id
-    if isinstance(context, ScheduleFiredContext):
-        return context.created_by
-    if isinstance(context, ReactionReceivedContext | CustomEventContext):
-        return context.sender_id
+        requester_id = context.envelope.requester_id
+    elif isinstance(context, BeforeResponseContext):
+        requester_id = context.draft.envelope.requester_id
+    elif isinstance(context, AfterResponseContext):
+        requester_id = context.result.envelope.requester_id
+    elif isinstance(context, ScheduleFiredContext):
+        requester_id = context.created_by
+    elif isinstance(context, ReactionReceivedContext | CustomEventContext):
+        requester_id = context.sender_id
+    else:
+        requester_id = None
+    if requester_id is not None:
+        return requester_id
+    if trigger_dispatch:
+        return context.config.get_mindroom_user_id(context.runtime_paths)
     return None

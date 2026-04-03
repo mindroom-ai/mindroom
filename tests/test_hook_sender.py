@@ -604,6 +604,11 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
 
     assert captured_content["com.mindroom.source_kind"] == "hook_dispatch"
+    expected_requester = bot.config.get_mindroom_user_id(bot.runtime_paths)
+    if expected_requester is None:
+        assert ORIGINAL_SENDER_KEY not in captured_content
+    else:
+        assert captured_content[ORIGINAL_SENDER_KEY] == expected_requester
     assert "com.mindroom._trigger_dispatch" not in captured_content
 
 
@@ -732,3 +737,45 @@ async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_pat
 
     # Plain hook messages without mention should still be filtered
     assert dispatch is None
+
+
+@pytest.mark.asyncio
+async def test_router_precheck_allows_self_authored_hook_dispatch_without_requester(tmp_path: Path) -> None:
+    """Router-authored hook_dispatch without preserved requester should survive ingress precheck."""
+    bot = _hook_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$router-hook-dispatch",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "restart notification",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "hook-plugin:agent:started",
+            },
+        },
+    )
+    bot.hook_registry = HookRegistry.empty()
+    bot._extract_message_context = AsyncMock(
+        return_value=_MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+    )
+
+    prechecked = bot._precheck_dispatch_event(room, event)
+
+    assert prechecked is not None
+    assert prechecked.requester_user_id == "@mindroom_router:localhost"
+
+    dispatch = await bot._prepare_dispatch(room, prechecked, event_label="message")
+
+    assert dispatch is not None
+    assert dispatch.requester_user_id == "@mindroom_router:localhost"
+    assert dispatch.envelope.source_kind == "hook_dispatch"

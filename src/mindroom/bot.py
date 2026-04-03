@@ -2085,8 +2085,10 @@ class AgentBot:
         per-agent reply permissions.
         """
         requester_user_id = self._requester_user_id_for_event(event)
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        source_kind = content.get("com.mindroom.source_kind") if isinstance(content, dict) else None
 
-        if requester_user_id == self.matrix_id.full_id:
+        if requester_user_id == self.matrix_id.full_id and source_kind != "hook_dispatch":
             return None
 
         # Edits bypass the dedup check: if an edit is redelivered after a
