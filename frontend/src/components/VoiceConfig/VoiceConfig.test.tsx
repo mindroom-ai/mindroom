@@ -4,6 +4,7 @@ import { VoiceConfig } from './VoiceConfig';
 import { useConfigStore } from '@/store/configStore';
 import type { ConfigDiagnostic } from '@/lib/configValidation';
 import { Config } from '@/types/config';
+import type { SaveConfigResult } from '@/store/configStore';
 
 vi.mock('@/store/configStore');
 
@@ -20,7 +21,7 @@ describe('VoiceConfig', () => {
     diagnostics: ConfigDiagnostic[];
     syncStatus: 'synced' | 'syncing' | 'error' | 'disconnected';
     isDirty: boolean;
-    saveConfig: typeof mockSaveConfig;
+    saveConfig: () => Promise<SaveConfigResult>;
     updateVoiceConfig: typeof mockUpdateVoiceConfig;
   };
   type MockedStoreHook = {
@@ -69,6 +70,7 @@ describe('VoiceConfig', () => {
     mockSaveConfig.mockImplementation(async () => {
       mockStoreState.syncStatus = 'synced';
       mockStoreState.isDirty = false;
+      return { status: 'saved' };
     });
     setMockStore(createConfig());
   });
@@ -160,6 +162,11 @@ describe('VoiceConfig', () => {
     mockSaveConfig.mockImplementation(async () => {
       mockStoreState.syncStatus = 'error';
       mockStoreState.isDirty = true;
+      return {
+        status: 'error',
+        message: 'Configuration validation failed',
+        diagnostics: mockStoreState.diagnostics,
+      };
     });
     mockStoreState.diagnostics = [
       {

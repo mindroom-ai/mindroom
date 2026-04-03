@@ -39,7 +39,9 @@ describe('configStore', () => {
   beforeEach(() => {
     // Reset store state
     useConfigStore.setState({
+      loadedConfig: null,
       config: null,
+      draftVersion: 0,
       agents: [],
       teams: [],
       cultures: [],

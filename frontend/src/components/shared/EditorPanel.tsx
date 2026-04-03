@@ -11,7 +11,7 @@ export interface EditorPanelProps {
   /** Whether the panel is in a dirty state (has unsaved changes) */
   isDirty: boolean;
   /** Function to call when save is clicked */
-  onSave: () => void | Promise<void>;
+  onSave: () => void | Promise<unknown>;
   /** Function to call when delete is clicked */
   onDelete: () => void;
   /** Whether to show the save and delete buttons */

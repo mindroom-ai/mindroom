@@ -108,11 +108,12 @@ export function VoiceConfig() {
         host: normalizeHost(voiceConfig.stt.host),
       },
     });
-    await saveConfig();
-    const state = useConfigStore.getState();
-    const saveSucceeded = state.syncStatus === 'synced' && !state.isDirty;
-    if (!saveSucceeded) {
-      const globalDiagnostic = state.diagnostics.find(diagnostic => diagnostic.kind === 'global');
+    const result = await saveConfig();
+    if (result.status !== 'saved') {
+      const globalDiagnostic =
+        result.status === 'error'
+          ? result.diagnostics.find(diagnostic => diagnostic.kind === 'global')
+          : null;
       toast({
         title: 'Save Failed',
         description: globalDiagnostic?.message ?? 'Failed to save voice configuration.',
