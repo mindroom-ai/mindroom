@@ -7,22 +7,24 @@ is NOT added to ``TOOL_REGISTRY`` (no generic factory).
 """
 
 from mindroom.tool_system.metadata import (
-    TOOL_METADATA,
     SetupType,
     ToolCategory,
     ToolMetadata,
     ToolStatus,
+    register_builtin_tool_metadata,
 )
 
-TOOL_METADATA["delegate"] = ToolMetadata(
-    name="delegate",
-    display_name="Agent Delegation",
-    description="Delegate tasks to other configured agents",
-    category=ToolCategory.PRODUCTIVITY,
-    status=ToolStatus.AVAILABLE,
-    setup_type=SetupType.NONE,
-    icon="Users",
-    icon_color="text-blue-500",
-    config_fields=[],
-    dependencies=[],
+register_builtin_tool_metadata(
+    ToolMetadata(
+        name="delegate",
+        display_name="Agent Delegation",
+        description="Delegate tasks to other configured agents",
+        category=ToolCategory.PRODUCTIVITY,
+        status=ToolStatus.AVAILABLE,
+        setup_type=SetupType.NONE,
+        icon="Users",
+        icon_color="text-blue-500",
+        config_fields=[],
+        dependencies=[],
+    ),
 )

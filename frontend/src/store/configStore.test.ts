@@ -341,7 +341,34 @@ describe('configStore', () => {
       expect(state.syncStatus).toBe('error');
     });
 
-    it('stores backend validation issues when config load returns 422', async () => {
+    it('stores backend validation issues and clears stale config when load returns 422', async () => {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          agents: {
+            assistant: {
+              display_name: 'Assistant',
+              role: 'Helpful',
+              tools: [],
+              skills: [],
+              instructions: [],
+              rooms: ['lobby'],
+            },
+          },
+          models: {
+            default: {
+              provider: 'ollama',
+              id: 'test-model',
+            },
+          },
+        }),
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: { assistant: makeAgentPolicy('assistant') } }),
+      });
+      await useConfigStore.getState().loadConfig();
+
       (global.fetch as any).mockResolvedValueOnce({
         ok: false,
         status: 422,
@@ -360,6 +387,10 @@ describe('configStore', () => {
 
       const state = useConfigStore.getState();
       expect(state.syncStatus).toBe('error');
+      expect(state.config).toBeNull();
+      expect(state.agents).toEqual([]);
+      expect(state.rooms).toEqual([]);
+      expect(state.agentPoliciesByAgent).toEqual({});
       expect(state.diagnostics).toEqual([
         {
           kind: 'global',

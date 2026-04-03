@@ -261,6 +261,47 @@ interface ConfigState {
   markDirty: () => void;
 }
 
+function clearedLoadedConfigState(
+  diagnostics: ConfigDiagnostic[]
+): Pick<
+  ConfigState,
+  | 'config'
+  | 'agents'
+  | 'teams'
+  | 'cultures'
+  | 'rooms'
+  | 'agentPoliciesByAgent'
+  | 'agentPoliciesStale'
+  | 'selectedAgentId'
+  | 'selectedTeamId'
+  | 'selectedCultureId'
+  | 'selectedRoomId'
+  | 'isDirty'
+  | 'isLoading'
+  | 'diagnostics'
+  | 'syncStatus'
+  | 'privateWorkerScopeBackups'
+> {
+  return {
+    config: null,
+    agents: [],
+    teams: [],
+    cultures: [],
+    rooms: [],
+    agentPoliciesByAgent: {},
+    agentPoliciesStale: false,
+    selectedAgentId: null,
+    selectedTeamId: null,
+    selectedCultureId: null,
+    selectedRoomId: null,
+    isDirty: false,
+    isLoading: false,
+    diagnostics,
+    syncStatus: 'error',
+    privateWorkerScopeBackups: {},
+  };
+}
+
 export const useConfigStore = create<ConfigState>((set, get) => ({
   // Initial state
   config: null,
@@ -368,8 +409,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       });
     } catch (error) {
       if (error instanceof configService.ConfigValidationError) {
-        set({
-          diagnostics: [
+        set(
+          clearedLoadedConfigState([
             {
               kind: 'global',
               message: 'Configuration validation failed',
@@ -379,23 +420,19 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
               kind: 'validation' as const,
               issue,
             })),
-          ],
-          isLoading: false,
-          syncStatus: 'error',
-        });
+          ])
+        );
         return;
       }
-      set({
-        diagnostics: [
+      set(
+        clearedLoadedConfigState([
           {
             kind: 'global',
             message: error instanceof Error ? error.message : 'Failed to load config',
             blocking: true,
           },
-        ],
-        isLoading: false,
-        syncStatus: 'error',
-      });
+        ])
+      );
     }
   },
 

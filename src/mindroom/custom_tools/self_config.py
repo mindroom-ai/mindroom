@@ -16,12 +16,12 @@ from mindroom.config.main import (
 )
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.custom_tools.config_manager import (
-    _is_known_tool_entry,
     _preserve_tool_overrides,
     _save_runtime_validated_config,
     validate_knowledge_bases,
 )
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.metadata import resolved_tool_metadata_for_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -125,7 +125,8 @@ class SelfConfigTools(Toolkit):
 
         # Validate tools against known tool metadata
         if tools is not None:
-            invalid_tools = [t for t in tools if not _is_known_tool_entry(t)]
+            tool_metadata = resolved_tool_metadata_for_runtime(self.runtime_paths, config)
+            invalid_tools = [t for t in tools if t not in tool_metadata]
             if invalid_tools:
                 return f"Error: Unknown tools: {', '.join(invalid_tools)}"
             blocked_tools = sorted({t for t in tools if t in _SELF_CONFIG_BLOCKED_TOOLS})

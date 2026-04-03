@@ -604,6 +604,34 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
         set_plugin_skill_roots(original_plugin_roots)
 
 
+def test_load_plugins_preserves_metadata_only_built_in_tools(tmp_path: Path) -> None:
+    """Syncing the plugin overlay must keep metadata-only built-ins visible."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config_without_plugins = _bind_runtime_paths(Config(plugins=[]), config_path)
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+
+    try:
+        assert load_plugins(config_without_plugins, runtime_paths_for(config_without_plugins)) == []
+        for tool_name in ("memory", "delegate", "self_config", "compact_context"):
+            assert tool_name in TOOL_METADATA
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
 def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tmp_path: Path) -> None:
     """Reloading an enabled plugin should drop tool names it no longer registers."""
     plugin_root = tmp_path / "plugins" / "demo"
@@ -715,6 +743,130 @@ def test_load_plugins_rejects_built_in_tool_name_collisions(tmp_path: Path) -> N
 
     with pytest.raises(ConfigRuntimeValidationError, match="conflicts with built-in tool 'calculator'"):
         _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+
+
+def test_load_plugins_rejects_plugin_tool_name_collisions(tmp_path: Path) -> None:
+    """Active plugins must not register the same tool name."""
+    first_root = tmp_path / "plugins" / "first"
+    second_root = tmp_path / "plugins" / "second"
+    first_root.mkdir(parents=True)
+    second_root.mkdir(parents=True)
+    (first_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "first_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (second_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "second_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    for root, display_name in ((first_root, "First Tool"), (second_root, "Second Tool")):
+        (root / "tools.py").write_text(
+            "from agno.tools import Toolkit\n"
+            "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+            "\n"
+            "class DemoTool(Toolkit):\n"
+            "    def __init__(self) -> None:\n"
+            "        super().__init__(name='demo', tools=[])\n"
+            "\n"
+            "@register_tool_with_metadata(\n"
+            "    name='shared_tool',\n"
+            f"    display_name='{display_name}',\n"
+            "    description='Should conflict',\n"
+            "    category=ToolCategory.DEVELOPMENT,\n"
+            ")\n"
+            "def demo_plugin_tools():\n"
+            "    return DemoTool\n",
+            encoding="utf-8",
+        )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match="Plugin tool 'shared_tool' conflicts between plugins 'first_plugin' and 'second_plugin'",
+    ):
+        _bind_runtime_paths(Config(plugins=["./plugins/first", "./plugins/second"]), config_path)
+
+
+def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path) -> None:
+    """Changing only the manifest plugin name should force a logical module reload."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    manifest_path = plugin_root / "mindroom.plugin.json"
+    manifest_path.write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='renamed_tool',\n"
+        "    display_name='Renamed Tool',\n"
+        "    description='Should survive manifest rename',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+
+    try:
+        assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo_plugin"]
+        assert "renamed_tool" in _TOOL_REGISTRY
+
+        manifest_path.write_text(
+            json.dumps({"name": "renamed_plugin", "tools_module": "tools.py", "skills": []}),
+            encoding="utf-8",
+        )
+        stat_result = manifest_path.stat()
+        os.utime(manifest_path, (stat_result.st_atime, stat_result.st_mtime + 1))
+
+        assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["renamed_plugin"]
+        assert "renamed_tool" in _TOOL_REGISTRY
+
+        follow_up_config = Config.model_validate(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {
+                    "assistant": {
+                        "display_name": "Assistant",
+                        "role": "test",
+                        "tools": ["renamed_tool"],
+                    },
+                },
+                "plugins": ["./plugins/demo"],
+            },
+        )
+        bound = _bind_runtime_paths(follow_up_config, config_path)
+        assert bound.get_agent("assistant").tool_names == ["renamed_tool"]
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
 
 
 def test_load_plugins_rolls_back_runtime_tool_state_when_later_plugin_fails(tmp_path: Path) -> None:

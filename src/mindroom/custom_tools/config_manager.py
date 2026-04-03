@@ -21,18 +21,19 @@ from mindroom.config.main import (
 )
 from mindroom.config.models import AgentLearningMode, ToolConfigEntry
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.metadata import TOOL_METADATA, ToolCategory, ToolStatus
+from mindroom.tool_system.metadata import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.metadata import ToolMetadata
 
 logger = get_logger(__name__)
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
 
 
-def _is_known_tool_entry(tool_name: str) -> bool:
+def _is_known_tool_entry(tool_name: str, tool_metadata: dict[str, ToolMetadata]) -> bool:
     """Return whether a tool entry is a known registered tool."""
-    return tool_name in TOOL_METADATA
+    return tool_name in tool_metadata
 
 
 def _preserve_tool_overrides(
@@ -303,6 +304,18 @@ class ConfigManagerTools(Toolkit):
         """Load config or return one shared invalid-config response."""
         return load_config_or_user_error(self.runtime_paths, footer=footer)
 
+    def _load_config_and_tool_metadata_or_error(
+        self,
+        *,
+        footer: str | None = None,
+    ) -> tuple[Config | None, dict[str, ToolMetadata] | None, str | None]:
+        """Load config and resolve one runtime-aware tool metadata snapshot."""
+        config, load_error = self._load_config_or_error(footer=footer)
+        if load_error:
+            return None, None, load_error
+        assert config is not None
+        return config, resolved_tool_metadata_for_runtime(self.runtime_paths, config), None
+
     def _get_available_models(self) -> str:
         """Get the list of configured models from the current configuration."""
         config, load_error = self._load_config_or_error()
@@ -458,10 +471,15 @@ class ConfigManagerTools(Toolkit):
 
     def _list_available_tools(self) -> str:
         """List all available tools that can be used by agents."""
+        _, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error()
+        if load_error:
+            return load_error
+        assert tool_metadata is not None
+
         tools_by_category: dict[str, list[tuple[str, str]]] = {}
 
-        for tool_name in sorted(TOOL_METADATA.keys()):
-            metadata = TOOL_METADATA[tool_name]
+        for tool_name in sorted(tool_metadata):
+            metadata = tool_metadata[tool_name]
             category = metadata.category.value
             description = metadata.description
             if category not in tools_by_category:
@@ -478,14 +496,19 @@ class ConfigManagerTools(Toolkit):
 
     def _get_tool_details(self, tool_name: str) -> str:
         """Get detailed information about a specific tool."""
-        if tool_name not in TOOL_METADATA:
-            available = ", ".join(sorted(TOOL_METADATA.keys()))
+        _, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error()
+        if load_error:
+            return load_error
+        assert tool_metadata is not None
+
+        if tool_name not in tool_metadata:
+            available = ", ".join(sorted(tool_metadata.keys()))
             return f"Unknown tool: {tool_name}\n\nAvailable tools: {available}"
 
         output = [f"## Tool: {tool_name}\n"]
 
-        if tool_name in TOOL_METADATA:
-            metadata = TOOL_METADATA[tool_name]
+        if tool_name in tool_metadata:
+            metadata = tool_metadata[tool_name]
             output.append(f"**Display Name**: {metadata.display_name}")
             output.append(f"**Description**: {metadata.description}")
             output.append(f"**Category**: {metadata.category.value}")
@@ -530,15 +553,17 @@ class ConfigManagerTools(Toolkit):
         if not re.match(r"^[a-z0-9_]+$", agent_name):
             return "Error: Agent name must be lowercase alphanumeric with underscores only"
 
-        # Validate tools
-        invalid_tools = [t for t in tools if not _is_known_tool_entry(t)]
-        if invalid_tools:
-            return f"Error: Unknown tools: {', '.join(invalid_tools)}\n\nUse get_info with info_type='available_tools' to see valid tools."
-
-        config, load_error = self._load_config_or_error(footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+        config, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error(
+            footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
+        )
         if load_error:
             return load_error
         assert config is not None
+        assert tool_metadata is not None
+
+        invalid_tools = [t for t in tools if not _is_known_tool_entry(t, tool_metadata)]
+        if invalid_tools:
+            return f"Error: Unknown tools: {', '.join(invalid_tools)}\n\nUse get_info with info_type='available_tools' to see valid tools."
 
         try:
             if agent_name in config.agents:
@@ -604,10 +629,13 @@ class ConfigManagerTools(Toolkit):
         learning_mode: AgentLearningMode | None,
     ) -> str:
         """Update an existing agent configuration."""
-        config, load_error = self._load_config_or_error(footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+        config, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error(
+            footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
+        )
         if load_error:
             return load_error
         assert config is not None
+        assert tool_metadata is not None
 
         try:
             if agent_name not in config.agents:
@@ -617,7 +645,7 @@ class ConfigManagerTools(Toolkit):
 
             # Validate tools if provided
             if tools is not None:
-                invalid_tools = [t for t in tools if not _is_known_tool_entry(t)]
+                invalid_tools = [t for t in tools if not _is_known_tool_entry(t, tool_metadata)]
                 if invalid_tools:
                     return f"Error: Unknown tools: {', '.join(invalid_tools)}"
 
@@ -747,10 +775,11 @@ class ConfigManagerTools(Toolkit):
 
     def _validate_agent_config(self, agent_name: str) -> str:  # noqa: C901, PLR0912
         """Validate an agent's configuration."""
-        config, load_error = self._load_config_or_error()
+        config, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error()
         if load_error:
             return load_error
         assert config is not None
+        assert tool_metadata is not None
 
         if agent_name not in config.agents:
             return f"Error: Agent '{agent_name}' not found."
@@ -773,7 +802,7 @@ class ConfigManagerTools(Toolkit):
         if not agent.tools:
             warnings.append("No tools configured")
         else:
-            invalid_tools = [t for t in agent.tool_names if not _is_known_tool_entry(t)]
+            invalid_tools = [t for t in agent.tool_names if not _is_known_tool_entry(t, tool_metadata)]
             if invalid_tools:
                 issues.append(f"Invalid tools: {', '.join(invalid_tools)}")
 
@@ -823,6 +852,11 @@ class ConfigManagerTools(Toolkit):
 
     def _generate_agent_template(self, agent_type: str) -> str:
         """Generate a template configuration for common agent types."""
+        _, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error()
+        if load_error:
+            return load_error
+        assert tool_metadata is not None
+
         # Map agent types to tool categories
         type_to_category = {
             "researcher": ToolCategory.RESEARCH,
@@ -842,7 +876,7 @@ class ConfigManagerTools(Toolkit):
         # Get tools from this category that are available
         tools = [
             name
-            for name, metadata in TOOL_METADATA.items()
+            for name, metadata in tool_metadata.items()
             if metadata.category == category and metadata.status == ToolStatus.AVAILABLE
         ][:5]  # Limit to 5 tools
 
@@ -876,7 +910,7 @@ model: "default"
 ```
 
 **Available tools in {category.value} category:**
-{chr(10).join(f"- {name}: {metadata.description}" for name, metadata in TOOL_METADATA.items() if metadata.category == category)}
+{chr(10).join(f"- {name}: {metadata.description}" for name, metadata in tool_metadata.items() if metadata.category == category)}
 
 **To create this agent, use:**
 ```

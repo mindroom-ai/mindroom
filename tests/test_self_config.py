@@ -79,6 +79,41 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
     return config_path
 
 
+def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "self_config_plugin_tool") -> Path:
+    """Write one config that enables a plugin-defined tool for self-config tests."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        f"    name='{tool_name}',\n"
+        "    display_name='Plugin Tool',\n"
+        "    description='Plugin-defined tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    Config(
+        agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[])},
+        models=_DEFAULT_MODELS,
+        plugins=["./plugins/demo"],
+    ).save_to_yaml(config_path)
+    return config_path
+
+
 class TestGetOwnConfig:
     """Tests for SelfConfigTools.get_own_config."""
 
@@ -220,6 +255,17 @@ class TestUpdateOwnConfig:
             assert "nonexistent_tool" in result
         finally:
             config_path.unlink(missing_ok=True)
+
+    def test_update_tools_accepts_plugin_tool_from_current_config(self, tmp_path: Path) -> None:
+        """Self-config should accept plugin tools without relying on ambient registry state."""
+        config_path = _plugin_tool_config_path(tmp_path)
+        tool = _self_config_tools(agent_name="coder", config_path=config_path)
+
+        result = tool.update_own_config(tools=["self_config_plugin_tool"])
+
+        assert "Successfully" in result
+        reloaded = Config.from_yaml(config_path)
+        assert reloaded.agents["coder"].tool_names == ["self_config_plugin_tool"]
 
     def test_update_tools_blocks_privileged_tool(self) -> None:
         """Self-config should not allow assigning privileged global-config tools."""

@@ -87,13 +87,19 @@ def restore_plugin_tool_registrations(module_name: str, registrations: dict[str,
         _PLUGIN_TOOL_METADATA_BY_MODULE.pop(module_name, None)
 
 
-def synchronize_plugin_tools(active_module_names: list[str]) -> None:
+def synchronize_plugin_tools(active_plugins: list[tuple[str, str]]) -> None:
     """Rebuild the active plugin tool overlay from cached per-module registrations."""
     desired_metadata = _BUILTIN_TOOL_METADATA.copy()
     desired_registry = _BUILTIN_TOOL_REGISTRY.copy()
+    plugin_owner_by_tool_name: dict[str, str] = {}
 
-    for module_name in active_module_names:
+    for plugin_name, module_name in active_plugins:
         for tool_name, plugin_metadata in _PLUGIN_TOOL_METADATA_BY_MODULE.get(module_name, {}).items():
+            existing_owner = plugin_owner_by_tool_name.get(tool_name)
+            if existing_owner is not None and existing_owner != plugin_name:
+                msg = f"Plugin tool '{tool_name}' conflicts between plugins '{existing_owner}' and '{plugin_name}'."
+                raise ValueError(msg)
+            plugin_owner_by_tool_name[tool_name] = plugin_name
             desired_metadata[tool_name] = plugin_metadata
             factory = cast("Callable[[], type[Toolkit]] | None", plugin_metadata.factory)
             if factory is None:
@@ -114,8 +120,8 @@ def _reject_plugin_builtin_tool_collision(tool_name: str) -> None:
         raise ValueError(msg)
 
 
-def _register_builtin_tool_metadata(metadata: ToolMetadata) -> None:
-    """Store one built-in tool in the durable built-in registry."""
+def register_builtin_tool_metadata(metadata: ToolMetadata) -> None:
+    """Store one built-in tool or metadata-only built-in entry in the durable registry."""
     factory = cast("Callable[[], type[Toolkit]] | None", metadata.factory)
     _BUILTIN_TOOL_METADATA[metadata.name] = metadata
     TOOL_METADATA[metadata.name] = metadata
@@ -710,7 +716,7 @@ def register_tool_with_metadata(
             _register_plugin_tool_metadata(func.__module__, metadata)
             return func
 
-        _register_builtin_tool_metadata(metadata)
+        register_builtin_tool_metadata(metadata)
 
         return func
 
@@ -786,6 +792,15 @@ def loaded_tool_registry_for_validation(
         yield
     finally:
         _restore_tool_registry_snapshot(snapshot)
+
+
+def resolved_tool_metadata_for_runtime(
+    runtime_paths: RuntimePaths,
+    config: Config,
+) -> dict[str, ToolMetadata]:
+    """Return tool metadata visible for one runtime config without mutating global state."""
+    with loaded_tool_registry_for_validation(runtime_paths, config):
+        return TOOL_METADATA.copy()
 
 
 def default_worker_routed_tools(tool_names: list[str]) -> list[str]:

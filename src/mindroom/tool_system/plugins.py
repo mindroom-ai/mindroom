@@ -75,6 +75,7 @@ class _Plugin:
 @dataclass
 class _ModuleCacheEntry:
     mtime: float
+    module_name: str
     module: ModuleType
 
 
@@ -91,7 +92,7 @@ def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
     from mindroom.tool_system.metadata import synchronize_plugin_tools  # noqa: PLC0415
 
     active_tool_modules = [
-        _module_name(plugin.name, plugin.tools_module_path)
+        (plugin.name, _module_name(plugin.name, plugin.tools_module_path))
         for plugin in plugins
         if plugin.tools_module_path is not None
     ]
@@ -393,6 +394,46 @@ def _resolve_skill_dirs(root: Path, skills: list[str]) -> list[Path]:
     return skill_dirs
 
 
+def _prepare_plugin_tool_module_reload(
+    module_name: str,
+    cached: _ModuleCacheEntry | None,
+) -> dict[str, dict[str, ToolMetadata]]:
+    """Snapshot one tool module's cached registrations before reload."""
+    from mindroom.tool_system.metadata import (  # noqa: PLC0415
+        clear_plugin_tool_registrations,
+        snapshot_plugin_tool_registrations,
+    )
+
+    previous_registrations_by_module_name: dict[str, dict[str, ToolMetadata]] = {}
+    for candidate_module_name in {module_name, cached.module_name if cached is not None else None}:
+        if candidate_module_name is None:
+            continue
+        previous_registrations_by_module_name[candidate_module_name] = snapshot_plugin_tool_registrations(
+            candidate_module_name,
+        )
+        clear_plugin_tool_registrations(candidate_module_name)
+    return previous_registrations_by_module_name
+
+
+def _restore_failed_plugin_tool_module_reload(
+    module_path: Path,
+    module_name: str,
+    cached: _ModuleCacheEntry | None,
+    previous_registrations_by_module_name: dict[str, dict[str, ToolMetadata]],
+) -> None:
+    """Restore cached tool registrations and module imports after one failed reload."""
+    from mindroom.tool_system.metadata import restore_plugin_tool_registrations  # noqa: PLC0415
+
+    sys.modules.pop(module_name, None)
+    for restored_module_name, registrations in previous_registrations_by_module_name.items():
+        restore_plugin_tool_registrations(restored_module_name, registrations)
+    if cached is not None:
+        _MODULE_IMPORT_CACHE[module_path] = cached
+        sys.modules[cached.module_name] = cached.module
+    else:
+        _MODULE_IMPORT_CACHE.pop(module_path, None)
+
+
 def _load_plugin_module(
     plugin_name: str,
     module_path: Path | None,
@@ -408,21 +449,18 @@ def _load_plugin_module(
         logger.exception("Failed to stat plugin module", path=str(module_path), kind=kind, error=str(exc))
         raise ValueError(msg) from exc
 
+    module_name = _module_name(plugin_name, module_path)
     cached = _MODULE_IMPORT_CACHE.get(module_path)
-    if cached is not None and cached.mtime == mtime:
+    if cached is not None and cached.mtime == mtime and cached.module_name == module_name:
         return cached.module
 
-    module_name = _module_name(plugin_name, module_path)
-    previous_registrations: dict[str, ToolMetadata] | None = None
-    if kind == "tools":
-        from mindroom.tool_system.metadata import (  # noqa: PLC0415
-            clear_plugin_tool_registrations,
-            restore_plugin_tool_registrations,
-            snapshot_plugin_tool_registrations,
-        )
+    previous_registrations_by_module_name = (
+        _prepare_plugin_tool_module_reload(module_name, cached) if kind == "tools" else {}
+    )
 
-        previous_registrations = snapshot_plugin_tool_registrations(module_name)
-        clear_plugin_tool_registrations(module_name)
+    if cached is not None and cached.module_name != module_name:
+        sys.modules.pop(cached.module_name, None)
+
     spec = util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
         msg = f"Failed to load plugin {kind} module: {module_path}"
@@ -434,17 +472,25 @@ def _load_plugin_module(
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
-        sys.modules.pop(module_name, None)
         if kind == "tools":
-            restore_plugin_tool_registrations(
+            _restore_failed_plugin_tool_module_reload(
+                module_path,
                 module_name,
-                previous_registrations or {},
+                cached,
+                previous_registrations_by_module_name,
             )
+        else:
+            sys.modules.pop(module_name, None)
+            if cached is not None:
+                _MODULE_IMPORT_CACHE[module_path] = cached
+                sys.modules[cached.module_name] = cached.module
+            else:
+                _MODULE_IMPORT_CACHE.pop(module_path, None)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
         logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
         raise ValueError(msg) from exc
 
-    _MODULE_IMPORT_CACHE[module_path] = _ModuleCacheEntry(mtime=mtime, module=module)
+    _MODULE_IMPORT_CACHE[module_path] = _ModuleCacheEntry(mtime=mtime, module_name=module_name, module=module)
     return module
 
 

@@ -7,22 +7,24 @@ requires ``agent_name`` at instantiation and is injected directly in
 """
 
 from mindroom.tool_system.metadata import (
-    TOOL_METADATA,
     SetupType,
     ToolCategory,
     ToolMetadata,
     ToolStatus,
+    register_builtin_tool_metadata,
 )
 
-TOOL_METADATA["self_config"] = ToolMetadata(
-    name="self_config",
-    display_name="Self Config",
-    description="Allow an agent to read and modify its own configuration",
-    category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.AVAILABLE,
-    setup_type=SetupType.NONE,
-    icon="Settings",
-    icon_color="text-indigo-500",
-    config_fields=[],
-    dependencies=[],
+register_builtin_tool_metadata(
+    ToolMetadata(
+        name="self_config",
+        display_name="Self Config",
+        description="Allow an agent to read and modify its own configuration",
+        category=ToolCategory.DEVELOPMENT,
+        status=ToolStatus.AVAILABLE,
+        setup_type=SetupType.NONE,
+        icon="Settings",
+        icon_color="text-indigo-500",
+        config_fields=[],
+        dependencies=[],
+    ),
 )

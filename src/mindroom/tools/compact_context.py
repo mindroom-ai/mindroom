@@ -7,22 +7,24 @@ is NOT added to ``TOOL_REGISTRY`` (no generic factory).
 """
 
 from mindroom.tool_system.metadata import (
-    TOOL_METADATA,
     SetupType,
     ToolCategory,
     ToolMetadata,
     ToolStatus,
+    register_builtin_tool_metadata,
 )
 
-TOOL_METADATA["compact_context"] = ToolMetadata(
-    name="compact_context",
-    display_name="Context Compaction",
-    description="Schedule context compaction for the next reply in the current conversation scope",
-    category=ToolCategory.PRODUCTIVITY,
-    status=ToolStatus.AVAILABLE,
-    setup_type=SetupType.NONE,
-    icon="Minimize2",
-    icon_color="text-amber-500",
-    config_fields=[],
-    dependencies=[],
+register_builtin_tool_metadata(
+    ToolMetadata(
+        name="compact_context",
+        display_name="Context Compaction",
+        description="Schedule context compaction for the next reply in the current conversation scope",
+        category=ToolCategory.PRODUCTIVITY,
+        status=ToolStatus.AVAILABLE,
+        setup_type=SetupType.NONE,
+        icon="Minimize2",
+        icon_color="text-amber-500",
+        config_fields=[],
+        dependencies=[],
+    ),
 )
