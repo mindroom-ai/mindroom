@@ -155,9 +155,8 @@ from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import config_confirmation
 from .commands.handler import (
     CommandEvent,
-    CommandHandlerContext,
+    CommandHandlingBot,
     _generate_welcome_message,
-    _run_skill_command_tool,
     handle_command,
 )
 from .commands.parsing import Command, command_parser
@@ -5428,83 +5427,13 @@ class AgentBot:
     ) -> None:
         assert self.client is not None
         event = await self._resolve_text_dispatch_event(prechecked_event.event)
-
-        async def send_skill_command_response(
-            *,
-            room_id: str,
-            reply_to_event_id: str,
-            thread_id: str | None,
-            thread_history: Sequence[ResolvedVisibleMessage],
-            prompt: str,
-            agent_name: str,
-            user_id: str | None,
-            reply_to_event: nio.RoomMessageText | None = None,
-        ) -> str | None:
-            return await self._send_skill_command_response(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
-                thread_history=thread_history,
-                prompt=prompt,
-                agent_name=agent_name,
-                user_id=user_id,
-                reply_to_event=reply_to_event,
-                source_envelope=source_envelope,
-            )
-
-        async def run_skill_command_tool(
-            *,
-            agent_name: str,
-            command_tool: str,
-            skill_name: str,
-            args_text: str,
-            requester_user_id: str | None = None,
-            room_id: str | None = None,
-            thread_id: str | None = None,
-        ) -> str:
-            runtime_context = None
-            if room_id is not None:
-                runtime_context = self._build_tool_runtime_context(
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    reply_to_event_id=event.event_id,
-                    user_id=requester_user_id,
-                    agent_name=agent_name,
-                    source_envelope=source_envelope,
-                )
-            return await _run_skill_command_tool(
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                agent_name=agent_name,
-                storage_path=self.storage_path,
-                command_tool=command_tool,
-                skill_name=skill_name,
-                args_text=args_text,
-                requester_user_id=requester_user_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                runtime_context=runtime_context,
-            )
-
-        context = CommandHandlerContext(
-            client=self.client,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            storage_path=self.storage_path,
-            logger=self.logger,
-            response_tracker=self.response_tracker,
-            derive_conversation_context=self._derive_conversation_context,
-            resolve_reply_thread_id=self._resolve_reply_thread_id,
-            send_response=self._send_response,
-            send_skill_command_response=send_skill_command_response,
-            run_skill_command_tool=run_skill_command_tool,
-        )
         await handle_command(
-            context=context,
+            bot=cast("CommandHandlingBot", self),
             room=room,
             event=event,
             command=command,
             requester_user_id=prechecked_event.requester_user_id,
+            source_envelope=source_envelope,
         )
 
 

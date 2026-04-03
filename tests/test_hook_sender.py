@@ -1267,14 +1267,15 @@ async def test_hook_dispatch_skill_command_preserves_source_envelope_in_runtime(
 
     async def fake_handle_command(
         *,
-        context: object,
+        bot: object,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
         command: object,
         requester_user_id: str,
+        source_envelope: MessageEnvelope | None = None,
     ) -> None:
         del command
-        await context.send_skill_command_response(
+        await bot._send_skill_command_response(
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
             thread_id=None,
@@ -1283,6 +1284,7 @@ async def test_hook_dispatch_skill_command_preserves_source_envelope_in_runtime(
             agent_name="code",
             user_id=requester_user_id,
             reply_to_event=event,
+            source_envelope=source_envelope,
         )
 
     with patch("mindroom.bot.handle_command", new=fake_handle_command):
@@ -1341,7 +1343,10 @@ async def test_hook_dispatch_skill_tool_command_builds_full_tool_runtime_context
     with (
         patch("mindroom.commands.handler._resolve_skill_command_agent", return_value=("code", None)),
         patch("mindroom.commands.handler.resolve_skill_command_spec", return_value=spec),
-        patch("mindroom.bot._run_skill_command_tool", new=AsyncMock(side_effect=fake_run_skill_command_tool)),
+        patch(
+            "mindroom.commands.handler._run_skill_command_tool",
+            new=AsyncMock(side_effect=fake_run_skill_command_tool),
+        ),
     ):
         await bot._handle_command(
             room,

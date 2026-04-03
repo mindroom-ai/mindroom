@@ -19,7 +19,7 @@ from mindroom.commands.config_commands import (
     _set_nested_value,
     handle_config_command,
 )
-from mindroom.commands.handler import CommandHandlerContext, handle_command
+from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.constants import resolve_runtime_paths
 
@@ -230,18 +230,18 @@ class TestValueFormatting:
 async def test_handle_command_threads_config_path_to_config_commands(tmp_path: Path) -> None:
     """`!config` dispatch should use the orchestrator-owned config file path."""
     config_path = tmp_path / "custom-config.yaml"
-    context = CommandHandlerContext(
+    bot = SimpleNamespace(
         client=AsyncMock(),
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
         storage_path=tmp_path,
         logger=MagicMock(),
         response_tracker=MagicMock(),
-        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
-        resolve_reply_thread_id=MagicMock(return_value=None),
-        send_response=AsyncMock(return_value=None),
-        send_skill_command_response=AsyncMock(return_value=None),
-        run_skill_command_tool=AsyncMock(return_value=""),
+        _derive_conversation_context=AsyncMock(return_value=(False, None, [])),
+        _resolve_reply_thread_id=MagicMock(return_value=None),
+        _send_response=AsyncMock(return_value=None),
+        _send_skill_command_response=AsyncMock(return_value=None),
+        _build_tool_runtime_context=MagicMock(return_value=None),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(
@@ -256,14 +256,14 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         AsyncMock(return_value=("ok", None)),
     ) as mock_handle_config_command:
         await handle_command(
-            context=context,
+            bot=bot,
             room=room,
             event=event,
             command=command,
             requester_user_id="@alice:example.org",
         )
 
-    mock_handle_config_command.assert_awaited_once_with("show", runtime_paths=context.runtime_paths)
+    mock_handle_config_command.assert_awaited_once_with("show", runtime_paths=bot.runtime_paths)
 
 
 @pytest.mark.asyncio

@@ -726,26 +726,7 @@ class MultiAgentOrchestrator:
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is None:
             return None
-
-        async def _send(
-            room_id: str,
-            body: str,
-            thread_id: str | None,
-            source_hook: str,
-            extra_content: dict[str, object] | None,
-            *,
-            trigger_dispatch: bool = False,
-        ) -> str | None:
-            return await router_bot._hook_send_message(
-                room_id,
-                body,
-                thread_id,
-                source_hook,
-                extra_content,
-                trigger_dispatch=trigger_dispatch,
-            )
-
-        return _send
+        return router_bot._hook_send_message
 
     def _hook_room_state_querier(self) -> HookRoomStateQuerier | None:
         """Return a router-backed room-state querier for hook contexts when available."""
