@@ -11,11 +11,9 @@ from urllib.parse import urlparse
 
 import httpx
 import typer
-import yaml
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from anthropic import APIStatusError
 from google.auth.exceptions import DefaultCredentialsError, RefreshError
-from pydantic import ValidationError
 
 from mindroom import constants
 from mindroom.constants import (
@@ -32,7 +30,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
 
-from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, Config, iter_config_validation_messages
 
 
 def doctor() -> None:
@@ -124,12 +122,9 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
     """Validate config file. Returns (config_or_none, passed, failed, warnings)."""
     try:
         config = _load_config_quiet(runtime_paths=runtime_paths)
-    except (ValidationError, ConfigRuntimeValidationError) as exc:
-        n = len(exc.errors())
-        console.print(f"[red]✗[/red] Config invalid ({n} validation error{'s' if n != 1 else ''})")
-        return None, 0, 1, 0
-    except (yaml.YAMLError, OSError) as exc:
-        console.print(f"[red]✗[/red] Config invalid: {exc}")
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        issues = "; ".join(f"{location}: {message}" for location, message in iter_config_validation_messages(exc))
+        console.print(f"[red]✗[/red] Config invalid: {issues}")
         return None, 0, 1, 0
     agents = len(config.agents)
     teams = len(config.teams)

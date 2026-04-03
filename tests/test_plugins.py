@@ -535,6 +535,89 @@ def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: P
         set_plugin_skill_roots(original_plugin_roots)
 
 
+def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Path) -> None:
+    """Re-enabling an unchanged plugin in the same process should restore its tools."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='toggled_plugin_tool',\n"
+        "    display_name='Toggled Plugin Tool',\n"
+        "    description='Should return when the plugin is re-enabled',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config_with_plugin = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+    config_without_plugin = _bind_runtime_paths(Config(plugins=[]), config_path)
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+
+    try:
+        assert [plugin.name for plugin in load_plugins(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
+            "demo_plugin",
+        ]
+        assert "toggled_plugin_tool" in _TOOL_REGISTRY
+
+        assert load_plugins(config_without_plugin, runtime_paths_for(config_without_plugin)) == []
+        assert "toggled_plugin_tool" not in _TOOL_REGISTRY
+
+        assert [plugin.name for plugin in load_plugins(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
+            "demo_plugin",
+        ]
+        assert "toggled_plugin_tool" in _TOOL_REGISTRY
+
+        follow_up_config = Config.model_validate(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {
+                    "assistant": {
+                        "display_name": "Assistant",
+                        "role": "test",
+                        "tools": ["toggled_plugin_tool"],
+                    },
+                },
+                "plugins": ["./plugins/demo"],
+            },
+        )
+        bound = _bind_runtime_paths(follow_up_config, config_path)
+        assert bound.get_agent("assistant").tool_names == ["toggled_plugin_tool"]
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._TOOL_MODULE_CACHE.clear()
+        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
 def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tmp_path: Path) -> None:
     """Duplicate plugin manifest names should fail before any plugin module imports run."""
     first_root = tmp_path / "plugins" / "first"

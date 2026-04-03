@@ -82,6 +82,15 @@ class ConfigRuntimeValidationError(ValueError):
         return [{"loc": ("config",), "msg": str(self), "type": "value_error"}]
 
 
+CONFIG_LOAD_USER_ERROR_TYPES = (
+    ValidationError,
+    ConfigRuntimeValidationError,
+    yaml.YAMLError,
+    OSError,
+    UnicodeError,
+)
+
+
 def iter_config_validation_messages(
     exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
 ) -> list[tuple[str, str]]:
@@ -1550,5 +1559,5 @@ def load_config_or_user_error(
     """Load config or return one shared user-facing invalid-configuration message."""
     try:
         return load_config(runtime_paths), None
-    except (ValidationError, ConfigRuntimeValidationError, yaml.YAMLError, OSError, UnicodeError) as exc:
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         return None, format_invalid_config_message(exc, footer=footer)

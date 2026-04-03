@@ -703,6 +703,17 @@ class TestConfigValidate:
         assert "Invalid configuration" in result.output
         assert "Plugin tools_module must be a string" in result.output
 
+    def test_validate_invalid_utf8_config(self, tmp_path: Path) -> None:
+        """Config validate should report unreadable config text cleanly."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_bytes(b"\xff\xfe\x00\x00")
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 1
+        assert "Invalid configuration" in result.output
+        assert "Could not read configuration text" in result.output
+
     def test_validate_accepts_file_based_api_key_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Config validate does not warn when provider secrets are supplied via *_FILE."""
         cfg = tmp_path / "config.yaml"
@@ -849,6 +860,17 @@ class TestRunErrorHandling:
         assert result.exit_code == 1
         assert "Invalid configuration" in result.output
         assert "Invalid plugin name" in result.output
+
+    def test_run_invalid_utf8_config(self, tmp_path: Path) -> None:
+        """Run should report unreadable config text without a traceback."""
+        bad_cfg = tmp_path / "config.yaml"
+        bad_cfg.write_bytes(b"\xff\xfe\x00\x00")
+
+        result = _invoke_with_runtime(["run"], bad_cfg)
+
+        assert result.exit_code == 1
+        assert "Invalid configuration" in result.output
+        assert "Could not read configuration text" in result.output
 
     def test_avatars_generate_reports_avatar_generation_failure(
         self,
@@ -1225,6 +1247,19 @@ class TestDoctor:
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 1
         assert "Config invalid" in result.output
+
+    def test_invalid_utf8_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor reports unreadable config text as a config failure."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_bytes(b"\xff\xfe\x00\x00")
+        storage = tmp_path / "storage"
+        _patch_homeserver_ok(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        assert result.exit_code == 1
+        assert "Config invalid" in result.output
+        assert "Could not read configuration text" in result.output
 
     def test_missing_api_key_is_warning(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor warns (not fails) on missing API keys."""

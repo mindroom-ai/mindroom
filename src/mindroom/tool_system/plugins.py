@@ -21,6 +21,7 @@ from mindroom.tool_system.skills import set_plugin_skill_roots
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.hooks.types import HookCallback
+    from mindroom.tool_system.metadata import ToolMetadata
 
 logger = get_logger(__name__)
 
@@ -90,11 +91,11 @@ def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
     """Remove plugin tool registrations for plugins no longer present in config."""
     from mindroom.tool_system.metadata import synchronize_plugin_tools  # noqa: PLC0415
 
-    active_tool_modules = {
+    active_tool_modules = [
         _module_name(plugin.name, plugin.tools_module_path)
         for plugin in plugins
         if plugin.tools_module_path is not None
-    }
+    ]
     synchronize_plugin_tools(active_tool_modules)
 
 
@@ -404,6 +405,16 @@ def _load_plugin_module(
         return cached.module
 
     module_name = _module_name(plugin_name, module_path)
+    previous_registrations: dict[str, ToolMetadata] | None = None
+    if kind == "tools":
+        from mindroom.tool_system.metadata import (  # noqa: PLC0415
+            clear_plugin_tool_registrations,
+            restore_plugin_tool_registrations,
+            snapshot_plugin_tool_registrations,
+        )
+
+        previous_registrations = snapshot_plugin_tool_registrations(module_name)
+        clear_plugin_tool_registrations(module_name)
     spec = util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
         msg = f"Failed to load plugin {kind} module: {module_path}"
@@ -416,6 +427,11 @@ def _load_plugin_module(
         spec.loader.exec_module(module)
     except Exception as exc:
         sys.modules.pop(module_name, None)
+        if kind == "tools":
+            restore_plugin_tool_registrations(
+                module_name,
+                previous_registrations or {},
+            )
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
         logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
         raise ValueError(msg) from exc
