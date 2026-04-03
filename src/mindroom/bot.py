@@ -36,6 +36,12 @@ from mindroom.hooks import (
     render_enrichment_block,
     strip_enrichment_from_session_storage,
 )
+from mindroom.hooks.ingress import (
+    HookIngressPolicy,
+    hook_ingress_policy,
+    is_automation_source_kind,
+    should_handle_interactive_text_response,
+)
 from mindroom.hooks.sender import HookMessageSender, send_hook_message
 from mindroom.hooks.types import (
     EVENT_AGENT_STARTED,
@@ -232,7 +238,6 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
-_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"scheduled", "hook", "hook_dispatch"})
 
 
 def _get_or_create_lock(locks: dict[object, asyncio.Lock], key: object, *, max_entries: int = 100) -> asyncio.Lock:
@@ -521,16 +526,6 @@ type _PrecheckedDispatchEvent = _PrecheckedEvent[_DispatchEvent]
 type _PrecheckedMediaDispatchEvent = _PrecheckedEvent[_MediaDispatchEvent]
 
 
-@dataclass(frozen=True)
-class _HookIngressPolicy:
-    """Normalized ingress behavior for hook-originated synthetic messages."""
-
-    rerun_message_received: bool = True
-    skip_message_received_plugin_names: frozenset[str] = field(default_factory=frozenset)
-    bypass_unmentioned_agent_gate: bool = False
-    allow_full_dispatch: bool = True
-
-
 def _is_coalescing_exempt_source_kind(event: _DispatchEvent) -> bool:
     """Return True when coalescing should be skipped for this event.
 
@@ -543,46 +538,7 @@ def _is_coalescing_exempt_source_kind(event: _DispatchEvent) -> bool:
     if not isinstance(content, dict):
         return False
     source_kind = content.get("com.mindroom.source_kind")
-    return isinstance(source_kind, str) and source_kind in _COALESCING_EXEMPT_SOURCE_KINDS
-
-
-def _split_hook_source(hook_source: str | None) -> tuple[str | None, str | None]:
-    """Return ``(plugin_name, event_name)`` from one serialized hook source tag."""
-    if not isinstance(hook_source, str):
-        return None, None
-    plugin_name, _, source_event_name = hook_source.partition(":")
-    if not plugin_name or not source_event_name:
-        return None, None
-    return plugin_name, source_event_name
-
-
-def _hook_ingress_policy(envelope: MessageEnvelope) -> _HookIngressPolicy:
-    """Return the normalized ingress policy for one synthetic hook message."""
-    if envelope.source_kind not in {"hook", "hook_dispatch"}:
-        return _HookIngressPolicy()
-
-    plugin_name, source_event_name = _split_hook_source(envelope.hook_source)
-    policy = _HookIngressPolicy(bypass_unmentioned_agent_gate=envelope.source_kind == "hook_dispatch")
-    if envelope.message_received_depth == 0:
-        return policy
-    if envelope.message_received_depth == 1:
-        if source_event_name == EVENT_MESSAGE_RECEIVED:
-            skip_plugin_names = frozenset({plugin_name}) if plugin_name is not None else frozenset()
-            return _HookIngressPolicy(
-                bypass_unmentioned_agent_gate=policy.bypass_unmentioned_agent_gate,
-                skip_message_received_plugin_names=skip_plugin_names,
-            )
-        return policy
-    return _HookIngressPolicy(
-        rerun_message_received=False,
-        bypass_unmentioned_agent_gate=policy.bypass_unmentioned_agent_gate,
-        allow_full_dispatch=False,
-    )
-
-
-def _should_handle_interactive_text_response(envelope: MessageEnvelope) -> bool:
-    """Return whether one inbound text event may answer an interactive prompt."""
-    return envelope.source_kind not in _COALESCING_EXEMPT_SOURCE_KINDS
+    return isinstance(source_kind, str) and is_automation_source_kind(source_kind)
 
 
 def _merge_response_extra_content(
@@ -837,7 +793,7 @@ class AgentBot:
         envelope: MessageEnvelope,
     ) -> bool:
         """Return True when a deep synthetic hook relay must stop before dispatch."""
-        ingress_policy = _hook_ingress_policy(envelope)
+        ingress_policy = hook_ingress_policy(envelope)
         if ingress_policy.allow_full_dispatch:
             return False
         self.logger.debug(
@@ -881,7 +837,7 @@ class AgentBot:
         *,
         envelope: MessageEnvelope,
         correlation_id: str,
-        policy: _HookIngressPolicy,
+        policy: HookIngressPolicy,
     ) -> bool:
         """Emit message:received and return whether hooks suppressed processing."""
         if not self.hook_registry.has_hooks(EVENT_MESSAGE_RECEIVED):
@@ -1567,7 +1523,7 @@ class AgentBot:
             envelope=envelope,
         ):
             return
-        if _should_handle_interactive_text_response(envelope):
+        if should_handle_interactive_text_response(envelope):
             await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
         await self._dispatch_text_message(
             room,
@@ -2136,7 +2092,7 @@ class AgentBot:
             envelope=envelope,
         ):
             return True
-        if _should_handle_interactive_text_response(envelope):
+        if should_handle_interactive_text_response(envelope):
             await interactive.handle_text_response(self.client, room, prepared_text_event, self.agent_name)
         await self._dispatch_text_message(
             room,
@@ -2388,7 +2344,7 @@ class AgentBot:
             requester_user_id=effective_requester_user_id,
             context=context,
         )
-        ingress_policy = _hook_ingress_policy(envelope)
+        ingress_policy = hook_ingress_policy(envelope)
         if await self._emit_message_received_hooks(
             envelope=envelope,
             correlation_id=correlation_id,
@@ -5304,7 +5260,7 @@ class AgentBot:
             body=edited_content,
             source_kind="edit",
         )
-        ingress_policy = _hook_ingress_policy(envelope)
+        ingress_policy = hook_ingress_policy(envelope)
         if await self._emit_message_received_hooks(
             envelope=envelope,
             correlation_id=event.event_id,
