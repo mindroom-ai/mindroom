@@ -435,6 +435,15 @@ class MatrixMessageTools(Toolkit):
         body = cls._message_to_dict(message).get("body")
         return body if isinstance(body, str) else None
 
+    @classmethod
+    def _message_visible_event_id(cls, message: ResolvedVisibleMessage | dict[str, object]) -> str | None:
+        if isinstance(message, ResolvedVisibleMessage):
+            return message.visible_event_id
+        latest_event_id = cls._message_to_dict(message).get("latest_event_id")
+        if isinstance(latest_event_id, str):
+            return latest_event_id
+        return cls._message_event_id(message)
+
     def _build_edit_options(
         self,
         context: ToolRuntimeContext,
@@ -686,12 +695,13 @@ class MatrixMessageTools(Toolkit):
         new_text = message.strip() if isinstance(message, str) and message.strip() else None
         if new_text is None:
             return self._payload("error", action="edit", message="message is required for edit.")
+        formatted_text = parse_and_format_interactive(new_text, extract_mapping=False).formatted_text
 
         latest_thread_event_id: str | None = None
         if thread_id is not None:
             thread_messages = await fetch_thread_history(context.client, room_id, thread_id)
             if thread_messages:
-                latest_thread_event_id = thread_messages[-1].visible_event_id
+                latest_thread_event_id = self._message_visible_event_id(thread_messages[-1])
             if latest_thread_event_id is None:
                 latest_thread_event_id = target
 

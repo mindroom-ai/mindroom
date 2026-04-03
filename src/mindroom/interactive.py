@@ -66,7 +66,15 @@ _deleted_question_ids: set[str] = set()
 
 # Constants
 # Match interactive code blocks
-_INTERACTIVE_PATTERN = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```"
+_INTERACTIVE_MARKERS = frozenset({"interactive", "interactive json"})
+_INTERACTIVE_PATTERN = (
+    r"(?m)^[ \t]*```[ \t]*(?:"
+    r"interactive(?:[ \t]+json)?[ \t]*\r?\n"
+    r"|"
+    r"\r?\n[ \t]*interactive(?:[ \t]+json)?[ \t]*\r?\n"
+    r")(.*?)\r?\n[ \t]*```[ \t]*$"
+)
+_INTERACTIVE_PATTERN_FLAGS = re.DOTALL | re.IGNORECASE | re.MULTILINE
 _MAX_OPTIONS = 5
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
@@ -292,6 +300,60 @@ def init_persistence(storage_root: Path) -> None:
             )
 
 
+def _preview_text(text: str, max_length: int = 160) -> str:
+    """Return a compact preview for warning logs."""
+    compact = " ".join(text.split())
+    if len(compact) <= max_length:
+        return compact
+    return f"{compact[: max_length - 3].rstrip()}..."
+
+
+def _find_interactive_match(response_text: str) -> re.Match[str] | None:
+    """Return the first interactive block match if present."""
+    return re.search(_INTERACTIVE_PATTERN, response_text, _INTERACTIVE_PATTERN_FLAGS)
+
+
+def _normalize_interactive_marker(text: str) -> str:
+    """Normalize an interactive fence marker for exact comparisons."""
+    return " ".join(text.strip().lower().split())
+
+
+def _is_interactive_marker(text: str) -> bool:
+    """Return whether the text is an allowed interactive marker."""
+    return _normalize_interactive_marker(text) in _INTERACTIVE_MARKERS
+
+
+def _is_inline_interactive_json(text: str) -> bool:
+    """Return whether the text looks like an interactive marker with inline JSON."""
+    normalized = _normalize_interactive_marker(text)
+    for marker in ("interactive json", "interactive"):
+        if not normalized.startswith(f"{marker} "):
+            continue
+        remainder = normalized[len(marker) :].lstrip()
+        if remainder.startswith(("{", "[")):
+            return True
+    return False
+
+
+def _should_warn_unparsed_interactive(response_text: str) -> bool:
+    """Return whether the text looks like a malformed interactive fence."""
+    for match in re.finditer(r"```", response_text):
+        fence_body = response_text[match.end() :]
+        fence_lines = fence_body.splitlines()
+        fence_marker = fence_lines[0].strip() if fence_lines else fence_body.strip()
+        if _is_interactive_marker(fence_marker) or _is_inline_interactive_json(fence_marker):
+            return True
+        if fence_marker:
+            continue
+
+        if len(fence_lines) < 2:
+            continue
+        next_line = fence_lines[1]
+        if _is_interactive_marker(next_line) or _is_inline_interactive_json(next_line):
+            return True
+    return False
+
+
 def should_create_interactive_question(response_text: str) -> bool:
     """Check if the response contains an interactive question in JSON format.
 
@@ -302,7 +364,7 @@ def should_create_interactive_question(response_text: str) -> bool:
         True if an interactive code block is found
 
     """
-    return bool(re.search(_INTERACTIVE_PATTERN, response_text, re.DOTALL))
+    return bool(_find_interactive_match(response_text))
 
 
 async def handle_reaction(
@@ -458,14 +520,24 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
 
     """
     # Find the first interactive block for processing
-    first_match = re.search(_INTERACTIVE_PATTERN, response_text, re.DOTALL)
+    first_match = _find_interactive_match(response_text)
 
     if not first_match:
+        if _should_warn_unparsed_interactive(response_text):
+            logger.warning(
+                "Interactive block not parsed",
+                preview=_preview_text(response_text),
+            )
         return _InteractiveResponse(response_text, None, None)
 
     try:
         interactive_data = json.loads(first_match.group(1))
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "Interactive JSON parse failed",
+            error=str(exc),
+            preview=_preview_text(first_match.group(1)),
+        )
         return _InteractiveResponse(response_text, None, None)
 
     question = interactive_data.get("question", _DEFAULT_QUESTION)
@@ -540,8 +612,10 @@ def register_interactive_question(
 def clear_interactive_question(event_id: str) -> None:
     """Remove one tracked interactive question when its message is edited away."""
     with _thread_lock:
-        if _remove_active_question_locked(event_id):
-            _save_active_questions_locked()
+        if not _remove_active_question_locked(event_id):
+            return
+        _save_active_questions_locked()
+    logger.info("Cleared interactive question", event_id=event_id)
 
 
 async def add_reaction_buttons(
