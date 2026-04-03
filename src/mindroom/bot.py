@@ -522,6 +522,7 @@ class _HookIngressPolicy:
     rerun_message_received: bool = True
     skip_message_received_plugin_names: frozenset[str] = field(default_factory=frozenset)
     bypass_unmentioned_agent_gate: bool = False
+    allow_full_dispatch: bool = True
 
 
 def _is_coalescing_exempt_source_kind(event: _DispatchEvent) -> bool:
@@ -564,9 +565,12 @@ def _hook_ingress_policy(envelope: MessageEnvelope) -> _HookIngressPolicy:
             bypass_unmentioned_agent_gate=policy.bypass_unmentioned_agent_gate,
             skip_message_received_plugin_names=skip_plugin_names,
         )
+    if envelope.message_received_depth == 1 and envelope.source_kind == "hook_dispatch":
+        return policy
     return _HookIngressPolicy(
         rerun_message_received=False,
         bypass_unmentioned_agent_gate=policy.bypass_unmentioned_agent_gate,
+        allow_full_dispatch=False,
     )
 
 
@@ -1532,6 +1536,16 @@ class AgentBot:
         )
         if dispatch is None:
             return
+        ingress_policy = _hook_ingress_policy(dispatch.envelope)
+        if not ingress_policy.allow_full_dispatch:
+            self.logger.debug(
+                "Ignoring deep synthetic hook relay before command/response dispatch",
+                event_id=event.event_id,
+                source_kind=dispatch.envelope.source_kind,
+                hook_source=dispatch.envelope.hook_source,
+                message_received_depth=dispatch.envelope.message_received_depth,
+            )
+            return
 
         # Router handles commands exclusively
         command = command_parser.parse(event.body)
@@ -1546,6 +1560,7 @@ class AgentBot:
                         requester_user_id=prechecked_event.requester_user_id,
                     ),
                     command,
+                    source_envelope=dispatch.envelope,
                 )
             return
         await self._hydrate_dispatch_context(room, event, dispatch.context)
@@ -3945,6 +3960,7 @@ class AgentBot:
         agent_name: str,
         user_id: str | None,
         reply_to_event: nio.RoomMessageText | None = None,
+        source_envelope: MessageEnvelope | None = None,
     ) -> str | None:
         """Send a skill command response using a specific agent."""
         response_target = self._prepare_response_target(
@@ -3969,6 +3985,7 @@ class AgentBot:
                 user_id=user_id,
                 reply_to_event=reply_to_event,
                 response_target=response_target,
+                source_envelope=source_envelope,
             )
 
     async def _send_skill_command_response_locked(
@@ -3983,6 +4000,7 @@ class AgentBot:
         user_id: str | None,
         reply_to_event: nio.RoomMessageText | None = None,
         response_target: _ResponseTarget,
+        source_envelope: MessageEnvelope | None = None,
     ) -> str | None:
         """Send a skill command response after acquiring the per-thread lock."""
         assert self.client is not None
@@ -4001,6 +4019,7 @@ class AgentBot:
             response_target=response_target,
             include_context=self._agent_has_matrix_messaging_tool(agent_name),
             agent_name=agent_name,
+            source_envelope=source_envelope,
         )
         session_id = response_target.session_id
         model_prompt = runtime.model_prompt
@@ -5335,9 +5354,35 @@ class AgentBot:
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedTextDispatchEvent,
         command: Command,
+        *,
+        source_envelope: MessageEnvelope | None = None,
     ) -> None:
         assert self.client is not None
         event = await self._resolve_text_dispatch_event(prechecked_event.event)
+
+        async def send_skill_command_response(
+            *,
+            room_id: str,
+            reply_to_event_id: str,
+            thread_id: str | None,
+            thread_history: Sequence[ResolvedVisibleMessage],
+            prompt: str,
+            agent_name: str,
+            user_id: str | None,
+            reply_to_event: nio.RoomMessageText | None = None,
+        ) -> str | None:
+            return await self._send_skill_command_response(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                thread_history=thread_history,
+                prompt=prompt,
+                agent_name=agent_name,
+                user_id=user_id,
+                reply_to_event=reply_to_event,
+                source_envelope=source_envelope,
+            )
+
         context = CommandHandlerContext(
             client=self.client,
             config=self.config,
@@ -5348,7 +5393,7 @@ class AgentBot:
             derive_conversation_context=self._derive_conversation_context,
             resolve_reply_thread_id=self._resolve_reply_thread_id,
             send_response=self._send_response,
-            send_skill_command_response=self._send_skill_command_response,
+            send_skill_command_response=send_skill_command_response,
         )
         await handle_command(
             context=context,

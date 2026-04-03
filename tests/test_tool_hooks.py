@@ -648,6 +648,7 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
             {
                 "phase": "before",
                 "com.mindroom.original_sender": "@user:localhost",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
             False,
         ),
@@ -659,6 +660,7 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
             {
                 "phase": "after",
                 "com.mindroom.original_sender": "@user:localhost",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
             False,
         ),
@@ -785,6 +787,7 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
             "tool-policy:tool:before_call",
             {
                 "com.mindroom.original_sender": "@user:localhost",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
             True,
         ),

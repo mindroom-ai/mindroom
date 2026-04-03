@@ -428,10 +428,12 @@ Sends a hook-originated Matrix message and returns the event ID on success, or `
 For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
 For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while passing `thread_id=None` explicitly posts at room level.
 Plain `hook` sends can still dispatch when they satisfy the usual routing rules, for example if the message explicitly mentions an agent or otherwise qualifies as a normal addressed message.
+Hook-originated sends always carry an internal synthetic-chain depth.
+The first hook-originated hop uses depth `1`, and each later synthetic hop increments it.
 When `trigger_dispatch=True`, MindRoom sends the message as source kind `hook_dispatch`.
-That variant still re-enters the normal ingress pipeline, including `message:received`, and bypasses the usual "ignore other agent unless mentioned" ingress gate before continuing through normal permissions, routing, and should-respond checks.
-Automation that originates from `message:received` re-enters `message:received` at most once.
-MindRoom skips the origin plugin on that first synthetic hop, then suppresses deeper `message:received` re-entry for the rest of the synthetic chain to avoid cross-plugin feedback loops.
+The first synthetic `hook_dispatch` hop still re-enters the normal ingress pipeline, including `message:received`, and bypasses the usual "ignore other agent unless mentioned" ingress gate before continuing through normal permissions, routing, and should-respond checks.
+If that first synthetic hop originated from `message:received`, MindRoom skips the origin plugin on the `message:received` re-entry.
+Deeper synthetic hook hops still arrive as messages, but they do not re-enter `message:received` and they stop before further command handling or agent/model dispatch to avoid feedback loops.
 
 **`await ctx.query_room_state(room_id, event_type, state_key=None)`**
 Queries Matrix room state events.
@@ -463,7 +465,7 @@ MessageEnvelope(
     agent_name: str,
     source_kind: str,  # "message", "edit", "voice", "image", "scheduled", "hook", "hook_dispatch"
     hook_source: str | None = None,
-    message_received_depth: int = 0,
+    message_received_depth: int = 0,  # internal synthetic-chain depth for hook-originated relays
 )
 
 ResponseDraft(

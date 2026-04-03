@@ -594,20 +594,23 @@ def _requester_id_for_hook_send(
 
 
 def _message_received_depth_for_hook_send(context: object) -> int:
-    """Return the causal message:received relay depth to preserve on hook sends."""
-    if isinstance(context, MessageReceivedContext):
-        return context.envelope.message_received_depth + 1
-    if isinstance(context, MessageEnrichContext):
-        return _next_message_received_depth(context.envelope.message_received_depth)
+    """Return the synthetic hook-chain depth to preserve on hook sends."""
+    return _next_message_received_depth(_current_message_received_depth(context))
+
+
+def _current_message_received_depth(context: object) -> int:
+    """Return the inbound synthetic hook-chain depth for one hook context."""
+    if isinstance(context, MessageReceivedContext | MessageEnrichContext):
+        return context.envelope.message_received_depth
     if isinstance(context, BeforeResponseContext):
-        return _next_message_received_depth(context.draft.envelope.message_received_depth)
+        return context.draft.envelope.message_received_depth
     if isinstance(context, AfterResponseContext):
-        return _next_message_received_depth(context.result.envelope.message_received_depth)
+        return context.result.envelope.message_received_depth
     if isinstance(context, CustomEventContext | ToolBeforeCallContext | ToolAfterCallContext):
-        return _next_message_received_depth(context.message_received_depth)
+        return context.message_received_depth
     return 0
 
 
 def _next_message_received_depth(current_depth: int) -> int:
     """Return the next synthetic-chain depth after one downstream hook hop."""
-    return current_depth + 1 if current_depth > 0 else 0
+    return current_depth + 1

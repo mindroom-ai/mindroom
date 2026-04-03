@@ -349,6 +349,83 @@ async def test_downstream_hook_sends_advance_existing_message_received_depth(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("context_kind", ["enrich", "before", "after"])
+async def test_non_message_hook_dispatch_starts_synthetic_chain_at_depth_one(
+    tmp_path: Path,
+    context_kind: str,
+) -> None:
+    """Non-message hook dispatch should mark the first synthetic hop with depth one."""
+    sent_messages: list[dict[str, object] | None] = []
+
+    async def sender(
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, object] | None,
+        *,
+        trigger_dispatch: bool = False,
+    ) -> str | None:
+        del room_id, body, thread_id, source_hook, trigger_dispatch
+        sent_messages.append(extra_content)
+        return "$event"
+
+    config = _config(tmp_path)
+    base_kwargs = {
+        "plugin_name": "downstream-plugin",
+        "settings": {},
+        "config": config,
+        "runtime_paths": runtime_paths_for(config),
+        "logger": get_logger("tests.hook_sender").bind(event_name="test"),
+        "correlation_id": "corr-depth",
+        "message_sender": sender,
+    }
+    envelope = _message_received_context(tmp_path).envelope
+    if context_kind == "enrich":
+        context = MessageEnrichContext(
+            event_name="message:enrich",
+            envelope=envelope,
+            target_entity_name="code",
+            target_member_names=None,
+            **base_kwargs,
+        )
+    elif context_kind == "before":
+        context = BeforeResponseContext(
+            event_name="message:before_response",
+            draft=ResponseDraft(
+                response_text="hello",
+                response_kind="ai",
+                tool_trace=None,
+                extra_content=None,
+                envelope=envelope,
+            ),
+            **base_kwargs,
+        )
+    else:
+        context = AfterResponseContext(
+            event_name="message:after_response",
+            result=ResponseResult(
+                response_text="hello",
+                response_event_id="$response",
+                delivery_kind="sent",
+                response_kind="ai",
+                envelope=envelope,
+            ),
+            **base_kwargs,
+        )
+
+    event_id = await context.send_message("!room:localhost", "follow-up", trigger_dispatch=True)
+
+    assert event_id == "$event"
+    assert sent_messages == [
+        {
+            "com.mindroom.original_sender": "@user:localhost",
+            HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_hook_send_message_failure_does_not_crash_later_hooks(tmp_path: Path) -> None:
     """Sender failures should be isolated by normal hook execution error handling."""
 
@@ -963,6 +1040,100 @@ async def test_hook_dispatch_from_message_received_stops_reentry_after_first_syn
     assert hook_calls == []
     assert dispatch.envelope.source_kind == "hook_dispatch"
     assert dispatch.envelope.message_received_depth == 2
+
+
+@pytest.mark.asyncio
+async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_path: Path) -> None:
+    """Deeper synthetic hook relays should stop before command parsing or AI dispatch."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$deep-hook-dispatch",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "follow-up automation",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:message:before_response",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
+            },
+        },
+    )
+    bot._resolve_text_dispatch_event = AsyncMock(return_value=event)
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._resolve_dispatch_action = AsyncMock()
+
+    await bot._dispatch_text_message(
+        room,
+        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+    )
+
+    bot._resolve_dispatch_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hook_dispatch_skill_command_preserves_source_envelope_in_runtime(tmp_path: Path) -> None:
+    """Skill-command responses should inherit hook provenance and synthetic depth."""
+    bot = _hook_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$hook-skill",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "!skill demo summarize",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:message:received",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
+            },
+        },
+    )
+    bot._resolve_text_dispatch_event = AsyncMock(return_value=event)
+    bot._extract_dispatch_context = AsyncMock(
+        return_value=_MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+    )
+    bot._send_skill_command_response = AsyncMock(return_value="$skill-reply")
+
+    async def fake_handle_command(
+        *,
+        context: object,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+        command: object,
+        requester_user_id: str,
+    ) -> None:
+        del command
+        await context.send_skill_command_response(
+            room_id=room.room_id,
+            reply_to_event_id=event.event_id,
+            thread_id=None,
+            thread_history=[],
+            prompt="Use demo skill",
+            agent_name="code",
+            user_id=requester_user_id,
+            reply_to_event=event,
+        )
+
+    with patch("mindroom.bot.handle_command", new=fake_handle_command):
+        await bot._dispatch_text_message(
+            room,
+            _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        )
+
+    source_envelope = bot._send_skill_command_response.await_args.kwargs["source_envelope"]
+    assert source_envelope.hook_source == "origin-plugin:message:received"
+    assert source_envelope.message_received_depth == 1
 
 
 @pytest.mark.asyncio
