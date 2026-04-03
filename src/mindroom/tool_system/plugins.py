@@ -101,7 +101,7 @@ def load_plugins(
         return []
     plugins: list[_Plugin] = []
     skill_roots: list[Path] = []
-    seen_plugin_manifest_paths: dict[str, Path] = {}
+    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]] = []
 
     for plugin_order, plugin_entry in enumerate(plugin_entries):
         if not plugin_entry.enabled:
@@ -111,16 +111,11 @@ def load_plugins(
         plugin_base = _load_plugin_base(root)
         if plugin_base is None:
             continue
-        existing_manifest_path = seen_plugin_manifest_paths.get(plugin_base.name)
-        if existing_manifest_path is not None:
-            logger.warning(
-                "Skipping duplicate plugin manifest name",
-                plugin_name=plugin_base.name,
-                path=str(plugin_base.manifest_path),
-                first_path=str(existing_manifest_path),
-            )
-            continue
-        seen_plugin_manifest_paths[plugin_base.name] = plugin_base.manifest_path
+        plugin_bases.append((plugin_base, plugin_entry, plugin_order))
+
+    _reject_duplicate_plugin_manifest_names(plugin_bases)
+
+    for plugin_base, plugin_entry, plugin_order in plugin_bases:
         plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
         plugins.append(plugin)
         skill_roots.extend(plugin.skill_dirs)
@@ -130,6 +125,26 @@ def load_plugins(
 
     set_plugin_skill_roots(skill_roots)
     return plugins
+
+
+def _reject_duplicate_plugin_manifest_names(
+    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]],
+) -> None:
+    """Fail plugin loading when configured manifests reuse the same plugin name."""
+    manifest_paths_by_name: dict[str, list[Path]] = {}
+    for plugin_base, _, _ in plugin_bases:
+        manifest_paths_by_name.setdefault(plugin_base.name, []).append(plugin_base.manifest_path)
+
+    duplicates = {name: paths for name, paths in manifest_paths_by_name.items() if len(paths) > 1}
+    if not duplicates:
+        return
+
+    duplicate_descriptions = ", ".join(
+        f"{name}: {', '.join(str(path) for path in paths)}" for name, paths in sorted(duplicates.items())
+    )
+    logger.error("Duplicate plugin manifest names configured", duplicates=duplicates)
+    msg = f"Duplicate plugin manifest names configured: {duplicate_descriptions}"
+    raise ValueError(msg)
 
 
 def _resolve_plugin_root(plugin_path: str, runtime_paths: RuntimePaths) -> Path:

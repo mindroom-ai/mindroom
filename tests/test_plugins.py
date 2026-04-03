@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+import pytest
 
 import mindroom.tool_system.plugins as plugin_module
 from mindroom.config.main import Config
@@ -15,9 +16,6 @@ from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_too
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import bind_runtime_paths, runtime_paths_for
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def _bind_runtime_paths(config: Config, config_path: Path) -> Config:
@@ -236,7 +234,7 @@ def test_load_plugins_rejects_manifest_name_with_colon(tmp_path: Path) -> None:
 
 
 def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tmp_path: Path) -> None:
-    """Duplicate plugin manifest names must be rejected before import side effects run."""
+    """Duplicate plugin manifest names should fail before any plugin module imports run."""
     first_root = tmp_path / "plugins" / "first"
     second_root = tmp_path / "plugins" / "second"
     first_root.mkdir(parents=True)
@@ -244,19 +242,31 @@ def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tm
     manifest = {"name": "shared-plugin", "tools_module": "tools.py", "skills": []}
     (first_root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
     (second_root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (first_root / "tools.py").write_text("VALUE = 'first'\n", encoding="utf-8")
-    (second_root / "tools.py").write_text("raise RuntimeError('duplicate should not import')\n", encoding="utf-8")
+    first_import_marker = tmp_path / "first-imported"
+    second_import_marker = tmp_path / "second-imported"
+    (first_root / "tools.py").write_text(
+        f"from pathlib import Path\nPath({str(first_import_marker)!r}).write_text('imported', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (second_root / "tools.py").write_text(
+        "raise RuntimeError('broken duplicate should not import')\n",
+        encoding="utf-8",
+    )
+    (second_root / "hooks.py").write_text(
+        f"from pathlib import Path\nPath({str(second_import_marker)!r}).write_text('imported', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    config = _bind_runtime_paths(Config(plugins=["./plugins/first", "./plugins/second"]), config_path)
 
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
     try:
-        plugins = load_plugins(config, runtime_paths_for(config))
+        with pytest.raises(ValueError, match="Duplicate plugin manifest names configured"):
+            _bind_runtime_paths(Config(plugins=["./plugins/first", "./plugins/second"]), config_path)
     finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
@@ -265,8 +275,8 @@ def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tm
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
 
-    assert [plugin.name for plugin in plugins] == ["shared-plugin"]
-    assert plugins[0].root == first_root.resolve()
+    assert not first_import_marker.exists()
+    assert not second_import_marker.exists()
 
 
 def test_config_normalizes_string_and_object_plugin_entries() -> None:
