@@ -172,60 +172,8 @@ class ResponseResult:
     envelope: MessageEnvelope
 
 
-class _PluginStateRootMixin:
-    """Shared plugin state-root property for hook contexts."""
-
-    runtime_paths: RuntimePaths | None
-    plugin_name: str
-
-    @property
-    def state_root(self) -> Path:
-        """Return the plugin state root, creating it on first access."""
-        return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
-
-
-class _BoundRoomStateMixin:
-    """Shared room-state helper methods for hook contexts."""
-
-    logger: structlog.stdlib.BoundLogger
-    room_state_querier: HookRoomStateQuerier | None
-    room_state_putter: HookRoomStatePutter | None
-
-    async def query_room_state(
-        self,
-        room_id: str,
-        event_type: str,
-        state_key: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Query Matrix room state and return the result when a querier is available."""
-        return await _query_bound_room_state(
-            self.logger,
-            self.room_state_querier,
-            room_id,
-            event_type,
-            state_key,
-        )
-
-    async def put_room_state(
-        self,
-        room_id: str,
-        event_type: str,
-        state_key: str,
-        content: dict[str, Any],
-    ) -> bool:
-        """Write a Matrix room state event and return ``True`` on success."""
-        return await _put_bound_room_state(
-            self.logger,
-            self.room_state_putter,
-            room_id,
-            event_type,
-            state_key,
-            content,
-        )
-
-
 @dataclass(slots=True)
-class HookContext(_PluginStateRootMixin, _BoundRoomStateMixin):
+class HookContext:
     """Base fields available to every hook."""
 
     event_name: str
@@ -238,6 +186,11 @@ class HookContext(_PluginStateRootMixin, _BoundRoomStateMixin):
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
+
+    @property
+    def state_root(self) -> Path:
+        """Return the plugin state root, creating it on first access."""
+        return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
 
     async def send_message(
         self,
@@ -273,6 +226,38 @@ class HookContext(_PluginStateRootMixin, _BoundRoomStateMixin):
             requester_id=_requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch),
             message_received_depth=_message_received_depth_for_hook_send(self),
             trigger_dispatch=trigger_dispatch,
+        )
+
+    async def query_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Query Matrix room state and return the result when a querier is available."""
+        return await _query_bound_room_state(
+            self.logger,
+            self.room_state_querier,
+            room_id,
+            event_type,
+            state_key,
+        )
+
+    async def put_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+        content: dict[str, Any],
+    ) -> bool:
+        """Write a Matrix room state event and return ``True`` on success."""
+        return await _put_bound_room_state(
+            self.logger,
+            self.room_state_putter,
+            room_id,
+            event_type,
+            state_key,
+            content,
         )
 
 
@@ -403,7 +388,7 @@ class CustomEventContext(HookContext):
 
 
 @dataclass(slots=True)
-class ToolBeforeCallContext(_PluginStateRootMixin, _BoundRoomStateMixin):
+class ToolBeforeCallContext:
     """Context passed to tool:before_call hook callbacks."""
 
     tool_name: str
@@ -432,6 +417,11 @@ class ToolBeforeCallContext(_PluginStateRootMixin, _BoundRoomStateMixin):
         self.declined = True
         self.decline_reason = reason
 
+    @property
+    def state_root(self) -> Path:
+        """Return the plugin state root, creating it on first access."""
+        return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
+
     async def send_message(
         self,
         room_id: str,
@@ -456,9 +446,41 @@ class ToolBeforeCallContext(_PluginStateRootMixin, _BoundRoomStateMixin):
             trigger_dispatch=trigger_dispatch,
         )
 
+    async def query_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Query Matrix room state and return the result when a querier is available."""
+        return await _query_bound_room_state(
+            self.logger,
+            self.room_state_querier,
+            room_id,
+            event_type,
+            state_key,
+        )
+
+    async def put_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+        content: dict[str, Any],
+    ) -> bool:
+        """Write a Matrix room state event and return ``True`` on success."""
+        return await _put_bound_room_state(
+            self.logger,
+            self.room_state_putter,
+            room_id,
+            event_type,
+            state_key,
+            content,
+        )
+
 
 @dataclass(slots=True)
-class ToolAfterCallContext(_PluginStateRootMixin, _BoundRoomStateMixin):
+class ToolAfterCallContext:
     """Context passed to tool:after_call hook callbacks."""
 
     tool_name: str
@@ -484,6 +506,11 @@ class ToolAfterCallContext(_PluginStateRootMixin, _BoundRoomStateMixin):
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
     message_received_depth: int = 0
 
+    @property
+    def state_root(self) -> Path:
+        """Return the plugin state root, creating it on first access."""
+        return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
+
     async def send_message(
         self,
         room_id: str,
@@ -506,6 +533,38 @@ class ToolAfterCallContext(_PluginStateRootMixin, _BoundRoomStateMixin):
             requester_id=self.requester_id,
             message_received_depth=_message_received_depth_for_hook_send(self),
             trigger_dispatch=trigger_dispatch,
+        )
+
+    async def query_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Query Matrix room state and return the result when a querier is available."""
+        return await _query_bound_room_state(
+            self.logger,
+            self.room_state_querier,
+            room_id,
+            event_type,
+            state_key,
+        )
+
+    async def put_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+        content: dict[str, Any],
+    ) -> bool:
+        """Write a Matrix room state event and return ``True`` on success."""
+        return await _put_bound_room_state(
+            self.logger,
+            self.room_state_putter,
+            room_id,
+            event_type,
+            state_key,
+            content,
         )
 
 
