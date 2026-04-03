@@ -70,4 +70,4 @@ Notes:
 - Instances in Cluster should be created via the platform provisioner API. Avoid direct Helm installs except for debugging.
 - `saas-platform/.env` is the source of truth for Terraform + Helm deployment. It is not committed.
 - Local artifacts (backups, wgcf, etc.) are ignored by git.
-- Router-managed rooms in `multi_user` mode now reconcile `m.room.power_levels` so `com.mindroom.thread.resolution` can be sent at PL0. If room reconciliation logs start failing, check that the service account is joined and allowed to update room power levels.
+- Router-managed rooms in `multi_user` mode now reconcile `m.room.power_levels` so `com.mindroom.thread.tags` can be sent at PL0. If room reconciliation logs start failing, check that the service account is joined and allowed to update room power levels.

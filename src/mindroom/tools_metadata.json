@@ -304,13 +304,13 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Resolve or reopen Matrix threads using shared room-state markers",
-      "display_name": "Thread Resolution",
+      "description": "Tag, untag, and inspect Matrix threads using shared room-state markers",
+      "display_name": "Thread Tags",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "helper_text": null,
-      "icon": "CheckCheck",
+      "icon": "Tags",
       "icon_color": "text-emerald-500",
-      "name": "thread_resolution",
+      "name": "thread_tags",
       "setup_type": "none",
       "status": "available"
     },
