@@ -383,6 +383,7 @@ timezone: America/Los_Angeles      # Default: UTC
 - [Agents](https://docs.mindroom.chat/configuration/agents/index.md) - Configure individual AI agents
 - [Models](https://docs.mindroom.chat/configuration/models/index.md) - Configure AI model providers
 - [Teams](https://docs.mindroom.chat/configuration/teams/index.md) - Configure multi-agent collaboration
+- [Toolkits](https://docs.mindroom.chat/configuration/toolkits/index.md) - Configure dynamic tool bundles that agents load on demand
 - [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
 - [Router](https://docs.mindroom.chat/configuration/router/index.md) - Configure message routing
 - [Memory](https://docs.mindroom.chat/memory/index.md) - Configure memory providers and behavior

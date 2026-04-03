@@ -2112,6 +2112,23 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
+      "config_fields": [],
+      "default_execution_target": "primary",
+      "dependencies": [],
+      "description": "Load and unload allowed toolkits for the current session",
+      "display_name": "Dynamic Tools",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": "PackagePlus",
+      "icon_color": "text-sky-500",
+      "name": "dynamic_tools",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "development",
       "config_fields": [
         {
           "authored_override": true,

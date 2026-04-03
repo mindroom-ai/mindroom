@@ -1112,6 +1112,7 @@ def _build_team(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     scope_context: ScopeSessionContext | None = None,
+    session_id: str | None = None,
 ) -> tuple[list[Agent], Team, TeamMode]:
     """Create member agents and build one agno.Team for a configured team.
 
@@ -1135,6 +1136,7 @@ def _build_team(
                 runtime_paths,
                 on_missing_bases=_log_missing_knowledge_bases(member_name),
             ),
+            session_id=session_id,
             include_interactive_questions=False,
         )
 
@@ -1239,6 +1241,7 @@ async def _non_stream_team_completion(
                     runtime_paths,
                     execution_identity,
                     scope_context,
+                    session_id,
                 )
             except ValueError as e:
                 return _error_response(500, str(e), error_type="server_error")
@@ -1344,6 +1347,7 @@ async def _stream_team_completion(  # noqa: C901
                     runtime_paths,
                     execution_identity,
                     scope_context,
+                    session_id,
                 )
         except ValueError as e:
             await _cleanup()
