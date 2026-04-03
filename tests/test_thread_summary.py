@@ -11,14 +11,14 @@ import pytest
 
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.thread_summary import (
-    _FIRST_THRESHOLD,
-    _SUBSEQUENT_INTERVAL,
     _last_summary_counts,
     _next_threshold,
     _recover_last_summary_count,
-    _send_summary_event,
-    _summary_locks,
+    _thread_locks,
     maybe_generate_thread_summary,
+    send_thread_summary_event,
+    thread_summary_cache_key,
+    update_last_summary_count,
 )
 
 
@@ -42,21 +42,38 @@ class TestNextThreshold:
     """Threshold arithmetic for summary generation triggers."""
 
     def test_first_threshold(self) -> None:
-        """First summary triggers at 5 messages."""
-        assert _next_threshold(0) == _FIRST_THRESHOLD
+        """First summary threshold should come from config values."""
+        assert _next_threshold(0, first_threshold=5, subsequent_interval=10) == 5
 
     def test_at_first_threshold(self) -> None:
-        """After first summary, next threshold is 15."""
-        assert _next_threshold(_FIRST_THRESHOLD) == _FIRST_THRESHOLD + _SUBSEQUENT_INTERVAL
+        """After first summary, next threshold should advance by the configured interval."""
+        assert _next_threshold(5, first_threshold=5, subsequent_interval=10) == 15
 
     def test_after_first_threshold(self) -> None:
-        """Subsequent thresholds increment by 10."""
-        assert _next_threshold(15) == 25
-        assert _next_threshold(25) == 35
+        """Subsequent thresholds should increment by the configured interval."""
+        assert _next_threshold(15, first_threshold=5, subsequent_interval=10) == 25
+        assert _next_threshold(25, first_threshold=5, subsequent_interval=10) == 35
 
-    def test_below_first_threshold(self) -> None:
-        """Counts below 5 still target the first threshold."""
-        assert _next_threshold(3) == _FIRST_THRESHOLD
+    def test_manual_summary_below_first_threshold_uses_subsequent_interval(self) -> None:
+        """Any existing summary count should become the new baseline, even below the first threshold."""
+        assert _next_threshold(3, first_threshold=5, subsequent_interval=10) == 13
+
+    def test_custom_thresholds(self) -> None:
+        """Custom config values should shift both first and subsequent thresholds."""
+        assert _next_threshold(0, first_threshold=1, subsequent_interval=4) == 1
+        assert _next_threshold(1, first_threshold=1, subsequent_interval=4) == 5
+        assert _next_threshold(5, first_threshold=1, subsequent_interval=4) == 9
+
+
+class TestUpdateLastSummaryCount:
+    """In-memory cache updates for summary baselines."""
+
+    def test_ignores_lower_write_after_higher_write(self) -> None:
+        """A later stale write must not move the summary baseline backwards."""
+        update_last_summary_count("!room:x", "$thread1", 12)
+        update_last_summary_count("!room:x", "$thread1", 7)
+
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 12
 
 
 # -- _recover_last_summary_count --
@@ -233,9 +250,16 @@ class TestRecoverLastSummaryCount:
 # -- maybe_generate_thread_summary --
 
 
-def _mock_config(model_name: str | None = None) -> MagicMock:
+def _mock_config(
+    model_name: str | None = None,
+    *,
+    first_threshold: int = 5,
+    subsequent_interval: int = 10,
+) -> MagicMock:
     config = MagicMock()
     config.defaults.thread_summary_model = model_name
+    config.defaults.thread_summary_first_threshold = first_threshold
+    config.defaults.thread_summary_subsequent_interval = subsequent_interval
     return config
 
 
@@ -249,7 +273,7 @@ def _mock_runtime_paths() -> MagicMock:
 def _clear_summary_counts() -> None:
     """Reset in-memory state between tests."""
     _last_summary_counts.clear()
-    _summary_locks.clear()
+    _thread_locks.clear()
 
 
 @pytest.mark.asyncio
@@ -305,11 +329,64 @@ class TestMaybeGenerateThreadSummary:
 
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
-        assert _last_summary_counts["!room:x:$thread1"] == 5
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
+
+    async def test_concurrent_calls_generate_and_send_once_per_thread(self) -> None:
+        """Concurrent calls for one thread should share a single generation/send path."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        generation_started = asyncio.Event()
+        release_generation = asyncio.Event()
+
+        async def _blocked_generate(*_: object) -> str:
+            generation_started.set()
+            await release_generation.wait()
+            return "Users discussed testing strategies"
+
+        with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_history",
+                return_value=_make_thread_history(5),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                new=AsyncMock(side_effect=_blocked_generate),
+            ) as mock_gen,
+            patch(
+                "mindroom.thread_summary.send_thread_summary_event",
+                new=AsyncMock(return_value="$summary1"),
+            ) as mock_send,
+            patch(
+                "mindroom.thread_summary._recover_last_summary_count",
+                return_value=0,
+            ),
+        ):
+            task_one = asyncio.create_task(
+                maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp),
+            )
+            task_two = asyncio.create_task(
+                maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp),
+            )
+            await generation_started.wait()
+            await asyncio.sleep(0)
+            release_generation.set()
+            await asyncio.gather(task_one, task_two)
+
+        assert mock_gen.await_count == 1
+        mock_send.assert_awaited_once_with(
+            client,
+            "!room:x",
+            "$thread1",
+            "Users discussed testing strategies",
+            5,
+            "default",
+        )
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     async def test_already_summarized_skips(self) -> None:
         """No LLM call when count hasn't crossed the next threshold."""
-        _last_summary_counts["!room:x:$thread1"] = 5
+        update_last_summary_count("!room:x", "$thread1", 5)
         client = AsyncMock(spec=nio.AsyncClient)
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -329,7 +406,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_crosses_second_threshold(self) -> None:
         """Summary is generated when crossing the second threshold (15)."""
-        _last_summary_counts["!room:x:$thread1"] = 5
+        update_last_summary_count("!room:x", "$thread1", 5)
         client = AsyncMock(spec=nio.AsyncClient)
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary2", room_id="!room:x"))
         config = _mock_config()
@@ -348,7 +425,121 @@ class TestMaybeGenerateThreadSummary:
             await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
 
         client.room_send.assert_awaited_once()
-        assert _last_summary_counts["!room:x:$thread1"] == 15
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 15
+
+    async def test_first_threshold_one_triggers_on_first_message(self) -> None:
+        """A configured first threshold of 1 should summarize the first thread message."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary-first", room_id="!room:x"))
+        config = _mock_config(first_threshold=1)
+        rp = _mock_runtime_paths()
+
+        with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_history",
+                return_value=_make_thread_history(1),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                return_value="🧵 First thread message summarized",
+            ) as mock_gen,
+            patch(
+                "mindroom.thread_summary._recover_last_summary_count",
+                return_value=0,
+            ),
+        ):
+            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+
+        mock_gen.assert_awaited_once()
+        client.room_send.assert_awaited_once()
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 1
+
+    async def test_custom_subsequent_interval_controls_next_threshold(self) -> None:
+        """A custom interval should defer the next summary until the configured count is reached."""
+        update_last_summary_count("!room:x", "$thread1", 3)
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary-custom", room_id="!room:x"))
+        config = _mock_config(first_threshold=3, subsequent_interval=4)
+        rp = _mock_runtime_paths()
+
+        with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_history",
+                return_value=_make_thread_history(6),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+            ) as mock_gen,
+        ):
+            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+
+        mock_gen.assert_not_awaited()
+
+        with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_history",
+                return_value=_make_thread_history(7),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                return_value="🧵 Custom interval threshold reached",
+            ) as mock_gen,
+        ):
+            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+
+        mock_gen.assert_awaited_once()
+        client.room_send.assert_awaited_once()
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 7
+
+    async def test_manual_summary_below_first_threshold_delays_next_auto_summary(self) -> None:
+        """A manual summary below the first threshold should suppress auto-summary until the interval is reached."""
+        update_last_summary_count("!room:x", "$thread1", 3)
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary-manual", room_id="!room:x"))
+        config = _mock_config(first_threshold=5, subsequent_interval=10)
+        rp = _mock_runtime_paths()
+
+        with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_history",
+                return_value=_make_thread_history(5),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+            ) as mock_gen,
+        ):
+            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+
+        mock_gen.assert_not_awaited()
+
+        with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_history",
+                return_value=_make_thread_history(12),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+            ) as mock_gen,
+        ):
+            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+
+        mock_gen.assert_not_awaited()
+
+        with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_history",
+                return_value=_make_thread_history(13),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                return_value="🧵 Manual baseline respected",
+            ) as mock_gen,
+        ):
+            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+
+        mock_gen.assert_awaited_once()
+        client.room_send.assert_awaited_once()
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 13
 
     async def test_generation_failure_no_event(self) -> None:
         """No Matrix event sent when LLM returns None; count is recorded to prevent retries."""
@@ -374,7 +565,7 @@ class TestMaybeGenerateThreadSummary:
 
         client.room_send.assert_not_awaited()
         # Count is recorded to prevent retry storms
-        assert _last_summary_counts["!room:x:$thread1"] == 5
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     async def test_generation_exception_records_count(self) -> None:
         """Exception in _generate_summary records count to prevent retry storms."""
@@ -400,7 +591,7 @@ class TestMaybeGenerateThreadSummary:
 
         client.room_send.assert_not_awaited()
         # Count is recorded to prevent retry storms
-        assert _last_summary_counts["!room:x:$thread1"] == 5
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     async def test_send_failure_still_records_count(self) -> None:
         """When _send_summary_event fails (returns None), count is still recorded to prevent cost amplification."""
@@ -428,7 +619,7 @@ class TestMaybeGenerateThreadSummary:
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
         # Count must be recorded even though send failed
-        assert _last_summary_counts["!room:x:$thread1"] == 5
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     async def test_recovery_seeds_cache_on_restart(self) -> None:
         """On cache miss, recovery from existing events seeds _last_summary_counts."""
@@ -453,7 +644,7 @@ class TestMaybeGenerateThreadSummary:
 
         # Recovered count 10 → next threshold 20 → 12 messages < 20 → skip
         mock_gen.assert_not_awaited()
-        assert _last_summary_counts["!room:x:$thread1"] == 10
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 10
 
     async def test_concurrent_calls_generate_one_summary_per_thread(self) -> None:
         """Concurrent summary checks should serialize on the per-thread critical section."""
@@ -499,11 +690,11 @@ class TestSendSummaryEvent:
     """Verify the Matrix event payload structure."""
 
     async def test_event_content_structure(self) -> None:
-        """Verify the Matrix event has the expected fields."""
+        """Verify the public summary-send API writes the expected event payload."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
 
-        result = await _send_summary_event(
+        result = await send_thread_summary_event(
             client,
             room_id="!room:x",
             thread_id="$root1",
@@ -537,7 +728,7 @@ class TestSendSummaryEvent:
         client = AsyncMock(spec=nio.AsyncClient)
         client.room_send = AsyncMock(return_value=nio.RoomSendError(message="forbidden"))
 
-        result = await _send_summary_event(
+        result = await send_thread_summary_event(
             client,
             room_id="!room:x",
             thread_id="$root1",

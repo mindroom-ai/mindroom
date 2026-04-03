@@ -47,7 +47,7 @@ See [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-con
 - [Research Sources](research-sources.md) - ArXiv, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](ai-and-generation.md) - Image, video, speech, and transcription APIs.
 - [Media & Content](media-and-content.md) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging, thread resolution, and attachment-aware workflows.
+- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging, thread summaries and resolution, and attachment-aware workflows.
 - [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
 - [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, and task managers.
 - [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar APIs and MindRoom scheduling tools.

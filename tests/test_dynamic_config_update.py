@@ -284,6 +284,69 @@ class TestDynamicConfigUpdate:
         assert router_bot.enable_streaming is False
 
     @pytest.mark.asyncio
+    async def test_thread_summary_threshold_defaults_update_existing_bots_without_restart(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Changing thread summary defaults should update existing bots on config reload."""
+        initial_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+            defaults={
+                "thread_summary_first_threshold": 5,
+                "thread_summary_subsequent_interval": 10,
+            },
+        )
+        updated_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+            defaults={
+                "thread_summary_first_threshold": 1,
+                "thread_summary_subsequent_interval": 3,
+            },
+        )
+
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator.config = initial_config
+
+        mock_bot = MagicMock(spec=AgentBot)
+        mock_bot.config = initial_config
+        mock_bot.enable_streaming = True
+        orchestrator.agent_bots["general"] = mock_bot
+        router_bot = MagicMock(spec=AgentBot)
+        router_bot.config = initial_config
+        router_bot.enable_streaming = True
+        orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+
+        with (
+            patch("mindroom.orchestrator.load_config", return_value=updated_config),
+            patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
+        ):
+            updated = await orchestrator.update_config()
+
+        assert updated is False
+        assert mock_bot.config == updated_config
+        assert mock_bot.config.defaults.thread_summary_first_threshold == 1
+        assert mock_bot.config.defaults.thread_summary_subsequent_interval == 3
+        assert router_bot.config == updated_config
+        assert router_bot.config.defaults.thread_summary_first_threshold == 1
+        assert router_bot.config.defaults.thread_summary_subsequent_interval == 3
+
+    @pytest.mark.asyncio
     async def test_matrix_room_access_change_reconciles_rooms_without_restarts(self, tmp_path: Path) -> None:
         """Changing matrix_room_access should trigger room/invitation reconciliation on config reload."""
         initial_config = Config(

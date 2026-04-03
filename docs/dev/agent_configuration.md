@@ -344,6 +344,8 @@ defaults:
   show_tool_calls: true
   allow_self_config: false
   max_preload_chars: 50000  # Hard cap for context_files preload
+  thread_summary_first_threshold: 5  # First automatic thread summary after 5 messages
+  thread_summary_subsequent_interval: 10  # Re-summarize after each additional 10 messages
   # num_history_runs: null  # Default: all
   # num_history_messages: null  # Mutually exclusive with num_history_runs
   # max_tool_calls_from_history: null  # Default: no limit
@@ -430,6 +432,7 @@ Below is a representative selection:
 - **slack** - Slack messaging (requires bot token)
 - **discord** - Discord messaging (requires bot token)
 - **matrix_message** - Send messages to other Matrix rooms
+- **thread_summary** - Write or update a one-line Matrix thread summary with `set_thread_summary`
 
 ### AI & Generation Tools
 - **dalle** - Generate images with DALL-E
@@ -609,6 +612,8 @@ defaults:
   tools: [scheduler]
   markdown: true
   enable_streaming: true
+  thread_summary_first_threshold: 5
+  thread_summary_subsequent_interval: 10
 
 # Router
 router:

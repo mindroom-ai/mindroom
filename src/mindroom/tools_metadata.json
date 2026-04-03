@@ -342,6 +342,25 @@
       "dependencies": [
         "agno"
       ],
+      "description": "Set or update Matrix thread summaries with room/thread context defaults",
+      "display_name": "Thread Summary",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "helper_text": null,
+      "icon": "MessageCircleMore",
+      "icon_color": "text-cyan-500",
+      "name": "thread_summary",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
+      "config_fields": null,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
       "description": "Tag, untag, and inspect Matrix threads using shared room-state markers",
       "display_name": "Thread Tags",
       "docs_url": "https://github.com/mindroom-ai/mindroom",

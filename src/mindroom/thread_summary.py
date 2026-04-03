@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections import defaultdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -29,10 +30,7 @@ logger = get_logger(__name__)
 # In-memory tracking of last summarized message count per thread.
 # Key: "{room_id}:{thread_id}", value: message count at last summary.
 _last_summary_counts: dict[str, int] = {}
-_summary_locks: dict[str, asyncio.Lock] = {}
-
-_FIRST_THRESHOLD = 5
-_SUBSEQUENT_INTERVAL = 10
+_thread_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 class _ThreadSummary(BaseModel):
@@ -41,11 +39,34 @@ class _ThreadSummary(BaseModel):
     summary: str = Field(description="One-line summary of the thread conversation")
 
 
-def _next_threshold(last_summarized_count: int) -> int:
+def thread_summary_cache_key(room_id: str, thread_id: str) -> str:
+    """Return the in-memory cache key for one room/thread pair."""
+    return f"{room_id}:{thread_id}"
+
+
+def thread_summary_lock(room_id: str, thread_id: str) -> asyncio.Lock:
+    """Return the shared per-thread lock for summary writes."""
+    return _thread_locks[thread_summary_cache_key(room_id, thread_id)]
+
+
+def update_last_summary_count(room_id: str, thread_id: str, message_count: int) -> None:
+    """Record the latest summarized message count for one thread monotonically."""
+    cache_key = thread_summary_cache_key(room_id, thread_id)
+    existing_count = _last_summary_counts.get(cache_key, 0)
+    if message_count > existing_count:
+        _last_summary_counts[cache_key] = message_count
+
+
+def _next_threshold(
+    last_summarized_count: int,
+    *,
+    first_threshold: int,
+    subsequent_interval: int,
+) -> int:
     """Return the next message count at which a summary should be generated."""
-    if last_summarized_count < _FIRST_THRESHOLD:
-        return _FIRST_THRESHOLD
-    return last_summarized_count + _SUBSEQUENT_INTERVAL
+    if last_summarized_count <= 0:
+        return first_threshold
+    return last_summarized_count + subsequent_interval
 
 
 async def _recover_last_summary_count(
@@ -156,7 +177,7 @@ async def _generate_summary(
     return str(content) if content else None
 
 
-async def _send_summary_event(
+async def send_thread_summary_event(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -207,41 +228,45 @@ async def maybe_generate_thread_summary(
     runtime_paths: RuntimePaths,
 ) -> None:
     """Generate and send a thread summary if the message count crosses a threshold."""
-    key = f"{room_id}:{thread_id}"
-    lock = _summary_locks.setdefault(key, asyncio.Lock())
+    thread_history = await fetch_thread_history(client, room_id, thread_id)
+    message_count = len(thread_history)
+    first_threshold = config.defaults.thread_summary_first_threshold
+    subsequent_interval = config.defaults.thread_summary_subsequent_interval
 
-    async with lock:
-        thread_history = await fetch_thread_history(client, room_id, thread_id)
-        message_count = len(thread_history)
+    async with thread_summary_lock(room_id, thread_id):
+        cache_key = thread_summary_cache_key(room_id, thread_id)
 
         # Recover from existing summary events on cache miss (e.g., after restart)
-        if key not in _last_summary_counts:
+        if cache_key not in _last_summary_counts:
             recovered = await _recover_last_summary_count(client, room_id, thread_id)
             if recovered > 0:
-                _last_summary_counts[key] = recovered
+                update_last_summary_count(room_id, thread_id, recovered)
 
-        last_count = _last_summary_counts.get(key, 0)
-        threshold = _next_threshold(last_count)
+        last_count = _last_summary_counts.get(cache_key, 0)
+        threshold = _next_threshold(
+            last_count,
+            first_threshold=first_threshold,
+            subsequent_interval=subsequent_interval,
+        )
 
         if message_count < threshold:
             return
-
         try:
             summary = await _generate_summary(thread_history, config, runtime_paths)
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
             # Record current count to prevent retry storms until next threshold
-            _last_summary_counts[key] = message_count
+            update_last_summary_count(room_id, thread_id, message_count)
             return
 
         if summary is None:
             logger.warning("Thread summary generation returned None", room_id=room_id, thread_id=thread_id)
             # Record current count to prevent retry storms until next threshold
-            _last_summary_counts[key] = message_count
+            update_last_summary_count(room_id, thread_id, message_count)
             return
 
         model_name = config.defaults.thread_summary_model or "default"
         # Record count before sending — the LLM cost is already incurred, so don't
         # retry on Matrix send failure (avoids cost amplification loop).
-        _last_summary_counts[key] = message_count
-        await _send_summary_event(client, room_id, thread_id, summary, message_count, model_name)
+        update_last_summary_count(room_id, thread_id, message_count)
+        await send_thread_summary_event(client, room_id, thread_id, summary, message_count, model_name)

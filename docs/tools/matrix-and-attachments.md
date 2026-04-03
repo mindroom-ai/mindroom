@@ -9,20 +9,21 @@ Use these tools to work inside the active Matrix room and thread, send follow-up
 ## What This Page Covers
 
 This page documents the built-in tools in the `matrix-and-attachments` group.
-Use these tools when you need to send or inspect Matrix messages, manage thread resolution state, or handle attachment IDs that are scoped to the current room and thread.
+Use these tools when you need to send or inspect Matrix messages, manage thread resolution or summary state, or handle attachment IDs that are scoped to the current room and thread.
 
 ## Tools On This Page
 
 - [`matrix_message`] - Send, reply, react, read, edit, or inspect Matrix conversation context.
 - [`thread_resolution`] - Mark a Matrix thread resolved or unresolved with shared room-state markers.
+- [`thread_summary`] - Set or update a Matrix thread summary from the current room and thread context.
 - [`attachments`] - List, inspect, and register context-scoped attachment IDs for later tool calls.
 
 ## Common Setup Notes
 
-All three tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation.
+All four tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation.
 `matrix_message` implies `attachments` through `Config.IMPLIED_TOOLS`, so enabling `matrix_message` makes the `attachments` toolkit available even when you do not list it separately.
 Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run.
-Current source on this branch exposes `matrix_message`, `thread_resolution`, and `attachments` as the registered tools in this area.
+Current source on this branch exposes `matrix_message`, `thread_resolution`, `thread_summary`, and `attachments` as the registered tools in this area.
 The issue references `thread_tags.py` and `matrix_api.py`, but those files are not present in this worktree, so they are not documented as standalone tools on this page.
 
 ## [`matrix_message`]
@@ -112,6 +113,47 @@ resolve_thread(room_id="!ops:example.org", thread_id="$threadRootEvent")
 - The returned payload includes `resolved_by`, `resolved_at`, and `updated_at` so a caller can surface who closed or reopened the thread.
 - Use `canonical=True` on `unresolve_thread()` only when you already have the canonical state key and do not want the tool to fetch the original event again.
 
+## [`thread_summary`]
+
+`thread_summary` lets agents set or replace the current thread summary explicitly instead of waiting for the automatic summarizer.
+
+### What It Does
+
+`thread_summary` exposes `set_thread_summary(summary, room_id=None, thread_id=None, reply_to_event_id=None)`.
+The tool defaults to the active room and current thread from `ToolRuntimeContext`.
+When the agent is replying at room scope, it can still target the correct thread through `reply_to_event_id`.
+The tool normalizes the target to the canonical thread root before sending a new `m.notice` summary event with `io.mindroom.thread_summary` metadata.
+Manual summaries are marked with `model_name="manual"` and update the cached last-summary count so later automatic summaries continue from the new baseline.
+A per-thread async lock prevents concurrent duplicate manual summaries from racing each other.
+
+### Configuration
+
+This tool has no tool-specific inline configuration fields.
+
+### Example
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - thread_summary
+```
+
+```python
+set_thread_summary("Decision: ship the current plan and revisit logs tomorrow.")
+set_thread_summary(
+    "Summary for the import thread.",
+    room_id="!ops:example.org",
+    reply_to_event_id="$replyEvent",
+)
+```
+
+### Notes
+
+- `summary` must be a non-empty string.
+- The tool writes a normal Matrix notice event, so the updated summary remains visible in the thread timeline.
+- Automatic thread summaries still exist, but this tool gives an agent an explicit override path when a human asks for a manual summary refresh.
+
 ## [`attachments`]
 
 `attachments` lets agents inspect and register files that are scoped to the current Matrix conversation.
@@ -153,9 +195,9 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 
 ## Related Matrix Runtime Features
 
-Automatic thread summaries are implemented in `src/mindroom/thread_summary.py` as bot runtime behavior rather than as a standalone tool.
+Automatic thread summaries are still implemented in `src/mindroom/thread_summary.py` as bot runtime behavior.
 The summarizer posts one `m.notice` summary after a thread reaches five messages, and then again every ten additional messages, using `defaults.thread_summary_model` or `default`.
-This page does not document `thread_summary` as a configurable tool because it is not part of the live tool registry on this branch.
+The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
 
 ## Related Docs
 
