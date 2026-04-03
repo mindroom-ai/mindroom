@@ -322,7 +322,7 @@ A bounded semaphore (default 10) prevents one plugin from flooding the event loo
 ## Custom events
 
 Plugins can define and emit namespaced custom events.
-Built-in namespaces (`message:*`, `agent:*`, `schedule:*`, `reaction:*`, `config:*`, `tool:*`) are reserved.
+Built-in namespaces (`message:*`, `agent:*`, `bot:*`, `schedule:*`, `reaction:*`, `config:*`, `tool:*`) are reserved.
 
 ### Defining a custom event hook
 
