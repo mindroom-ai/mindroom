@@ -47,6 +47,7 @@ describe('configStore', () => {
       agentPoliciesByAgent: {},
       agentPoliciesStale: false,
       agentPoliciesRequestId: 0,
+      loadConfigRequestId: 0,
       selectedAgentId: null,
       selectedTeamId: null,
       selectedCultureId: null,
@@ -464,6 +465,105 @@ describe('configStore', () => {
       await useConfigStore.getState().loadConfig();
 
       const state = useConfigStore.getState();
+      expect(state.syncStatus).toBe('error');
+      expect(state.config).toBeNull();
+      expect(state.agents).toEqual([]);
+      expect(state.rooms).toEqual([]);
+      expect(state.agentPoliciesByAgent).toEqual({});
+      expect(state.diagnostics).toEqual([
+        {
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: true,
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['plugins', 0],
+            msg: 'Plugin tools_module must be a string',
+            type: 'value_error',
+          },
+        },
+      ]);
+    });
+
+    it('ignores stale successful load results after a newer 422 failure', async () => {
+      const pendingConfigResponse = deferred<{
+        ok: boolean;
+        json: () => Promise<{
+          agents: Record<
+            string,
+            {
+              display_name: string;
+              role: string;
+              tools: string[];
+              skills: string[];
+              instructions: string[];
+              rooms: string[];
+            }
+          >;
+          models: { default: { provider: string; id: string } };
+        }>;
+      }>();
+
+      (global.fetch as any)
+        .mockReturnValueOnce(pendingConfigResponse.promise)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 422,
+          json: async () => ({
+            detail: [
+              {
+                loc: ['plugins', 0],
+                msg: 'Plugin tools_module must be a string',
+                type: 'value_error',
+              },
+            ],
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            agent_policies: { assistant: makeAgentPolicy('assistant') },
+          }),
+        });
+
+      const firstLoadPromise = useConfigStore.getState().loadConfig();
+      const secondLoadPromise = useConfigStore.getState().loadConfig();
+
+      await secondLoadPromise;
+
+      let state = useConfigStore.getState();
+      expect(state.loadConfigRequestId).toBe(2);
+      expect(state.syncStatus).toBe('error');
+      expect(state.config).toBeNull();
+
+      pendingConfigResponse.resolve({
+        ok: true,
+        json: async () => ({
+          agents: {
+            assistant: {
+              display_name: 'Assistant',
+              role: 'Helpful',
+              tools: [],
+              skills: [],
+              instructions: [],
+              rooms: ['lobby'],
+            },
+          },
+          models: {
+            default: {
+              provider: 'ollama',
+              id: 'test-model',
+            },
+          },
+        }),
+      });
+
+      await firstLoadPromise;
+
+      state = useConfigStore.getState();
+      expect(state.loadConfigRequestId).toBe(2);
       expect(state.syncStatus).toBe('error');
       expect(state.config).toBeNull();
       expect(state.agents).toEqual([]);

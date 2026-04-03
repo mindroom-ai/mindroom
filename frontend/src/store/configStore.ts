@@ -210,6 +210,7 @@ interface ConfigState {
   agentPoliciesByAgent: AgentPoliciesByAgent;
   agentPoliciesStale: boolean;
   agentPoliciesRequestId: number;
+  loadConfigRequestId: number;
   selectedAgentId: string | null;
   selectedTeamId: string | null;
   selectedCultureId: string | null;
@@ -315,6 +316,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   agentPoliciesByAgent: {},
   agentPoliciesStale: false,
   agentPoliciesRequestId: 0,
+  loadConfigRequestId: 0,
   selectedAgentId: null,
   selectedTeamId: null,
   selectedCultureId: null,
@@ -327,7 +329,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Load configuration from backend
   loadConfig: async () => {
-    set({ isLoading: true, diagnostics: [] });
+    const loadConfigRequestId = get().loadConfigRequestId + 1;
+    set({ isLoading: true, diagnostics: [], loadConfigRequestId });
     try {
       const rawConfig = await configService.loadConfig();
       const {
@@ -395,6 +398,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         diagnostics = [agentPoliciesDiagnostic(false)];
         agentPoliciesStale = true;
       }
+      if (get().loadConfigRequestId != loadConfigRequestId) {
+        return;
+      }
       const nextAgentPoliciesRequestId = get().agentPoliciesRequestId + 1;
 
       set({
@@ -413,6 +419,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         privateWorkerScopeBackups: {},
       });
     } catch (error) {
+      if (get().loadConfigRequestId != loadConfigRequestId) {
+        return;
+      }
       const nextAgentPoliciesRequestId = get().agentPoliciesRequestId + 1;
       if (error instanceof configService.ConfigValidationError) {
         set(
