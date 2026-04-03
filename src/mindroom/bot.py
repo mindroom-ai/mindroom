@@ -157,6 +157,7 @@ from .commands.handler import CommandEvent, CommandHandlerContext, _generate_wel
 from .commands.parsing import Command, command_parser
 from .constants import (
     ATTACHMENT_IDS_KEY,
+    HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_COMPLETED,
@@ -513,6 +514,15 @@ type _PrecheckedDispatchEvent = _PrecheckedEvent[_DispatchEvent]
 type _PrecheckedMediaDispatchEvent = _PrecheckedEvent[_MediaDispatchEvent]
 
 
+@dataclass(frozen=True)
+class _HookIngressPolicy:
+    """Normalized ingress behavior for hook-originated synthetic messages."""
+
+    rerun_message_received: bool = True
+    skip_message_received_plugin_names: frozenset[str] = field(default_factory=frozenset)
+    bypass_unmentioned_agent_gate: bool = False
+
+
 def _is_coalescing_exempt_source_kind(event: _DispatchEvent) -> bool:
     """Return True when coalescing should be skipped for this event.
 
@@ -528,25 +538,72 @@ def _is_coalescing_exempt_source_kind(event: _DispatchEvent) -> bool:
     return isinstance(source_kind, str) and source_kind in _COALESCING_EXEMPT_SOURCE_KINDS
 
 
-def _message_received_skip_plugin_names(
-    event: _DispatchEvent,
-    envelope: MessageEnvelope,
-) -> frozenset[str]:
-    """Return plugins whose message:received hooks should be skipped on re-entry."""
-    if envelope.source_kind not in {"hook", "hook_dispatch"}:
-        return frozenset()
-    if not isinstance(event.source, dict):
-        return frozenset()
-    content = event.source.get("content")
-    if not isinstance(content, dict):
-        return frozenset()
-    hook_source = content.get("com.mindroom.hook_source")
+def _split_hook_source(hook_source: str | None) -> tuple[str | None, str | None]:
+    """Return ``(plugin_name, event_name)`` from one serialized hook source tag."""
     if not isinstance(hook_source, str):
-        return frozenset()
+        return None, None
     plugin_name, _, source_event_name = hook_source.partition(":")
-    if not plugin_name or source_event_name != EVENT_MESSAGE_RECEIVED:
-        return frozenset()
-    return frozenset({plugin_name})
+    if not plugin_name or not source_event_name:
+        return None, None
+    return plugin_name, source_event_name
+
+
+def _hook_ingress_policy(envelope: MessageEnvelope) -> _HookIngressPolicy:
+    """Return the normalized ingress policy for one synthetic hook message."""
+    if envelope.source_kind not in {"hook", "hook_dispatch"}:
+        return _HookIngressPolicy()
+
+    plugin_name, source_event_name = _split_hook_source(envelope.hook_source)
+    policy = _HookIngressPolicy(bypass_unmentioned_agent_gate=envelope.source_kind == "hook_dispatch")
+    if envelope.message_received_depth == 0:
+        return policy
+    if envelope.message_received_depth == 1 and source_event_name == EVENT_MESSAGE_RECEIVED:
+        skip_plugin_names = frozenset({plugin_name}) if plugin_name is not None else frozenset()
+        return _HookIngressPolicy(
+            bypass_unmentioned_agent_gate=policy.bypass_unmentioned_agent_gate,
+            skip_message_received_plugin_names=skip_plugin_names,
+        )
+    return _HookIngressPolicy(
+        rerun_message_received=False,
+        bypass_unmentioned_agent_gate=policy.bypass_unmentioned_agent_gate,
+    )
+
+
+def _fallback_room_state_querier(
+    primary: HookRoomStateQuerier | None,
+    fallback: HookRoomStateQuerier | None,
+) -> HookRoomStateQuerier | None:
+    """Return a self-first room-state querier with optional fallback."""
+    if primary is None:
+        return fallback
+    if fallback is None:
+        return primary
+
+    async def _query(room_id: str, event_type: str, state_key: str | None) -> dict[str, Any] | None:
+        result = await primary(room_id, event_type, state_key)
+        if result is not None:
+            return result
+        return await fallback(room_id, event_type, state_key)
+
+    return _query
+
+
+def _fallback_room_state_putter(
+    primary: HookRoomStatePutter | None,
+    fallback: HookRoomStatePutter | None,
+) -> HookRoomStatePutter | None:
+    """Return a self-first room-state putter with optional fallback."""
+    if primary is None:
+        return fallback
+    if fallback is None:
+        return primary
+
+    async def _put(room_id: str, event_type: str, state_key: str, content: dict[str, Any]) -> bool:
+        if await primary(room_id, event_type, state_key, content):
+            return True
+        return await fallback(room_id, event_type, state_key, content)
+
+    return _put
 
 
 def _merge_response_extra_content(
@@ -697,23 +754,19 @@ class AgentBot:
 
     def _hook_room_state_querier(self) -> HookRoomStateQuerier | None:
         """Return the room-state querier bound into hook contexts for this bot."""
-        if self.orchestrator is not None:
-            querier = self.orchestrator._hook_room_state_querier()
-            if querier is not None:
-                return querier
-        if self.client is not None:
-            return build_hook_room_state_querier(self.client)
-        return None
+        primary = build_hook_room_state_querier(self.client) if self.client is not None else None
+        fallback = None
+        if self.agent_name != ROUTER_AGENT_NAME and self.orchestrator is not None:
+            fallback = self.orchestrator._hook_room_state_querier()
+        return _fallback_room_state_querier(primary, fallback)
 
     def _hook_room_state_putter(self) -> HookRoomStatePutter | None:
         """Return the room-state putter bound into hook contexts for this bot."""
-        if self.orchestrator is not None:
-            putter = self.orchestrator._hook_room_state_putter()
-            if putter is not None:
-                return putter
-        if self.client is not None:
-            return build_hook_room_state_putter(self.client)
-        return None
+        primary = build_hook_room_state_putter(self.client) if self.client is not None else None
+        fallback = None
+        if self.agent_name != ROUTER_AGENT_NAME and self.orchestrator is not None:
+            fallback = self.orchestrator._hook_room_state_putter()
+        return _fallback_room_state_putter(primary, fallback)
 
     def _build_message_envelope(
         self,
@@ -730,11 +783,11 @@ class AgentBot:
         """Build the normalized inbound envelope consumed by message hooks."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
         resolved_source_kind = source_kind
+        source_kind_sender_is_trusted = (isinstance(event, _PreparedTextEvent) and event.is_synthetic) or (
+            extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
+        )
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = content.get("com.mindroom.source_kind")
-            source_kind_sender_is_trusted = (isinstance(event, _PreparedTextEvent) and event.is_synthetic) or (
-                extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
-            )
             if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
                 resolved_source_kind = source_kind_override
         if resolved_source_kind is None:
@@ -744,6 +797,15 @@ class AgentBot:
                 resolved_source_kind = "image"
             else:
                 resolved_source_kind = "message"
+        hook_source: str | None = None
+        message_received_depth = 0
+        if isinstance(content, dict) and source_kind_sender_is_trusted:
+            hook_source_override = content.get("com.mindroom.hook_source")
+            if isinstance(hook_source_override, str) and hook_source_override:
+                hook_source = hook_source_override
+            depth_override = content.get(HOOK_MESSAGE_RECEIVED_DEPTH_KEY)
+            if isinstance(depth_override, int) and not isinstance(depth_override, bool) and depth_override > 0:
+                message_received_depth = depth_override
 
         return MessageEnvelope(
             source_event_id=event.event_id,
@@ -765,6 +827,8 @@ class AgentBot:
             ),
             agent_name=agent_name or self.agent_name,
             source_kind=resolved_source_kind,
+            hook_source=hook_source,
+            message_received_depth=message_received_depth,
         )
 
     def _default_response_envelope(
@@ -797,18 +861,20 @@ class AgentBot:
     async def _emit_message_received_hooks(
         self,
         *,
-        event: _DispatchEvent,
         envelope: MessageEnvelope,
         correlation_id: str,
+        policy: _HookIngressPolicy,
     ) -> bool:
         """Emit message:received and return whether hooks suppressed processing."""
         if not self.hook_registry.has_hooks(EVENT_MESSAGE_RECEIVED):
+            return False
+        if not policy.rerun_message_received:
             return False
 
         context = MessageReceivedContext(
             **self._hook_base_kwargs(EVENT_MESSAGE_RECEIVED, correlation_id),
             envelope=envelope,
-            skip_plugin_names=_message_received_skip_plugin_names(event, envelope),
+            skip_plugin_names=policy.skip_message_received_plugin_names,
         )
         await emit(self.hook_registry, EVENT_MESSAGE_RECEIVED, context)
         return context.suppress
@@ -2275,16 +2341,17 @@ class AgentBot:
             requester_user_id=effective_requester_user_id,
             context=context,
         )
+        ingress_policy = _hook_ingress_policy(envelope)
         if await self._emit_message_received_hooks(
-            event=event,
             envelope=envelope,
             correlation_id=correlation_id,
+            policy=ingress_policy,
         ):
             self.response_tracker.mark_responded(event.event_id)
             return None
 
         sender_agent_name = extract_agent_name(effective_requester_user_id, self.config, self.runtime_paths)
-        if sender_agent_name and not context.am_i_mentioned and envelope.source_kind != "hook_dispatch":
+        if sender_agent_name and not context.am_i_mentioned and not ingress_policy.bypass_unmentioned_agent_gate:
             self.logger.debug(f"Ignoring {event_label} from other agent (not mentioned)")
             return None
 
@@ -5175,10 +5242,11 @@ class AgentBot:
             body=edited_content,
             source_kind="edit",
         )
+        ingress_policy = _hook_ingress_policy(envelope)
         if await self._emit_message_received_hooks(
-            event=event,
             envelope=envelope,
             correlation_id=event.event_id,
+            policy=ingress_policy,
         ):
             self.response_tracker.mark_responded(event_info.original_event_id, response_event_id)
             return

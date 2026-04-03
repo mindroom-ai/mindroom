@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
 from mindroom.logging_config import get_logger
 
 from .types import (
@@ -60,6 +60,7 @@ async def _send_bound_message(
     thread_id: str | None = None,
     extra_content: dict[str, Any] | None = None,
     requester_id: str | None = None,
+    message_received_depth: int = 0,
     trigger_dispatch: bool = False,
 ) -> str | None:
     """Send one hook-originated Matrix message through a bound sender."""
@@ -70,6 +71,8 @@ async def _send_bound_message(
     resolved_extra_content = dict(extra_content or {})
     if requester_id:
         resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
+    if message_received_depth > 0:
+        resolved_extra_content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = message_received_depth
     return await message_sender(
         room_id,
         text,
@@ -133,6 +136,8 @@ class MessageEnvelope:
     mentioned_agents: tuple[str, ...]
     agent_name: str
     source_kind: str
+    hook_source: str | None = None
+    message_received_depth: int = 0
 
     @property
     def target(self) -> _EnvelopeTargetView:
@@ -234,10 +239,12 @@ class HookContext:
         usual routing rules. When *trigger_dispatch* is True the message
         uses source_kind ``hook_dispatch``, which also bypasses the
         normal "ignore other agent unless mentioned" ingress gate before
-        re-entering the normal dispatch pipeline. If a
-        ``message:received`` hook emitted the synthetic event, MindRoom
-        skips re-running that same plugin's ``message:received`` hooks
-        on the relay to avoid immediate recursion.
+        re-entering the normal dispatch pipeline. Automation that
+        originates from ``message:received`` re-enters
+        ``message:received`` at most once: MindRoom skips the origin
+        plugin on the first synthetic hop, then suppresses deeper
+        ``message:received`` re-entry for the rest of that synthetic
+        chain to avoid cross-plugin feedback loops.
         """
         return await _send_bound_message(
             self.logger,
@@ -249,6 +256,7 @@ class HookContext:
             thread_id=thread_id,
             extra_content=extra_content,
             requester_id=_requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch),
+            message_received_depth=_message_received_depth_for_hook_send(self),
             trigger_dispatch=trigger_dispatch,
         )
 
@@ -340,6 +348,7 @@ class ScheduleFiredContext(HookContext):
             thread_id=resolved_thread_id,
             extra_content=extra_content,
             requester_id=_requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch),
+            message_received_depth=_message_received_depth_for_hook_send(self),
             trigger_dispatch=trigger_dispatch,
         )
 
@@ -431,6 +440,7 @@ class ToolBeforeCallContext:
             thread_id=thread_id,
             extra_content=extra_content,
             requester_id=self.requester_id,
+            message_received_depth=_message_received_depth_for_hook_send(self),
             trigger_dispatch=trigger_dispatch,
         )
 
@@ -518,6 +528,7 @@ class ToolAfterCallContext:
             thread_id=thread_id,
             extra_content=extra_content,
             requester_id=self.requester_id,
+            message_received_depth=_message_received_depth_for_hook_send(self),
             trigger_dispatch=trigger_dispatch,
         )
 
@@ -577,3 +588,16 @@ def _requester_id_for_hook_send(
     if trigger_dispatch:
         return context.config.get_mindroom_user_id(context.runtime_paths)
     return None
+
+
+def _message_received_depth_for_hook_send(context: object) -> int:
+    """Return the causal message:received relay depth to preserve on hook sends."""
+    if isinstance(context, MessageReceivedContext):
+        return context.envelope.message_received_depth + 1
+    if isinstance(context, MessageEnrichContext):
+        return context.envelope.message_received_depth
+    if isinstance(context, BeforeResponseContext):
+        return context.draft.envelope.message_received_depth
+    if isinstance(context, AfterResponseContext):
+        return context.result.envelope.message_received_depth
+    return 0

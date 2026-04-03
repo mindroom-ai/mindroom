@@ -618,6 +618,7 @@ def set_runtime_storage_path(storage_path: Path, runtime_paths: RuntimePaths) ->
 # Other constants
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
+HOOK_MESSAGE_RECEIVED_DEPTH_KEY = "com.mindroom.message_received_depth"
 VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"

@@ -439,18 +439,21 @@ For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while
 Plain `hook` sends can still dispatch when they satisfy the usual routing rules, for example if the message explicitly mentions an agent or otherwise qualifies as a normal addressed message.
 When `trigger_dispatch=True`, MindRoom sends the message as source kind `hook_dispatch`.
 That variant still re-enters the normal ingress pipeline, including `message:received`, and bypasses the usual "ignore other agent unless mentioned" ingress gate before continuing through normal permissions, routing, and should-respond checks.
-To prevent immediate recursion, when a `message:received` hook emits hook-originated automation, MindRoom skips re-running that same plugin's `message:received` hooks on the synthetic event.
+Automation that originates from `message:received` re-enters `message:received` at most once.
+MindRoom skips the origin plugin on that first synthetic hop, then suppresses deeper `message:received` re-entry for the rest of the synthetic chain to avoid cross-plugin feedback loops.
 
 **`await ctx.query_room_state(room_id, event_type, state_key=None)`**
 Queries Matrix room state events.
 When `state_key` is provided, returns the content `dict` for that single state event, or `None` on Matrix error response/not-found.
 When `state_key` is `None`, returns a `{state_key: content}` dict of all state events matching `event_type`, or `None` on Matrix error response.
 Returns `None` when no room state querier is available (e.g. no Matrix client bound).
+When both the current bot and the router can query room state, MindRoom tries the current bot first and falls back to the router on Matrix error responses.
 Transport exceptions from the underlying Matrix client propagate to the hook.
 
 **`await ctx.put_room_state(room_id, event_type, state_key, content)`**
 Writes a single Matrix room state event and returns `True` on success, `False` on Matrix error response.
 Returns `False` when no room state putter is available.
+When both the current bot and the router can write room state, MindRoom tries the current bot first and falls back to the router on Matrix error responses.
 Transport exceptions from the underlying Matrix client propagate to the hook.
 
 ### Transport objects
@@ -468,6 +471,8 @@ MessageEnvelope(
     mentioned_agents: tuple[str, ...],
     agent_name: str,
     source_kind: str,  # "message", "edit", "voice", "image", "scheduled", "hook", "hook_dispatch"
+    hook_source: str | None = None,
+    message_received_depth: int = 0,
 )
 
 ResponseDraft(

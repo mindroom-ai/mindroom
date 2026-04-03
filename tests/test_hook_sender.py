@@ -15,7 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_MESSAGE_RECEIVED,
@@ -219,7 +219,11 @@ async def test_hook_context_send_message_supports_multiple_hook_sends(tmp_path: 
             "first",
             "$thread",
             "hook-plugin:message:received",
-            {"custom": 1, ORIGINAL_SENDER_KEY: "@user:localhost"},
+            {
+                "custom": 1,
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
+            },
             False,
         ),
         (
@@ -227,7 +231,10 @@ async def test_hook_context_send_message_supports_multiple_hook_sends(tmp_path: 
             "second",
             None,
             "hook-plugin:message:received",
-            {ORIGINAL_SENDER_KEY: "@user:localhost"},
+            {
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
+            },
             False,
         ),
     ]
@@ -342,6 +349,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
                 "body": "automation",
                 "com.mindroom.source_kind": "hook",
                 "com.mindroom.hook_source": "hook-plugin:message:received",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
         },
     )
@@ -365,6 +373,8 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
     assert hook_calls == []
     assert dispatch.requester_user_id == "@mindroom_router:localhost"
     assert dispatch.envelope.source_kind == "hook"
+    assert dispatch.envelope.hook_source == "hook-plugin:message:received"
+    assert dispatch.envelope.message_received_depth == 1
     assert dispatch.envelope.mentioned_agents == ("code",)
     bot.response_tracker.mark_responded.assert_not_called()
 
@@ -384,6 +394,7 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
                 "body": "@mindroom_code:localhost automation",
                 "com.mindroom.source_kind": "hook",
                 "com.mindroom.hook_source": "hook-plugin:message:received",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
         },
     )
@@ -405,6 +416,7 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
     bot._resolve_dispatch_action.assert_awaited_once()
     dispatch = bot._resolve_dispatch_action.await_args.args[2]
     assert dispatch.envelope.source_kind == "hook"
+    assert dispatch.envelope.message_received_depth == 1
     assert dispatch.envelope.mentioned_agents == ("code",)
     assert hook_calls == []
 
@@ -660,7 +672,9 @@ async def test_prepare_dispatch_allows_hook_dispatch_without_mention(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_prepare_dispatch_skips_message_received_hooks_for_hook_dispatch(tmp_path: Path) -> None:
+async def test_prepare_dispatch_reruns_message_received_for_hook_dispatch_from_non_message_hooks(
+    tmp_path: Path,
+) -> None:
     """hook_dispatch from non-message hooks should still run message:received hooks."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
@@ -707,8 +721,10 @@ async def test_prepare_dispatch_skips_message_received_hooks_for_hook_dispatch(t
 
 
 @pytest.mark.asyncio
-async def test_hook_dispatch_from_message_received_skips_only_origin_plugin_on_reentry(tmp_path: Path) -> None:
-    """hook_dispatch should re-enter message:received while avoiding immediate same-plugin recursion."""
+async def test_hook_dispatch_from_message_received_reenters_once_and_skips_origin_plugin(
+    tmp_path: Path,
+) -> None:
+    """First-hop hook_dispatch should re-enter message:received once and skip only the origin plugin."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
     event = nio.RoomMessageText.from_dict(
@@ -721,6 +737,7 @@ async def test_hook_dispatch_from_message_received_skips_only_origin_plugin_on_r
                 "body": "restart notification",
                 "com.mindroom.source_kind": "hook_dispatch",
                 "com.mindroom.hook_source": "origin-plugin:message:received",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
         },
     )
@@ -757,6 +774,65 @@ async def test_hook_dispatch_from_message_received_skips_only_origin_plugin_on_r
     assert dispatch is not None
     assert hook_calls == ["other"]
     assert dispatch.envelope.source_kind == "hook_dispatch"
+    assert dispatch.envelope.hook_source == "origin-plugin:message:received"
+    assert dispatch.envelope.message_received_depth == 1
+
+
+@pytest.mark.asyncio
+async def test_hook_dispatch_from_message_received_stops_reentry_after_first_synthetic_hop(
+    tmp_path: Path,
+) -> None:
+    """Deeper synthetic hops should not keep re-entering message:received across plugins."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$hook-dispatch-msg",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "restart notification",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "other-plugin:message:received",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
+            },
+        },
+    )
+    hook_calls: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def origin(_ctx: MessageReceivedContext) -> None:
+        hook_calls.append("origin")
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def other(_ctx: MessageReceivedContext) -> None:
+        hook_calls.append("other")
+
+    bot.hook_registry = HookRegistry.from_plugins(
+        [_plugin("origin-plugin", [origin]), _plugin("other-plugin", [other])],
+    )
+    bot._extract_message_context = AsyncMock(
+        return_value=_MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+    )
+
+    dispatch = await bot._prepare_dispatch(
+        room,
+        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        event_label="message",
+    )
+
+    assert dispatch is not None
+    assert hook_calls == []
+    assert dispatch.envelope.source_kind == "hook_dispatch"
+    assert dispatch.envelope.message_received_depth == 2
 
 
 @pytest.mark.asyncio
