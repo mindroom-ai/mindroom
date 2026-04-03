@@ -46,6 +46,7 @@ async def send_hook_message(
     source_hook: str,
     extra_content: dict[str, Any] | None,
     *,
+    trigger_dispatch: bool = False,
     sender_domain: str | None = None,
 ) -> str | None:
     """Send one hook-originated Matrix message."""
@@ -54,7 +55,6 @@ async def send_hook_message(
         return None
 
     content_extra = dict(extra_content or {})
-    trigger_dispatch = bool(content_extra.pop("com.mindroom._trigger_dispatch", False))
     content_extra["com.mindroom.source_kind"] = "hook_dispatch" if trigger_dispatch else "hook"
     content_extra["com.mindroom.hook_source"] = source_hook
 
@@ -89,6 +89,8 @@ def build_hook_message_sender(
         thread_id: str | None,
         source_hook: str,
         extra_content: dict[str, Any] | None,
+        *,
+        trigger_dispatch: bool = False,
     ) -> str | None:
         return await send_hook_message(
             client,
@@ -99,6 +101,7 @@ def build_hook_message_sender(
             thread_id,
             source_hook,
             extra_content,
+            trigger_dispatch=trigger_dispatch,
             sender_domain=resolved_sender_domain,
         )
 

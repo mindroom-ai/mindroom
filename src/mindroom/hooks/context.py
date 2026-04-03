@@ -70,9 +70,14 @@ async def _send_bound_message(
     resolved_extra_content = dict(extra_content or {})
     if requester_id:
         resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
-    if trigger_dispatch:
-        resolved_extra_content["com.mindroom._trigger_dispatch"] = True
-    return await message_sender(room_id, text, thread_id, source_hook, resolved_extra_content or None)
+    return await message_sender(
+        room_id,
+        text,
+        thread_id,
+        source_hook,
+        resolved_extra_content or None,
+        trigger_dispatch=trigger_dispatch,
+    )
 
 
 async def _query_bound_room_state(

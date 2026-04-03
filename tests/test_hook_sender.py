@@ -180,7 +180,7 @@ async def test_hook_context_send_message_without_bound_sender_returns_none(tmp_p
 @pytest.mark.asyncio
 async def test_hook_context_send_message_supports_multiple_hook_sends(tmp_path: Path) -> None:
     """Multiple hooks should be able to send sequential messages through the bound sender."""
-    sent_messages: list[tuple[str, str, str | None, str, dict[str, object] | None]] = []
+    sent_messages: list[tuple[str, str, str | None, str, dict[str, object] | None, bool]] = []
 
     async def sender(
         room_id: str,
@@ -188,8 +188,10 @@ async def test_hook_context_send_message_supports_multiple_hook_sends(tmp_path: 
         thread_id: str | None,
         source_hook: str,
         extra_content: dict[str, object] | None,
+        *,
+        trigger_dispatch: bool = False,
     ) -> str | None:
-        sent_messages.append((room_id, body, thread_id, source_hook, extra_content))
+        sent_messages.append((room_id, body, thread_id, source_hook, extra_content, trigger_dispatch))
         return f"$event{len(sent_messages)}"
 
     @hook(EVENT_MESSAGE_RECEIVED, priority=10)
@@ -218,6 +220,7 @@ async def test_hook_context_send_message_supports_multiple_hook_sends(tmp_path: 
             "$thread",
             "hook-plugin:message:received",
             {"custom": 1, ORIGINAL_SENDER_KEY: "@user:localhost"},
+            False,
         ),
         (
             "!room:localhost",
@@ -225,6 +228,7 @@ async def test_hook_context_send_message_supports_multiple_hook_sends(tmp_path: 
             None,
             "hook-plugin:message:received",
             {ORIGINAL_SENDER_KEY: "@user:localhost"},
+            False,
         ),
     ]
 
@@ -239,8 +243,10 @@ async def test_hook_send_message_failure_does_not_crash_later_hooks(tmp_path: Pa
         thread_id: str | None,
         source_hook: str,
         extra_content: dict[str, object] | None,
+        *,
+        trigger_dispatch: bool = False,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, extra_content
+        del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch
         msg = "boom"
         raise RuntimeError(msg)
 
@@ -610,7 +616,6 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
         assert ORIGINAL_SENDER_KEY not in captured_content
     else:
         assert captured_content[ORIGINAL_SENDER_KEY] == expected_requester
-    assert "com.mindroom._trigger_dispatch" not in captured_content
 
 
 @pytest.mark.asyncio

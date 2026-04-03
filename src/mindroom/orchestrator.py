@@ -733,8 +733,17 @@ class MultiAgentOrchestrator:
             thread_id: str | None,
             source_hook: str,
             extra_content: dict[str, object] | None,
+            *,
+            trigger_dispatch: bool = False,
         ) -> str | None:
-            return await router_bot._hook_send_message(room_id, body, thread_id, source_hook, extra_content)
+            return await router_bot._hook_send_message(
+                room_id,
+                body,
+                thread_id,
+                source_hook,
+                extra_content,
+                trigger_dispatch=trigger_dispatch,
+            )
 
         return _send
 

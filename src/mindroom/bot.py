@@ -4939,6 +4939,8 @@ class AgentBot:
         thread_id: str | None,
         source_hook: str,
         extra_content: dict[str, Any] | None = None,
+        *,
+        trigger_dispatch: bool = False,
     ) -> str | None:
         """Send a hook-originated Matrix message with stable metadata tags."""
         if self.client is None:
@@ -4954,6 +4956,7 @@ class AgentBot:
             thread_id,
             source_hook,
             extra_content,
+            trigger_dispatch=trigger_dispatch,
             sender_domain=self.matrix_id.domain,
         )
         if event_id:

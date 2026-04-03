@@ -576,7 +576,7 @@ async def test_tool_after_call_hooks_cannot_mutate_non_deepcopyable_result(tmp_p
 @pytest.mark.asyncio
 async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) -> None:
     """Tool hook contexts should route send_message() through the active hook sender."""
-    sent: list[tuple[str, str, str | None, str, dict[str, object] | None]] = []
+    sent: list[tuple[str, str, str | None, str, dict[str, object] | None, bool]] = []
 
     async def hook_message_sender(
         room_id: str,
@@ -584,8 +584,10 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
         thread_id: str | None,
         source_hook: str,
         extra_content: dict[str, object] | None,
+        *,
+        trigger_dispatch: bool = False,
     ) -> str | None:
-        sent.append((room_id, body, thread_id, source_hook, extra_content))
+        sent.append((room_id, body, thread_id, source_hook, extra_content, trigger_dispatch))
         return f"${body}-event"
 
     @hook(EVENT_TOOL_BEFORE_CALL)
@@ -636,6 +638,7 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
                 "phase": "before",
                 "com.mindroom.original_sender": "@user:localhost",
             },
+            False,
         ),
         (
             "!room:localhost",
@@ -646,6 +649,7 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
                 "phase": "after",
                 "com.mindroom.original_sender": "@user:localhost",
             },
+            False,
         ),
     ]
 
@@ -653,7 +657,7 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
 @pytest.mark.asyncio
 async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path: Path) -> None:
     """Tool hook contexts should expose live room-state helpers from the active runtime client."""
-    sent: list[tuple[str, str, str | None, str, dict[str, object] | None]] = []
+    sent: list[tuple[str, str, str | None, str, dict[str, object] | None, bool]] = []
 
     async def hook_message_sender(
         room_id: str,
@@ -661,8 +665,10 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
         thread_id: str | None,
         source_hook: str,
         extra_content: dict[str, object] | None,
+        *,
+        trigger_dispatch: bool = False,
     ) -> str | None:
-        sent.append((room_id, body, thread_id, source_hook, extra_content))
+        sent.append((room_id, body, thread_id, source_hook, extra_content, trigger_dispatch))
         return "$dispatch-event"
 
     @hook(EVENT_TOOL_BEFORE_CALL)
@@ -713,8 +719,8 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
             "tool-policy:tool:before_call",
             {
                 "com.mindroom.original_sender": "@user:localhost",
-                "com.mindroom._trigger_dispatch": True,
             },
+            True,
         ),
     ]
 
@@ -732,8 +738,10 @@ async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path)
         thread_id: str | None,
         source_hook: str,
         extra_content: dict[str, object] | None,
+        *,
+        trigger_dispatch: bool = False,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, extra_content
+        del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch
         current_loop = asyncio.get_running_loop()
         current_thread = threading.get_ident()
         seen.append(("sender", current_thread, id(current_loop)))
