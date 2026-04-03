@@ -58,6 +58,16 @@ class ToolRuntimeContext:
     message_received_depth: int = 0
 
 
+@dataclass(frozen=True)
+class ToolRuntimeHookBindings:
+    """Resolved hook-facing bindings derived from one tool runtime context."""
+
+    message_sender: HookMessageSender | None
+    room_state_querier: HookRoomStateQuerier | None
+    room_state_putter: HookRoomStatePutter | None
+    message_received_depth: int
+
+
 _TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(
     "tool_runtime_context",
     default=None,
@@ -67,6 +77,16 @@ _TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(
 def get_tool_runtime_context() -> ToolRuntimeContext | None:
     """Get the current shared tool runtime context."""
     return _TOOL_RUNTIME_CONTEXT.get()
+
+
+def resolve_tool_runtime_hook_bindings(context: ToolRuntimeContext) -> ToolRuntimeHookBindings:
+    """Return the canonical hook-facing bindings for one tool runtime context."""
+    return ToolRuntimeHookBindings(
+        message_sender=context.hook_message_sender,
+        room_state_querier=context.room_state_querier or build_hook_room_state_querier(context.client),
+        room_state_putter=context.room_state_putter or build_hook_room_state_putter(context.client),
+        message_received_depth=context.message_received_depth,
+    )
 
 
 def resolve_current_session_id(
@@ -160,6 +180,7 @@ async def emit_custom_event(
         return
 
     correlation_id = context.correlation_id or f"{event_name}:{uuid4().hex}"
+    bindings = resolve_tool_runtime_hook_bindings(context)
     hook_context = CustomEventContext(
         event_name=event_name,
         plugin_name="",
@@ -168,15 +189,15 @@ async def emit_custom_event(
         runtime_paths=context.runtime_paths,
         logger=get_logger("mindroom.hooks.tools").bind(event_name=event_name),
         correlation_id=correlation_id,
-        message_sender=context.hook_message_sender,
-        room_state_querier=context.room_state_querier or build_hook_room_state_querier(context.client),
-        room_state_putter=context.room_state_putter or build_hook_room_state_putter(context.client),
+        message_sender=bindings.message_sender,
+        room_state_querier=bindings.room_state_querier,
+        room_state_putter=bindings.room_state_putter,
         payload=payload,
         source_plugin=plugin_name,
         room_id=context.room_id,
         thread_id=context.resolved_thread_id or context.thread_id,
         sender_id=context.requester_id,
-        message_received_depth=context.message_received_depth,
+        message_received_depth=bindings.message_received_depth,
     )
     await emit(context.hook_registry, event_name, hook_context)
 
