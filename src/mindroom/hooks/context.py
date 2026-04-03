@@ -226,8 +226,10 @@ class HookContext:
         """Send a Matrix message from a hook and return the event ID when available.
 
         When *trigger_dispatch* is True the message uses source_kind
-        ``hook_dispatch`` so that receiving agents process it as if it
-        came from a user (bypassing the agent-not-mentioned filter).
+        ``hook_dispatch`` so that receiving agents process it through
+        normal dispatch instead of treating it as a non-dispatching hook
+        note. Normal routing, permissions, and should-respond checks
+        still apply.
         """
         return await _send_bound_message(
             self.logger,

@@ -649,6 +649,53 @@ async def test_prepare_dispatch_allows_hook_dispatch_without_mention(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_prepare_dispatch_skips_message_received_hooks_for_hook_dispatch(tmp_path: Path) -> None:
+    """hook_dispatch should enter normal dispatch without re-triggering message:received hooks."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$hook-dispatch-msg",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "restart notification",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "restart-notify:bot:ready",
+            },
+        },
+    )
+    hook_calls: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def received(_ctx: MessageReceivedContext) -> None:
+        hook_calls.append("called")
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot._extract_message_context = AsyncMock(
+        return_value=_MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+    )
+
+    dispatch = await bot._prepare_dispatch(
+        room,
+        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        event_label="message",
+    )
+
+    assert dispatch is not None
+    assert hook_calls == []
+    assert dispatch.envelope.source_kind == "hook_dispatch"
+
+
+@pytest.mark.asyncio
 async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_path: Path) -> None:
     """Plain hook messages from agents without mentions should still be filtered."""
     bot = _agent_bot(tmp_path)

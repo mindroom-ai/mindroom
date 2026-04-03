@@ -68,7 +68,10 @@ async def test_schedule_hook_rewrites_message_text(tmp_path: Path) -> None:
     config = _config(tmp_path)
     set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [rewrite])]))
 
-    with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
+    with (
+        patch("mindroom.scheduling.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value="$latest")),
+        patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send,
+    ):
         await _execute_scheduled_workflow(
             AsyncMock(),
             _workflow("Prepare for meeting"),

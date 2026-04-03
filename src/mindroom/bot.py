@@ -759,7 +759,7 @@ class AgentBot:
         correlation_id: str,
     ) -> bool:
         """Emit message:received and return whether hooks suppressed processing."""
-        if envelope.source_kind == "hook":
+        if envelope.source_kind in {"hook", "hook_dispatch"}:
             self.logger.debug(
                 "Skipping message:received hooks for hook-originated automation message",
                 event_id=envelope.source_event_id,

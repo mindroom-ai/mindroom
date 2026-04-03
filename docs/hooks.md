@@ -436,7 +436,8 @@ Every hook context also exposes the following async helpers:
 Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
 For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
 For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while passing `thread_id=None` explicitly posts at room level.
-When `trigger_dispatch=True`, MindRoom sends the message as source kind `hook_dispatch` so receiving agents handle it as dispatchable automation instead of a non-dispatching hook note.
+When `trigger_dispatch=True`, MindRoom sends the message as source kind `hook_dispatch` so receiving agents route it through normal dispatch instead of treating it as a non-dispatching hook note.
+Normal routing, permissions, and should-respond checks still apply to that dispatched automation.
 
 **`await ctx.query_room_state(room_id, event_type, state_key=None)`**
 Queries Matrix room state events.

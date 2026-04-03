@@ -313,7 +313,9 @@ async def test_schedule_fired_auto_poke_uses_thread_from_stored_state(
     await emit(loaded_workloop.registry, EVENT_SCHEDULE_FIRED, schedule_context)
 
     assert schedule_context.suppress is True
-    sender.assert_not_awaited()
+    sender.assert_awaited_once()
+    assert sender.await_args.args[0] == "!room:localhost"
+    assert sender.await_args.args[2] == "$thread_root"
 
 
 @pytest.mark.asyncio
