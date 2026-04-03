@@ -14,7 +14,7 @@ import {
   VoiceConfig,
 } from '@/types/config';
 import * as configService from '@/services/configService';
-import type { ConfigDiagnostic } from '@/lib/configValidation';
+import type { ConfigDiagnostic, ConfigValidationIssue } from '@/lib/configValidation';
 import {
   cloneToolEntries,
   getToolOverrides as getToolOverridesFromEntries,
@@ -33,30 +33,85 @@ export type SaveConfigResult =
   | { status: 'stale' }
   | { status: 'error'; message: string; diagnostics: ConfigDiagnostic[] };
 
-function retainedDraftDiagnostics(diagnostics: ConfigDiagnostic[]): ConfigDiagnostic[] {
-  return diagnostics.filter(
-    diagnostic =>
-      diagnostic.kind === 'validation' ||
-      (diagnostic.kind === 'global' && diagnostic.message === CONFIG_VALIDATION_FAILED_MESSAGE)
-  );
+type ConfigDiagnosticPath = Array<string | number>;
+
+function validationDiagnostics(
+  issues: ConfigValidationIssue[],
+  options: { blocking: boolean }
+): ConfigDiagnostic[] {
+  return [
+    {
+      kind: 'global',
+      message: CONFIG_VALIDATION_FAILED_MESSAGE,
+      blocking: options.blocking,
+    },
+    ...issues.map(issue => ({
+      kind: 'validation' as const,
+      issue,
+    })),
+  ];
+}
+
+function draftSyncStatus(state: {
+  loadedConfig: Config | null;
+  isDirty: boolean;
+}): ConfigState['syncStatus'] {
+  if (state.isDirty) {
+    return 'error';
+  }
+  return state.loadedConfig == null ? 'disconnected' : 'synced';
+}
+
+function diagnosticsContainValidationErrors(diagnostics: ConfigDiagnostic[]): boolean {
+  return diagnostics.some(diagnostic => diagnostic.kind === 'validation');
+}
+
+function pathStartsWith(path: ConfigDiagnosticPath, prefix: ConfigDiagnosticPath): boolean {
+  return prefix.every((segment, index) => path[index] === segment);
+}
+
+function diagnosticsOverlapTouchedPath(
+  issuePath: ConfigDiagnosticPath,
+  touchedPath: ConfigDiagnosticPath
+): boolean {
+  return pathStartsWith(issuePath, touchedPath) || pathStartsWith(touchedPath, issuePath);
+}
+
+function retainedDraftDiagnostics(
+  diagnostics: ConfigDiagnostic[],
+  touchedPaths: ConfigDiagnosticPath[] = []
+): ConfigDiagnostic[] {
+  const filteredDiagnostics = diagnostics.filter(diagnostic => {
+    if (diagnostic.kind !== 'validation') {
+      return true;
+    }
+    return !touchedPaths.some(path => diagnosticsOverlapTouchedPath(diagnostic.issue.loc, path));
+  });
+
+  if (diagnosticsContainValidationErrors(filteredDiagnostics)) {
+    return filteredDiagnostics.filter(
+      diagnostic =>
+        diagnostic.kind === 'validation' ||
+        (diagnostic.kind === 'global' && diagnostic.message === CONFIG_VALIDATION_FAILED_MESSAGE)
+    );
+  }
+
+  return filteredDiagnostics.filter(diagnostic => diagnostic.kind === 'validation');
 }
 
 function nextDraftVersion(draftVersion: number): number {
   return draftVersion + 1;
 }
 
-function syncStatusForLoadedConfig(loadedConfig: Config | null): ConfigState['syncStatus'] {
-  return loadedConfig == null ? 'disconnected' : 'synced';
-}
-
 function markDraftDirty<T extends object>(
   state: Pick<ConfigState, 'draftVersion' | 'diagnostics'>,
-  changes: T
+  changes: T,
+  touchedPaths: ConfigDiagnosticPath[] = []
 ): T & Pick<ConfigState, 'isDirty' | 'diagnostics' | 'draftVersion'> {
   return {
     ...changes,
     isDirty: true,
-    diagnostics: retainedDraftDiagnostics(state.diagnostics),
+    diagnostics: retainedDraftDiagnostics(state.diagnostics, touchedPaths),
     draftVersion: nextDraftVersion(state.draftVersion),
   };
 }
@@ -239,6 +294,8 @@ interface ConfigState {
   // State
   loadedConfig: Config | null;
   config: Config | null;
+  recoveryConfigSource: string | null;
+  recoveryConfigSourceOriginal: string | null;
   draftVersion: number;
   agents: Agent[];
   teams: Team[];
@@ -264,6 +321,8 @@ interface ConfigState {
   // Actions
   loadConfig: () => Promise<void>;
   saveConfig: () => Promise<SaveConfigResult>;
+  updateRecoveryConfigSource: (source: string) => void;
+  saveRecoveryConfigSource: () => Promise<SaveConfigResult>;
   refreshAgentPolicies: (agents: Agent[]) => Promise<void>;
   selectAgent: (agentId: string | null) => void;
   updateAgent: (agentId: string, updates: Partial<Agent>) => void;
@@ -304,11 +363,14 @@ interface ConfigState {
 function clearedLoadedConfigState(
   diagnostics: ConfigDiagnostic[],
   agentPoliciesRequestId: number,
-  draftVersion: number
+  draftVersion: number,
+  recoveryConfigSource: string | null = null
 ): Pick<
   ConfigState,
   | 'loadedConfig'
   | 'config'
+  | 'recoveryConfigSource'
+  | 'recoveryConfigSourceOriginal'
   | 'draftVersion'
   | 'agents'
   | 'teams'
@@ -330,6 +392,8 @@ function clearedLoadedConfigState(
   return {
     loadedConfig: null,
     config: null,
+    recoveryConfigSource,
+    recoveryConfigSourceOriginal: recoveryConfigSource,
     draftVersion,
     agents: [],
     teams: [],
@@ -354,6 +418,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Initial state
   loadedConfig: null,
   config: null,
+  recoveryConfigSource: null,
+  recoveryConfigSourceOriginal: null,
   draftVersion: 0,
   agents: [],
   teams: [],
@@ -376,8 +442,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Load configuration from backend
   loadConfig: async () => {
-    const loadConfigRequestId = get().loadConfigRequestId + 1;
-    set({ isLoading: true, diagnostics: [], loadConfigRequestId });
+    const currentState = get();
+    const loadConfigRequestId = currentState.loadConfigRequestId + 1;
+    const draftVersionAtStart = currentState.draftVersion;
+    set({
+      isLoading: true,
+      diagnostics: currentState.isDirty ? retainedDraftDiagnostics(currentState.diagnostics) : [],
+      loadConfigRequestId,
+    });
     try {
       const rawConfig = await configService.loadConfig();
       const {
@@ -445,15 +517,27 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         diagnostics = [agentPoliciesDiagnostic(false)];
         agentPoliciesStale = true;
       }
-      if (get().loadConfigRequestId != loadConfigRequestId) {
+      const latestState = get();
+      if (latestState.loadConfigRequestId != loadConfigRequestId) {
         return;
       }
-      const nextAgentPoliciesRequestId = get().agentPoliciesRequestId + 1;
-      const nextDraft = nextDraftVersion(get().draftVersion);
+      if (latestState.isDirty || latestState.draftVersion != draftVersionAtStart) {
+        set({
+          loadedConfig: normalizedConfig,
+          isLoading: false,
+          syncStatus: latestState.syncStatus,
+          diagnostics: retainedDraftDiagnostics(latestState.diagnostics),
+        });
+        return;
+      }
+      const nextAgentPoliciesRequestId = latestState.agentPoliciesRequestId + 1;
+      const nextDraft = nextDraftVersion(latestState.draftVersion);
 
       set({
         loadedConfig: normalizedConfig,
         config: normalizedConfig,
+        recoveryConfigSource: null,
+        recoveryConfigSourceOriginal: null,
         draftVersion: nextDraft,
         agents,
         teams,
@@ -474,22 +558,33 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
       const nextAgentPoliciesRequestId = get().agentPoliciesRequestId + 1;
       if (error instanceof configService.ConfigValidationError) {
+        let recoveryConfigSource: string | null = null;
+        try {
+          recoveryConfigSource = await configService.loadRawConfigSource();
+        } catch {
+          recoveryConfigSource = null;
+        }
+        const latestState = get();
+        if (latestState.loadConfigRequestId != loadConfigRequestId) {
+          return;
+        }
+        if (latestState.isDirty || latestState.draftVersion != draftVersionAtStart) {
+          set({
+            isLoading: false,
+            syncStatus: 'error',
+            diagnostics: validationDiagnostics(error.issues, {
+              blocking: latestState.recoveryConfigSource != null && latestState.config == null,
+            }),
+          });
+          return;
+        }
         const nextDraft = nextDraftVersion(get().draftVersion);
         set(
           clearedLoadedConfigState(
-            [
-              {
-                kind: 'global',
-                message: CONFIG_VALIDATION_FAILED_MESSAGE,
-                blocking: true,
-              },
-              ...error.issues.map(issue => ({
-                kind: 'validation' as const,
-                issue,
-              })),
-            ],
+            validationDiagnostics(error.issues, { blocking: true }),
             nextAgentPoliciesRequestId,
-            nextDraft
+            nextDraft,
+            recoveryConfigSource
           )
         );
         return;
@@ -555,7 +650,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       rooms,
       agentPoliciesStale,
       draftVersion,
-      loadedConfig,
       diagnostics,
     } = get();
     if (!config) {
@@ -653,12 +747,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const draftChangedSinceSaveStarted = currentState.draftVersion !== savedDraftVersion;
       rememberRawToolEntries(updatedConfig, rawEntriesByAgent, rawDefaultToolEntries);
       if (draftChangedSinceSaveStarted) {
-        const baselineConfig =
-          currentState.loadedConfig ?? currentState.config ?? loadedConfig ?? config;
         set({
           loadedConfig: updatedConfig,
           isLoading: false,
-          syncStatus: syncStatusForLoadedConfig(baselineConfig),
+          syncStatus: draftSyncStatus(currentState),
         });
         if (currentState.agentPoliciesStale) {
           void get().refreshAgentPolicies(currentState.agents);
@@ -685,26 +777,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const currentState = get();
       const draftChangedSinceSaveStarted = currentState.draftVersion !== savedDraftVersion;
       if (draftChangedSinceSaveStarted) {
-        const baselineConfig =
-          currentState.loadedConfig ?? currentState.config ?? loadedConfig ?? config;
         set({
           isLoading: false,
-          syncStatus: syncStatusForLoadedConfig(baselineConfig),
+          syncStatus: draftSyncStatus(currentState),
         });
         return { status: 'stale' };
       }
       if (error instanceof configService.ConfigValidationError) {
-        const errorDiagnostics = [
-          {
-            kind: 'global' as const,
-            message: 'Configuration validation failed',
-            blocking: false,
-          },
-          ...error.issues.map(issue => ({
-            kind: 'validation' as const,
-            issue,
-          })),
-        ];
+        const errorDiagnostics = validationDiagnostics(error.issues, { blocking: false });
         set({
           diagnostics: errorDiagnostics,
           isLoading: false,
@@ -737,6 +817,107 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     }
   },
 
+  updateRecoveryConfigSource: source => {
+    set(state => {
+      if (source === state.recoveryConfigSource) {
+        return state;
+      }
+      return {
+        recoveryConfigSource: source,
+        isDirty: source !== state.recoveryConfigSourceOriginal,
+        diagnostics: retainedDraftDiagnostics(state.diagnostics),
+        draftVersion: nextDraftVersion(state.draftVersion),
+      };
+    });
+  },
+
+  saveRecoveryConfigSource: async () => {
+    const { recoveryConfigSource, diagnostics, draftVersion } = get();
+    if (recoveryConfigSource == null) {
+      return {
+        status: 'error',
+        message: 'No recovery configuration is available to save.',
+        diagnostics,
+      };
+    }
+
+    const saveConfigRequestId = get().saveConfigRequestId + 1;
+    const savedDraftVersion = draftVersion;
+    set({
+      isLoading: true,
+      syncStatus: 'syncing',
+      saveConfigRequestId,
+    });
+
+    try {
+      await configService.saveRawConfigSource(recoveryConfigSource);
+      if (get().saveConfigRequestId != saveConfigRequestId) {
+        return { status: 'stale' };
+      }
+      const currentState = get();
+      const draftChangedSinceSaveStarted = currentState.draftVersion !== savedDraftVersion;
+      if (draftChangedSinceSaveStarted) {
+        set({
+          isLoading: false,
+          syncStatus: draftSyncStatus(currentState),
+        });
+        return { status: 'stale' };
+      }
+
+      set({
+        recoveryConfigSourceOriginal: recoveryConfigSource,
+        isDirty: false,
+      });
+      await get().loadConfig();
+      return { status: 'saved' };
+    } catch (error) {
+      if (get().saveConfigRequestId != saveConfigRequestId) {
+        return { status: 'stale' };
+      }
+      const currentState = get();
+      const draftChangedSinceSaveStarted = currentState.draftVersion !== savedDraftVersion;
+      if (draftChangedSinceSaveStarted) {
+        set({
+          isLoading: false,
+          syncStatus: draftSyncStatus(currentState),
+        });
+        return { status: 'stale' };
+      }
+      if (error instanceof configService.ConfigValidationError) {
+        const errorDiagnostics = validationDiagnostics(error.issues, { blocking: true });
+        set({
+          diagnostics: errorDiagnostics,
+          isLoading: false,
+          syncStatus: 'error',
+        });
+        return {
+          status: 'error',
+          message: CONFIG_VALIDATION_FAILED_MESSAGE,
+          diagnostics: errorDiagnostics,
+        };
+      }
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to save raw configuration';
+      const errorDiagnostics = [
+        {
+          kind: 'global' as const,
+          message: errorMessage,
+          blocking: true,
+        },
+      ];
+      set({
+        diagnostics: errorDiagnostics,
+        isLoading: false,
+        syncStatus: 'error',
+      });
+      return {
+        status: 'error',
+        message: errorMessage,
+        diagnostics: errorDiagnostics,
+      };
+    }
+  },
+
   // Select an agent for editing
   selectAgent: agentId => {
     set({ selectedAgentId: agentId });
@@ -753,6 +934,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
 
       const normalizedUpdates = normalizeAgentUpdates(currentAgent, updates);
+      const touchedPaths = Object.keys(normalizedUpdates).map(
+        key => ['agents', agentId, key] as ConfigDiagnosticPath
+      );
       nextAgents = state.agents.map(agent =>
         agent.id === agentId ? { ...agent, ...normalizedUpdates } : agent
       );
@@ -761,7 +945,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       return {
         agents: nextAgents,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, touchedPaths),
       };
     });
     if (shouldRefreshAgentPolicies && get().config != null) {
@@ -795,6 +979,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           })();
 
       const normalizedUpdates = normalizeAgentUpdates(currentAgent, privateUpdates);
+      const touchedPaths = Object.keys(normalizedUpdates).map(
+        key => ['agents', agentId, key] as ConfigDiagnosticPath
+      );
       nextAgents = state.agents.map(agent =>
         agent.id === agentId ? { ...agent, ...normalizedUpdates } : agent
       );
@@ -803,7 +990,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       return {
         agents: nextAgents,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, touchedPaths),
         privateWorkerScopeBackups: nextBackups,
       };
     });
@@ -828,7 +1015,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set(state => ({
       agents: [...state.agents, newAgent],
       selectedAgentId: id,
-      ...markDraftDirty(state, {}),
+      ...markDraftDirty(state, {}, [['agents']]),
     }));
     if (get().config != null) {
       void get().refreshAgentPolicies([...get().agents]);
@@ -864,7 +1051,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       agentPoliciesByAgent: nextAgentPoliciesByAgent,
       privateWorkerScopeBackups: remainingBackups,
       selectedAgentId: state.selectedAgentId === agentId ? null : state.selectedAgentId,
-      ...markDraftDirty(state, {}),
+      ...markDraftDirty(state, {}, [['agents']]),
     });
     if (get().config != null && deletedAgent != null) {
       void get().refreshAgentPolicies(nextAgents);
@@ -885,11 +1072,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
 
       const normalizedUpdates = normalizeTeamUpdates(currentTeam, updates);
+      const touchedPaths = Object.keys(normalizedUpdates).map(
+        key => ['teams', teamId, key] as ConfigDiagnosticPath
+      );
       return {
         teams: state.teams.map(team =>
           team.id === teamId ? { ...team, ...normalizedUpdates } : team
         ),
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, touchedPaths),
       };
     });
   },
@@ -904,7 +1094,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set(state => ({
       teams: [...state.teams, newTeam],
       selectedTeamId: id,
-      ...markDraftDirty(state, {}),
+      ...markDraftDirty(state, {}, [['teams']]),
     }));
   },
 
@@ -913,7 +1103,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set(state => ({
       teams: state.teams.filter(team => team.id !== teamId),
       selectedTeamId: state.selectedTeamId === teamId ? null : state.selectedTeamId,
-      ...markDraftDirty(state, {}),
+      ...markDraftDirty(state, {}, [['teams']]),
     }));
   },
 
@@ -934,7 +1124,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         if (!targetCulture) {
           return {
             cultures: updatedCultures,
-            ...markDraftDirty(state, {}),
+            ...markDraftDirty(state, {}, [['cultures', cultureId]]),
           };
         }
         return {
@@ -943,13 +1133,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             cultureId,
             targetCulture.agents
           ),
-          ...markDraftDirty(state, {}),
+          ...markDraftDirty(state, {}, [['cultures', cultureId, 'agents']]),
         };
       }
 
       return {
         cultures: updatedCultures,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(
+          state,
+          {},
+          Object.keys(updates).map(key => ['cultures', cultureId, key] as ConfigDiagnosticPath)
+        ),
       };
     });
   },
@@ -980,7 +1174,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return {
         cultures: nextCultures,
         selectedCultureId: id,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['cultures']]),
       };
     });
   },
@@ -990,7 +1184,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set(state => ({
       cultures: state.cultures.filter(culture => culture.id !== cultureId),
       selectedCultureId: state.selectedCultureId === cultureId ? null : state.selectedCultureId,
-      ...markDraftDirty(state, {}),
+      ...markDraftDirty(state, {}, [['cultures']]),
     }));
   },
 
@@ -1057,14 +1251,19 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           config: updatedConfig,
           rooms: updatedRooms,
           agents: updatedAgents,
-          ...markDraftDirty(state, {}),
+          ...markDraftDirty(state, {}, [['rooms', roomId, 'agents'], ['agents']]),
         };
       }
 
       return {
         config: updatedConfig,
         rooms: updatedRooms,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [
+          ...Object.keys(updates).map(key => ['rooms', roomId, key] as ConfigDiagnosticPath),
+          ...(updates.model !== undefined
+            ? ([['room_models', roomId]] as ConfigDiagnosticPath[])
+            : []),
+        ]),
       };
     });
   },
@@ -1090,7 +1289,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         rooms: [...state.rooms, newRoom],
         agents: updatedAgents,
         selectedRoomId: id,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['rooms'], ['agents']]),
       };
     });
   },
@@ -1127,7 +1326,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         teams: updatedTeams,
         config: updatedConfig,
         selectedRoomId: state.selectedRoomId === roomId ? null : state.selectedRoomId,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['rooms'], ['agents'], ['teams'], ['room_models', roomId]]),
       };
     });
   },
@@ -1152,7 +1351,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return {
         rooms: updatedRooms,
         agents: updatedAgents,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['rooms', roomId, 'agents'], ['agents']]),
       };
     });
   },
@@ -1177,7 +1376,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return {
         rooms: updatedRooms,
         agents: updatedAgents,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['rooms', roomId, 'agents'], ['agents']]),
       };
     });
   },
@@ -1193,7 +1392,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['room_models']]),
       };
     });
   },
@@ -1219,7 +1418,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         preserveRawToolEntries(state.config, nextConfig);
         return {
           config: nextConfig,
-          ...markDraftDirty(state, {}),
+          ...markDraftDirty(state, {}, [['memory']]),
         };
       }
 
@@ -1230,7 +1429,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['memory']]),
       };
     });
   },
@@ -1253,7 +1452,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['knowledge_bases', baseName]]),
       };
     });
   },
@@ -1289,7 +1488,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return {
         config: nextConfig,
         agents,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['knowledge_bases', baseName], ['agents']]),
       };
     });
   },
@@ -1311,7 +1510,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['models', modelId]]),
       };
     });
   },
@@ -1328,7 +1527,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['models']]),
       };
     });
   },
@@ -1347,7 +1546,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['tools', toolId]]),
       };
     });
   },
@@ -1362,7 +1561,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}),
+        ...markDraftDirty(state, {}, [['voice']]),
       };
     });
   },
@@ -1384,7 +1583,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     );
     setRememberedRawToolEntries(config, agentId, nextRawEntries);
     set(state => ({
-      ...markDraftDirty(state, {}),
+      ...markDraftDirty(state, {}, [['agents', agentId, 'tools']]),
     }));
   },
 

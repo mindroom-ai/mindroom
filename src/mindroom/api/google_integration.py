@@ -116,6 +116,14 @@ def _get_oauth_credentials(runtime_paths: RuntimePaths) -> dict[str, Any] | None
     }
 
 
+def _require_oauth_credentials(runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Return Google OAuth credentials or raise one consistent API error."""
+    oauth_config = _get_oauth_credentials(runtime_paths)
+    if oauth_config is None:
+        raise HTTPException(status_code=503, detail="OAuth not configured")
+    return oauth_config
+
+
 def _build_google_token_data(creds: Credentials) -> dict[str, Any]:
     """Convert Google credentials to the stored token payload."""
     token_data = {
@@ -230,16 +238,12 @@ def _save_env_credentials(
 @router.get("/status")
 async def get_status(request: Request, agent_name: str | None = None) -> GoogleStatus:
     """Check Google integration status."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    # Check environment variables
-    runtime_paths = api_runtime_paths(request)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
+    runtime_paths = target.runtime_paths
     client_id = runtime_paths.env_value("GOOGLE_CLIENT_ID")
     client_secret = runtime_paths.env_value("GOOGLE_CLIENT_SECRET")
     has_credentials = bool(client_id and client_secret)
 
-    # Get current credentials
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
     creds = _get_google_credentials(target, runtime_paths)
 
     if not creds:
@@ -287,9 +291,8 @@ async def get_status(request: Request, agent_name: str | None = None) -> GoogleS
 @router.post("/connect")
 async def connect(request: Request, agent_name: str | None = None) -> GoogleAuthUrl:
     """Start Google OAuth flow."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
+    runtime_paths = target.runtime_paths
     oauth_config = _get_oauth_credentials(runtime_paths)
     if not oauth_config:
         raise HTTPException(
@@ -298,7 +301,6 @@ async def connect(request: Request, agent_name: str | None = None) -> GoogleAuth
         )
 
     try:
-        resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
         _, _, flow_cls = _ensure_google_packages(runtime_paths)
         state = issue_pending_oauth_state(request, "google", agent_name)
 
@@ -342,14 +344,16 @@ async def callback(request: Request) -> RedirectResponse:
     pending = consume_pending_oauth_request(request, "google", state)
     agent_name = pending.agent_name
 
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
-    oauth_config = _get_oauth_credentials(runtime_paths)
-    if not oauth_config:
-        raise HTTPException(status_code=503, detail="OAuth not configured")
-
     try:
+        target = resolve_request_credentials_target(
+            request,
+            agent_name=agent_name,
+            service_names=("google",),
+            execution_scope_override_provided=pending.execution_scope_override_provided,
+            execution_scope_override=pending.execution_scope_override,
+        )
+        runtime_paths = target.runtime_paths
+        oauth_config = _require_oauth_credentials(runtime_paths)
         _, _, flow_cls = _ensure_google_packages(runtime_paths)
 
         # Create OAuth flow and exchange code for tokens
@@ -359,13 +363,6 @@ async def callback(request: Request) -> RedirectResponse:
         flow.fetch_token(code=code)
 
         # Save credentials
-        target = resolve_request_credentials_target(
-            request,
-            agent_name=agent_name,
-            service_names=("google",),
-            execution_scope_override_provided=pending.execution_scope_override_provided,
-            execution_scope_override=pending.execution_scope_override,
-        )
         _save_credentials(flow.credentials, target)
 
         # Extract the domain from the redirect URI for the final redirect

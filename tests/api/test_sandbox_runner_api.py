@@ -1208,6 +1208,132 @@ def test_sandbox_runner_rejects_unknown_authored_override_field(
     assert "request.tool_config_overrides.shell.missing_field" in response.json()["detail"]
 
 
+def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_validation(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Execute prevalidation should use the current runtime's plugin metadata, not stale startup globals."""
+    _set_sandbox_token(monkeypatch)
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ConfigField, ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoPluginTool(Toolkit):\n"
+        "    def __init__(self, label: str | None = None) -> None:\n"
+        "        super().__init__(name='demo_plugin', tools=[])\n"
+        "        self.label = label\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='demo_plugin',\n"
+        "    display_name='Demo Plugin',\n"
+        "    description='Demo plugin tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        "    config_fields=[ConfigField(name='label', label='Label', type='text', required=False)],\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoPluginTool\n",
+        encoding="utf-8",
+    )
+    config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "agents: {}\n"
+        "router:\n"
+        "  model: default\n"
+        "plugins:\n"
+        "  - ./plugins/demo\n",
+        encoding="utf-8",
+    )
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "demo_plugin",
+            "function_name": "missing",
+            "args": [],
+            "kwargs": {},
+            "tool_config_overrides": {"label": "hello"},
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Tool 'demo_plugin' does not expose 'missing'."
+
+
+def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_override_validation(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Tool init override prevalidation should also use the current runtime's plugin metadata."""
+    _set_sandbox_token(monkeypatch)
+    plugin_root = tmp_path / "plugins" / "demo-init"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin_init", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ConfigField, ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoPluginInitTool(Toolkit):\n"
+        "    def __init__(self, base_dir: str | None = None) -> None:\n"
+        "        super().__init__(name='demo_plugin_init', tools=[])\n"
+        "        self.base_dir = base_dir\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='demo_plugin_init',\n"
+        "    display_name='Demo Plugin Init',\n"
+        "    description='Demo plugin tool with init overrides',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        "    config_fields=[ConfigField(name='base_dir', label='Base dir', type='path', required=False)],\n"
+        ")\n"
+        "def demo_plugin_init_tools():\n"
+        "    return DemoPluginInitTool\n",
+        encoding="utf-8",
+    )
+    config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "agents: {}\n"
+        "router:\n"
+        "  model: default\n"
+        "plugins:\n"
+        "  - ./plugins/demo-init\n",
+        encoding="utf-8",
+    )
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "demo_plugin_init",
+            "function_name": "missing",
+            "args": [],
+            "kwargs": {},
+            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Tool 'demo_plugin_init' does not expose 'missing'."
+
+
 def test_sandbox_runner_subprocess_rejects_unsafe_tool_init_overrides(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

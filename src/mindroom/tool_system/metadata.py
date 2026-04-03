@@ -28,7 +28,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
     from types import ModuleType
 
     from agno.tools import Toolkit
@@ -377,12 +377,18 @@ def validate_authored_overrides(
 def sanitize_tool_init_overrides(
     tool_name: str,
     tool_init_overrides: dict[str, object] | None,
+    *,
+    tool_metadata: Mapping[str, ToolMetadata] | None = None,
 ) -> dict[str, object] | None:
     """Validate and retain only the explicitly safe runtime tool init overrides."""
     if not tool_init_overrides:
         return None
 
-    metadata = TOOL_METADATA[tool_name]
+    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
+    metadata = metadata_by_name.get(tool_name)
+    if metadata is None:
+        msg = f"Unknown tool '{tool_name}'."
+        raise ToolInitOverrideError(msg)
     allowed_fields = {
         field.name for field in metadata.config_fields or [] if field.name in _SAFE_TOOL_INIT_OVERRIDE_FIELDS
     }
@@ -929,11 +935,12 @@ def default_worker_routed_tools(tool_names: list[str]) -> list[str]:
     return selected_tools
 
 
-def export_tools_metadata() -> list[dict[str, Any]]:
+def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) -> list[dict[str, Any]]:
     """Export tool metadata as JSON-serializable dictionaries."""
     tools: list[dict[str, Any]] = []
+    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
 
-    for metadata in TOOL_METADATA.values():
+    for metadata in metadata_by_name.values():
         tool_dict = asdict(metadata)
         tool_dict["category"] = metadata.category.value
         tool_dict["status"] = metadata.status.value

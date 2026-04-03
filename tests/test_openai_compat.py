@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 import pytest
 from fastapi import Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from mindroom import constants
@@ -159,6 +160,95 @@ def test_load_config_requires_runtime_paths() -> None:
 
     with pytest.raises(TypeError, match="API context is not initialized"):
         openai_compat._load_config(request)
+
+
+def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: Config) -> None:
+    """Model listing should load config from the same runtime that authenticated the request."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+    app = FastAPI()
+    app.include_router(router)
+    runtime_a = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "old-key"})
+    runtime_b = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "new-key"})
+    initialize_api_app(app, runtime_a)
+    captured_runtime_paths: list[RuntimePaths | None] = []
+
+    def _authenticate_and_swap(
+        authorization: str | None,
+        runtime_paths: RuntimePaths,
+    ) -> JSONResponse | None:
+        assert authorization == "Bearer old-key"
+        assert runtime_paths == runtime_a
+        initialize_api_app(app, runtime_b)
+        return None
+
+    def _capture_load_config(
+        _request: Request,
+        *,
+        runtime_paths: RuntimePaths | None = None,
+    ) -> tuple[Config, RuntimePaths]:
+        captured_runtime_paths.append(runtime_paths)
+        return test_config, runtime_paths or runtime_b
+
+    with (
+        patch("mindroom.api.openai_compat._authenticate_request", side_effect=_authenticate_and_swap),
+        patch("mindroom.api.openai_compat._load_config", side_effect=_capture_load_config),
+        TestClient(app) as client,
+    ):
+        response = client.get("/v1/models", headers={"authorization": "Bearer old-key"})
+
+    assert response.status_code == 200
+    assert captured_runtime_paths == [runtime_a]
+
+
+def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap() -> None:
+    """Chat completions should parse against the same runtime that authenticated the request."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+    app = FastAPI()
+    app.include_router(router)
+    runtime_a = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "old-key"})
+    runtime_b = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "new-key"})
+    initialize_api_app(app, runtime_a)
+    captured_runtime_paths: list[RuntimePaths | None] = []
+
+    def _authenticate_and_swap(
+        authorization: str | None,
+        runtime_paths: RuntimePaths,
+    ) -> JSONResponse | None:
+        assert authorization == "Bearer old-key"
+        assert runtime_paths == runtime_a
+        initialize_api_app(app, runtime_b)
+        return None
+
+    def _capture_parse_request(
+        _request: Request,
+        body: bytes,
+        *,
+        runtime_paths: RuntimePaths | None = None,
+    ) -> JSONResponse:
+        captured_runtime_paths.append(runtime_paths)
+        assert json.loads(body) == {"model": "general", "messages": [{"role": "user", "content": "hi"}]}
+        return JSONResponse(status_code=400, content={"detail": "stop"})
+
+    with (
+        patch("mindroom.api.openai_compat._authenticate_request", side_effect=_authenticate_and_swap),
+        patch("mindroom.api.openai_compat._parse_chat_request", side_effect=_capture_parse_request),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"authorization": "Bearer old-key"},
+            json={"model": "general", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "stop"}
+    assert captured_runtime_paths == [runtime_a]
 
 
 def test_list_models_returns_runtime_validation_errors(tmp_path: Path) -> None:

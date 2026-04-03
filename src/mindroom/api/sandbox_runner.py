@@ -26,11 +26,11 @@ from mindroom.config.main import Config, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.metadata import (
-    TOOL_METADATA,
     ToolConfigOverrideError,
     ToolInitOverrideError,
     ensure_tool_registry_loaded,
     get_tool_by_name,
+    resolved_tool_metadata_for_runtime,
     sanitize_tool_init_overrides,
     validate_authored_overrides,
 )
@@ -645,14 +645,23 @@ async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse
     )
 
 
-def _validate_execute_request_payload(payload: SandboxRunnerExecuteRequest) -> None:
+def _validate_execute_request_payload(
+    payload: SandboxRunnerExecuteRequest,
+    *,
+    tool_metadata: dict[str, Any],
+) -> None:
     """Validate request override channels before execution dispatch."""
     if payload.credential_overrides:
         raise HTTPException(status_code=400, detail="credential_overrides must be supplied via lease_id.")
-    if payload.tool_init_overrides and payload.tool_name in TOOL_METADATA:
+    if payload.tool_init_overrides and payload.tool_name in tool_metadata:
         try:
             payload.tool_init_overrides = (
-                sanitize_tool_init_overrides(payload.tool_name, payload.tool_init_overrides) or {}
+                sanitize_tool_init_overrides(
+                    payload.tool_name,
+                    payload.tool_init_overrides,
+                    tool_metadata=tool_metadata,
+                )
+                or {}
             )
         except ToolInitOverrideError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -662,6 +671,7 @@ def _validate_execute_request_payload(payload: SandboxRunnerExecuteRequest) -> N
                 payload.tool_name,
                 payload.tool_config_overrides,
                 config_path_prefix="request.tool_config_overrides",
+                tool_metadata=tool_metadata,
             )
         except ToolConfigOverrideError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -678,10 +688,13 @@ async def execute_tool_call(
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
     runtime_paths = sandbox_runner_runtime_paths(request)
-    config = _request_runtime_config_or_empty(runtime_paths)
+    execution_env = sandbox_exec.request_execution_env(payload.tool_name, payload.execution_env, runtime_paths)
+    effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(runtime_paths, execution_env)
+    config = _request_runtime_config_or_empty(effective_runtime_paths)
+    tool_metadata = resolved_tool_metadata_for_runtime(effective_runtime_paths, config)
     runner_token = _app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
-    _validate_execute_request_payload(payload)
+    _validate_execute_request_payload(payload, tool_metadata=tool_metadata)
     credential_overrides: dict[str, object] = {}
     if payload.lease_id is not None:
         credential_overrides = sandbox_worker_prep.consume_credential_lease(

@@ -87,11 +87,15 @@ class _ToolStreamState:
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
 
-def _load_config(request: Request) -> tuple[Config, RuntimePaths]:
+def _load_config(
+    request: Request,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+) -> tuple[Config, RuntimePaths]:
     """Load the current runtime config and return it with its path."""
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
-    runtime_paths = api_runtime_paths(request)
+    runtime_paths = api_runtime_paths(request) if runtime_paths is None else runtime_paths
     return config_lifecycle.load_runtime_config(runtime_paths)
 
 
@@ -568,6 +572,8 @@ def _validate_chat_request(
 def _parse_chat_request(
     request: Request,
     body: bytes,
+    *,
+    runtime_paths: RuntimePaths | None = None,
 ) -> tuple[_ChatCompletionRequest, Config, RuntimePaths, str, list[ResolvedVisibleMessage] | None] | JSONResponse:
     """Parse and validate a chat completion request body.
 
@@ -578,7 +584,7 @@ def _parse_chat_request(
     except (json.JSONDecodeError, ValidationError):
         return _error_response(400, "Invalid request body")
 
-    config, runtime_paths = _load_config(request)
+    config, runtime_paths = _load_config(request, runtime_paths=runtime_paths)
     validation_error = _validate_chat_request(req, config)
     if validation_error:
         return validation_error
@@ -661,7 +667,7 @@ async def list_models(
     if auth_error is not None:
         return auth_error
 
-    config, runtime_paths = _load_config(request)
+    config, runtime_paths = _load_config(request, runtime_paths=runtime_paths)
 
     # Use config file mtime as creation timestamp
     try:
@@ -727,7 +733,7 @@ async def chat_completions(
         return auth_error
 
     # Parse and validate request
-    parsed = _parse_chat_request(request, await request.body())
+    parsed = _parse_chat_request(request, await request.body(), runtime_paths=runtime_paths)
     if isinstance(parsed, JSONResponse):
         return parsed
     req, config, runtime_paths, prompt, thread_history = parsed

@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from mindroom import constants
-from mindroom.api.config_lifecycle import api_runtime_paths, read_committed_config
+from mindroom.api.config_lifecycle import read_committed_config_and_runtime
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import get_joined_rooms, get_room_name, leave_room
 from mindroom.matrix.rooms import resolve_room_aliases
@@ -133,14 +133,13 @@ async def get_all_agents_rooms(request: Request) -> AllAgentsRoomsResponse:
     Returns information about configured rooms, joined rooms,
     and unconfigured rooms (joined but not in config) for each Matrix entity.
     """
-    entities = read_committed_config(
+    entities, runtime_paths = read_committed_config_and_runtime(
         request,
         lambda config_data: {
             entity_id: dict(entity_data)
             for entity_id, entity_data in _get_configured_matrix_entities(config_data).items()
         },
     )
-    runtime_paths = api_runtime_paths(request)
 
     # Gather room information for all configured Matrix entities concurrently.
     tasks = [_get_agent_matrix_rooms(agent_id, agent_data, runtime_paths) for agent_id, agent_data in entities.items()]
@@ -164,11 +163,11 @@ async def get_agent_rooms(agent_id: str, request: Request) -> AgentRoomsResponse
         HTTPException: If the entity is not found or an error occurs
 
     """
-    agent_data = read_committed_config(
+    agent_data, runtime_paths = read_committed_config_and_runtime(
         request,
         lambda config_data: dict(_get_configured_matrix_entity(config_data, agent_id)),
     )
-    return await _get_agent_matrix_rooms(agent_id, agent_data, api_runtime_paths(request))
+    return await _get_agent_matrix_rooms(agent_id, agent_data, runtime_paths)
 
 
 @router.post("/rooms/leave")
@@ -186,11 +185,10 @@ async def leave_room_endpoint(request: RoomLeaveRequest, api_request: Request) -
         HTTPException: If the entity is not found or the leave operation fails
 
     """
-    agent_data = read_committed_config(
+    agent_data, runtime_paths = read_committed_config_and_runtime(
         api_request,
         lambda config_data: dict(_get_configured_matrix_entity(config_data, request.agent_id)),
     )
-    runtime_paths = api_runtime_paths(api_request)
     homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
 
     # Create or get the Matrix user for this configured entity.
@@ -227,7 +225,7 @@ async def leave_rooms_bulk(requests: list[RoomLeaveRequest], api_request: Reques
         Results for each request
 
     """
-    read_committed_config(api_request, lambda _config_data: None)
+    read_committed_config_and_runtime(api_request, lambda _config_data: None)
     results = []
     for request in requests:
         try:

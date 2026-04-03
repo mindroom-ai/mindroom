@@ -24,7 +24,7 @@ describe('shouldShowBlockingDiagnosticOverlay', () => {
           message: 'Authentication required. Please log in to access this instance.',
           blocking: true,
         },
-        { hasLoadedConfig: false }
+        { hasLoadedConfig: false, hasRecoveryConfig: false }
       )
     ).toBe(true);
   });
@@ -37,7 +37,7 @@ describe('shouldShowBlockingDiagnosticOverlay', () => {
           message: 'Network error',
           blocking: true,
         },
-        { hasLoadedConfig: true }
+        { hasLoadedConfig: true, hasRecoveryConfig: false }
       )
     ).toBe(false);
     expect(
@@ -47,7 +47,20 @@ describe('shouldShowBlockingDiagnosticOverlay', () => {
           message: 'Configuration validation failed',
           blocking: true,
         },
-        { hasLoadedConfig: true }
+        { hasLoadedConfig: true, hasRecoveryConfig: false }
+      )
+    ).toBe(false);
+  });
+
+  it('keeps recovery mode visible for generic blocking failures when a recovery draft exists', () => {
+    expect(
+      shouldShowBlockingDiagnosticOverlay(
+        {
+          kind: 'global',
+          message: 'Server error. Please try again later or contact support.',
+          blocking: true,
+        },
+        { hasLoadedConfig: false, hasRecoveryConfig: true }
       )
     ).toBe(false);
   });
@@ -60,7 +73,7 @@ describe('shouldShowBlockingDiagnosticOverlay', () => {
           message: 'Server error. Please try again later or contact support.',
           blocking: true,
         },
-        { hasLoadedConfig: false }
+        { hasLoadedConfig: false, hasRecoveryConfig: false }
       )
     ).toBe(true);
     expect(
@@ -70,7 +83,7 @@ describe('shouldShowBlockingDiagnosticOverlay', () => {
           message: 'Configuration validation failed',
           blocking: true,
         },
-        { hasLoadedConfig: false }
+        { hasLoadedConfig: false, hasRecoveryConfig: false }
       )
     ).toBe(true);
   });

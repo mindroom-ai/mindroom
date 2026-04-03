@@ -25,7 +25,9 @@ from mindroom.api.config_lifecycle import load_config_into_app as load_api_confi
 from mindroom.api.config_lifecycle import raise_for_config_load_result as raise_api_config_load_result
 from mindroom.api.config_lifecycle import read_app_committed_config as read_api_app_committed_config
 from mindroom.api.config_lifecycle import read_committed_config as read_api_committed_config
+from mindroom.api.config_lifecycle import read_raw_config_source as read_api_raw_config_source
 from mindroom.api.config_lifecycle import replace_committed_config as replace_api_committed_config
+from mindroom.api.config_lifecycle import replace_raw_config_source as replace_api_raw_config_source
 from mindroom.api.config_lifecycle import write_app_committed_config as write_api_app_committed_config
 
 # Import routers
@@ -117,6 +119,12 @@ class AgentPoliciesRequest(BaseModel):
 
     defaults: DraftAgentPolicyDefaultsRequest | None = None
     agents: dict[str, DraftAgentPolicyAgentRequest]
+
+
+class RawConfigSourceRequest(BaseModel):
+    """Payload for raw config source recovery edits."""
+
+    source: str
 
 
 def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> float:
@@ -891,6 +899,30 @@ async def save_config(
         request,
         new_config,
         error_prefix="Failed to save configuration",
+    )
+    return {"success": True}
+
+
+@app.get("/api/config/raw")
+async def get_raw_config_source(
+    request: Request,
+    _user: Annotated[dict, Depends(verify_user)],
+) -> dict[str, str]:
+    """Return the raw config source text for recovery editing."""
+    return {"source": read_api_raw_config_source(request)}
+
+
+@app.put("/api/config/raw")
+async def save_raw_config_source(
+    request: Request,
+    payload: RawConfigSourceRequest,
+    _user: Annotated[dict, Depends(verify_user)],
+) -> dict[str, bool]:
+    """Replace the raw config source text after validating it against the active runtime."""
+    replace_api_raw_config_source(
+        request,
+        payload.source,
+        error_prefix="Failed to save raw configuration",
     )
     return {"success": True}
 

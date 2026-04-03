@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import tempfile
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import yaml
@@ -24,7 +26,6 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     import asyncio
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
     from types import TracebackType
 
 logger = get_logger(__name__)
@@ -167,6 +168,17 @@ def _save_config_to_file(
     constants.safe_replace(tmp_path, config_path)
 
 
+def _save_raw_config_source_to_file(
+    source: str,
+    runtime_paths: constants.RuntimePaths,
+) -> None:
+    """Save raw config source text to the active config path."""
+    config_path = runtime_paths.config_path
+    tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
+    tmp_path.write_text(source, encoding="utf-8")
+    constants.safe_replace(tmp_path, config_path)
+
+
 def _validated_config_payload(
     raw_config: dict[str, Any],
     runtime_paths: constants.RuntimePaths,
@@ -267,6 +279,28 @@ def _validate_replacement_payload(
     return _validated_config_payload(new_config, runtime_paths)
 
 
+def _validate_raw_config_source(
+    source: str,
+    runtime_paths: constants.RuntimePaths,
+) -> dict[str, Any]:
+    """Validate raw YAML source against the current runtime without mutating the live file."""
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=runtime_paths.config_path.parent,
+        prefix=f"{runtime_paths.config_path.name}.validation.",
+        suffix=".tmp",
+        delete=False,
+    ) as tmp:
+        tmp.write(source)
+        validation_path = Path(tmp.name)
+    validation_runtime_paths = replace(runtime_paths, config_path=validation_path)
+    try:
+        return load_runtime_config_model(validation_runtime_paths).authored_model_dump()
+    finally:
+        validation_path.unlink(missing_ok=True)
+
+
 def _commit_replaced_snapshot(
     api_app: FastAPI,
     initial_state: ApiState,
@@ -282,6 +316,29 @@ def _commit_replaced_snapshot(
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        current_state.snapshot = _published_snapshot(
+            current,
+            config_data=validated_payload,
+            config_load_result=ConfigLoadResult(success=True),
+        )
+
+
+def _commit_raw_replaced_snapshot(
+    api_app: FastAPI,
+    initial_state: ApiState,
+    *,
+    expected_generation: int,
+    runtime_paths: constants.RuntimePaths,
+    validated_payload: dict[str, Any],
+    source: str,
+) -> None:
+    """Commit one raw replacement payload if the targeted snapshot is still current."""
+    with initial_state.config_lock:
+        current_state = _app_config_state(api_app)
+        current = current_state.snapshot
+        if current.generation != expected_generation or current.runtime_paths != runtime_paths:
+            raise _stale_snapshot_error()
+        _save_raw_config_source_to_file(source, runtime_paths=runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,
@@ -348,6 +405,34 @@ def _build_and_commit_replacement(
         raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
 
 
+def _build_and_commit_raw_replacement(
+    api_app: FastAPI,
+    source: str,
+    *,
+    error_prefix: str,
+) -> None:
+    """Build one raw replacement payload off-lock and commit it only if still current."""
+    initial_state = _app_config_state(api_app)
+    with initial_state.config_lock:
+        snapshot = _app_config_state(api_app).snapshot
+    try:
+        validated_payload = _validate_raw_config_source(source, snapshot.runtime_paths)
+        _commit_raw_replaced_snapshot(
+            api_app,
+            initial_state,
+            expected_generation=snapshot.generation,
+            runtime_paths=snapshot.runtime_paths,
+            validated_payload=validated_payload,
+            source=source,
+        )
+    except HTTPException:
+        raise
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        raise HTTPException(status_code=422, detail=_config_error_detail(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"{error_prefix}: {exc!s}") from exc
+
+
 def load_config_from_file(
     runtime_paths: constants.RuntimePaths,
     *,
@@ -400,12 +485,55 @@ def read_app_committed_config[T](
         return reader(snapshot.config_data)
 
 
+def read_app_committed_config_and_runtime[T](
+    api_app: FastAPI,
+    reader: Callable[[dict[str, Any]], T],
+) -> tuple[T, constants.RuntimePaths]:
+    """Read committed API config and runtime from one coherent published snapshot."""
+    initial_state = _app_config_state(api_app)
+    with initial_state.config_lock:
+        snapshot = _app_config_state(api_app).snapshot
+        raise_for_config_load_result(snapshot.config_load_result)
+        if not snapshot.config_data:
+            _raise_missing_loaded_config()
+        return reader(snapshot.config_data), snapshot.runtime_paths
+
+
+def read_app_committed_runtime_config(
+    api_app: FastAPI,
+) -> tuple[Config, constants.RuntimePaths]:
+    """Read one validated runtime config and runtime from the same published snapshot."""
+    initial_state = _app_config_state(api_app)
+    with initial_state.config_lock:
+        snapshot = _app_config_state(api_app).snapshot
+        raise_for_config_load_result(snapshot.config_load_result)
+        if not snapshot.config_data:
+            _raise_missing_loaded_config()
+        runtime_paths = snapshot.runtime_paths
+        return Config.validate_with_runtime(snapshot.config_data, runtime_paths), runtime_paths
+
+
 def read_committed_config[T](
     request: Request,
     reader: Callable[[dict[str, Any]], T],
 ) -> T:
     """Read committed API config only when the current on-disk config is valid."""
     return read_app_committed_config(request.app, reader)
+
+
+def read_committed_config_and_runtime[T](
+    request: Request,
+    reader: Callable[[dict[str, Any]], T],
+) -> tuple[T, constants.RuntimePaths]:
+    """Read committed API config and runtime from one coherent request snapshot."""
+    return read_app_committed_config_and_runtime(request.app, reader)
+
+
+def read_committed_runtime_config(
+    request: Request,
+) -> tuple[Config, constants.RuntimePaths]:
+    """Read one validated runtime config and runtime from one coherent request snapshot."""
+    return read_app_committed_runtime_config(request.app)
 
 
 def write_committed_config[T](
@@ -446,6 +574,29 @@ def replace_app_committed_config(
 ) -> None:
     """Replace the entire committed API config with one freshly validated payload."""
     _build_and_commit_replacement(api_app, new_config, error_prefix=error_prefix)
+
+
+def read_raw_config_source(request: Request) -> str:
+    """Read the raw config source text for the current runtime."""
+    initial_state = _app_config_state(request.app)
+    with initial_state.config_lock:
+        snapshot = _app_config_state(request.app).snapshot
+        try:
+            return snapshot.runtime_paths.config_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Recovery still needs the raw source visible even when the on-disk file
+            # contains unreadable bytes. Replacement characters keep the editor usable.
+            return snapshot.runtime_paths.config_path.read_bytes().decode("utf-8", errors="replace")
+
+
+def replace_raw_config_source(
+    request: Request,
+    source: str,
+    *,
+    error_prefix: str,
+) -> None:
+    """Replace the raw config source with one freshly validated payload."""
+    _build_and_commit_raw_replacement(request.app, source, error_prefix=error_prefix)
 
 
 async def watch_config(

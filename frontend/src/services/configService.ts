@@ -130,6 +130,42 @@ export async function saveConfig(config: ConfigSavePayload): Promise<void> {
   }
 }
 
+export async function loadRawConfigSource(): Promise<string> {
+  const response = await fetch(`${API_BASE}/config/raw`);
+
+  if (!response.ok) {
+    const detail = await responseDetail(response);
+    if (typeof detail === 'string' && detail.length > 0) {
+      throw new Error(detail);
+    }
+    throw new Error(`Failed to load raw configuration (Error ${response.status})`);
+  }
+
+  const payload = (await response.json()) as { source: string };
+  return payload.source;
+}
+
+export async function saveRawConfigSource(source: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/config/raw`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ source }),
+  });
+
+  if (!response.ok) {
+    const detail = await responseDetail(response);
+    if (response.status === 422 && isConfigValidationIssueList(detail)) {
+      throw new ConfigValidationError(detail);
+    }
+    if (typeof detail === 'string' && detail.length > 0) {
+      throw new Error(detail);
+    }
+    throw new Error(`Failed to save raw configuration (Error ${response.status})`);
+  }
+}
+
 export async function getAvailableTools(): Promise<string[]> {
   const response = await fetch(`${API_BASE}/tools`);
 

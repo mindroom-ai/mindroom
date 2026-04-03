@@ -1173,11 +1173,6 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths | None = None,
     ) -> dict[str, object] | None:
         """Return runtime kwargs derived from one agent's authored tool overrides."""
-        agent_config = self.get_agent(agent_name)
-        overrides = agent_config.get_tool_overrides(tool_name)
-        if not overrides:
-            return None
-
         from mindroom.tool_system.metadata import (  # noqa: PLC0415
             authored_tool_overrides_to_runtime,
             ensure_tool_registry_loaded,
@@ -1185,6 +1180,11 @@ class Config(BaseModel):
 
         if runtime_paths is not None:
             ensure_tool_registry_loaded(runtime_paths, self)
+
+        agent_config = self.get_agent(agent_name)
+        overrides = agent_config.get_tool_overrides(tool_name)
+        if not overrides:
+            return None
 
         return authored_tool_overrides_to_runtime(tool_name, overrides)
 

@@ -5,9 +5,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants
+from mindroom.api import credentials as credentials_api
 from mindroom.api import main
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
@@ -276,6 +278,50 @@ class TestCredentialsAPI:
         assert response.status_code == 409
         assert "execution_scope=unscoped" in response.json()["detail"]
         assert "Persisted scope is worker_scope=shared" in response.json()["detail"]
+
+    def test_resolve_request_credentials_target_keeps_one_runtime_for_identity(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Credential targeting should derive worker identity from the same bound runtime it validated."""
+        runtime_a = constants.resolve_primary_runtime_paths(
+            config_path=tmp_path / "first.yaml",
+            storage_path=tmp_path / "first-store",
+            process_env={"CUSTOMER_ID": "tenant-a", "ACCOUNT_ID": "account-a"},
+        )
+        runtime_b = constants.resolve_primary_runtime_paths(
+            config_path=tmp_path / "second.yaml",
+            storage_path=tmp_path / "second-store",
+            process_env={"CUSTOMER_ID": "tenant-b", "ACCOUNT_ID": "account-b"},
+        )
+        initialize_api_app(app, runtime_a)
+        request = Request(
+            {
+                "type": "http",
+                "app": app,
+                "headers": [],
+                "query_string": b"",
+                "auth_user": {"user_id": "dashboard-user"},
+            },
+        )
+        config = _config_with_worker_scope("shared")
+        base_manager = MagicMock()
+        base_manager.for_worker.return_value = MagicMock()
+        runtime_lookup = MagicMock(side_effect=[runtime_a, runtime_b])
+        monkeypatch.setattr("mindroom.api.main.api_runtime_paths", runtime_lookup)
+
+        with (
+            patch("mindroom.api.credentials.get_runtime_credentials_manager", return_value=base_manager),
+            patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, runtime_a)),
+        ):
+            target = credentials_api.resolve_request_credentials_target(request, agent_name="general")
+
+        assert runtime_lookup.call_count == 1
+        assert target.runtime_paths == runtime_a
+        assert target.execution_identity is not None
+        assert target.execution_identity.tenant_id == "tenant-a"
+        assert target.execution_identity.account_id == "account-a"
 
     def test_unknown_agent_rejected_for_dashboard_credentials(self, client: TestClient) -> None:
         """Dashboard credentials must reject unknown agents instead of falling back to shared state."""

@@ -19,7 +19,7 @@ from mindroom.api.credentials import (
 from mindroom.api.google_tools_helper import check_google_tool_configured
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
-from mindroom.tool_system.metadata import ensure_tool_registry_loaded, export_tools_metadata
+from mindroom.tool_system.metadata import export_tools_metadata, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
     build_worker_target_from_runtime_env,
@@ -27,6 +27,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -148,14 +149,13 @@ def _load_env_shared_preview_credentials(
 def _resolve_tool_availability_context(
     request: Request,
     *,
+    runtime_paths: RuntimePaths,
     config: Config,
     agent_name: str | None,
     execution_scope_override_provided: bool,
     execution_scope_override: WorkerScope | None,
 ) -> _ResolvedToolAvailabilityContext:
     """Resolve one tool-availability context from persisted config plus optional draft override."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
     scope_request = resolve_dashboard_agent_execution_scope_request(
         config=config,
         agent_name=agent_name,
@@ -165,12 +165,15 @@ def _resolve_tool_availability_context(
     )
     execution_scope = scope_request.requested_execution_scope
 
-    runtime_paths = api_runtime_paths(request)
     status_authoritative = not scope_request.draft_scope_preview and dashboard_credentials_supported_for_scope(
         execution_scope,
     )
     execution_identity = (
-        build_dashboard_execution_identity(request, scope_request.agent_name)
+        build_dashboard_execution_identity(
+            request,
+            scope_request.agent_name,
+            runtime_paths=runtime_paths,
+        )
         if status_authoritative and scope_request.agent_name is not None and execution_scope is not None
         else None
     )
@@ -191,6 +194,11 @@ def _resolve_tool_availability_context(
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=worker_target,
     )
+
+
+def _read_tools_runtime_config(request: Request) -> tuple[Config, RuntimePaths]:
+    """Read one coherent config/runtime snapshot for the tools dashboard route."""
+    return config_lifecycle.read_committed_runtime_config(request)
 
 
 def _update_tools_statuses(
@@ -248,15 +256,13 @@ async def get_registered_tools(
     This builds tool metadata from the in-memory registry and updates availability
     based on credentials (including plugin-provided tools).
     """
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
-    config, _ = config_lifecycle.load_runtime_config(runtime_paths)
-    ensure_tool_registry_loaded(runtime_paths, config)
-    tools = export_tools_metadata()
+    config, runtime_paths = _read_tools_runtime_config(request)
+    tool_metadata = resolved_tool_metadata_for_runtime(runtime_paths, config)
+    tools = export_tools_metadata(tool_metadata)
     execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
     context = _resolve_tool_availability_context(
         request,
+        runtime_paths=runtime_paths,
         config=config,
         agent_name=agent_name,
         execution_scope_override_provided=execution_scope_override_provided,

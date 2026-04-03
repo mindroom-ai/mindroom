@@ -1175,9 +1175,10 @@ def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_work
 ) -> None:
     """Shared-only integrations should stay visible but be marked unsupported."""
     config = _config_with_worker_scope("user")
+    runtime_paths = main._app_runtime_paths(main.app)
 
     with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
     ):
         response = test_client.get("/api/tools/?agent_name=general")
 
@@ -1195,6 +1196,7 @@ def test_get_tools_execution_scope_override_marks_backend_tools_unsupported(
 ) -> None:
     """Draft execution-scope overrides should drive shared-only tool support flags."""
     config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(main.app)
     tools = [
         {
             "name": "homeassistant",
@@ -1217,8 +1219,7 @@ def test_get_tools_execution_scope_override_marks_backend_tools_unsupported(
     ]
 
     with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
-        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
@@ -1237,6 +1238,7 @@ def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
 ) -> None:
     """An explicit unscoped draft must not fall back to the persisted agent scope."""
     config = _config_with_worker_scope("user")
+    runtime_paths = main._app_runtime_paths(main.app)
     tools = [
         {
             "name": "homeassistant",
@@ -1259,8 +1261,7 @@ def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
     ]
 
     with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
-        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=unscoped")
@@ -1276,8 +1277,9 @@ def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
 def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
     """Tool preview should reject unknown agents instead of falling back to shared state."""
     config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(main.app)
 
-    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
+    with patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)):
         response = test_client.get("/api/tools/?agent_name=missing")
 
     assert response.status_code == 404
@@ -1287,6 +1289,7 @@ def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
 def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClient) -> None:
     """Supported scoped tools should report runtime env credentials as available."""
     config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(main.app)
     tools = [
         {
             "name": "weather",
@@ -1305,8 +1308,7 @@ def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClie
     ]
 
     with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
-        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
         patch(
             "mindroom.api.tools._load_env_shared_preview_credentials",
@@ -1328,6 +1330,7 @@ def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboar
 ) -> None:
     """Requester-owned scoped credentials must not flip isolated dashboard status to available."""
     config = _config_with_worker_scope("user")
+    runtime_paths = main._app_runtime_paths(main.app)
     tools = [
         {
             "name": "weather",
@@ -1346,8 +1349,7 @@ def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboar
     ]
 
     with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
-        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
         patch("mindroom.api.tools.load_scoped_credentials") as mock_load_scoped_credentials,
     ):
@@ -1361,6 +1363,77 @@ def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboar
     assert tool["status"] == "requires_config"
     assert tool["dashboard_configuration_supported"] is False
     mock_load_scoped_credentials.assert_not_called()
+
+
+def test_get_tools_uses_one_runtime_snapshot(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """The tools route should not mix one old config read with a newer runtime."""
+    from mindroom.api import tools as tools_api  # noqa: PLC0415
+
+    first_runtime = main._app_runtime_paths(main.app)
+    second_runtime = _runtime_paths(tmp_path / "second-runtime")
+    second_runtime.config_path.parent.mkdir(parents=True, exist_ok=True)
+    second_runtime.config_path.write_text(
+        yaml.safe_dump(_authored_config_payload("new_agent")),
+        encoding="utf-8",
+    )
+    captured_runtime_paths: list[constants.RuntimePaths] = []
+
+    def _read_tools_runtime_config(_request: object) -> tuple[Config, constants.RuntimePaths]:
+        main.initialize_api_app(main.app, second_runtime)
+        main._load_config_from_file(second_runtime, main.app)
+        return _config_with_worker_scope("shared"), first_runtime
+
+    def _resolve_tool_availability_context(
+        _request: object,
+        *,
+        runtime_paths: constants.RuntimePaths,
+        config: Config,
+        agent_name: str | None,
+        execution_scope_override_provided: bool,
+        execution_scope_override: str | None,
+    ) -> tools_api._ResolvedToolAvailabilityContext:
+        _ = (config, agent_name, execution_scope_override_provided, execution_scope_override)
+        captured_runtime_paths.append(runtime_paths)
+        return tools_api._ResolvedToolAvailabilityContext(
+            execution_scope=None,
+            dashboard_configuration_supported=True,
+            status_authoritative=True,
+            credentials_manager=MagicMock(),
+            worker_target=None,
+        )
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", side_effect=_read_tools_runtime_config),
+        patch(
+            "mindroom.api.tools.resolved_tool_metadata_for_runtime",
+            side_effect=lambda runtime_paths, _config: (captured_runtime_paths.append(runtime_paths), {})[1],
+        ),
+        patch(
+            "mindroom.api.tools.export_tools_metadata",
+            return_value=[
+                {
+                    "name": "calculator",
+                    "display_name": "Calculator",
+                    "description": "Calc",
+                    "category": "utility",
+                    "status": "available",
+                    "setup_type": "none",
+                    "config_fields": None,
+                },
+            ],
+        ),
+        patch(
+            "mindroom.api.tools._resolve_tool_availability_context",
+            side_effect=_resolve_tool_availability_context,
+        ),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general")
+
+    assert response.status_code == 200
+    assert captured_runtime_paths == [first_runtime, first_runtime]
 
 
 def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClient) -> None:
@@ -2171,6 +2244,135 @@ def test_save_config_can_recover_from_invalid_reload(
     assert saved_config["agents"]["recovered_agent"]["display_name"] == "Recovered Agent"
     assert "plugins" not in saved_config
     assert main._app_context(main.app).config_load_result == main.ConfigLoadResult(success=True)
+
+
+def test_get_raw_config_source_returns_current_invalid_file(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Raw config source should remain readable even when structured load fails."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    invalid_source = "agents:\n  broken: [\n"
+    temp_config_file.write_text(invalid_source, encoding="utf-8")
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    response = test_client.get("/api/config/raw")
+
+    assert response.status_code == 200
+    assert response.json() == {"source": invalid_source}
+
+
+def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_file(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Raw recovery should stay usable even when config.yaml contains unreadable bytes."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    temp_config_file.write_bytes(b"agents:\n  broken: \xff\n")
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    response = test_client.get("/api/config/raw")
+
+    assert response.status_code == 200
+    assert response.json() == {"source": "agents:\n  broken: \ufffd\n"}
+
+
+def test_save_raw_config_source_can_recover_from_invalid_reload(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Raw config recovery should replace an invalid file and republish the structured cache."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    valid_source = yaml.safe_dump(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {
+                "recovered_agent": {
+                    "display_name": "Recovered Agent",
+                    "role": "Recovered role",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["recovery_room"],
+                },
+            },
+        },
+        sort_keys=True,
+    )
+
+    response = test_client.put("/api/config/raw", json={"source": valid_source})
+
+    assert response.status_code == 200
+    assert temp_config_file.read_text(encoding="utf-8") == valid_source
+    assert main._app_context(main.app).config_load_result == main.ConfigLoadResult(success=True)
+
+    load_response = test_client.post("/api/config/load")
+    assert load_response.status_code == 200
+    assert load_response.json()["agents"]["recovered_agent"]["display_name"] == "Recovered Agent"
+
+
+def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path) -> None:
+    """Concurrent raw validation should not let one request read another request's temp file."""
+    runtime_paths = _runtime_paths(tmp_path)
+    first_source = yaml.safe_dump(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {"agent_a": {"display_name": "Agent A", "role": "role a", "rooms": []}},
+        },
+        sort_keys=True,
+    )
+    second_source = yaml.safe_dump(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}},
+        },
+        sort_keys=True,
+    )
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    call_lock = threading.Lock()
+    call_count = 0
+    original_loader = config_lifecycle.load_runtime_config_model
+    results: list[dict[str, Any] | None] = [None, None]
+
+    def _interleaving_loader(validation_runtime_paths: constants.RuntimePaths) -> Config:
+        nonlocal call_count
+        with call_lock:
+            call_count += 1
+            call_number = call_count
+        if call_number == 1:
+            first_entered.set()
+            assert second_entered.wait(timeout=5)
+        else:
+            assert first_entered.wait(timeout=5)
+            second_entered.set()
+        return original_loader(validation_runtime_paths)
+
+    def _run_validation(index: int, source: str) -> None:
+        results[index] = config_lifecycle._validate_raw_config_source(source, runtime_paths)
+
+    with patch("mindroom.api.config_lifecycle.load_runtime_config_model", side_effect=_interleaving_loader):
+        first_thread = threading.Thread(target=_run_validation, args=(0, first_source))
+        second_thread = threading.Thread(target=_run_validation, args=(1, second_source))
+        first_thread.start()
+        second_thread.start()
+        first_thread.join(timeout=5)
+        second_thread.join(timeout=5)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert results[0] is not None
+    assert results[1] is not None
+    assert results[0]["agents"] == {"agent_a": {"display_name": "Agent A", "role": "role a", "rooms": []}}
+    assert results[1]["agents"] == {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}}
 
 
 def test_run_config_write_restores_original_config_before_releasing_lock(tmp_path: Path) -> None:

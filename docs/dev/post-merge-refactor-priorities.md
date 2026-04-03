@@ -6,11 +6,11 @@ It is intentionally short and prioritized.
 
 The goal is to preserve the improvements from this branch and reduce the chance that the same bad patterns reappear.
 
-## Current PR Stabilization Plan
+## Completed In This PR
 
-This is the concrete refactor plan that should land before merging the current branch.
+These items were the pre-merge stabilization plan for this branch.
 
-The goal is to stop the same stale-state and partial-commit bug classes from surviving another review round.
+They are now implemented in the current branch.
 
 ### 1. Backend API Snapshot And Generation Refactor
 
@@ -20,23 +20,17 @@ Files:
 - `src/mindroom/api/config_lifecycle.py`
 - `tests/api/test_api.py`
 
-Why this is in the current PR:
+What landed:
 
 - Most recurring review findings have been caused by runtime paths, config data, config load result, and auth state being published separately.
-- The current lock-and-recheck fixes are safer than before, but they still leave the API runtime model harder to reason about than it should be.
+- The API now publishes one snapshot object under one stable app state holder.
+- Reads, writes, and reloads now bind to one current snapshot after locking and reject stale generations.
 
-Target shape:
+Outcome:
 
-- Replace the current mutable `_ApiContext` field-by-field model with one stable app state holder and one published snapshot.
-- Treat the runtime-bound API state as one atomic unit: runtime paths, committed config payload, config load result, auth state, and generation.
-- Build new snapshot data off-lock and only commit it if the captured generation still matches the current one.
-
-Acceptance criteria:
-
-- Reads, writes, and reloads all operate on one current snapshot after taking the lock.
-- Runtime swaps publish one new snapshot instead of mutating multiple fields in place.
-- Late loads and writes become generation mismatches instead of stale partial commits.
-- Tests cover read-during-swap, write-during-swap, stale load completion, and stale write attempts after failure publication.
+- Runtime swaps now publish one coherent snapshot instead of mutating multiple fields in place.
+- Late loads and writes now become generation mismatches instead of stale partial commits.
+- Focused tests now cover read-during-swap, write-during-swap, stale load completion, and stale write attempts after failure publication.
 
 ### 2. Plugin Validation Isolation From Live Registry State
 
@@ -47,22 +41,17 @@ Files:
 - `src/mindroom/config/main.py`
 - `tests/test_plugins.py`
 
-Why this is in the current PR:
+What landed:
 
 - Plugin validation and runtime loading are still the other major source of stale-global-state bugs.
-- The current lock makes the temporary mutation path safer, but validation should not need to snapshot and restore the live registry at all.
+- Validation now resolves plugin tool metadata through a separate registration sink instead of mutating the live registry.
+- Runtime activation still applies the committed plugin overlay transactionally.
 
-Target shape:
+Outcome:
 
-- Build a validation-only tool overlay or registry view in memory.
-- Keep runtime activation as the only code path that applies plugin-derived tool state to globals.
-- Make collision checks and plugin-derived registrations come from the same overlay builder in validation and runtime activation.
-
-Acceptance criteria:
-
-- Validation no longer mutates or restores the live tool registry.
+- Validation no longer snapshots and restores the live tool registry.
 - Runtime activation still commits one explicit plugin overlay.
-- Plugin add/remove/re-add, manifest rename, export rename, and collision handling all stay covered.
+- Tests now cover add/remove/re-add, manifest rename, export rename, duplicate names, collisions, and rollback paths.
 
 ### 3. Frontend Loaded Config / Draft Config Split
 
@@ -74,30 +63,19 @@ Files:
 - `frontend/src/components/**`
 - `frontend/src/store/configStore.test.ts`
 
-Why this is in the current PR:
+What landed:
 
-- The frontend still has the same bug-generating shape as the backend did: one implicit state object standing in for loaded config, draft config, save status, and invalid-load state.
-- Recent review findings about overlapping saves, swallowed save failures, and sidecar draft data all point to the same missing boundary.
+- The frontend previously had the same bug-generating shape as the backend did: one implicit state object standing in for loaded config, draft config, save status, and invalid-load state.
+- The store now separates `loadedConfig` from the editable draft and versions draft mutations explicitly.
+- `saveConfig()` now returns an explicit result contract.
+- Invalid-load recovery is now an explicit raw-config mode instead of a synthetic replacement draft.
 
-Target shape:
+Outcome:
 
-- Separate the last loaded backend config from the mutable draft config.
-- Make invalid-load state explicit instead of encoding it indirectly through `config`, `diagnostics`, and `syncStatus`.
-- Make `saveConfig()` return one explicit success or failure result, or throw a typed error consistently, so callers do not guess from store side effects.
-- Move persisted sidecar draft state like raw tool-entry overrides under the same draft versioning model instead of keeping them outside the save race checks.
-
-Acceptance criteria:
-
-- Older save completions are true no-ops against a newer draft.
-- Save callers such as Knowledge and Voice no longer need store-specific workarounds to know whether a save succeeded.
-- Draft versioning covers tool overrides and any other persisted sidecar config state.
-- Tests cover overlapping saves, edits during save, failed save contracts, and invalid-load recovery behavior.
-
-### Execution Order For This PR
-
-1. Backend API snapshot and generation refactor.
-2. Plugin validation isolation from live registry state.
-3. Frontend loaded-config vs draft-config split and save-result contract cleanup.
+- Overlapping loads, saves, and policy refreshes are now request-versioned.
+- Save callers such as Knowledge and Voice now use the explicit save result contract.
+- Draft versioning now covers tool overrides and other persisted sidecar draft state.
+- Focused tests now cover overlapping saves, edits during save, failed save contracts, and invalid-load recovery behavior.
 
 ## Why These Items
 
@@ -113,7 +91,41 @@ The fixes are now materially better than `origin/main`.
 
 The remaining work should focus on reducing the number of legal ways to bypass those good patterns.
 
-## Priority 1: Simplify Plugin Tool Loading
+## Priority 1: Centralize Request Snapshot Consumption
+
+Files:
+
+- `src/mindroom/api/config_lifecycle.py`
+- `src/mindroom/api/tools.py`
+- `src/mindroom/api/credentials.py`
+- `src/mindroom/api/google_integration.py`
+- `src/mindroom/api/integrations.py`
+- `src/mindroom/api/openai_compat.py`
+
+Current state:
+
+- The helper layer now has a coherent snapshot model.
+- The remaining risk is route-level code that still composes runtime paths, committed config, auth state, or runtime-scoped metadata from separate helper calls.
+- Matrix and `/api/tools` now use coherent request snapshots, but other routes still do some local composition.
+
+Why this is next:
+
+- Several late review findings came from callers bypassing the new helper-level guarantees rather than from the helper layer itself.
+- A single request-scoped snapshot helper would make those bypasses harder to reintroduce.
+
+Refactor target:
+
+- Add one small request-scoped helper for callers that need committed config plus runtime-bound context together.
+- Prefer passing that coherent request snapshot through the route body instead of re-reading runtime or auth state later in the handler.
+- Keep request-time tool metadata resolution non-mutating and runtime-scoped.
+
+Acceptance criteria:
+
+- Routes that need both committed config and runtime paths do not read them separately.
+- Request-time availability/credential helpers no longer re-read runtime state when a coherent snapshot is already available.
+- New API routes have one obvious helper path to stay snapshot-safe.
+
+## Priority 2: Simplify Plugin Tool Loading
 
 Files:
 
@@ -124,7 +136,6 @@ Current state:
 
 - Plugin tool state is now transactional and explicit enough to be correct.
 - The code still depends on import-time decorator registration to discover plugin tools.
-- Validation now serializes registry mutation with runtime loads, but it still does so by mutating and restoring process-global registries under a lock.
 - There are still several moving parts, including module caches, manifest caches, per-module tool metadata, and the committed live overlay.
 
 Why this is next:
@@ -145,44 +156,10 @@ Refactor target:
 Acceptance criteria:
 
 - One active plugin load path builds candidate registrations first and commits once.
-- Validation reads do not need to snapshot and restore global registry state.
+- Validation reads stay fully isolated from the live registry.
 - Plugin add, remove, re-add, manifest rename, and export rename all work from the same model.
 - Tool-name collisions fail at one clear boundary.
 - Tests cover whole-plugin removal, intra-plugin duplicate names, cross-plugin collisions, manifest-only rename, and failed multi-plugin load rollback.
-
-## Priority 2: Finish Config-Load Error Consolidation
-
-Files:
-
-- `src/mindroom/config/main.py`
-- `src/mindroom/api/config_lifecycle.py`
-- `src/mindroom/commands/config_commands.py`
-- `src/mindroom/custom_tools/config_manager.py`
-- `src/mindroom/custom_tools/self_config.py`
-- `src/mindroom/cli/config.py`
-
-Current state:
-
-- The main user-facing API, chat, tool, and CLI paths now mostly normalize invalid config the same way.
-- The remaining risk is broad local `except Exception` handling in config-facing tools and commands.
-- There are still a few internal raw `load_config(...)` helpers, but the bad user-facing bypass pattern is mostly gone.
-
-Why this is next:
-
-- Future edits can still weaken the shared invalid-config UX if local call sites start formatting errors themselves again.
-- The code now has the right shape, but not every caller is as strict as it should be.
-
-Refactor target:
-
-- Move user-facing config-load failure classification and formatting into one small shared module if it is still split across `config.main` and local callers.
-- Narrow broad `except Exception` blocks in config-facing commands and tools to expected operational failures.
-- Keep raw `load_config(...)` for internal startup and non-user-facing paths only.
-
-Acceptance criteria:
-
-- User-facing config readers and writers either use the shared helper or explicitly preserve its semantics.
-- Malformed YAML, invalid UTF-8, missing files, schema errors, and runtime validation errors all stay in the same user-facing error channel.
-- New user-facing config surfaces do not invent their own load-error formatting.
 
 ## Priority 3: Reduce Frontend Async Store Duplication
 
@@ -190,27 +167,24 @@ Files:
 
 - `frontend/src/store/configStore.ts`
 - `frontend/src/services/configService.ts`
+- `frontend/src/App.tsx`
 
 Current state:
 
-- The store now guards `loadConfig()`, `refreshAgentPolicies()`, and `saveConfig()` against stale overlapping responses.
-- The sequencing pattern is still duplicated across multiple async actions.
-- Invalid current configs now stay in a read-only error state with detailed validation issues instead of silently falling back to stale data.
-- The invalid-config and validation-diagnostic retention logic still live directly inside `configStore.ts`.
+- The store now has `loadedConfig`, a mutable draft, explicit recovery mode, and request sequencing for load/save/policy refresh.
+- The sequencing and diagnostic-retention patterns are still duplicated across a large store file.
+- Raw recovery editing now exists, but it still lives inline inside the main config store and app shell.
 
 Why this is next:
 
 - This exact stale-state class has already recurred more than once.
-- Duplicated async sequencing logic is easy to copy incorrectly.
-- Recovery-mode behavior is now correct, but it is still hand-built inside the main store rather than being one explicit sub-state.
+- The frontend behavior is now correct enough, but it is still more implicit and duplicated than it should be.
 
 Refactor target:
 
-- Extract one small internal request-version helper or store utility for async actions that replace committed state.
-- Keep the distinction between validation-failure clears, generic-load-error preservation, and save-result sequencing.
-- Keep diagnostics behavior explicit.
-- Decide explicitly whether dashboard invalid-config recovery should remain read-only or gain a raw full-config editor.
-- Make invalid-load state one explicit mode instead of implicit coupling between `config`, `diagnostics`, and `syncStatus`.
+- Extract one small internal helper for request-versioned async actions.
+- Make recovery mode one explicit sub-state instead of logic distributed across `configStore.ts` and `App.tsx`.
+- Keep save-result handling explicit so components do not guess from store side effects.
 
 Acceptance criteria:
 
@@ -229,7 +203,7 @@ Current state:
 
 - The config watcher and worker cleanup loop now read current runtime state instead of closing over startup `RuntimePaths`.
 - The lifecycle policy still lives in `api.main`.
-- Config cache commits are now serialized and runtime-mismatch loads are discarded, but the sequencing still spans multiple helpers in `config_lifecycle.py`.
+- Config cache commits are now generation-checked and runtime-mismatch loads are discarded, but the sequencing still spans multiple helpers in `config_lifecycle.py`.
 
 Why this is next:
 
@@ -295,8 +269,8 @@ Acceptance criteria:
 
 ## Recommended Order
 
-1. Simplify plugin tool loading.
-2. Finish config-load error consolidation.
+1. Centralize request snapshot consumption.
+2. Simplify plugin tool loading.
 3. Reduce frontend async store duplication.
 4. Move API background runtime lifecycles out of `main.py`.
 5. Continue shrinking `bot.py` with one clearly justified extraction at a time.

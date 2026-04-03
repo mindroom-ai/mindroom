@@ -41,6 +41,8 @@ describe('configStore', () => {
     useConfigStore.setState({
       loadedConfig: null,
       config: null,
+      recoveryConfigSource: null,
+      recoveryConfigSourceOriginal: null,
       draftVersion: 0,
       agents: [],
       teams: [],
@@ -423,7 +425,7 @@ describe('configStore', () => {
       ]);
     });
 
-    it('stores backend validation issues and clears stale config when load returns 422', async () => {
+    it('stores backend validation issues and loads raw recovery source when load returns 422', async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -464,12 +466,20 @@ describe('configStore', () => {
           ],
         }),
       });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          source: 'agents:\n  assistant:\n    role: broken\n',
+        }),
+      });
 
       await useConfigStore.getState().loadConfig();
 
       const state = useConfigStore.getState();
       expect(state.syncStatus).toBe('error');
       expect(state.config).toBeNull();
+      expect(state.recoveryConfigSource).toBe('agents:\n  assistant:\n    role: broken\n');
+      expect(state.recoveryConfigSourceOriginal).toBe('agents:\n  assistant:\n    role: broken\n');
       expect(state.agents).toEqual([]);
       expect(state.rooms).toEqual([]);
       expect(state.agentPoliciesByAgent).toEqual({});
@@ -527,6 +537,12 @@ describe('configStore', () => {
         .mockResolvedValueOnce({
           ok: true,
           json: async () => ({
+            source: 'plugins:\n  - bad\n',
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
             agent_policies: { assistant: makeAgentPolicy('assistant') },
           }),
         });
@@ -540,6 +556,7 @@ describe('configStore', () => {
       expect(state.loadConfigRequestId).toBe(2);
       expect(state.syncStatus).toBe('error');
       expect(state.config).toBeNull();
+      expect(state.recoveryConfigSource).toBe('plugins:\n  - bad\n');
 
       pendingConfigResponse.resolve({
         ok: true,
@@ -644,12 +661,19 @@ describe('configStore', () => {
           ],
         }),
       });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          source: 'plugins:\n  - bad\n',
+        }),
+      });
 
       await useConfigStore.getState().loadConfig();
 
       let state = useConfigStore.getState();
       expect(state.agentPoliciesRequestId).toBe(2);
       expect(state.config).toBeNull();
+      expect(state.recoveryConfigSource).toBe('plugins:\n  - bad\n');
       expect(state.agentPoliciesByAgent).toEqual({});
 
       pendingPolicyResponse.resolve({
@@ -682,6 +706,292 @@ describe('configStore', () => {
           },
         },
       ]);
+    });
+
+    it('preserves a newer dirty structured draft when a late load returns 422', async () => {
+      const existingConfig = {
+        memory: {
+          backend: 'mem0',
+          embedder: {
+            provider: 'openai',
+            config: { model: 'text-embedding-3-small' },
+          },
+        },
+        knowledge_bases: {},
+        cultures: {},
+        agents: {
+          assistant: {
+            display_name: 'Assistant',
+            role: 'Original role',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        models: {
+          default: {
+            provider: 'ollama',
+            id: 'existing-model',
+          },
+        },
+        router: {
+          model: 'default',
+        },
+      } satisfies Config;
+      const pendingRawSourceResponse = deferred<{
+        ok: boolean;
+        json: () => Promise<{ source: string }>;
+      }>();
+
+      useConfigStore.setState({
+        loadedConfig: existingConfig,
+        config: existingConfig,
+        agents: [
+          {
+            id: 'assistant',
+            display_name: 'Assistant',
+            role: 'Original role',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            learning: true,
+            learning_mode: 'always',
+          },
+        ],
+      });
+
+      (global.fetch as any)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 422,
+          json: async () => ({
+            detail: [
+              {
+                loc: ['plugins', 0],
+                msg: 'Plugin tools_module must be a string',
+                type: 'value_error',
+              },
+            ],
+          }),
+        })
+        .mockReturnValueOnce(pendingRawSourceResponse.promise);
+
+      const loadPromise = useConfigStore.getState().loadConfig();
+      await waitFor(() => expect((global.fetch as any).mock.calls).toHaveLength(2));
+
+      useConfigStore.getState().updateAgent('assistant', { role: 'Edited role' });
+
+      pendingRawSourceResponse.resolve({
+        ok: true,
+        json: async () => ({
+          source: 'plugins:\n  - bad\n',
+        }),
+      });
+
+      await loadPromise;
+
+      const state = useConfigStore.getState();
+      expect(state.agents[0].role).toBe('Edited role');
+      expect(state.recoveryConfigSource).toBeNull();
+      expect(state.isDirty).toBe(true);
+      expect(state.syncStatus).toBe('error');
+      expect(state.diagnostics).toEqual([
+        {
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: false,
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['plugins', 0],
+            msg: 'Plugin tools_module must be a string',
+            type: 'value_error',
+          },
+        },
+      ]);
+    });
+
+    it('preserves newer recovery edits when a retry load returns 422', async () => {
+      const pendingRawSourceResponse = deferred<{
+        ok: boolean;
+        json: () => Promise<{ source: string }>;
+      }>();
+
+      useConfigStore.setState({
+        diagnostics: [
+          {
+            kind: 'global',
+            message: 'Configuration validation failed',
+            blocking: true,
+          },
+        ],
+        syncStatus: 'error',
+        recoveryConfigSource: 'plugins:\n  - bad\n',
+        recoveryConfigSourceOriginal: 'plugins:\n  - bad\n',
+      });
+
+      (global.fetch as any)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 422,
+          json: async () => ({
+            detail: [
+              {
+                loc: ['plugins', 0],
+                msg: 'Plugin tools_module must be a string',
+                type: 'value_error',
+              },
+            ],
+          }),
+        })
+        .mockReturnValueOnce(pendingRawSourceResponse.promise);
+
+      const loadPromise = useConfigStore.getState().loadConfig();
+      await waitFor(() => expect((global.fetch as any).mock.calls).toHaveLength(2));
+
+      useConfigStore.getState().updateRecoveryConfigSource('plugins:\n  - fixed\n');
+
+      pendingRawSourceResponse.resolve({
+        ok: true,
+        json: async () => ({
+          source: 'plugins:\n  - bad\n',
+        }),
+      });
+
+      await loadPromise;
+
+      const state = useConfigStore.getState();
+      expect(state.recoveryConfigSource).toBe('plugins:\n  - fixed\n');
+      expect(state.recoveryConfigSourceOriginal).toBe('plugins:\n  - bad\n');
+      expect(state.isDirty).toBe(true);
+      expect(state.syncStatus).toBe('error');
+      expect(state.diagnostics).toEqual([
+        {
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: true,
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['plugins', 0],
+            msg: 'Plugin tools_module must be a string',
+            type: 'value_error',
+          },
+        },
+      ]);
+    });
+
+    it('saves raw recovery source and reloads the structured config', async () => {
+      useConfigStore.setState({
+        diagnostics: [
+          {
+            kind: 'global',
+            message: 'Configuration validation failed',
+            blocking: true,
+          },
+        ],
+        syncStatus: 'error',
+        recoveryConfigSource: 'agents:\n  helper:\n    role: Fixed\n',
+        recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
+        isDirty: true,
+      });
+
+      (global.fetch as any)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ success: true }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            agents: {
+              helper: {
+                display_name: 'Helper',
+                role: 'Fixed',
+                tools: [],
+                skills: [],
+                instructions: [],
+                rooms: [],
+              },
+            },
+            models: {
+              default: {
+                provider: 'ollama',
+                id: 'test-model',
+              },
+            },
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ agent_policies: { helper: makeAgentPolicy('helper') } }),
+        });
+
+      const result = await useConfigStore.getState().saveRecoveryConfigSource();
+
+      expect(result).toEqual({ status: 'saved' });
+      expect((global.fetch as any).mock.calls[0][0]).toBe('/api/config/raw');
+      expect((global.fetch as any).mock.calls[1][0]).toBe('/api/config/load');
+      expect(useConfigStore.getState()).toMatchObject({
+        recoveryConfigSource: null,
+        recoveryConfigSourceOriginal: null,
+        syncStatus: 'synced',
+        isDirty: false,
+        diagnostics: [],
+      });
+      expect(useConfigStore.getState().config?.agents.helper.role).toBe('Fixed');
+    });
+
+    it('preserves newer recovery edits when an older recovery save finishes later', async () => {
+      const pendingSaveResponse = deferred<{
+        ok: boolean;
+        json: () => Promise<{ success: boolean }>;
+      }>();
+
+      useConfigStore.setState({
+        diagnostics: [
+          {
+            kind: 'global',
+            message: 'Configuration validation failed',
+            blocking: true,
+          },
+        ],
+        syncStatus: 'error',
+        recoveryConfigSource: 'agents:\n  helper:\n    role: Fixed\n',
+        recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
+        draftVersion: 1,
+        isDirty: true,
+      });
+
+      (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
+
+      const savePromise = useConfigStore.getState().saveRecoveryConfigSource();
+      useConfigStore
+        .getState()
+        .updateRecoveryConfigSource('agents:\n  helper:\n    role: Newer fix\n');
+
+      pendingSaveResponse.resolve({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+
+      const result = await savePromise;
+
+      expect(result).toEqual({ status: 'stale' });
+      expect((global.fetch as any).mock.calls).toHaveLength(1);
+      expect(useConfigStore.getState()).toMatchObject({
+        recoveryConfigSource: 'agents:\n  helper:\n    role: Newer fix\n',
+        recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
+        syncStatus: 'error',
+        isDirty: true,
+      });
     });
 
     it('loads config and records a non-blocking diagnostic when agent policy derivation fails during reload', async () => {
@@ -1398,7 +1708,7 @@ describe('configStore', () => {
       expect(state.privateWorkerScopeBackups).toEqual({
         helper: 'shared',
       });
-      expect(state.syncStatus).toBe('synced');
+      expect(state.syncStatus).toBe('error');
     });
 
     it('preserves newer voice edits when an older save finishes later', async () => {
@@ -1479,7 +1789,207 @@ describe('configStore', () => {
         },
       });
       expect(state.isDirty).toBe(true);
+      expect(state.syncStatus).toBe('error');
+    });
+
+    it('ignores successful load results while a dirty draft save is still in flight', async () => {
+      const pendingSaveResponse = deferred<{
+        ok: boolean;
+        json: () => Promise<{ success: true }>;
+      }>();
+      const loadedConfig: Config = {
+        models: {
+          default: { provider: 'test', id: 'old-model' },
+        },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-ada-002',
+            },
+          },
+        },
+        agents: {
+          helper: {
+            display_name: 'Helper',
+            role: 'Helpful',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+      };
+      const draftConfig: Config = {
+        ...loadedConfig,
+        models: {
+          default: { provider: 'test', id: 'new-model' },
+        },
+      };
+      const agents = [
+        {
+          id: 'helper',
+          display_name: 'Helper',
+          role: 'Helpful',
+          tools: [],
+          skills: [],
+          instructions: [],
+          rooms: [],
+        },
+      ];
+      useConfigStore.setState({
+        loadedConfig,
+        config: draftConfig,
+        agents,
+        isDirty: true,
+      });
+
+      (global.fetch as any)
+        .mockReturnValueOnce(pendingSaveResponse.promise)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            ...loadedConfig,
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ agent_policies: { helper: makeAgentPolicy('helper') } }),
+        });
+
+      const savePromise = useConfigStore.getState().saveConfig();
+      const loadPromise = useConfigStore.getState().loadConfig();
+
+      await loadPromise;
+
+      let state = useConfigStore.getState();
+      expect(state.config?.models.default.id).toBe('new-model');
+      expect(state.loadedConfig?.models.default.id).toBe('old-model');
+      expect(state.isDirty).toBe(true);
+      expect(state.syncStatus).toBe('syncing');
+
+      pendingSaveResponse.resolve({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+      await savePromise;
+
+      state = useConfigStore.getState();
+      expect(state.config?.models.default.id).toBe('new-model');
+      expect(state.loadedConfig?.models.default.id).toBe('new-model');
+      expect(state.isDirty).toBe(false);
       expect(state.syncStatus).toBe('synced');
+    });
+
+    it('clears validation issues for fields edited after a failed save while keeping unrelated ones', async () => {
+      const config: Config = {
+        agents: {
+          helper: {
+            display_name: 'Helper',
+            role: '',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        teams: {
+          ops: {
+            display_name: '',
+            role: 'Runs ops',
+            agents: ['helper'],
+            rooms: [],
+            mode: 'coordinate',
+          },
+        },
+        defaults: { markdown: true },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-ada-002',
+            },
+          },
+        },
+        models: {
+          default: { provider: 'test', id: 'test-model' },
+        },
+        router: { model: 'default' },
+      };
+      const diagnostics = [
+        {
+          kind: 'global' as const,
+          message: 'Configuration validation failed',
+          blocking: false,
+        },
+        {
+          kind: 'validation' as const,
+          issue: {
+            loc: ['agents', 'helper', 'role'],
+            msg: 'role is required',
+            type: 'value_error',
+          },
+        },
+        {
+          kind: 'validation' as const,
+          issue: {
+            loc: ['teams', 'ops', 'display_name'],
+            msg: 'display_name is required',
+            type: 'value_error',
+          },
+        },
+      ];
+      useConfigStore.setState({
+        loadedConfig: config,
+        config,
+        agents: [
+          {
+            id: 'helper',
+            display_name: 'Helper',
+            role: '',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        ],
+        teams: [
+          {
+            id: 'ops',
+            display_name: '',
+            role: 'Runs ops',
+            agents: ['helper'],
+            rooms: [],
+            mode: 'coordinate',
+          },
+        ],
+        diagnostics,
+        syncStatus: 'error',
+      });
+
+      useConfigStore.getState().updateAgent('helper', { role: 'Now valid' });
+
+      expect(useConfigStore.getState().diagnostics).toEqual([
+        {
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: false,
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['teams', 'ops', 'display_name'],
+            msg: 'display_name is required',
+            type: 'value_error',
+          },
+        },
+      ]);
     });
 
     it('refreshes agent policies after a successful save when preview state is stale', async () => {

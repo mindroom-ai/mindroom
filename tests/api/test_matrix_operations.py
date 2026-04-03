@@ -283,6 +283,105 @@ class TestMatrixOperations:
             assert data["results"][0]["success"] is True
             assert data["results"][1]["success"] is False
 
+    @pytest.mark.asyncio
+    async def test_get_agent_rooms_uses_one_runtime_snapshot(
+        self,
+        test_client: TestClient,
+        tmp_path: Path,
+        mock_agent_user: Any,  # noqa: ANN401
+        mock_matrix_client: Any,  # noqa: ANN401
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Agent-room reads should use the same runtime snapshot as the committed config read."""
+        first_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "first.yaml", process_env={})
+        second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
+
+        def _fake_snapshot_read(
+            _request: Any,  # noqa: ANN401
+            reader: Any,  # noqa: ANN401
+        ) -> tuple[dict[str, Any], constants.RuntimePaths]:
+            main.initialize_api_app(main.app, second_runtime)
+            return (
+                reader(
+                    {
+                        "agents": {
+                            "old_agent": {
+                                "display_name": "Old",
+                                "role": "Test",
+                                "rooms": [],
+                            },
+                        },
+                    },
+                ),
+                first_runtime,
+            )
+
+        monkeypatch.setattr(
+            "mindroom.api.matrix_operations.read_committed_config_and_runtime",
+            _fake_snapshot_read,
+        )
+
+        with (
+            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user) as create_user,
+            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
+            patch("mindroom.api.matrix_operations.get_joined_rooms", return_value=[]),
+        ):
+            response = test_client.get("/api/matrix/agents/old_agent/rooms")
+
+        assert response.status_code == 200
+        assert create_user.await_args.kwargs["runtime_paths"] == first_runtime
+
+    @pytest.mark.asyncio
+    async def test_leave_room_uses_one_runtime_snapshot(
+        self,
+        test_client: TestClient,
+        tmp_path: Path,
+        mock_agent_user: Any,  # noqa: ANN401
+        mock_matrix_client: Any,  # noqa: ANN401
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Room-leave requests should not mix committed config with a newer runtime swap."""
+        first_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "first.yaml", process_env={})
+        second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
+
+        def _fake_snapshot_read(
+            _request: Any,  # noqa: ANN401
+            reader: Any,  # noqa: ANN401
+        ) -> tuple[dict[str, Any], constants.RuntimePaths]:
+            main.initialize_api_app(main.app, second_runtime)
+            return (
+                reader(
+                    {
+                        "agents": {
+                            "old_agent": {
+                                "display_name": "Old",
+                                "role": "Test",
+                                "rooms": [],
+                            },
+                        },
+                    },
+                ),
+                first_runtime,
+            )
+
+        monkeypatch.setattr(
+            "mindroom.api.matrix_operations.read_committed_config_and_runtime",
+            _fake_snapshot_read,
+        )
+
+        with (
+            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user) as create_user,
+            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
+            patch("mindroom.api.matrix_operations.leave_room", return_value=True),
+        ):
+            response = test_client.post(
+                "/api/matrix/rooms/leave",
+                json={"agent_id": "old_agent", "room_id": "!room:localhost"},
+            )
+
+        assert response.status_code == 200
+        assert create_user.await_args.kwargs["runtime_paths"] == first_runtime
+
 
 @pytest.mark.parametrize(
     ("method", "path", "payload"),

@@ -40,6 +40,8 @@ import { Dashboard } from '@/components/Dashboard/Dashboard';
 import { Skills } from '@/components/Skills/Skills';
 import { Schedules } from '@/components/Schedules/Schedules';
 import { Credentials } from '@/components/Credentials/Credentials';
+import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Dialog,
@@ -109,8 +111,10 @@ export function shouldShowBlockingDiagnosticOverlay(
   blockingDiagnostic: GlobalConfigDiagnostic | null,
   {
     hasLoadedConfig,
+    hasRecoveryConfig,
   }: {
     hasLoadedConfig: boolean;
+    hasRecoveryConfig: boolean;
   }
 ): boolean {
   if (blockingDiagnostic == null) {
@@ -119,15 +123,20 @@ export function shouldShowBlockingDiagnosticOverlay(
   if (isAuthDiagnosticMessage(blockingDiagnostic.message)) {
     return true;
   }
-  return !hasLoadedConfig;
+  return !hasLoadedConfig && !hasRecoveryConfig;
 }
 
 function AppContent() {
   const {
     loadConfig,
     config,
+    recoveryConfigSource,
+    recoveryConfigSourceOriginal,
+    updateRecoveryConfigSource,
+    saveRecoveryConfigSource,
     syncStatus,
     diagnostics,
+    isLoading,
     selectedAgentId,
     selectedTeamId,
     selectedCultureId,
@@ -149,7 +158,11 @@ function AppContent() {
   const blockingDiagnostic = globalDiagnostics.find(diagnostic => diagnostic.blocking) ?? null;
   const showBlockingDiagnosticOverlay = shouldShowBlockingDiagnosticOverlay(blockingDiagnostic, {
     hasLoadedConfig: config != null,
+    hasRecoveryConfig: recoveryConfigSource != null,
   });
+  const canRecoverInvalidConfig =
+    !isAuthDiagnosticMessage(blockingDiagnostic?.message ?? '') && recoveryConfigSource != null;
+  const recoveryConfigIsDirty = recoveryConfigSource !== recoveryConfigSourceOriginal;
   const visibleGlobalDiagnostics = showBlockingDiagnosticOverlay
     ? globalDiagnostics.filter(diagnostic => !diagnostic.blocking)
     : globalDiagnostics;
@@ -230,6 +243,70 @@ function AppContent() {
     const error = blockingDiagnostic.message;
     const isAuthError = isAuthDiagnosticMessage(error);
     const isDifferentInstance = error.includes('Access denied');
+
+    if (!isAuthError && canRecoverInvalidConfig) {
+      return (
+        <div className="flex items-center justify-center h-screen bg-gradient-to-br from-amber-50 via-orange-50/40 to-yellow-50/50 dark:from-stone-950 dark:via-stone-900 dark:to-amber-950/20">
+          <div className="max-w-4xl w-full mx-4 p-6 bg-white dark:bg-stone-900 rounded-lg shadow-lg space-y-4">
+            <div className="space-y-2">
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
+                {validationIssues.length > 0
+                  ? 'Configuration Validation Failed'
+                  : 'Configuration Recovery'}
+              </h2>
+              <p className="text-sm text-gray-600 dark:text-gray-300">
+                The current <code>config.yaml</code> could not be loaded. Edit the raw configuration
+                below and save it as a full replacement.
+              </p>
+            </div>
+
+            {validationIssues.length > 0 ? (
+              <div className="rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+                <p className="font-medium">Current configuration is invalid.</p>
+                <ul className="mt-3 list-disc space-y-1 pl-5">
+                  {validationIssues.map((issue, index) => (
+                    <li key={`${issue.loc.join('.')}-${issue.msg}-${index}`}>
+                      <span className="font-medium">{issue.loc.join(' → ') || 'config'}</span>
+                      {': '}
+                      {issue.msg}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <div className="rounded-md border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100">
+                {blockingDiagnostic?.message}
+              </div>
+            )}
+
+            <Textarea
+              value={recoveryConfigSource}
+              onChange={event => updateRecoveryConfigSource(event.target.value)}
+              className="min-h-[420px] font-mono text-sm"
+              spellCheck={false}
+              disabled={isLoading}
+            />
+
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Saving here replaces the entire <code>config.yaml</code> with the edited source.
+              </p>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={() => void loadConfig()} disabled={isLoading}>
+                  Retry
+                </Button>
+                <Button
+                  onClick={() => void saveRecoveryConfigSource()}
+                  disabled={isLoading || !recoveryConfigIsDirty}
+                >
+                  Save Replacement Config
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
 
     return (
       <div className="flex items-center justify-center h-screen bg-gradient-to-br from-amber-50 via-orange-50/40 to-yellow-50/50 dark:from-stone-950 dark:via-stone-900 dark:to-amber-950/20">
