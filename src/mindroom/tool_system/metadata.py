@@ -838,6 +838,9 @@ def ensure_tool_registry_loaded(
         return
 
     load_plugins(config, runtime_paths, set_skill_roots=False)
+    from mindroom.mcp.registry import sync_mcp_tool_registry  # noqa: PLC0415
+
+    sync_mcp_tool_registry(config)
 
 
 def _capture_tool_registry_snapshot() -> _ToolRegistrySnapshot:
@@ -953,10 +956,16 @@ def resolved_tool_state_for_runtime(
 ) -> tuple[dict[str, Callable[[], type[Toolkit]]], dict[str, ToolMetadata]]:
     """Return registry and metadata visible for one runtime config without mutating global state."""
     import mindroom.tools  # noqa: F401, PLC0415
+    from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
 
     plugin_entries = config.plugins
     if not plugin_entries:
-        return _BUILTIN_TOOL_REGISTRY.copy(), _BUILTIN_TOOL_METADATA.copy()
+        builtin_registry = _BUILTIN_TOOL_REGISTRY.copy()
+        builtin_metadata = _BUILTIN_TOOL_METADATA.copy()
+        mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
+        builtin_registry.update(mcp_registry)
+        builtin_metadata.update(mcp_metadata)
+        return builtin_registry, builtin_metadata
 
     plugin_bases: list[tuple[plugin_module._PluginBase, Any, int]] = []
     for plugin_order, plugin_entry in enumerate(plugin_entries):
@@ -999,7 +1008,11 @@ def resolved_tool_state_for_runtime(
                 validation_registrations,
             )
 
-    return _resolved_tool_state(active_plugins, validation_registrations)
+    desired_registry, desired_metadata = _resolved_tool_state(active_plugins, validation_registrations)
+    mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
+    desired_registry.update(mcp_registry)
+    desired_metadata.update(mcp_metadata)
+    return desired_registry, desired_metadata
 
 
 def resolved_tool_metadata_for_runtime(

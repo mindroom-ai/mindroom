@@ -287,6 +287,7 @@ def test_config_accepts_and_round_trips_mcp_servers(tmp_path: Path) -> None:
     raw = _base_config_data()
     raw["mcp_servers"] = {
         "filesystem": {
+            "transport": "stdio",
             "command": "npx",
             "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
         },
@@ -294,7 +295,9 @@ def test_config_accepts_and_round_trips_mcp_servers(tmp_path: Path) -> None:
 
     config = Config.validate_with_runtime(deepcopy(raw), _runtime_paths(tmp_path))
 
-    assert config.mcp_servers == raw["mcp_servers"]
+    assert config.mcp_servers["filesystem"].transport == "stdio"
+    assert config.mcp_servers["filesystem"].command == "npx"
+    assert config.mcp_servers["filesystem"].args == ["-y", "@modelcontextprotocol/server-filesystem", "."]
     assert config.authored_model_dump()["mcp_servers"] == raw["mcp_servers"]
 
 
@@ -303,6 +306,7 @@ def test_config_rejects_invalid_mcp_server_name(tmp_path: Path) -> None:
     raw = _base_config_data()
     raw["mcp_servers"] = {
         "filesystem-server": {
+            "transport": "stdio",
             "command": "npx",
         },
     }

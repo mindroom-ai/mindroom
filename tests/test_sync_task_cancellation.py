@@ -498,6 +498,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         config = MagicMock(spec=Config)
         config.agents = {"test_agent": MagicMock()}
         config.teams = {}
+        config.mcp_servers = {}
         config.plugins = []
         config.mindroom_user = None
         config.get_all_configured_rooms.return_value = []
@@ -544,6 +545,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         old_config = MagicMock(spec=Config)
         old_config.agents = {"agent1": MagicMock()}
         old_config.teams = {}
+        old_config.mcp_servers = {}
         old_config.authorization = MagicMock()
         old_config.authorization.global_users = []
         orchestrator.config = old_config
@@ -560,6 +562,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         new_config = MagicMock(spec=Config)
         new_config.agents = {"agent1": MagicMock()}
         new_config.teams = {}
+        new_config.mcp_servers = {}
         new_config.authorization = MagicMock()
         new_config.authorization.global_users = []  # Add this for the logging
         mock_load_config.return_value = new_config

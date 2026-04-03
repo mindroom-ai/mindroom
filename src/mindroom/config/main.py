@@ -51,6 +51,7 @@ from mindroom.matrix.identity import (
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
+from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.tool_system.metadata import ToolConfigOverrideError, ToolMetadataValidationError
 from mindroom.tool_system.plugins import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
@@ -345,7 +346,7 @@ class Config(BaseModel):
         default_factory=dict,
         description="Knowledge base configurations keyed by base ID",
     )
-    mcp_servers: dict[str, Any] = Field(
+    mcp_servers: dict[str, MCPServerConfig] = Field(
         default_factory=dict,
         description="MCP server configurations keyed by server id",
     )
@@ -408,6 +409,8 @@ class Config(BaseModel):
         if overlapping_names:
             msg = f"Agent and team names must be distinct, overlapping keys: {', '.join(overlapping_names)}"
             raise ValueError(msg)
+        for server_id in self.mcp_servers:
+            normalize_mcp_server_id(server_id)
         return self
 
     @model_validator(mode="after")
@@ -1294,6 +1297,20 @@ class Config(BaseModel):
         return frozenset(
             agent_name for agent_name, agent_config in self.agents.items() if agent_config.private is not None
         )
+
+    def get_entities_referencing_tools(self, tool_names: set[str]) -> set[str]:
+        """Return agents and teams that depend on any of the given tools."""
+        matching_agents = {
+            agent_name
+            for agent_name in self.agents
+            if any(tool_name in tool_names for tool_name in self.get_agent_tools(agent_name))
+        }
+        matching_teams = {
+            team_name
+            for team_name, team_config in self.teams.items()
+            if any(agent_name in matching_agents for agent_name in team_config.agents)
+        }
+        return matching_agents | matching_teams
 
     def get_agent_delegation_closure(
         self,

@@ -2,13 +2,9 @@
 icon: lucide/plug
 ---
 
-# MCP (Planned)
+# MCP
 
-> [!WARNING]
-> MindRoom does not currently support direct MCP server configuration in `config.yaml`.
+Native MCP client support is now documented at [MCP](../mcp.md).
+Use that page for `mcp_servers`, transport examples, tool naming, and agent setup.
 
-MCP can still be used today through the plugin system by wrapping Agno `MCPTools` in a plugin tool factory.
-
-See [Plugins](../plugins.md#mcp-via-plugins-advanced) for the current workaround and setup instructions.
-
-This page remains as a compatibility pointer and will be expanded when native MCP support is added.
+This compatibility page remains only so older links continue to resolve.

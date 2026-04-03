@@ -23,6 +23,7 @@ class ConfigUpdatePlan:
     """Computed impact of one config reload."""
 
     new_config: Config
+    changed_mcp_servers: set[str]
     all_new_entities: set[str]
     entities_to_restart: set[str]
     new_entities: set[str]
@@ -60,12 +61,15 @@ def _identify_entities_to_restart(
     config: Config | None,
     new_config: Config,
     agent_bots: Mapping[str, AgentBot | TeamBot],
+    changed_mcp_servers: set[str],
 ) -> set[str]:
     """Identify entities that need restarting due to config changes."""
     agents_to_restart = _get_changed_agents(config, new_config, agent_bots)
     teams_to_restart = _get_changed_teams(config, new_config, agent_bots)
 
     entities_to_restart = agents_to_restart | teams_to_restart
+    if changed_mcp_servers:
+        entities_to_restart |= _entities_referencing_mcp_servers(config, new_config, changed_mcp_servers)
 
     if _router_needs_restart(config, new_config):
         entities_to_restart.add("router")
@@ -151,6 +155,33 @@ def _router_needs_restart(config: Config | None, new_config: Config) -> bool:
     return old_rooms != new_rooms
 
 
+def _changed_mcp_servers(
+    config: Config | None,
+    new_config: Config,
+) -> set[str]:
+    """Return MCP server ids whose config changed across a reload."""
+    if config is None:
+        return set(new_config.mcp_servers)
+    all_server_ids = set(config.mcp_servers) | set(new_config.mcp_servers)
+    return {
+        server_id
+        for server_id in all_server_ids
+        if config.mcp_servers.get(server_id) != new_config.mcp_servers.get(server_id)
+    }
+
+
+def _entities_referencing_mcp_servers(
+    config: Config | None,
+    new_config: Config,
+    changed_server_ids: set[str],
+) -> set[str]:
+    """Return entities that reference any changed MCP server tool."""
+    tool_names = {f"mcp_{server_id}" for server_id in changed_server_ids}
+    old_entities = set() if config is None else config.get_entities_referencing_tools(tool_names)
+    new_entities = new_config.get_entities_referencing_tools(tool_names)
+    return old_entities | new_entities
+
+
 def build_config_update_plan(
     *,
     current_config: Config,
@@ -160,15 +191,18 @@ def build_config_update_plan(
     agent_bots: Mapping[str, AgentBot | TeamBot],
 ) -> ConfigUpdatePlan:
     """Compute the effect of reloading config for the current runtime state."""
+    changed_mcp_servers = _changed_mcp_servers(current_config, new_config)
     entities_to_restart = _identify_entities_to_restart(
         current_config,
         new_config,
         agent_bots,
+        changed_mcp_servers,
     )
     new_entities = configured_entities - existing_entities - entities_to_restart
 
     return ConfigUpdatePlan(
         new_config=new_config,
+        changed_mcp_servers=changed_mcp_servers,
         all_new_entities=configured_entities,
         entities_to_restart=entities_to_restart,
         new_entities=new_entities,
