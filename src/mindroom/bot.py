@@ -153,7 +153,13 @@ from .authorization import (
 )
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import config_confirmation
-from .commands.handler import CommandEvent, CommandHandlerContext, _generate_welcome_message, handle_command
+from .commands.handler import (
+    CommandEvent,
+    CommandHandlerContext,
+    _generate_welcome_message,
+    _run_skill_command_tool,
+    handle_command,
+)
 from .commands.parsing import Command, command_parser
 from .constants import (
     ATTACHMENT_IDS_KEY,
@@ -495,6 +501,7 @@ class _PreparedTextEvent:
     source: dict[str, Any]
     server_timestamp: int | None = None
     is_synthetic: bool = False
+    source_kind_override: str | None = None
 
 
 type _TextDispatchEvent = nio.RoomMessageText | _PreparedTextEvent
@@ -572,6 +579,11 @@ def _hook_ingress_policy(envelope: MessageEnvelope) -> _HookIngressPolicy:
         bypass_unmentioned_agent_gate=policy.bypass_unmentioned_agent_gate,
         allow_full_dispatch=False,
     )
+
+
+def _should_handle_interactive_text_response(envelope: MessageEnvelope) -> bool:
+    """Return whether one inbound text event may answer an interactive prompt."""
+    return envelope.source_kind not in _COALESCING_EXEMPT_SOURCE_KINDS
 
 
 def _merge_response_extra_content(
@@ -750,10 +762,14 @@ class AgentBot:
     ) -> MessageEnvelope:
         """Build the normalized inbound envelope consumed by message hooks."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
-        resolved_source_kind = source_kind
-        source_kind_sender_is_trusted = (isinstance(event, _PreparedTextEvent) and event.is_synthetic) or (
-            extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
+        resolved_source_kind = (
+            source_kind
+            if source_kind is not None
+            else event.source_kind_override
+            if isinstance(event, _PreparedTextEvent)
+            else None
         )
+        source_kind_sender_is_trusted = extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = content.get("com.mindroom.source_kind")
             if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
@@ -1552,7 +1568,8 @@ class AgentBot:
             envelope=envelope,
         ):
             return
-        await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
+        if _should_handle_interactive_text_response(envelope):
+            await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
         await self._dispatch_text_message(
             room,
             _PrecheckedEvent(
@@ -1884,6 +1901,7 @@ class AgentBot:
                     },
                     server_timestamp=None,
                     is_synthetic=True,
+                    source_kind_override="voice",
                 ),
                 requester_user_id=prechecked_event.requester_user_id,
             ),
@@ -2119,7 +2137,8 @@ class AgentBot:
             envelope=envelope,
         ):
             return True
-        await interactive.handle_text_response(self.client, room, prepared_text_event, self.agent_name)
+        if _should_handle_interactive_text_response(envelope):
+            await interactive.handle_text_response(self.client, room, prepared_text_event, self.agent_name)
         await self._dispatch_text_message(
             room,
             _PrecheckedEvent(
@@ -5433,6 +5452,40 @@ class AgentBot:
                 source_envelope=source_envelope,
             )
 
+        async def run_skill_command_tool(
+            *,
+            agent_name: str,
+            command_tool: str,
+            skill_name: str,
+            args_text: str,
+            requester_user_id: str | None = None,
+            room_id: str | None = None,
+            thread_id: str | None = None,
+        ) -> str:
+            runtime_context = None
+            if room_id is not None:
+                runtime_context = self._build_tool_runtime_context(
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    reply_to_event_id=event.event_id,
+                    user_id=requester_user_id,
+                    agent_name=agent_name,
+                    source_envelope=source_envelope,
+                )
+            return await _run_skill_command_tool(
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                agent_name=agent_name,
+                storage_path=self.storage_path,
+                command_tool=command_tool,
+                skill_name=skill_name,
+                args_text=args_text,
+                requester_user_id=requester_user_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                runtime_context=runtime_context,
+            )
+
         context = CommandHandlerContext(
             client=self.client,
             config=self.config,
@@ -5444,6 +5497,7 @@ class AgentBot:
             resolve_reply_thread_id=self._resolve_reply_thread_id,
             send_response=self._send_response,
             send_skill_command_response=send_skill_command_response,
+            run_skill_command_tool=run_skill_command_tool,
         )
         await handle_command(
             context=context,

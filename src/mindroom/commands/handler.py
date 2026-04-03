@@ -22,6 +22,7 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from mindroom.thread_utils import check_agent_mentioned, create_session_id, get_configured_agents_for_room
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.skills import resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_tracker import ResponseTracker
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
 
@@ -72,6 +74,7 @@ class CommandHandlerContext:
     resolve_reply_thread_id: Callable[..., str | None]
     send_response: Callable[..., Awaitable[str | None]]
     send_skill_command_response: Callable[..., Awaitable[str | None]]
+    run_skill_command_tool: Callable[..., Awaitable[str]]
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
@@ -382,16 +385,27 @@ async def _run_skill_command_tool(
     requester_user_id: str | None = None,
     room_id: str | None = None,
     thread_id: str | None = None,
+    runtime_context: ToolRuntimeContext | None = None,
 ) -> str:
-    session_id = create_session_id(room_id, thread_id) if room_id is not None else None
+    resolved_requester_user_id = runtime_context.requester_id if runtime_context is not None else requester_user_id
+    resolved_room_id = runtime_context.room_id if runtime_context is not None else room_id
+    resolved_thread_id = runtime_context.thread_id if runtime_context is not None else thread_id
+    resolved_reply_thread_id = runtime_context.resolved_thread_id if runtime_context is not None else resolved_thread_id
+    session_id = (
+        runtime_context.session_id
+        if runtime_context is not None and runtime_context.session_id is not None
+        else create_session_id(resolved_room_id, resolved_thread_id)
+        if resolved_room_id is not None
+        else None
+    )
     execution_identity = build_tool_execution_identity(
         channel="matrix",
         agent_name=agent_name,
         runtime_paths=runtime_paths,
-        requester_id=requester_user_id,
-        room_id=room_id,
-        thread_id=thread_id,
-        resolved_thread_id=thread_id,
+        requester_id=resolved_requester_user_id,
+        room_id=resolved_room_id,
+        thread_id=resolved_thread_id,
+        resolved_thread_id=resolved_reply_thread_id,
         session_id=session_id,
     )
     effective_runtime_paths = (
@@ -401,7 +415,7 @@ async def _run_skill_command_tool(
     )
 
     try:
-        with tool_execution_identity(execution_identity):
+        with tool_runtime_context(runtime_context), tool_execution_identity(execution_identity):
             toolkits = _collect_agent_toolkits(
                 config,
                 agent_name,
@@ -612,11 +626,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 elif not spec.user_invocable:
                     response_text = f"❌ Skill '{spec.name}' is not user-invocable."
                 elif spec.dispatch and spec.dispatch.kind == "tool":
-                    response_text = await _run_skill_command_tool(
-                        config=context.config,
-                        runtime_paths=context.runtime_paths,
+                    response_text = await context.run_skill_command_tool(
                         agent_name=target_agent,
-                        storage_path=context.storage_path,
                         command_tool=spec.dispatch.tool_name,
                         skill_name=spec.name,
                         args_text=args_text,

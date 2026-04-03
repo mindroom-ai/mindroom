@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import platform
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.tools import Toolkit
@@ -26,6 +26,7 @@ from mindroom.tool_system.metadata import (
     ToolStatus,
     register_tool_with_metadata,
 )
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from mindroom.tool_system.skills import build_agent_skills, resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -773,6 +774,89 @@ async def test_skill_command_tool_dispatch_sets_execution_identity() -> None:
         f"@alice:example.org:!room:example.org:$thread:{create_session_id('!room:example.org', '$thread')}:"
         "skill:dispatch:hello"
     )
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_installs_explicit_tool_runtime_context() -> None:
+    """Skill tool dispatch should expose the provided ToolRuntimeContext to tool hooks."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: ARG002, N803
+            context = get_tool_runtime_context()
+            assert context is not None
+            return (
+                f"{context.message_received_depth}:"
+                f"{context.hook_message_sender is not None}:"
+                f"{context.room_state_querier is not None}:"
+                f"{context.room_state_putter is not None}"
+            )
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["demo_toolkit"]
+        runtime_paths = resolve_runtime_paths()
+
+        async def _message_sender(
+            room_id: str,
+            body: str,
+            thread_id: str | None,
+            source_hook: str,
+            extra_content: dict[str, object] | None,
+            *,
+            trigger_dispatch: bool = False,
+        ) -> str | None:
+            del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch
+            return "$event"
+
+        runtime_context = ToolRuntimeContext(
+            agent_name="code",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            requester_id="@alice:example.org",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            hook_message_sender=_message_sender,
+            room_state_querier=AsyncMock(return_value={}),
+            room_state_putter=AsyncMock(return_value=True),
+            message_received_depth=1,
+        )
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name="code",
+            command_tool="demo",
+            skill_name="dispatch",
+            args_text="hello",
+            requester_user_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            runtime_context=runtime_context,
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == "1:True:True:True"
 
 
 @pytest.mark.asyncio

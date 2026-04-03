@@ -241,6 +241,7 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         resolve_reply_thread_id=MagicMock(return_value=None),
         send_response=AsyncMock(return_value=None),
         send_skill_command_response=AsyncMock(return_value=None),
+        run_skill_command_tool=AsyncMock(return_value=""),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(

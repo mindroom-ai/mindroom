@@ -17,8 +17,10 @@ from mindroom.bot import (
     _MessageContext,
     _PrecheckedEvent,
     _PreparedDispatch,
+    _PreparedTextEvent,
     _ResponseAction,
 )
+from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -45,6 +47,7 @@ from mindroom.hooks.sender import HookMessageSender as SenderAlias
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.tool_system.skills import _SkillCommandDispatch, _SkillCommandSpec
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -669,6 +672,39 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
 
 
 @pytest.mark.asyncio
+async def test_voice_prepared_text_does_not_trust_hook_metadata_from_user_content(tmp_path: Path) -> None:
+    """Voice-normalized user events must not be able to inject internal hook provenance."""
+    bot = _agent_bot(tmp_path)
+    prepared_voice = _PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice-event",
+        body="voice text",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "voice text",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "spoofed:message:received",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
+            },
+        },
+        is_synthetic=True,
+        source_kind_override="voice",
+    )
+
+    envelope = bot._build_message_envelope(
+        room_id="!room:localhost",
+        event=prepared_voice,
+        requester_user_id="@user:localhost",
+        context=_dispatch_context(bot),
+    )
+
+    assert envelope.source_kind == "voice"
+    assert envelope.hook_source is None
+    assert envelope.message_received_depth == 0
+
+
+@pytest.mark.asyncio
 async def test_dispatch_text_message_runs_message_received_before_command_parsing(tmp_path: Path) -> None:
     """Router command handling must still allow message:received hooks to suppress first."""
     bot = _agent_bot(tmp_path, agent_name="router")
@@ -1117,6 +1153,48 @@ async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message
 
 
 @pytest.mark.asyncio
+async def test_first_hop_hook_dispatch_does_not_consume_interactive_answer_on_message_path(tmp_path: Path) -> None:
+    """First-hop synthetic hook traffic should not answer interactive prompts."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$first-hop-hook-interactive",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "1",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:bot:ready",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
+            },
+        },
+    )
+    interactive._active_questions.clear()
+    interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
+        room_id=room.room_id,
+        thread_id=None,
+        options={"1": "first"},
+        creator_agent=bot.agent_name,
+    )
+    bot._precheck_dispatch_event = MagicMock(
+        return_value=_PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+    )
+    bot._resolve_text_dispatch_event = AsyncMock(return_value=event)
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._dispatch_text_message = AsyncMock()
+
+    try:
+        await bot._on_message(room, event)
+    finally:
+        assert "$question123" in interactive._active_questions
+        interactive._active_questions.clear()
+
+    bot._dispatch_text_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_first_hop_plain_hook_from_non_message_hook_still_dispatches(tmp_path: Path) -> None:
     """First-hop plain hook messages from non-message hooks should still reach normal dispatch."""
     bot = _agent_bot(tmp_path)
@@ -1216,6 +1294,67 @@ async def test_hook_dispatch_skill_command_preserves_source_envelope_in_runtime(
     source_envelope = bot._send_skill_command_response.await_args.kwargs["source_envelope"]
     assert source_envelope.hook_source == "origin-plugin:message:received"
     assert source_envelope.message_received_depth == 1
+
+
+@pytest.mark.asyncio
+async def test_hook_dispatch_skill_tool_command_builds_full_tool_runtime_context(tmp_path: Path) -> None:
+    """Hook-dispatched !skill tool runs should inherit the full tool runtime context."""
+    bot = _hook_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$hook-skill-tool",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "!skill demo summarize",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:message:received",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
+            },
+        },
+    )
+    command = Command(
+        type=CommandType.SKILL,
+        args={"skill_name": "demo", "args_text": "summarize"},
+        raw_text="!skill demo summarize",
+    )
+    bot.client.rooms = {}
+    bot._send_response = AsyncMock(return_value="$response")
+    captured_runtime_context = None
+
+    async def fake_run_skill_command_tool(**kwargs: object) -> str:
+        nonlocal captured_runtime_context
+        captured_runtime_context = kwargs["runtime_context"]
+        return "tool-result"
+
+    spec = _SkillCommandSpec(
+        name="demo",
+        description="demo",
+        source_path=tmp_path / "demo" / "SKILL.md",
+        user_invocable=True,
+        disable_model_invocation=False,
+        dispatch=_SkillCommandDispatch(tool_name="shell.demo"),
+    )
+
+    with (
+        patch("mindroom.commands.handler._resolve_skill_command_agent", return_value=("code", None)),
+        patch("mindroom.commands.handler.resolve_skill_command_spec", return_value=spec),
+        patch("mindroom.bot._run_skill_command_tool", new=AsyncMock(side_effect=fake_run_skill_command_tool)),
+    ):
+        await bot._handle_command(
+            room,
+            _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+            command,
+            source_envelope=_synthetic_envelope(agent_name="router"),
+        )
+
+    assert captured_runtime_context is not None
+    assert captured_runtime_context.message_received_depth == 1
+    assert captured_runtime_context.hook_message_sender is not None
+    assert captured_runtime_context.room_state_querier is not None
+    assert captured_runtime_context.room_state_putter is not None
 
 
 @pytest.mark.asyncio
