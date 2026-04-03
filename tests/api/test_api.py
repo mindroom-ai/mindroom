@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
@@ -83,6 +83,19 @@ def _validated_authored_payload(
         _authored_config_payload(agent_name),
         runtime_paths,
     ).authored_model_dump()
+
+
+def _publish_committed_runtime_config(
+    api_app: FastAPI,
+    runtime_paths: constants.RuntimePaths,
+    authored_payload: dict[str, Any],
+) -> None:
+    """Publish one committed config snapshot for request-bound API tests."""
+    main.initialize_api_app(api_app, runtime_paths)
+    context = main._app_context(api_app)
+    context.config_data = Config.validate_with_runtime(authored_payload, runtime_paths).authored_model_dump()
+    context.config_load_result = main.ConfigLoadResult(success=True)
+    context.auth_state = None
 
 
 class _ContextSwapLock:
@@ -1439,9 +1452,9 @@ def test_get_tools_uses_one_runtime_snapshot(
 def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClient) -> None:
     """Google dashboard actions should reject unsupported worker scopes."""
     config = _config_with_worker_scope("user")
-
-    with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    with patch(
+        "mindroom.api.config_lifecycle.read_committed_runtime_config",
+        return_value=(config, main._app_runtime_paths(test_client.app)),
     ):
         response = test_client.post("/api/google/disconnect?agent_name=general")
 
@@ -1452,9 +1465,9 @@ def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClien
 def test_homeassistant_connect_oauth_rejects_isolating_worker_scope(test_client: TestClient) -> None:
     """Home Assistant OAuth should reject unsupported worker scopes."""
     config = _config_with_worker_scope("user")
-
-    with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    with patch(
+        "mindroom.api.config_lifecycle.read_committed_runtime_config",
+        return_value=(config, main._app_runtime_paths(test_client.app)),
     ):
         response = test_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general",
@@ -1514,9 +1527,12 @@ def test_google_connect_uses_pending_oauth_state(
     )
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
-
-    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
-        response = api_key_client.post("/api/google/connect?agent_name=general")
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+    response = api_key_client.post("/api/google/connect?agent_name=general")
 
     assert response.status_code == 200
     assert response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
@@ -1529,13 +1545,15 @@ def test_google_connect_rejects_draft_execution_scope_override(api_key_client: T
     config = _config_with_worker_scope("user")
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
-
     with (
         patch(
             "mindroom.api.google_integration._get_oauth_credentials",
             return_value={"web": {"client_id": "client-id", "client_secret": "client-secret"}},
         ),
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch(
+            "mindroom.api.config_lifecycle.read_committed_runtime_config",
+            return_value=(config, main._app_runtime_paths(api_key_client.app)),
+        ),
     ):
         connect_response = api_key_client.post("/api/google/connect?agent_name=general&execution_scope=shared")
     assert connect_response.status_code == 409
@@ -1602,11 +1620,15 @@ def test_google_configure_writes_runtime_env_file_and_refreshes_runtime(
         "mindroom.api.google_integration._ensure_google_packages",
         lambda _runtime_paths: (object, object, _FakeFlowFactory),
     )
-    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, temp_config_file)):
-        connect_response = api_key_client.post(
-            "/api/google/connect?agent_name=general",
-            headers={"Authorization": "Bearer test-key"},
-        )
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+    connect_response = api_key_client.post(
+        "/api/google/connect?agent_name=general",
+        headers={"Authorization": "Bearer test-key"},
+    )
 
     assert connect_response.status_code == 200
     assert connect_response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
@@ -1649,11 +1671,15 @@ def test_google_reset_clears_runtime_env_file_and_refreshes_runtime(
     assert "GOOGLE_REDIRECT_URI=" not in env_contents
     assert "UNRELATED=value" in env_contents
 
-    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, temp_config_file)):
-        connect_response = api_key_client.post(
-            "/api/google/connect?agent_name=general",
-            headers={"Authorization": "Bearer test-key"},
-        )
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+    connect_response = api_key_client.post(
+        "/api/google/connect?agent_name=general",
+        headers={"Authorization": "Bearer test-key"},
+    )
 
     assert connect_response.status_code == 503
     assert "GOOGLE_CLIENT_ID" in connect_response.json()["detail"]
@@ -1750,15 +1776,18 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     config = _config_with_worker_scope("shared")
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
-
-    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
-        response = api_key_client.post(
-            "/api/homeassistant/connect/oauth?agent_name=general",
-            json={
-                "instance_url": "homeassistant.local:8123",
-                "client_id": "client-id",
-            },
-        )
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+    response = api_key_client.post(
+        "/api/homeassistant/connect/oauth?agent_name=general",
+        json={
+            "instance_url": "homeassistant.local:8123",
+            "client_id": "client-id",
+        },
+    )
 
     assert response.status_code == 200
     auth_url = response.json()["auth_url"]
@@ -1789,9 +1818,13 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
     }
     async_client = MagicMock()
     async_client.__aenter__.return_value.post.return_value = token_response
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
 
     with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
         patch("mindroom.api.homeassistant_integration.resolve_request_credentials_target", return_value=target),
         patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
     ):
@@ -1840,9 +1873,9 @@ def test_homeassistant_connect_rejects_draft_execution_scope_override(
     config = _config_with_worker_scope("user")
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
-
-    with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    with patch(
+        "mindroom.api.config_lifecycle.read_committed_runtime_config",
+        return_value=(config, main._app_runtime_paths(api_key_client.app)),
     ):
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general&execution_scope=shared",
@@ -1902,9 +1935,12 @@ def test_spotify_connect_uses_pending_oauth_state(
     )
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
-
-    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
-        response = api_key_client.post("/api/integrations/spotify/connect?agent_name=general")
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+    response = api_key_client.post("/api/integrations/spotify/connect?agent_name=general")
 
     assert response.status_code == 200
     assert response.json()["auth_url"] == "https://accounts.spotify.test/authorize"
@@ -1941,9 +1977,9 @@ def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: 
     )
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
-
-    with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    with patch(
+        "mindroom.api.config_lifecycle.read_committed_runtime_config",
+        return_value=(config, main._app_runtime_paths(api_key_client.app)),
     ):
         connect_response = api_key_client.post(
             "/api/integrations/spotify/connect?agent_name=general&execution_scope=shared",
@@ -1956,9 +1992,9 @@ def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: 
 def test_spotify_status_rejects_isolating_worker_scope(test_client: TestClient) -> None:
     """Spotify dashboard status should reject unsupported worker scopes."""
     config = _config_with_worker_scope("user")
-
-    with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    with patch(
+        "mindroom.api.config_lifecycle.read_committed_runtime_config",
+        return_value=(config, main._app_runtime_paths(test_client.app)),
     ):
         response = test_client.get("/api/integrations/spotify/status?agent_name=general")
 
@@ -2021,10 +2057,15 @@ def test_spotify_callback_preserves_runtime_validation_error(
     assert login_response.status_code == 200
 
     invalid_detail = [{"loc": ["config"], "msg": "Invalid plugin name: BadName", "type": "value_error"}]
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
     with patch(
-        "mindroom.api.config_lifecycle.load_runtime_config",
+        "mindroom.api.config_lifecycle.read_committed_runtime_config",
         side_effect=[
-            (config, Path("config.yaml")),
+            (config, main._app_runtime_paths(api_key_client.app)),
             HTTPException(status_code=422, detail=invalid_detail),
         ],
     ):
@@ -3248,6 +3289,102 @@ def test_api_key_valid_key_allows_access(api_key_client: TestClient) -> None:
         headers={"Authorization": "Bearer test-key"},
     )
     assert response.status_code == 200
+
+
+def test_protected_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Path) -> None:
+    """Protected reads should stay on the auth-time snapshot even if the app swaps before the handler reads."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "old",
+                "rooms": ["old-room"],
+            },
+        },
+    }
+    payload_b = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "new",
+                "rooms": ["new-room"],
+            },
+        },
+    }
+    original_read = main.read_api_committed_config
+
+    def _swap_then_read(request: Request, reader: Callable[[dict[str, Any]], object]) -> object:
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return original_read(request, reader)
+
+    with (
+        patch.object(main, "read_api_committed_config", side_effect=_swap_then_read),
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.get(
+            "/api/rooms",
+            headers={"Authorization": "Bearer key-a"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == ["old-room"]
+
+
+def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:
+    """Protected writes should fail stale instead of mutating a newer runtime after auth succeeds."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = _authored_config_payload("old")
+    payload_b = _authored_config_payload("new")
+    runtime_b.config_path.write_text(yaml.safe_dump(payload_b), encoding="utf-8")
+    original_replace = main.replace_api_committed_config
+
+    def _swap_then_replace(
+        request: Request,
+        new_config: dict[str, Any],
+        *,
+        error_prefix: str,
+    ) -> None:
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return original_replace(request, new_config, error_prefix=error_prefix)
+
+    with (
+        patch.object(main, "replace_api_committed_config", side_effect=_swap_then_replace),
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.put(
+            "/api/config/save",
+            headers={"Authorization": "Bearer key-a"},
+            json=_authored_config_payload("written"),
+        )
+
+    assert response.status_code == 409
+    assert Config.validate_with_runtime(yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8")), runtime_b)
+    assert yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8"))["agents"] == payload_b["agents"]
 
 
 def test_api_key_missing_header_rejects(api_key_client: TestClient) -> None:

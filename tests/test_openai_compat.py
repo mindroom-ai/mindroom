@@ -141,6 +141,7 @@ def test_load_config_uses_dynamic_runtime_config_path(
 
     app = FastAPI()
     initialize_api_app(app, runtime_paths)
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
     request = Request({"type": "http", "app": app})
 
     config, resolved_runtime_paths = openai_compat._load_config(request)
@@ -160,6 +161,59 @@ def test_load_config_requires_runtime_paths() -> None:
 
     with pytest.raises(TypeError, match="API context is not initialized"):
         openai_compat._load_config(request)
+
+
+def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> None:
+    """OpenAI-compatible routes should ignore newer on-disk edits until reload publishes a new snapshot."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "router:\n"
+        "  model: default\n"
+        "agents:\n"
+        "  general:\n"
+        "    display_name: General\n"
+        "    role: helper\n"
+        "    rooms: []\n",
+        encoding="utf-8",
+    )
+    app = FastAPI()
+    app.include_router(router)
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+    )
+    initialize_api_app(app, runtime_paths)
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "router:\n"
+        "  model: default\n"
+        "agents:\n"
+        "  changed:\n"
+        "    display_name: Changed\n"
+        "    role: helper\n"
+        "    rooms: []\n",
+        encoding="utf-8",
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/v1/models")
+
+    assert response.status_code == 200
+    model_ids = {model["id"] for model in response.json()["data"]}
+    assert "general" in model_ids
+    assert "changed" not in model_ids
 
 
 def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: Config) -> None:
@@ -283,6 +337,7 @@ def test_list_models_returns_runtime_validation_errors(tmp_path: Path) -> None:
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is False
 
     with TestClient(app) as client:
         response = client.get("/v1/models")
@@ -306,6 +361,7 @@ def test_list_models_returns_malformed_yaml_errors(tmp_path: Path) -> None:
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is False
 
     with TestClient(app) as client:
         response = client.get("/v1/models")

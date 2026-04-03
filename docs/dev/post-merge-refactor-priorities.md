@@ -95,35 +95,35 @@ The remaining work should focus on reducing the number of legal ways to bypass t
 
 Files:
 
+- `src/mindroom/api/main.py`
 - `src/mindroom/api/config_lifecycle.py`
-- `src/mindroom/api/tools.py`
 - `src/mindroom/api/credentials.py`
-- `src/mindroom/api/google_integration.py`
-- `src/mindroom/api/integrations.py`
-- `src/mindroom/api/openai_compat.py`
+- `src/mindroom/api/knowledge.py`
+- `src/mindroom/api/schedules.py`
+- `src/mindroom/api/workers.py`
 
 Current state:
 
-- The helper layer now has a coherent snapshot model.
-- The remaining risk is route-level code that still composes runtime paths, committed config, auth state, or runtime-scoped metadata from separate helper calls.
-- Matrix and `/api/tools` now use coherent request snapshots, but other routes still do some local composition.
+- The helper layer now has a coherent snapshot model, and the highest-risk routes now bind committed config and runtime coherently.
+- The remaining risk is no longer the old sibling route bugs in `/api/tools`, Matrix, or the OpenAI-compatible routes.
+- The remaining risk is that auth-protected dashboard routes still rely on conventions instead of one obvious request-scoped auth-plus-snapshot path.
 
 Why this is next:
 
-- Several late review findings came from callers bypassing the new helper-level guarantees rather than from the helper layer itself.
-- A single request-scoped snapshot helper would make those bypasses harder to reintroduce.
+- The remaining bug class is still "authenticate under one snapshot, then execute under another".
+- One explicit request-scoped auth-and-snapshot dependency would make that bypass much harder to reintroduce.
 
 Refactor target:
 
-- Add one small request-scoped helper for callers that need committed config plus runtime-bound context together.
-- Prefer passing that coherent request snapshot through the route body instead of re-reading runtime or auth state later in the handler.
+- Add one obvious dependency/helper path for auth-protected dashboard routes that need authenticated user plus committed runtime/config state together.
+- Prefer passing that bound request snapshot through the route body instead of re-reading auth or runtime state later in the handler.
 - Keep request-time tool metadata resolution non-mutating and runtime-scoped.
 
 Acceptance criteria:
 
-- Routes that need both committed config and runtime paths do not read them separately.
-- Request-time availability/credential helpers no longer re-read runtime state when a coherent snapshot is already available.
-- New API routes have one obvious helper path to stay snapshot-safe.
+- Protected routes do not authenticate under one snapshot and execute under another.
+- Request-time helpers do not re-read runtime or auth state when a bound request snapshot is already available.
+- New dashboard routes have one obvious helper path to stay auth- and snapshot-safe.
 
 ## Priority 2: Simplify Plugin Tool Loading
 

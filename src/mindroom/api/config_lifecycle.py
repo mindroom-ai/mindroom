@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _UNSET = object()
+_REQUEST_SNAPSHOT_SCOPE_KEY = "api_snapshot"
 
 
 @dataclass(frozen=True)
@@ -197,6 +198,36 @@ def _app_config_state(api_app: FastAPI) -> ApiState:
     return cast("ApiState", state)
 
 
+def request_snapshot(request: Request) -> ApiSnapshot | None:
+    """Return the request-bound API snapshot, if one was pinned earlier."""
+    snapshot = request.scope.get(_REQUEST_SNAPSHOT_SCOPE_KEY)
+    return snapshot if isinstance(snapshot, ApiSnapshot) else None
+
+
+def store_request_snapshot(request: Request, snapshot: ApiSnapshot) -> ApiSnapshot:
+    """Pin one API snapshot to the current request."""
+    request.scope[_REQUEST_SNAPSHOT_SCOPE_KEY] = snapshot
+    return snapshot
+
+
+def bind_current_request_snapshot(request: Request) -> ApiSnapshot:
+    """Pin the app's current published snapshot to the current request."""
+    existing = request_snapshot(request)
+    if existing is not None:
+        return existing
+    app_state = _app_config_state(request.app)
+    with app_state.config_lock:
+        return store_request_snapshot(request, app_state.snapshot)
+
+
+def _request_or_current_snapshot(request: Request) -> ApiSnapshot:
+    """Return the request-bound snapshot when present, else the current app snapshot."""
+    bound_snapshot = request_snapshot(request)
+    if bound_snapshot is not None:
+        return bound_snapshot
+    return _app_config_state(request.app).snapshot
+
+
 def _published_snapshot(
     snapshot: ApiSnapshot,
     *,
@@ -228,7 +259,7 @@ def _stale_snapshot_error() -> HTTPException:
 
 def api_runtime_paths(request: Request) -> constants.RuntimePaths:
     """Return the API request's committed runtime paths."""
-    return _app_config_state(request.app).snapshot.runtime_paths
+    return _request_or_current_snapshot(request).runtime_paths
 
 
 def _build_mutated_config[T](
@@ -351,11 +382,15 @@ def _build_and_commit_mutation[T](
     mutate: Callable[[dict[str, Any]], T],
     *,
     error_prefix: str,
+    initial_snapshot: ApiSnapshot | None = None,
 ) -> T:
     """Build one config mutation off-lock and commit it only if still current."""
     initial_state = _app_config_state(api_app)
-    with initial_state.config_lock:
-        snapshot = _app_config_state(api_app).snapshot
+    if initial_snapshot is None:
+        with initial_state.config_lock:
+            snapshot = _app_config_state(api_app).snapshot
+    else:
+        snapshot = initial_snapshot
     try:
         result, validated_payload = _build_mutated_config(snapshot, mutate, snapshot.runtime_paths)
         return _commit_mutated_snapshot(
@@ -381,11 +416,15 @@ def _build_and_commit_replacement(
     new_config: dict[str, Any],
     *,
     error_prefix: str,
+    initial_snapshot: ApiSnapshot | None = None,
 ) -> None:
     """Build one replacement payload off-lock and commit it only if still current."""
     initial_state = _app_config_state(api_app)
-    with initial_state.config_lock:
-        snapshot = _app_config_state(api_app).snapshot
+    if initial_snapshot is None:
+        with initial_state.config_lock:
+            snapshot = _app_config_state(api_app).snapshot
+    else:
+        snapshot = initial_snapshot
     try:
         validated_payload = _validate_replacement_payload(new_config, snapshot.runtime_paths)
         _commit_replaced_snapshot(
@@ -410,11 +449,15 @@ def _build_and_commit_raw_replacement(
     source: str,
     *,
     error_prefix: str,
+    initial_snapshot: ApiSnapshot | None = None,
 ) -> None:
     """Build one raw replacement payload off-lock and commit it only if still current."""
     initial_state = _app_config_state(api_app)
-    with initial_state.config_lock:
-        snapshot = _app_config_state(api_app).snapshot
+    if initial_snapshot is None:
+        with initial_state.config_lock:
+            snapshot = _app_config_state(api_app).snapshot
+    else:
+        snapshot = initial_snapshot
     try:
         validated_payload = _validate_raw_config_source(source, snapshot.runtime_paths)
         _commit_raw_replaced_snapshot(
@@ -518,7 +561,11 @@ def read_committed_config[T](
     reader: Callable[[dict[str, Any]], T],
 ) -> T:
     """Read committed API config only when the current on-disk config is valid."""
-    return read_app_committed_config(request.app, reader)
+    snapshot = _request_or_current_snapshot(request)
+    raise_for_config_load_result(snapshot.config_load_result)
+    if not snapshot.config_data:
+        _raise_missing_loaded_config()
+    return reader(snapshot.config_data)
 
 
 def read_committed_config_and_runtime[T](
@@ -526,14 +573,23 @@ def read_committed_config_and_runtime[T](
     reader: Callable[[dict[str, Any]], T],
 ) -> tuple[T, constants.RuntimePaths]:
     """Read committed API config and runtime from one coherent request snapshot."""
-    return read_app_committed_config_and_runtime(request.app, reader)
+    snapshot = _request_or_current_snapshot(request)
+    raise_for_config_load_result(snapshot.config_load_result)
+    if not snapshot.config_data:
+        _raise_missing_loaded_config()
+    return reader(snapshot.config_data), snapshot.runtime_paths
 
 
 def read_committed_runtime_config(
     request: Request,
 ) -> tuple[Config, constants.RuntimePaths]:
     """Read one validated runtime config and runtime from one coherent request snapshot."""
-    return read_app_committed_runtime_config(request.app)
+    snapshot = _request_or_current_snapshot(request)
+    raise_for_config_load_result(snapshot.config_load_result)
+    if not snapshot.config_data:
+        _raise_missing_loaded_config()
+    runtime_paths = snapshot.runtime_paths
+    return Config.validate_with_runtime(snapshot.config_data, runtime_paths), runtime_paths
 
 
 def write_committed_config[T](
@@ -543,7 +599,12 @@ def write_committed_config[T](
     error_prefix: str,
 ) -> T:
     """Mutate committed API config from the last valid cache snapshot."""
-    return write_app_committed_config(request.app, mutate, error_prefix=error_prefix)
+    return _build_and_commit_mutation(
+        request.app,
+        mutate,
+        error_prefix=error_prefix,
+        initial_snapshot=request_snapshot(request),
+    )
 
 
 def write_app_committed_config[T](
@@ -563,7 +624,12 @@ def replace_committed_config(
     error_prefix: str,
 ) -> None:
     """Replace the entire committed API config with one freshly validated payload."""
-    replace_app_committed_config(request.app, new_config, error_prefix=error_prefix)
+    _build_and_commit_replacement(
+        request.app,
+        new_config,
+        error_prefix=error_prefix,
+        initial_snapshot=request_snapshot(request),
+    )
 
 
 def replace_app_committed_config(
@@ -578,15 +644,13 @@ def replace_app_committed_config(
 
 def read_raw_config_source(request: Request) -> str:
     """Read the raw config source text for the current runtime."""
-    initial_state = _app_config_state(request.app)
-    with initial_state.config_lock:
-        snapshot = _app_config_state(request.app).snapshot
-        try:
-            return snapshot.runtime_paths.config_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            # Recovery still needs the raw source visible even when the on-disk file
-            # contains unreadable bytes. Replacement characters keep the editor usable.
-            return snapshot.runtime_paths.config_path.read_bytes().decode("utf-8", errors="replace")
+    snapshot = _request_or_current_snapshot(request)
+    try:
+        return snapshot.runtime_paths.config_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        # Recovery still needs the raw source visible even when the on-disk file
+        # contains unreadable bytes. Replacement characters keep the editor usable.
+        return snapshot.runtime_paths.config_path.read_bytes().decode("utf-8", errors="replace")
 
 
 def replace_raw_config_source(
@@ -596,7 +660,12 @@ def replace_raw_config_source(
     error_prefix: str,
 ) -> None:
     """Replace the raw config source with one freshly validated payload."""
-    _build_and_commit_raw_replacement(request.app, source, error_prefix=error_prefix)
+    _build_and_commit_raw_replacement(
+        request.app,
+        source,
+        error_prefix=error_prefix,
+        initial_snapshot=request_snapshot(request),
+    )
 
 
 async def watch_config(

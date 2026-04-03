@@ -93,10 +93,14 @@ def _load_config(
     runtime_paths: RuntimePaths | None = None,
 ) -> tuple[Config, RuntimePaths]:
     """Load the current runtime config and return it with its path."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request) if runtime_paths is None else runtime_paths
-    return config_lifecycle.load_runtime_config(runtime_paths)
+    config, committed_runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    if runtime_paths is not None and committed_runtime_paths != runtime_paths:
+        logger.info(
+            "Using bound request runtime snapshot for OpenAI-compatible config load",
+            requested_config_path=str(runtime_paths.config_path),
+            committed_config_path=str(committed_runtime_paths.config_path),
+        )
+    return config, committed_runtime_paths
 
 
 def _openai_compatible_agent_names(config: Config) -> list[str]:
@@ -660,9 +664,7 @@ async def list_models(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     """List available models (agents) in OpenAI format."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
+    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
     auth_error = _authenticate_request(authorization, runtime_paths)
     if auth_error is not None:
         return auth_error
@@ -725,9 +727,7 @@ async def chat_completions(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
+    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
     auth_error = _authenticate_request(authorization, runtime_paths)
     if auth_error is not None:
         return auth_error

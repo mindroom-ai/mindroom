@@ -341,7 +341,7 @@ def resolve_request_credentials_target(
             execution_identity=None,
         )
 
-    config, _ = config_lifecycle.load_runtime_config(runtime_paths)
+    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     scope_request = resolve_dashboard_agent_execution_scope_request(
         config=config,
         agent_name=agent_name,

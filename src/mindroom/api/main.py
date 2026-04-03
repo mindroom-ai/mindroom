@@ -28,6 +28,8 @@ from mindroom.api.config_lifecycle import read_committed_config as read_api_comm
 from mindroom.api.config_lifecycle import read_raw_config_source as read_api_raw_config_source
 from mindroom.api.config_lifecycle import replace_committed_config as replace_api_committed_config
 from mindroom.api.config_lifecycle import replace_raw_config_source as replace_api_raw_config_source
+from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
+from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
 from mindroom.api.config_lifecycle import write_app_committed_config as write_api_app_committed_config
 
 # Import routers
@@ -579,9 +581,8 @@ def _get_request_token(
     return None
 
 
-def _validate_supabase_token(token: str, api_app: FastAPI) -> _SupabaseUserProtocol | None:
+def _validate_supabase_token(token: str, auth_state: _ApiAuthState) -> _SupabaseUserProtocol | None:
     """Validate a Supabase access token and return the authenticated user."""
-    auth_state = _app_auth_state(api_app)
     if auth_state.supabase_auth is None:
         return None
 
@@ -596,10 +597,56 @@ def _validate_supabase_token(token: str, api_app: FastAPI) -> _SupabaseUserProto
     return response.user
 
 
+def _bind_authenticated_request_snapshot(request: Request) -> ApiSnapshot:
+    """Bind one coherent auth/runtime/config snapshot to the request."""
+    existing = request_api_snapshot(request)
+    bound_auth_state = cast("_ApiAuthState | None", existing.auth_state) if existing is not None else None
+    if (
+        existing is not None
+        and bound_auth_state is not None
+        and bound_auth_state.runtime_paths == existing.runtime_paths
+    ):
+        return existing
+
+    app_state = _app_state(request.app)
+    with app_state.config_lock:
+        current = app_state.snapshot
+        auth_state = cast("_ApiAuthState | None", current.auth_state)
+        if auth_state is None or auth_state.runtime_paths != current.runtime_paths:
+            settings = _build_auth_settings(current.runtime_paths)
+            auth_state = _ApiAuthState(
+                runtime_paths=current.runtime_paths,
+                settings=settings,
+                supabase_auth=_init_supabase_auth(
+                    current.runtime_paths,
+                    settings.supabase_url,
+                    settings.supabase_anon_key,
+                ),
+            )
+            current = _published_snapshot(
+                current,
+                increment_generation=False,
+                auth_state=auth_state,
+            )
+            app_state.snapshot = current
+        return store_request_api_snapshot(request, current)
+
+
+def _request_auth_state(request: Request) -> _ApiAuthState:
+    """Return the request-bound auth state when available."""
+    snapshot = request_api_snapshot(request)
+    if snapshot is None:
+        return _app_auth_state(request.app)
+    auth_state = cast("_ApiAuthState | None", snapshot.auth_state)
+    if auth_state is None or auth_state.runtime_paths != snapshot.runtime_paths:
+        return cast("_ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
+    return auth_state
+
+
 def _request_has_frontend_access(request: Request) -> bool:
     """Return whether the current request may load the dashboard UI."""
     authorization = request.headers.get("authorization")
-    auth_state = _app_auth_state(request.app)
+    auth_state = cast("_ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     mindroom_api_key = auth_state.settings.mindroom_api_key
 
     if auth_state.supabase_auth is None:
@@ -617,7 +664,7 @@ def _request_has_frontend_access(request: Request) -> bool:
         authorization,
         cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),
     )
-    return token is not None and _validate_supabase_token(token, request.app) is not None
+    return token is not None and _validate_supabase_token(token, auth_state) is not None
 
 
 def _sanitize_next_path(next_path: str | None) -> str:
@@ -743,7 +790,8 @@ async def verify_user(
 
     In standalone mode (no Supabase), returns a default user to allow access.
     """
-    auth_state = _app_auth_state(request.app)
+    snapshot = _bind_authenticated_request_snapshot(request)
+    auth_state = cast("_ApiAuthState", snapshot.auth_state)
     mindroom_api_key = auth_state.settings.mindroom_api_key
 
     if auth_state.supabase_auth is None:
@@ -775,7 +823,7 @@ async def verify_user(
     if token is None:
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
-    user = _validate_supabase_token(token, request.app)
+    user = _validate_supabase_token(token, auth_state)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -872,7 +920,7 @@ async def clear_auth_session(response: Response) -> dict[str, bool]:
 @app.get("/login", include_in_schema=False)
 async def standalone_login(request: Request, next: str = "/") -> Response:  # noqa: A002
     """Render the standalone dashboard login form when API-key auth is enabled."""
-    if not _app_auth_state(request.app).settings.mindroom_api_key:
+    if not cast("_ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state).settings.mindroom_api_key:
         raise HTTPException(status_code=404, detail="Not found")
 
     next_path = _sanitize_next_path(next)
@@ -1196,7 +1244,7 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
         raise HTTPException(status_code=404, detail="Not found")
 
     if not _request_has_frontend_access(request):
-        auth_settings = _app_auth_state(request.app).settings
+        auth_settings = _request_auth_state(request).settings
         target_path = _sanitize_next_path(f"/{path}" if path else "/")
         if auth_settings.supabase_url and auth_settings.supabase_anon_key and auth_settings.platform_login_url:
             redirect_to = quote(str(request.url), safe="")
@@ -1207,7 +1255,7 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
 
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    frontend_dir = ensure_frontend_dist_dir(_app_runtime_paths(request.app))
+    frontend_dir = ensure_frontend_dist_dir(api_runtime_paths(request))
     if frontend_dir is None:
         raise HTTPException(status_code=404, detail="Frontend assets are not available")
 

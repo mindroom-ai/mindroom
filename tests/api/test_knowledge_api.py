@@ -46,6 +46,13 @@ def _knowledge_config(
     )
 
 
+def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
+    """Publish one committed config snapshot for request-path tests."""
+    context = main._app_context(api_app)
+    context.config_data = config.authored_model_dump()
+    context.config_load_result = main.ConfigLoadResult(success=True)
+
+
 @pytest.fixture
 def test_client(tmp_path: Path) -> TestClient:
     """Create an API client bound to explicit runtime paths for this test file."""
@@ -66,10 +73,9 @@ def test_knowledge_bases_list_initializes_managers_with_full_reindex(
     config = _knowledge_config(tmp_path)
     manager = MagicMock()
     manager.get_status.return_value = {"indexed_count": 3, "file_count": 4}
-    runtime_paths = main._app_runtime_paths(test_client.app)
+    _publish_committed_runtime_config(test_client.app, config)
 
     with (
-        patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)),
         patch(
             "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
@@ -119,10 +125,9 @@ def test_knowledge_files_list_uses_manager_filters_when_available(
 
     manager = MagicMock()
     manager.list_files.return_value = [included_file]
-    runtime_paths = main._app_runtime_paths(test_client.app)
+    _publish_committed_runtime_config(test_client.app, config)
 
     with (
-        patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)),
         patch(
             "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
@@ -154,15 +159,13 @@ def test_knowledge_upload_rolls_back_on_oversized_file(
     """When one file is too large, previous files in the same request are removed."""
     config = _knowledge_config(tmp_path)
     monkeypatch.setattr("mindroom.api.knowledge._MAX_UPLOAD_BYTES", 5)
+    _publish_committed_runtime_config(test_client.app, config)
 
     files = [
         ("files", ("first.txt", b"1234", "text/plain")),
         ("files", ("second.txt", b"123456", "text/plain")),
     ]
-    runtime_paths = main._app_runtime_paths(test_client.app)
-
-    with patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)):
-        response = test_client.post("/api/knowledge/bases/research/upload", files=files)
+    response = test_client.post("/api/knowledge/bases/research/upload", files=files)
 
     assert response.status_code == 413
     assert not (tmp_path / "first.txt").exists()
@@ -177,10 +180,9 @@ def test_knowledge_upload_initializes_manager_with_full_reindex(
     config = _knowledge_config(tmp_path)
     manager = MagicMock()
     manager.index_file = AsyncMock(return_value=True)
-    runtime_paths = main._app_runtime_paths(test_client.app)
+    _publish_committed_runtime_config(test_client.app, config)
 
     with (
-        patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)),
         patch(
             "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
@@ -208,10 +210,9 @@ def test_knowledge_delete_initializes_manager_with_full_reindex(
     target.write_text("hello", encoding="utf-8")
     manager = MagicMock()
     manager.remove_file = AsyncMock(return_value=True)
-    runtime_paths = main._app_runtime_paths(test_client.app)
+    _publish_committed_runtime_config(test_client.app, config)
 
     with (
-        patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)),
         patch(
             "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
@@ -229,10 +230,9 @@ def test_knowledge_delete_initializes_manager_with_full_reindex(
 def test_knowledge_delete_rejects_path_traversal(test_client: TestClient, tmp_path: Path) -> None:
     """Delete endpoint should reject traversal paths."""
     config = _knowledge_config(tmp_path)
-    runtime_paths = main._app_runtime_paths(test_client.app)
+    _publish_committed_runtime_config(test_client.app, config)
 
-    with patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)):
-        response = test_client.delete("/api/knowledge/bases/research/files/..%2Fsecret.txt")
+    response = test_client.delete("/api/knowledge/bases/research/files/..%2Fsecret.txt")
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid path"
@@ -241,10 +241,9 @@ def test_knowledge_delete_rejects_path_traversal(test_client: TestClient, tmp_pa
 def test_unknown_knowledge_base_returns_404(test_client: TestClient, tmp_path: Path) -> None:
     """Endpoints should return 404 for unknown knowledge base IDs."""
     config = _knowledge_config(tmp_path, base_id="legal")
-    runtime_paths = main._app_runtime_paths(test_client.app)
+    _publish_committed_runtime_config(test_client.app, config)
 
-    with patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)):
-        response = test_client.get("/api/knowledge/bases/research/status")
+    response = test_client.get("/api/knowledge/bases/research/status")
 
     assert response.status_code == 404
     assert "not found" in response.json()["detail"]
@@ -255,7 +254,7 @@ def test_reindex_syncs_git_before_reindex_for_git_bases(test_client: TestClient,
     config = _knowledge_config(tmp_path, with_git=True)
     manager = MagicMock()
     call_order: list[str] = []
-    runtime_paths = main._app_runtime_paths(test_client.app)
+    _publish_committed_runtime_config(test_client.app, config)
 
     async def _sync() -> dict[str, int | bool]:
         call_order.append("sync")
@@ -269,7 +268,6 @@ def test_reindex_syncs_git_before_reindex_for_git_bases(test_client: TestClient,
     manager.reindex_all = AsyncMock(side_effect=_reindex)
 
     with (
-        patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)),
         patch(
             "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
@@ -306,11 +304,48 @@ def test_knowledge_routes_return_runtime_validation_errors(test_client: TestClie
         ),
         encoding="utf-8",
     )
+    assert main.load_api_config_into_app(runtime_paths, test_client.app) is False
 
     response = test_client.get("/api/knowledge/bases")
 
     assert response.status_code == 422
     assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+
+
+def test_knowledge_routes_use_committed_snapshot_until_reload(test_client: TestClient, tmp_path: Path) -> None:
+    """Knowledge routes should ignore newer on-disk edits until a new snapshot is published."""
+    config = _knowledge_config(tmp_path / "published")
+    _publish_committed_runtime_config(test_client.app, config)
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "BadName", "tools_module": null, "skills": []}',
+        encoding="utf-8",
+    )
+    runtime_paths.config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "router:\n"
+            "  model: default\n"
+            "agents: {}\n"
+            "knowledge_bases:\n"
+            "  changed:\n"
+            "    path: ./other\n"
+            "    watch: false\n"
+            "plugins:\n"
+            "  - ./plugins/bad-name\n"
+        ),
+        encoding="utf-8",
+    )
+
+    response = test_client.get("/api/knowledge/bases")
+
+    assert response.status_code == 200
+    assert response.json()["bases"][0]["name"] == "research"
 
 
 def test_ensure_manager_reloads_when_knowledge_base_path_changes(tmp_path: Path) -> None:
