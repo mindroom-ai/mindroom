@@ -324,7 +324,7 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     main.initialize_api_app(fresh_app, initial_runtime)
     assert main._app_auth_state(fresh_app).settings.mindroom_api_key is None
 
-    main._app_context(fresh_app).runtime_paths = refreshed_runtime
+    main.initialize_api_app(fresh_app, refreshed_runtime)
 
     assert main._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
 
@@ -517,20 +517,30 @@ def test_read_app_committed_config_uses_current_context_after_runtime_swap(tmp_p
         process_env={},
     )
     swap_lock = _ContextSwapLock()
-    first_context = main._ApiContext(
+    first_snapshot = main.ApiSnapshot(
+        generation=0,
         runtime_paths=first_runtime,
         config_data=_validated_authored_payload(first_runtime, "old"),
-        config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
         config_load_result=main.ConfigLoadResult(success=True),
     )
-    second_context = main._ApiContext(
+    second_snapshot = main.ApiSnapshot(
+        generation=1,
         runtime_paths=second_runtime,
         config_data=_validated_authored_payload(second_runtime, "new"),
-        config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
         config_load_result=main.ConfigLoadResult(success=True),
     )
-    fresh_app.state.api_context = first_context
-    swap_lock.on_enter = lambda: setattr(fresh_app.state, "api_context", second_context)
+    fresh_app.state.api_state = main.ApiState(
+        config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
+        snapshot=first_snapshot,
+    )
+    swap_lock.on_enter = lambda: setattr(
+        fresh_app.state,
+        "api_state",
+        main.ApiState(
+            config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
+            snapshot=second_snapshot,
+        ),
+    )
 
     loaded_agents = config_lifecycle.read_app_committed_config(
         fresh_app,
@@ -560,20 +570,30 @@ def test_write_app_committed_config_uses_current_context_after_runtime_swap(tmp_
         encoding="utf-8",
     )
     swap_lock = _ContextSwapLock()
-    first_context = main._ApiContext(
+    first_snapshot = main.ApiSnapshot(
+        generation=0,
         runtime_paths=first_runtime,
         config_data=_validated_authored_payload(first_runtime, "old"),
-        config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
         config_load_result=main.ConfigLoadResult(success=True),
     )
-    second_context = main._ApiContext(
+    second_snapshot = main.ApiSnapshot(
+        generation=1,
         runtime_paths=second_runtime,
         config_data=_validated_authored_payload(second_runtime, "new"),
-        config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
         config_load_result=main.ConfigLoadResult(success=True),
     )
-    fresh_app.state.api_context = first_context
-    swap_lock.on_enter = lambda: setattr(fresh_app.state, "api_context", second_context)
+    fresh_app.state.api_state = main.ApiState(
+        config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
+        snapshot=first_snapshot,
+    )
+    swap_lock.on_enter = lambda: setattr(
+        fresh_app.state,
+        "api_state",
+        main.ApiState(
+            config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
+            snapshot=second_snapshot,
+        ),
+    )
 
     def _mutate(config_data: dict[str, Any]) -> None:
         config_data["agents"]["written"] = {
@@ -2179,8 +2199,9 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
                 assert context.config_data == original_config
             return False
 
-    original_lock = context.config_lock
-    context.config_lock = _AssertingLock()
+    app_state = main._app_state(main.app)
+    original_lock = app_state.config_lock
+    app_state.config_lock = _AssertingLock()
     try:
         with pytest.raises(HTTPException) as exc_info:
             main._run_config_write(
@@ -2196,7 +2217,7 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
                 error_prefix="Failed to save configuration",
             )
     finally:
-        context.config_lock = original_lock
+        app_state.config_lock = original_lock
 
     assert exc_info.value.status_code == 422
     assert context.config_data == original_config
@@ -2270,8 +2291,9 @@ def test_run_config_write_checks_current_config_load_result_after_acquiring_lock
             return False
 
     signaling_lock = _SignalingLock()
-    original_lock = context.config_lock
-    context.config_lock = signaling_lock
+    app_state = main._app_state(main.app)
+    original_lock = app_state.config_lock
+    app_state.config_lock = signaling_lock
     error_detail = [{"loc": ("config",), "msg": "current config is invalid", "type": "value_error"}]
     captured_exception: list[HTTPException] = []
 
@@ -2307,7 +2329,7 @@ def test_run_config_write_checks_current_config_load_result_after_acquiring_lock
 
         writer_thread.join(timeout=1)
     finally:
-        context.config_lock = original_lock
+        app_state.config_lock = original_lock
 
     assert not writer_thread.is_alive()
     assert len(captured_exception) == 1

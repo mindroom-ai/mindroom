@@ -6,6 +6,99 @@ It is intentionally short and prioritized.
 
 The goal is to preserve the improvements from this branch and reduce the chance that the same bad patterns reappear.
 
+## Current PR Stabilization Plan
+
+This is the concrete refactor plan that should land before merging the current branch.
+
+The goal is to stop the same stale-state and partial-commit bug classes from surviving another review round.
+
+### 1. Backend API Snapshot And Generation Refactor
+
+Files:
+
+- `src/mindroom/api/main.py`
+- `src/mindroom/api/config_lifecycle.py`
+- `tests/api/test_api.py`
+
+Why this is in the current PR:
+
+- Most recurring review findings have been caused by runtime paths, config data, config load result, and auth state being published separately.
+- The current lock-and-recheck fixes are safer than before, but they still leave the API runtime model harder to reason about than it should be.
+
+Target shape:
+
+- Replace the current mutable `_ApiContext` field-by-field model with one stable app state holder and one published snapshot.
+- Treat the runtime-bound API state as one atomic unit: runtime paths, committed config payload, config load result, auth state, and generation.
+- Build new snapshot data off-lock and only commit it if the captured generation still matches the current one.
+
+Acceptance criteria:
+
+- Reads, writes, and reloads all operate on one current snapshot after taking the lock.
+- Runtime swaps publish one new snapshot instead of mutating multiple fields in place.
+- Late loads and writes become generation mismatches instead of stale partial commits.
+- Tests cover read-during-swap, write-during-swap, stale load completion, and stale write attempts after failure publication.
+
+### 2. Plugin Validation Isolation From Live Registry State
+
+Files:
+
+- `src/mindroom/tool_system/metadata.py`
+- `src/mindroom/tool_system/plugins.py`
+- `src/mindroom/config/main.py`
+- `tests/test_plugins.py`
+
+Why this is in the current PR:
+
+- Plugin validation and runtime loading are still the other major source of stale-global-state bugs.
+- The current lock makes the temporary mutation path safer, but validation should not need to snapshot and restore the live registry at all.
+
+Target shape:
+
+- Build a validation-only tool overlay or registry view in memory.
+- Keep runtime activation as the only code path that applies plugin-derived tool state to globals.
+- Make collision checks and plugin-derived registrations come from the same overlay builder in validation and runtime activation.
+
+Acceptance criteria:
+
+- Validation no longer mutates or restores the live tool registry.
+- Runtime activation still commits one explicit plugin overlay.
+- Plugin add/remove/re-add, manifest rename, export rename, and collision handling all stay covered.
+
+### 3. Frontend Loaded Config / Draft Config Split
+
+Files:
+
+- `frontend/src/store/configStore.ts`
+- `frontend/src/services/configService.ts`
+- `frontend/src/App.tsx`
+- `frontend/src/components/**`
+- `frontend/src/store/configStore.test.ts`
+
+Why this is in the current PR:
+
+- The frontend still has the same bug-generating shape as the backend did: one implicit state object standing in for loaded config, draft config, save status, and invalid-load state.
+- Recent review findings about overlapping saves, swallowed save failures, and sidecar draft data all point to the same missing boundary.
+
+Target shape:
+
+- Separate the last loaded backend config from the mutable draft config.
+- Make invalid-load state explicit instead of encoding it indirectly through `config`, `diagnostics`, and `syncStatus`.
+- Make `saveConfig()` return one explicit success or failure result, or throw a typed error consistently, so callers do not guess from store side effects.
+- Move persisted sidecar draft state like raw tool-entry overrides under the same draft versioning model instead of keeping them outside the save race checks.
+
+Acceptance criteria:
+
+- Older save completions are true no-ops against a newer draft.
+- Save callers such as Knowledge and Voice no longer need store-specific workarounds to know whether a save succeeded.
+- Draft versioning covers tool overrides and any other persisted sidecar config state.
+- Tests cover overlapping saves, edits during save, failed save contracts, and invalid-load recovery behavior.
+
+### Execution Order For This PR
+
+1. Backend API snapshot and generation refactor.
+2. Plugin validation isolation from live registry state.
+3. Frontend loaded-config vs draft-config split and save-result contract cleanup.
+
 ## Why These Items
 
 This branch fixed recurring regressions in four areas.

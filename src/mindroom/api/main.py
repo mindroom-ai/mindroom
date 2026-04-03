@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom import constants
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
-from mindroom.api.config_lifecycle import ApiConfigLock, ConfigLoadResult
+from mindroom.api.config_lifecycle import ApiConfigLock, ApiSnapshot, ApiState, ConfigLoadResult
 from mindroom.api.config_lifecycle import api_runtime_paths as api_request_runtime_paths
 from mindroom.api.config_lifecycle import load_config_into_app as load_api_config_into_app
 from mindroom.api.config_lifecycle import raise_for_config_load_result as raise_api_config_load_result
@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
 logger = get_logger(__name__)
+_UNSET = object()
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
 
 
@@ -71,15 +72,6 @@ class _ApiAuthState:
     runtime_paths: constants.RuntimePaths
     settings: _ApiAuthSettings
     supabase_auth: _SupabaseClientProtocol | None
-
-
-@dataclass
-class _ApiContext:
-    runtime_paths: constants.RuntimePaths
-    config_data: dict[str, Any]
-    config_lock: ApiConfigLock
-    auth_state: _ApiAuthState | None = None
-    config_load_result: ConfigLoadResult | None = None
 
 
 class DraftAgentPolicyDefaultsRequest(BaseModel):
@@ -194,13 +186,45 @@ def api_runtime_paths(request: Request) -> constants.RuntimePaths:
     return api_request_runtime_paths(request)
 
 
-def _app_context(api_app: FastAPI) -> _ApiContext:
-    """Return the committed API context for one app instance."""
-    context = getattr(api_app.state, "api_context", None)
-    if not isinstance(context, _ApiContext):
+def _app_state(api_app: FastAPI) -> ApiState:
+    """Return the committed API state holder for one app instance."""
+    state = getattr(api_app.state, "api_state", None)
+    if not isinstance(state, ApiState):
         msg = "API context is not initialized"
         raise TypeError(msg)
-    return context
+    return state
+
+
+def _published_snapshot(
+    snapshot: ApiSnapshot,
+    *,
+    increment_generation: bool = True,
+    runtime_paths: constants.RuntimePaths | None = None,
+    config_data: dict[str, Any] | None = None,
+    config_load_result: ConfigLoadResult | None | object = _UNSET,
+    auth_state: _ApiAuthState | None | object = _UNSET,
+) -> ApiSnapshot:
+    """Return one new published snapshot with an incremented generation."""
+    updated_runtime_paths = snapshot.runtime_paths if runtime_paths is None else runtime_paths
+    updated_config_data = snapshot.config_data if config_data is None else config_data
+    updated_config_load_result = (
+        snapshot.config_load_result
+        if config_load_result is _UNSET
+        else cast("ConfigLoadResult | None", config_load_result)
+    )
+    updated_auth_state = snapshot.auth_state if auth_state is _UNSET else auth_state
+    return ApiSnapshot(
+        generation=snapshot.generation + 1 if increment_generation else snapshot.generation,
+        runtime_paths=updated_runtime_paths,
+        config_data=updated_config_data,
+        config_load_result=updated_config_load_result,
+        auth_state=updated_auth_state,
+    )
+
+
+def _app_context(api_app: FastAPI) -> ApiSnapshot:
+    """Return the committed API snapshot for one app instance."""
+    return _app_state(api_app).snapshot
 
 
 def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
@@ -215,39 +239,44 @@ def _app_config_data(api_app: FastAPI) -> dict[str, Any]:
 
 def _app_config_lock(api_app: FastAPI) -> ApiConfigLock:
     """Return the config lock for one app instance."""
-    return _app_context(api_app).config_lock
+    return _app_state(api_app).config_lock
 
 
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Initialize one API app instance with explicit runtime-bound state."""
-    previous_context = getattr(api_app.state, "api_context", None)
-    if not isinstance(previous_context, _ApiContext):
-        api_app.state.api_context = _ApiContext(
-            runtime_paths=runtime_paths,
-            config_data={},
+    previous_state = getattr(api_app.state, "api_state", None)
+    if not isinstance(previous_state, ApiState):
+        api_app.state.api_state = ApiState(
             config_lock=cast("ApiConfigLock", threading.Lock()),
-            auth_state=None,
-            config_load_result=None,
+            snapshot=ApiSnapshot(
+                generation=0,
+                runtime_paths=runtime_paths,
+                config_data={},
+                config_load_result=None,
+                auth_state=None,
+            ),
         )
         return
 
-    config_lock = previous_context.config_lock
+    config_lock = previous_state.config_lock
     with config_lock:
-        current_context = getattr(api_app.state, "api_context", previous_context)
-        if not isinstance(current_context, _ApiContext):
-            current_context = previous_context
-        auth_state = current_context.auth_state if current_context.runtime_paths == runtime_paths else None
-        config_data = current_context.config_data if current_context.runtime_paths == runtime_paths else {}
+        current_state = getattr(api_app.state, "api_state", previous_state)
+        if not isinstance(current_state, ApiState):
+            current_state = previous_state
+        current_snapshot = current_state.snapshot
+        auth_state = current_snapshot.auth_state if current_snapshot.runtime_paths == runtime_paths else None
+        config_data = current_snapshot.config_data if current_snapshot.runtime_paths == runtime_paths else {}
         config_load_result = (
-            current_context.config_load_result if current_context.runtime_paths == runtime_paths else None
+            current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
         )
-        api_app.state.api_context = _ApiContext(
+        current_state.snapshot = _published_snapshot(
+            current_snapshot,
             runtime_paths=runtime_paths,
             config_data=config_data,
-            config_lock=config_lock,
             auth_state=auth_state,
             config_load_result=config_load_result,
         )
+        api_app.state.api_state = current_state
 
 
 def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSettings:
@@ -263,23 +292,28 @@ def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSetti
 
 def _app_auth_state(api_app: FastAPI) -> _ApiAuthState:
     """Return the committed auth state for one API app instance."""
-    context = _app_context(api_app)
-    runtime_paths = context.runtime_paths
-    state = context.auth_state
-    if state is not None and state.runtime_paths == runtime_paths:
+    app_state = _app_state(api_app)
+    with app_state.config_lock:
+        snapshot = app_state.snapshot
+        state = cast("_ApiAuthState | None", snapshot.auth_state)
+        if state is not None and state.runtime_paths == snapshot.runtime_paths:
+            return state
+        settings = _build_auth_settings(snapshot.runtime_paths)
+        state = _ApiAuthState(
+            runtime_paths=snapshot.runtime_paths,
+            settings=settings,
+            supabase_auth=_init_supabase_auth(
+                snapshot.runtime_paths,
+                settings.supabase_url,
+                settings.supabase_anon_key,
+            ),
+        )
+        app_state.snapshot = _published_snapshot(
+            snapshot,
+            increment_generation=False,
+            auth_state=state,
+        )
         return state
-    settings = _build_auth_settings(runtime_paths)
-    state = _ApiAuthState(
-        runtime_paths=runtime_paths,
-        settings=settings,
-        supabase_auth=_init_supabase_auth(
-            runtime_paths,
-            settings.supabase_url,
-            settings.supabase_anon_key,
-        ),
-    )
-    context.auth_state = state
-    return state
 
 
 async def _watch_config(
