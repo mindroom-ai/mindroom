@@ -559,13 +559,13 @@ def _hook_ingress_policy(envelope: MessageEnvelope) -> _HookIngressPolicy:
     policy = _HookIngressPolicy(bypass_unmentioned_agent_gate=envelope.source_kind == "hook_dispatch")
     if envelope.message_received_depth == 0:
         return policy
-    if envelope.message_received_depth == 1 and source_event_name == EVENT_MESSAGE_RECEIVED:
-        skip_plugin_names = frozenset({plugin_name}) if plugin_name is not None else frozenset()
-        return _HookIngressPolicy(
-            bypass_unmentioned_agent_gate=policy.bypass_unmentioned_agent_gate,
-            skip_message_received_plugin_names=skip_plugin_names,
-        )
-    if envelope.message_received_depth == 1 and envelope.source_kind == "hook_dispatch":
+    if envelope.message_received_depth == 1:
+        if source_event_name == EVENT_MESSAGE_RECEIVED:
+            skip_plugin_names = frozenset({plugin_name}) if plugin_name is not None else frozenset()
+            return _HookIngressPolicy(
+                bypass_unmentioned_agent_gate=policy.bypass_unmentioned_agent_gate,
+                skip_message_received_plugin_names=skip_plugin_names,
+            )
         return policy
     return _HookIngressPolicy(
         rerun_message_received=False,

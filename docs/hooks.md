@@ -431,7 +431,8 @@ Plain `hook` sends can still dispatch when they satisfy the usual routing rules,
 Hook-originated sends always carry an internal synthetic-chain depth.
 The first hook-originated hop uses depth `1`, and each later synthetic hop increments it.
 When `trigger_dispatch=True`, MindRoom sends the message as source kind `hook_dispatch`.
-The first synthetic `hook_dispatch` hop still re-enters the normal ingress pipeline, including `message:received`, and bypasses the usual "ignore other agent unless mentioned" ingress gate before continuing through normal permissions, routing, and should-respond checks.
+The first synthetic hook hop still re-enters the normal ingress pipeline, including `message:received`.
+For `hook_dispatch`, that first synthetic hop also bypasses the usual "ignore other agent unless mentioned" ingress gate before continuing through normal permissions, routing, and should-respond checks.
 If that first synthetic hop originated from `message:received`, MindRoom skips the origin plugin on the `message:received` re-entry.
 Deeper synthetic hook hops still arrive as messages, but they do not re-enter `message:received` and they stop before further command handling or agent/model dispatch to avoid feedback loops.
 

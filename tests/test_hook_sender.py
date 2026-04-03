@@ -1074,6 +1074,45 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
 
 
 @pytest.mark.asyncio
+async def test_first_hop_plain_hook_from_non_message_hook_still_dispatches(tmp_path: Path) -> None:
+    """First-hop plain hook messages from non-message hooks should still reach normal dispatch."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$plain-hook-first-hop",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "@mindroom_code:localhost restart notification",
+                "com.mindroom.source_kind": "hook",
+                "com.mindroom.hook_source": "restart-notify:bot:ready",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
+            },
+        },
+    )
+    hook_calls: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def received(_ctx: MessageReceivedContext) -> None:
+        hook_calls.append("called")
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot._resolve_text_dispatch_event = AsyncMock(return_value=event)
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._resolve_dispatch_action = AsyncMock(return_value=None)
+
+    await bot._dispatch_text_message(
+        room,
+        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+    )
+
+    bot._resolve_dispatch_action.assert_awaited_once()
+    assert hook_calls == ["called"]
+
+
+@pytest.mark.asyncio
 async def test_hook_dispatch_skill_command_preserves_source_envelope_in_runtime(tmp_path: Path) -> None:
     """Skill-command responses should inherit hook provenance and synthetic depth."""
     bot = _hook_bot(tmp_path)
