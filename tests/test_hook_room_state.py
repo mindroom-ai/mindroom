@@ -97,7 +97,7 @@ async def test_querier_with_state_key_returns_content() -> None:
 
 @pytest.mark.asyncio
 async def test_querier_with_state_key_error_returns_none() -> None:
-    """State event lookup returns None on error responses."""
+    """State event lookup returns None on Matrix error responses."""
     client = AsyncMock(spec=nio.AsyncClient)
     client.room_get_state_event.return_value = nio.RoomGetStateEventError(message="not found")
 
@@ -131,7 +131,7 @@ async def test_querier_without_state_key_returns_filtered_dict() -> None:
 
 @pytest.mark.asyncio
 async def test_querier_without_state_key_error_returns_none() -> None:
-    """Full state query returns None on error."""
+    """Full state query returns None on Matrix error responses."""
     client = AsyncMock(spec=nio.AsyncClient)
     client.room_get_state.return_value = nio.RoomGetStateError(message="forbidden")
 
@@ -155,6 +155,18 @@ async def test_querier_without_state_key_no_matches_returns_empty() -> None:
     result = await querier("!room:localhost", "com.mindroom.thread.tags", None)
 
     assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_querier_propagates_transport_exception() -> None:
+    """Transport exceptions should propagate instead of being converted to None."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_get_state_event.side_effect = RuntimeError("boom")
+
+    querier = build_hook_room_state_querier(client)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await querier("!room:localhost", "com.mindroom.thread.tags", "$thread1")
 
 
 # -- HookContext.query_room_state tests --
@@ -244,7 +256,7 @@ async def test_putter_success_returns_true() -> None:
 
 @pytest.mark.asyncio
 async def test_putter_error_returns_false() -> None:
-    """Failed room_put_state returns False."""
+    """Matrix error responses from room_put_state return False."""
     client = AsyncMock(spec=nio.AsyncClient)
     client.room_put_state.return_value = nio.RoomPutStateError(message="forbidden")
 
@@ -252,6 +264,18 @@ async def test_putter_error_returns_false() -> None:
     result = await putter("!room:localhost", "com.mindroom.thread.tags", "$thread1", {"tags": {}})
 
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_putter_propagates_transport_exception() -> None:
+    """Transport exceptions should propagate instead of being converted to False."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_put_state.side_effect = RuntimeError("boom")
+
+    putter = build_hook_room_state_putter(client)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await putter("!room:localhost", "com.mindroom.thread.tags", "$thread1", {"tags": {}})
 
 
 # -- HookContext.put_room_state tests --

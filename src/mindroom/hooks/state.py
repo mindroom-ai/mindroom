@@ -18,7 +18,9 @@ def build_hook_room_state_querier(
     The returned closure queries room state events via the Matrix client.
     When *state_key* is provided it fetches a single state event; when
     ``None`` it returns all events matching *event_type* as a
-    ``{state_key: content}`` dict.
+    ``{state_key: content}`` dict. Matrix error response objects are
+    converted to ``None``; transport exceptions from the client
+    propagate to the caller.
     """
 
     async def _query(
@@ -46,7 +48,9 @@ def build_hook_room_state_putter(
     """Return a putter bound to one Matrix client.
 
     The returned closure writes a single room state event via the Matrix
-    client and returns ``True`` on success, ``False`` on error.
+    client and returns ``True`` on success, ``False`` on Matrix error
+    response. Transport exceptions from the client propagate to the
+    caller.
     """
 
     async def _put(

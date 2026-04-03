@@ -436,19 +436,21 @@ Every hook context also exposes the following async helpers:
 Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
 For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
 For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while passing `thread_id=None` explicitly posts at room level.
-When `trigger_dispatch=True`, MindRoom sends the message as source kind `hook_dispatch` so receiving agents run it through the dispatch pipeline instead of treating it as a non-dispatching hook note.
-`hook_dispatch` still skips `message:received` hook re-emission and bypasses the usual "ignore other agent unless mentioned" ingress gate.
-After those ingress exceptions, normal permissions, routing, and should-respond checks still apply to that dispatched automation.
+Plain `hook` sends can still dispatch when they satisfy the usual routing rules, for example if the message explicitly mentions an agent or otherwise qualifies as a normal addressed message.
+When `trigger_dispatch=True`, MindRoom sends the message as source kind `hook_dispatch`.
+That variant still skips `message:received` hook re-emission and bypasses the usual "ignore other agent unless mentioned" ingress gate before continuing through normal permissions, routing, and should-respond checks.
 
 **`await ctx.query_room_state(room_id, event_type, state_key=None)`**
 Queries Matrix room state events.
-When `state_key` is provided, returns the content `dict` for that single state event, or `None` on error/not-found.
-When `state_key` is `None`, returns a `{state_key: content}` dict of all state events matching `event_type`, or `None` on error.
+When `state_key` is provided, returns the content `dict` for that single state event, or `None` on Matrix error response/not-found.
+When `state_key` is `None`, returns a `{state_key: content}` dict of all state events matching `event_type`, or `None` on Matrix error response.
 Returns `None` when no room state querier is available (e.g. no Matrix client bound).
+Transport exceptions from the underlying Matrix client propagate to the hook.
 
 **`await ctx.put_room_state(room_id, event_type, state_key, content)`**
-Writes a single Matrix room state event and returns `True` on success, `False` on error.
+Writes a single Matrix room state event and returns `True` on success, `False` on Matrix error response.
 Returns `False` when no room state putter is available.
+Transport exceptions from the underlying Matrix client propagate to the hook.
 
 ### Transport objects
 
