@@ -224,6 +224,7 @@ def test_load_plugins_uses_bound_runtime_paths(tmp_path: Path) -> None:
         r"plugin\\name",
         "UpperCase",
         ".hidden",
+        "   ",
     ],
 )
 def test_load_plugins_rejects_invalid_manifest_name(tmp_path: Path, plugin_name: str) -> None:
@@ -239,6 +240,53 @@ def test_load_plugins_rejects_invalid_manifest_name(tmp_path: Path, plugin_name:
     config_path.write_text("agents: {}", encoding="utf-8")
     with pytest.raises(ValueError, match="Invalid plugin name"):
         _bind_runtime_paths(Config(plugins=["./plugins/bad-name"]), config_path)
+
+
+@pytest.mark.parametrize("plugin_name", ["_demo", "-dash", "demo_plugin"])
+def test_load_plugins_accepts_safe_manifest_names(tmp_path: Path, plugin_name: str) -> None:
+    """Path-safe, provenance-safe plugin names should bind and load successfully."""
+    plugin_root = tmp_path / "plugins" / "safe-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": plugin_name, "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/safe-name"]), config_path)
+    original_plugin_roots = _get_plugin_skill_roots()
+
+    try:
+        plugins = load_plugins(config, runtime_paths_for(config))
+        assert [plugin.name for plugin in plugins] == [plugin_name]
+    finally:
+        set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_validate_with_runtime_does_not_mutate_plugin_skill_roots(tmp_path: Path) -> None:
+    """Runtime validation should not swap global plugin skill roots before activation."""
+    original_plugin_roots = _get_plugin_skill_roots()
+    sentinel_root = tmp_path / "existing-plugin-skills"
+    sentinel_root.mkdir()
+    set_plugin_skill_roots([sentinel_root])
+
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo-plugin", "tools_module": None, "skills": ["skills"]}),
+        encoding="utf-8",
+    )
+    (plugin_root / "skills").mkdir()
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+
+    try:
+        _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+        assert _get_plugin_skill_roots() == [sentinel_root.resolve()]
+    finally:
+        set_plugin_skill_roots(original_plugin_roots)
 
 
 def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tmp_path: Path) -> None:

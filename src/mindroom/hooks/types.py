@@ -38,7 +38,7 @@ BUILTIN_EVENT_NAMES = frozenset(
 )
 RESERVED_EVENT_NAMESPACES = frozenset({"message", "agent", "bot", "schedule", "reaction", "config", "tool"})
 EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$")
-PLUGIN_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+PLUGIN_NAME_PATTERN = re.compile(r"^[a-z0-9_-]+$")
 DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
     EVENT_MESSAGE_RECEIVED: 15000,
     EVENT_MESSAGE_ENRICH: 2000,
@@ -130,10 +130,7 @@ def default_timeout_ms_for_event(event_name: str) -> int:
 def validate_plugin_name(plugin_name: str) -> str:
     """Validate one plugin identifier and return the normalized value."""
     normalized = plugin_name.strip()
-    if not normalized:
-        msg = "Plugin name must not be empty"
-        raise ValueError(msg)
-    if not PLUGIN_NAME_PATTERN.fullmatch(normalized):
+    if not normalized or not PLUGIN_NAME_PATTERN.fullmatch(normalized):
         msg = (
             f"Invalid plugin name: {plugin_name!r}. "
             "Plugin names must use lowercase ASCII letters, digits, hyphens, or underscores."

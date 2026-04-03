@@ -644,7 +644,7 @@ def ensure_tool_registry_loaded(
     if config is None:
         return
 
-    load_plugins(config, runtime_paths)
+    load_plugins(config, runtime_paths, set_skill_roots=False)
 
 
 def default_worker_routed_tools(tool_names: list[str]) -> list[str]:

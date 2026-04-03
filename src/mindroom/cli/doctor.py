@@ -30,8 +30,9 @@ from .config import _activate_cli_runtime, _load_config_quiet, console
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
+
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 
 
 def doctor() -> None:
@@ -123,7 +124,7 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
     """Validate config file. Returns (config_or_none, passed, failed, warnings)."""
     try:
         config = _load_config_quiet(runtime_paths=runtime_paths)
-    except ValidationError as exc:
+    except (ValidationError, ConfigRuntimeValidationError) as exc:
         n = len(exc.errors())
         console.print(f"[red]✗[/red] Config invalid ({n} validation error{'s' if n != 1 else ''})")
         return None, 0, 1, 0

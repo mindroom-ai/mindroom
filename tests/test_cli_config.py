@@ -659,6 +659,28 @@ class TestConfigValidate:
         assert result.exit_code == 1
         assert "Issues found" in result.output
 
+    def test_validate_invalid_plugin_manifest_name(self, tmp_path: Path) -> None:
+        """Config validate should report plugin manifest validation failures cleanly."""
+        plugin_root = tmp_path / "plugins" / "bad-name"
+        plugin_root.mkdir(parents=True)
+        (plugin_root / "mindroom.plugin.json").write_text(
+            json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+            encoding="utf-8",
+        )
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n"
+            "plugins:\n  - ./plugins/bad-name\n",
+        )
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 1
+        assert "Invalid configuration" in result.output
+        assert "Invalid plugin name" in result.output
+
     def test_validate_accepts_file_based_api_key_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Config validate does not warn when provider secrets are supplied via *_FILE."""
         cfg = tmp_path / "config.yaml"
@@ -783,6 +805,28 @@ class TestRunErrorHandling:
         result = _invoke_with_runtime(["run"], bad_cfg)
         assert result.exit_code == 1
         assert "Invalid configuration" in result.output
+
+    def test_run_invalid_plugin_manifest_name(self, tmp_path: Path) -> None:
+        """Run should surface plugin manifest validation errors without a traceback."""
+        plugin_root = tmp_path / "plugins" / "bad-name"
+        plugin_root.mkdir(parents=True)
+        (plugin_root / "mindroom.plugin.json").write_text(
+            json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+            encoding="utf-8",
+        )
+        bad_cfg = tmp_path / "config.yaml"
+        bad_cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n"
+            "plugins:\n  - ./plugins/bad-name\n",
+        )
+
+        result = _invoke_with_runtime(["run"], bad_cfg)
+
+        assert result.exit_code == 1
+        assert "Invalid configuration" in result.output
+        assert "Invalid plugin name" in result.output
 
     def test_avatars_generate_reports_avatar_generation_failure(
         self,

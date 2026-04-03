@@ -1,6 +1,7 @@
 """Tests for the dashboard backend API endpoints."""
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1788,6 +1789,39 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
 
     assert exc_info.value.status_code == 422
     assert context.config_data == original_config
+
+
+def test_run_config_write_returns_422_for_invalid_plugin_manifest_name(tmp_path: Path) -> None:
+    """API config writes should surface invalid plugin manifests as user config errors."""
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    main.initialize_api_app(
+        main.app,
+        constants.resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
+    )
+    context = main._app_context(main.app)
+    context.config_data = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+        "plugins": [],
+    }
+
+    with pytest.raises(HTTPException) as exc_info:
+        main._run_config_write(
+            main.app,
+            lambda candidate_config: candidate_config.update({"plugins": ["./plugins/bad-name"]}),
+            error_prefix="Failed to save configuration",
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail[0]["loc"] == ("config",)
+    assert "Invalid plugin name" in str(exc_info.value.detail[0]["msg"])
+    assert exc_info.value.detail[0]["type"] == "value_error"
 
 
 def test_load_config_from_file_omits_legacy_null_optional_sections(tmp_path: Path) -> None:

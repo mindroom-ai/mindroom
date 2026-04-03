@@ -38,8 +38,9 @@ from .local_stack import local_stack_setup
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 
 _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
@@ -132,7 +133,7 @@ def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
 
     try:
         config = _load_config_quiet(runtime_paths=runtime_paths)
-    except ValidationError as exc:
+    except (ValidationError, ConfigRuntimeValidationError) as exc:
         _format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
     except (yaml.YAMLError, OSError) as exc:

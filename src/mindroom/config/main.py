@@ -73,6 +73,15 @@ _OPTIONAL_DICT_SECTION_NAMES = (
 )
 
 
+class ConfigRuntimeValidationError(ValueError):
+    """Runtime-aware config validation failed after Pydantic schema validation."""
+
+    def errors(self, *, include_context: bool = False) -> list[dict[str, object]]:
+        """Return one ValidationError-like payload for shared config UX code."""
+        del include_context
+        return [{"loc": ("config",), "msg": str(self), "type": "value_error"}]
+
+
 @dataclass(frozen=True)
 class ResolvedToolConfig:
     """Resolved authored tool config after defaults and per-agent overrides merge."""
@@ -762,7 +771,10 @@ class Config(BaseModel):
     ) -> Config:
         """Validate config data against one explicit runtime context."""
         config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
-        config._validate_authored_tool_entries(runtime_paths)
+        try:
+            config._validate_authored_tool_entries(runtime_paths)
+        except ValueError as exc:
+            raise ConfigRuntimeValidationError(str(exc)) from exc
         return config
 
     def authored_model_dump(self) -> dict[str, Any]:

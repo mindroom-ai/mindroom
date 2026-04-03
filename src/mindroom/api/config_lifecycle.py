@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from mindroom import constants
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.main import load_config as load_runtime_config_model
 from mindroom.file_watcher import watch_file
 from mindroom.logging_config import get_logger
@@ -101,6 +101,8 @@ def run_config_write[T](
             raise
         except ValidationError as e:
             raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
+        except ConfigRuntimeValidationError as e:
+            raise HTTPException(status_code=422, detail=e.errors()) from e
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
         else:

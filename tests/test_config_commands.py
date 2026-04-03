@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -321,6 +322,67 @@ async def test_handle_config_command_rejects_runtime_sensitive_invalid_change(tm
     assert "Invalid configuration" in response
     assert "mindroom_user.username" in response
     assert change_info is None
+
+
+@pytest.mark.asyncio
+async def test_handle_config_command_show_returns_invalid_plugin_manifest_error(tmp_path: Path) -> None:
+    """Show should return a user-facing error when plugin manifest validation fails."""
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": ["./plugins/bad-name"],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, change_info = await handle_config_command("show", _runtime_paths_for_config(config_path))
+
+    assert change_info is None
+    assert "Invalid configuration" in response
+    assert "Invalid plugin name" in response
+
+
+@pytest.mark.asyncio
+async def test_handle_config_command_set_returns_invalid_plugin_manifest_error(tmp_path: Path) -> None:
+    """Set previews should surface plugin manifest validation failures as user errors."""
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": [],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, change_info = await handle_config_command(
+        'set plugins ["./plugins/bad-name"]',
+        _runtime_paths_for_config(config_path),
+    )
+
+    assert change_info is None
+    assert "Invalid configuration" in response
+    assert "Invalid plugin name" in response
 
 
 @pytest.mark.asyncio

@@ -88,11 +88,14 @@ def _hook_display_name(callback: HookCallback) -> str:
 def load_plugins(
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    set_skill_roots: bool = True,
 ) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
     plugin_entries = config.plugins
     if not plugin_entries:
-        set_plugin_skill_roots([])
+        if set_skill_roots:
+            set_plugin_skill_roots([])
         return []
     plugins: list[_Plugin] = []
     skill_roots: list[Path] = []
@@ -118,7 +121,8 @@ def load_plugins(
     if plugins:
         logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
 
-    set_plugin_skill_roots(skill_roots)
+    if set_skill_roots:
+        set_plugin_skill_roots(skill_roots)
     return plugins
 
 
@@ -281,7 +285,7 @@ def _materialize_plugin(
     )
 
 
-def _parse_manifest(path: Path) -> _PluginManifest | None:  # noqa: PLR0911
+def _parse_manifest(path: Path) -> _PluginManifest | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -293,13 +297,14 @@ def _parse_manifest(path: Path) -> _PluginManifest | None:  # noqa: PLR0911
         return None
 
     name = data.get("name")
-    if not isinstance(name, str) or not name.strip():
-        logger.warning("Plugin manifest missing name", path=str(path))
-        return None
+    if not isinstance(name, str):
+        msg = f"Plugin manifest missing valid string name ({path})"
+        logger.error("Plugin manifest missing valid string name", path=str(path))
+        raise ValueError(msg)  # noqa: TRY004 - keep plugin manifest validation in the config error channel
     try:
         normalized_name = validate_plugin_name(name)
     except ValueError as exc:
-        logger.exception("Invalid plugin manifest name", path=str(path), plugin_name=name)
+        logger.error("Invalid plugin manifest name", path=str(path), plugin_name=name, error=str(exc))  # noqa: TRY400
         msg = f"{exc} ({path})"
         raise ValueError(msg) from exc
 

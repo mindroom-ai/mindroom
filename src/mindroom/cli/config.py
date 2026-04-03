@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.syntax import Syntax
 
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import (
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
     VERTEXAI_CLAUDE_ENV_KEYS,
@@ -241,16 +241,29 @@ def _get_editor() -> str:
     return "vi"
 
 
-def _format_validation_errors(exc: ValidationError, config_path: Path | None = None) -> None:
-    """Print Pydantic validation errors in a user-friendly format."""
+def _iter_validation_messages(
+    exc: ValidationError | ConfigRuntimeValidationError,
+) -> list[tuple[str, str]]:
+    """Return user-facing validation messages from one config validation exception."""
+    if isinstance(exc, ValidationError):
+        return [
+            (" -> ".join(str(x) for x in error["loc"]), error["msg"]) for error in exc.errors(include_context=False)
+        ]
+    return [("config", str(exc))]
+
+
+def _format_validation_errors(
+    exc: ValidationError | ConfigRuntimeValidationError,
+    config_path: Path | None = None,
+) -> None:
+    """Print config validation errors in a user-friendly format."""
     if config_path:
         console.print(f"[red]Error:[/red] Invalid configuration in {config_path}\n")
     else:
         console.print("[red]Error:[/red] Invalid configuration\n")
     console.print("Issues found:")
-    for error in exc.errors():
-        loc = " -> ".join(str(x) for x in error["loc"])
-        console.print(f"  [red]*[/red] {loc}: {error['msg']}")
+    for location, message in _iter_validation_messages(exc):
+        console.print(f"  [red]*[/red] {location}: {message}")
     console.print("\nFix these issues:")
     console.print("  [cyan]mindroom config edit[/cyan]      Edit your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Check config after editing")
@@ -447,7 +460,7 @@ def config_validate(
 
     try:
         config = _load_config_quiet(runtime_paths=runtime_paths)
-    except ValidationError as exc:
+    except (ValidationError, ConfigRuntimeValidationError) as exc:
         _format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
     except (yaml.YAMLError, OSError) as e:

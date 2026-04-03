@@ -8,13 +8,25 @@ from typing import TYPE_CHECKING, Any
 import yaml
 from pydantic import ValidationError
 
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+
+
+def _format_invalid_config_response(exc: ValidationError | ConfigRuntimeValidationError) -> str:
+    """Return one user-facing invalid-config response."""
+    errors: list[str] = []
+    if isinstance(exc, ValidationError):
+        for error in exc.errors(include_context=False):
+            location = " → ".join(str(loc) for loc in error["loc"])
+            errors.append(f"• {location}: {error['msg']}")
+    else:
+        errors.append(f"• {exc}")
+    return f"❌ Invalid configuration:\n{'\n'.join(errors)}\n\nChanges were NOT applied."
 
 
 def _parse_config_args(args_text: str) -> tuple[str, list[str]]:
@@ -177,7 +189,10 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     path = runtime_paths.config_path
 
     # Load current config
-    config = load_config(runtime_paths)
+    try:
+        config = load_config(runtime_paths)
+    except (ValidationError, ConfigRuntimeValidationError) as exc:
+        return _format_invalid_config_response(exc), None
     config_dict = config.authored_model_dump()
 
     if operation == "show":
@@ -232,14 +247,8 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             _validate_config_dict(test_config_dict, runtime_paths)
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
-        except ValidationError as e:
-            # Validation failed - explain why
-            errors = []
-            for error in e.errors():
-                location = " → ".join(str(loc) for loc in error["loc"])
-                errors.append(f"• {location}: {error['msg']}")
-            error_msg = "\n".join(errors)
-            return f"❌ Invalid configuration:\n{error_msg}\n\nChanges were NOT applied.", None
+        except (ValidationError, ConfigRuntimeValidationError) as e:
+            return _format_invalid_config_response(e), None
         else:
             # Format the preview message
             formatted_old = _format_value(old_value) if old_value is not None else "Not set"
@@ -314,13 +323,8 @@ async def apply_config_change(
         # Validate the modified config
         try:
             new_config = _validate_config_dict(config_dict, runtime_paths)
-        except ValidationError as ve:
-            errors = ["❌ Configuration validation failed:"]
-            for error in ve.errors():
-                location = " → ".join(str(loc) for loc in error["loc"])
-                errors.append(f"• {location}: {error['msg']}")
-            error_msg = "\n".join(errors)
-            return f"{error_msg}\n\nChanges were NOT applied."
+        except (ValidationError, ConfigRuntimeValidationError) as ve:
+            return _format_invalid_config_response(ve)
 
         # Save to file
         new_config.save_to_yaml(path)
