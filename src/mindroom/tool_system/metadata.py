@@ -5,6 +5,8 @@ from __future__ import annotations
 import functools
 import importlib
 import os
+import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -13,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from loguru import logger
 
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.tool_system import plugins as plugin_module
 from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
@@ -23,7 +26,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from agno.tools import Toolkit
 
@@ -35,6 +38,7 @@ _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
 _TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "text", "url"})
 AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
+_PLUGIN_MODULE_PREFIX = "mindroom_plugin_"
 
 
 class ToolInitOverrideError(ValueError):
@@ -43,6 +47,15 @@ class ToolInitOverrideError(ValueError):
 
 class ToolConfigOverrideError(ValueError):
     """Raised when authored tool config overrides are invalid."""
+
+
+@dataclass(frozen=True)
+class _ToolRegistrySnapshot:
+    registry: dict[str, Callable[[], type[Toolkit]]]
+    metadata: dict[str, ToolMetadata]
+    tool_module_cache: dict[Path, float]
+    module_import_cache: dict[Path, plugin_module._ModuleCacheEntry]
+    plugin_module_names: frozenset[str]
 
 
 def is_authored_override_inherit(value: object) -> bool:
@@ -645,6 +658,48 @@ def ensure_tool_registry_loaded(
         return
 
     load_plugins(config, runtime_paths, set_skill_roots=False)
+
+
+def _capture_tool_registry_snapshot() -> _ToolRegistrySnapshot:
+    """Capture the mutable tool/plugin registry state for transactional restoration."""
+    return _ToolRegistrySnapshot(
+        registry=_TOOL_REGISTRY.copy(),
+        metadata=TOOL_METADATA.copy(),
+        tool_module_cache=plugin_module._TOOL_MODULE_CACHE.copy(),
+        module_import_cache=plugin_module._MODULE_IMPORT_CACHE.copy(),
+        plugin_module_names=frozenset(
+            module_name for module_name in sys.modules if module_name.startswith(_PLUGIN_MODULE_PREFIX)
+        ),
+    )
+
+
+def _restore_tool_registry_snapshot(snapshot: _ToolRegistrySnapshot) -> None:
+    """Restore one previously captured tool/plugin registry snapshot."""
+    _TOOL_REGISTRY.clear()
+    _TOOL_REGISTRY.update(snapshot.registry)
+    TOOL_METADATA.clear()
+    TOOL_METADATA.update(snapshot.metadata)
+    plugin_module._TOOL_MODULE_CACHE.clear()
+    plugin_module._TOOL_MODULE_CACHE.update(snapshot.tool_module_cache)
+    plugin_module._MODULE_IMPORT_CACHE.clear()
+    plugin_module._MODULE_IMPORT_CACHE.update(snapshot.module_import_cache)
+    for module_name in tuple(sys.modules):
+        if module_name.startswith(_PLUGIN_MODULE_PREFIX) and module_name not in snapshot.plugin_module_names:
+            sys.modules.pop(module_name, None)
+
+
+@contextmanager
+def loaded_tool_registry_for_validation(
+    runtime_paths: RuntimePaths,
+    config: Config,
+) -> Iterator[None]:
+    """Temporarily load plugin tools for validation without leaking global registry state."""
+    snapshot = _capture_tool_registry_snapshot()
+    try:
+        ensure_tool_registry_loaded(runtime_paths, config)
+        yield
+    finally:
+        _restore_tool_registry_snapshot(snapshot)
 
 
 def default_worker_routed_tools(tool_names: list[str]) -> list[str]:

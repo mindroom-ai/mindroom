@@ -15,8 +15,9 @@ from mindroom.hooks import (
     build_hook_room_state_querier,
     emit,
 )
-from mindroom.hooks.types import validate_event_name, validate_plugin_name
+from mindroom.hooks.types import validate_event_name
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.plugin_identity import validate_plugin_name
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

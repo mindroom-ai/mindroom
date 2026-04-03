@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom import constants
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
-from mindroom.api.config_lifecycle import ApiConfigLock
+from mindroom.api.config_lifecycle import ApiConfigLock, ConfigLoadResult
 from mindroom.api.config_lifecycle import load_config_from_file as load_api_config_from_file
 from mindroom.api.config_lifecycle import run_config_write as run_api_config_write
 from mindroom.api.config_lifecycle import watch_config as watch_api_config
@@ -76,6 +76,7 @@ class _ApiContext:
     config_data: dict[str, Any]
     config_lock: ApiConfigLock
     auth_state: _ApiAuthState | None = None
+    config_load_result: ConfigLoadResult | None = None
 
 
 class DraftAgentPolicyDefaultsRequest(BaseModel):
@@ -203,16 +204,21 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     if isinstance(previous_context, _ApiContext):
         config_lock = previous_context.config_lock
         config_data = previous_context.config_data if previous_context.runtime_paths == runtime_paths else {}
+        config_load_result = (
+            previous_context.config_load_result if previous_context.runtime_paths == runtime_paths else None
+        )
         if previous_context.runtime_paths == runtime_paths:
             auth_state = previous_context.auth_state
     else:
         config_data = {}
         config_lock = cast("ApiConfigLock", threading.Lock())
+        config_load_result = None
     api_app.state.api_context = _ApiContext(
         runtime_paths=runtime_paths,
         config_data=config_data,
         config_lock=config_lock,
         auth_state=auth_state,
+        config_load_result=config_load_result,
     )
 
 
@@ -345,13 +351,15 @@ def _run_config_write[T](
 ) -> T:
     """Validate, save, and swap config under lock."""
     context = _app_context(api_app)
-    return run_api_config_write(
+    result = run_api_config_write(
         context.runtime_paths,
         context.config_data,
         context.config_lock,
         mutate,
         error_prefix=error_prefix,
     )
+    context.config_load_result = ConfigLoadResult(success=True)
+    return result
 
 
 def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
@@ -693,11 +701,13 @@ async def verify_user(
 def _load_config_from_file(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> bool:
     """Load config from YAML file."""
     context = _app_context(api_app)
-    return load_api_config_from_file(
+    result = load_api_config_from_file(
         runtime_paths,
         config_data=context.config_data,
         config_lock=context.config_lock,
     )
+    context.config_load_result = result
+    return result.success
 
 
 # Include routers
@@ -794,6 +804,11 @@ async def standalone_login(request: Request, next: str = "/") -> Response:  # no
 async def load_config(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Load configuration from file."""
     context = _app_context(request.app)
+    if context.config_load_result is not None and not context.config_load_result.success:
+        raise HTTPException(
+            status_code=context.config_load_result.error_status_code or 500,
+            detail=context.config_load_result.error_detail or "Failed to load configuration",
+        )
     with context.config_lock:
         if not context.config_data:
             raise HTTPException(status_code=500, detail="Failed to load configuration")

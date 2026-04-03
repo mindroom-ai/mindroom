@@ -386,6 +386,38 @@ async def test_handle_config_command_set_returns_invalid_plugin_manifest_error(t
 
 
 @pytest.mark.asyncio
+async def test_handle_config_command_set_returns_malformed_plugin_manifest_error(tmp_path: Path) -> None:
+    """Set previews should surface malformed plugin manifests as user errors."""
+    plugin_root = tmp_path / "plugins" / "bad-manifest"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "good_plugin", "tools_module": 123, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": [],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, change_info = await handle_config_command(
+        'set plugins ["./plugins/bad-manifest"]',
+        _runtime_paths_for_config(config_path),
+    )
+
+    assert change_info is None
+    assert "Invalid configuration" in response
+    assert "Plugin tools_module must be a string" in response
+
+
+@pytest.mark.asyncio
 class TestConfigCommandHandling:
     """Test the config command handler."""
 

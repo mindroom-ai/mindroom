@@ -1153,6 +1153,12 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             ),
         )
 
+    plugin_root = tmp_path / "plugins" / "tool-policy"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "tool-policy", "tools_module": null, "skills": []}',
+        encoding="utf-8",
+    )
     plugins = [_plugin("tool-policy", [before, on_custom_event])]
     config = _config(tmp_path, tools=[tool_name], plugins=["./plugins/tool-policy"])
     bot = _agent_bot(tmp_path, config=config)

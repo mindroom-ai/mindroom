@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 import yaml
@@ -22,6 +23,15 @@ if TYPE_CHECKING:
     from types import TracebackType
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class ConfigLoadResult:
+    """Outcome of one API config-file load attempt."""
+
+    success: bool
+    error_status_code: int | None = None
+    error_detail: object | None = None
 
 
 class ApiConfigLock(Protocol):
@@ -116,19 +126,35 @@ def load_config_from_file(
     *,
     config_data: dict[str, Any],
     config_lock: ApiConfigLock,
-) -> bool:
+) -> ConfigLoadResult:
     """Load config from the runtime config file into the shared cache."""
     try:
         validated_payload = load_runtime_config_model(runtime_paths).authored_model_dump()
         with config_lock:
             config_data.clear()
             config_data.update(validated_payload)
+    except ValidationError as exc:
+        detail = exc.errors(include_context=False)
+        logger.warning(
+            "Failed to load API config due to schema validation",
+            config_path=str(runtime_paths.config_path),
+            errors=detail,
+        )
+        return ConfigLoadResult(success=False, error_status_code=422, error_detail=detail)
+    except ConfigRuntimeValidationError as exc:
+        detail = exc.errors()
+        logger.warning(
+            "Failed to load API config due to runtime validation",
+            config_path=str(runtime_paths.config_path),
+            errors=detail,
+        )
+        return ConfigLoadResult(success=False, error_status_code=422, error_detail=detail)
     except Exception:
         logger.exception("Failed to load API config", config_path=str(runtime_paths.config_path))
-        return False
+        return ConfigLoadResult(success=False, error_status_code=500, error_detail="Failed to load configuration")
     else:
         logger.info("Loaded API config", config_path=str(runtime_paths.config_path))
-        return True
+        return ConfigLoadResult(success=True)
 
 
 async def watch_config(

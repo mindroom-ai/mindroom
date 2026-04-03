@@ -7,13 +7,13 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.plugin_identity import validate_plugin_name
 
 from .types import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EnrichmentCachePolicy,
     EnrichmentItem,
-    validate_plugin_name,
 )
 
 

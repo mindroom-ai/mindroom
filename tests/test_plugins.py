@@ -264,6 +264,66 @@ def test_load_plugins_accepts_safe_manifest_names(tmp_path: Path, plugin_name: s
         set_plugin_skill_roots(original_plugin_roots)
 
 
+@pytest.mark.parametrize(
+    ("manifest_content", "expected_error"),
+    [
+        (None, "Plugin manifest missing"),
+        ('{"name": "good_plugin",', "Failed to parse plugin manifest"),
+        (json.dumps(["not", "an", "object"]), "Plugin manifest must be a JSON object"),
+        (
+            json.dumps({"name": "good_plugin", "tools_module": 123, "skills": []}),
+            "Plugin tools_module must be a string",
+        ),
+        (
+            json.dumps({"name": "good_plugin", "hooks_module": 123, "skills": []}),
+            "Plugin hooks_module must be a string",
+        ),
+        (json.dumps({"name": "good_plugin", "skills": [1]}), "Plugin skills must be a list of strings"),
+    ],
+)
+def test_load_plugins_rejects_malformed_manifests(
+    tmp_path: Path,
+    manifest_content: str | None,
+    expected_error: str,
+) -> None:
+    """Configured plugins with malformed manifests should fail binding instead of being skipped."""
+    plugin_root = tmp_path / "plugins" / "bad-plugin"
+    plugin_root.mkdir(parents=True)
+    if manifest_content is not None:
+        (plugin_root / "mindroom.plugin.json").write_text(manifest_content, encoding="utf-8")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=expected_error):
+        _bind_runtime_paths(Config(plugins=["./plugins/bad-plugin"]), config_path)
+
+
+def test_load_plugins_rejects_missing_plugin_directory(tmp_path: Path) -> None:
+    """Configured plugins must exist on disk instead of being silently skipped."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Configured plugin path does not exist"):
+        _bind_runtime_paths(Config(plugins=["./plugins/missing"]), config_path)
+
+
+def test_load_plugins_rejects_missing_tools_module(tmp_path: Path) -> None:
+    """A declared plugin tools module must exist."""
+    plugin_root = tmp_path / "plugins" / "bad-plugin"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "good_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Plugin tools module not found"):
+        _bind_runtime_paths(Config(plugins=["./plugins/bad-plugin"]), config_path)
+
+
 def test_validate_with_runtime_does_not_mutate_plugin_skill_roots(tmp_path: Path) -> None:
     """Runtime validation should not swap global plugin skill roots before activation."""
     original_plugin_roots = _get_plugin_skill_roots()
@@ -287,6 +347,84 @@ def test_validate_with_runtime_does_not_mutate_plugin_skill_roots(tmp_path: Path
         assert _get_plugin_skill_roots() == [sentinel_root.resolve()]
     finally:
         set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path: Path) -> None:
+    """Runtime validation should roll back plugin tool registration when validation fails later."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='leaked_plugin_tool',\n"
+        "    display_name='Leaked Plugin Tool',\n"
+        "    description='Should not leak from failed validation',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+
+    try:
+        bad_config = Config.model_validate(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": ["./plugins/demo"],
+                "defaults": {"tools": ["missing_tool"]},
+            },
+        )
+        with pytest.raises(ValueError, match="Unknown tool 'missing_tool'"):
+            _bind_runtime_paths(bad_config, config_path)
+
+        assert "leaked_plugin_tool" not in _TOOL_REGISTRY
+        assert "leaked_plugin_tool" not in TOOL_METADATA
+
+        follow_up_config = Config.model_validate(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {
+                    "assistant": {
+                        "display_name": "Assistant",
+                        "role": "test",
+                        "tools": ["leaked_plugin_tool"],
+                    },
+                },
+                "plugins": [],
+            },
+        )
+        with pytest.raises(ValueError, match="Unknown tool 'leaked_plugin_tool'"):
+            _bind_runtime_paths(follow_up_config, config_path)
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._TOOL_MODULE_CACHE.clear()
+        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
 
 
 def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tmp_path: Path) -> None:
@@ -465,16 +603,21 @@ def test_load_plugins_reuses_same_module_when_tools_and_hooks_share_file(tmp_pat
     )
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    config = _bind_runtime_paths(
-        Config(plugins=[{"path": "./plugins/same-file"}]),
-        config_path,
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
     )
+    config = Config(plugins=[{"path": "./plugins/same-file"}])
 
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     try:
-        plugins = load_plugins(config, runtime_paths_for(config))
+        plugins = load_plugins(config, runtime_paths)
     finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)

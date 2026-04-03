@@ -40,7 +40,8 @@ my-plugin/
 | `skills` | list of strings | Relative directories containing skills (optional) |
 
 Unknown fields are ignored.
-Invalid or duplicate manifest names are configuration errors and stop plugin loading.
+Invalid, duplicate, or malformed configured plugin manifests are configuration errors and stop plugin loading.
+Configured plugin paths, declared module files, and declared skill directories must exist.
 If `hooks_module` is omitted, MindRoom auto-scans `tools_module` for `@hook`-decorated functions.
 If both fields point at the same file, MindRoom imports it once and reuses it for both tool registration and hook discovery.
 

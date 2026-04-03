@@ -773,7 +773,7 @@ class Config(BaseModel):
         config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
         try:
             config._validate_authored_tool_entries(runtime_paths)
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise ConfigRuntimeValidationError(str(exc)) from exc
         return config
 
@@ -1080,17 +1080,17 @@ class Config(BaseModel):
 
     def _validate_authored_tool_entries(self, runtime_paths: RuntimePaths) -> None:
         """Validate defaults and per-agent authored tool overrides with runtime metadata loaded."""
-        from mindroom.tool_system.metadata import ensure_tool_registry_loaded  # noqa: PLC0415
+        from mindroom.tool_system.metadata import loaded_tool_registry_for_validation  # noqa: PLC0415
 
-        ensure_tool_registry_loaded(runtime_paths, self)
-        for index, entry in enumerate(self.defaults.tools):
-            self._validate_authored_tool_entry(entry, config_path_prefix=f"defaults.tools[{index}]")
-        for agent_name, agent_config in self.agents.items():
-            for index, entry in enumerate(agent_config.tools):
-                self._validate_authored_tool_entry(
-                    entry,
-                    config_path_prefix=f"agents.{agent_name}.tools[{index}]",
-                )
+        with loaded_tool_registry_for_validation(runtime_paths, self):
+            for index, entry in enumerate(self.defaults.tools):
+                self._validate_authored_tool_entry(entry, config_path_prefix=f"defaults.tools[{index}]")
+            for agent_name, agent_config in self.agents.items():
+                for index, entry in enumerate(agent_config.tools):
+                    self._validate_authored_tool_entry(
+                        entry,
+                        config_path_prefix=f"agents.{agent_name}.tools[{index}]",
+                    )
 
     def get_agent_tool_configs(self, agent_name: str) -> list[ResolvedToolConfig]:
         """Return effective authored tool config entries for one agent."""
