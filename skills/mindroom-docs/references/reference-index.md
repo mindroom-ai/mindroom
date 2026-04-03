@@ -21,7 +21,22 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Cultures | `configuration/cultures.md` | `configuration/cultures/index.md` | `page__configuration__cultures__index.md` |
 | Router | `configuration/router.md` | `configuration/router/index.md` | `page__configuration__router__index.md` |
 | Overview | `tools/index.md` | `tools/index.md` | `page__tools__index.md` |
-| Built-in Tools | `tools/builtin.md` | `tools/builtin/index.md` | `page__tools__builtin__index.md` |
+| Execution & Coding | `tools/execution-and-coding.md` | `tools/execution-and-coding/index.md` | `page__tools__execution-and-coding__index.md` |
+| Data & Databases | `tools/data-and-databases.md` | `tools/data-and-databases/index.md` | `page__tools__data-and-databases__index.md` |
+| Web Search | `tools/web-search.md` | `tools/web-search/index.md` | `page__tools__web-search__index.md` |
+| Web Scraping & Browser | `tools/web-scraping-and-browser.md` | `tools/web-scraping-and-browser/index.md` | `page__tools__web-scraping-and-browser__index.md` |
+| Research Sources | `tools/research-sources.md` | `tools/research-sources/index.md` | `page__tools__research-sources__index.md` |
+| AI & Generation | `tools/ai-and-generation.md` | `tools/ai-and-generation/index.md` | `page__tools__ai-and-generation__index.md` |
+| Media & Content | `tools/media-and-content.md` | `tools/media-and-content/index.md` | `page__tools__media-and-content__index.md` |
+| Matrix & Attachments | `tools/matrix-and-attachments.md` | `tools/matrix-and-attachments/index.md` | `page__tools__matrix-and-attachments__index.md` |
+| Messaging & Social | `tools/messaging-and-social.md` | `tools/messaging-and-social/index.md` | `page__tools__messaging-and-social__index.md` |
+| Project Management | `tools/project-management.md` | `tools/project-management/index.md` | `page__tools__project-management__index.md` |
+| Calendar & Scheduling | `tools/calendar-and-scheduling.md` | `tools/calendar-and-scheduling/index.md` | `page__tools__calendar-and-scheduling__index.md` |
+| Memory & Storage | `tools/memory-and-storage.md` | `tools/memory-and-storage/index.md` | `page__tools__memory-and-storage__index.md` |
+| Agent Orchestration | `tools/agent-orchestration.md` | `tools/agent-orchestration/index.md` | `page__tools__agent-orchestration__index.md` |
+| Automation & Platforms | `tools/automation-and-platforms.md` | `tools/automation-and-platforms/index.md` | `page__tools__automation-and-platforms__index.md` |
+| Location, Commerce & Home | `tools/location-commerce-and-home.md` | `tools/location-commerce-and-home/index.md` | `page__tools__location-commerce-and-home__index.md` |
+| All Tools (Redirect) | `tools/builtin.md` | `tools/builtin/index.md` | `page__tools__builtin__index.md` |
 | MCP (Planned) | `tools/mcp.md` | `tools/mcp/index.md` | `page__tools__mcp__index.md` |
 | OpenClaw Import | `openclaw.md` | `openclaw/index.md` | `page__openclaw__index.md` |
 | Skills | `skills.md` | `skills/index.md` | `page__skills__index.md` |
