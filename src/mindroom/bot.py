@@ -224,7 +224,7 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
-_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"scheduled", "hook"})
+_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"scheduled", "hook", "hook_dispatch"})
 
 
 def _get_or_create_lock(locks: dict[object, asyncio.Lock], key: object, *, max_entries: int = 100) -> asyncio.Lock:

@@ -651,6 +651,75 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path: Path) -> None:
+    """Tool hook contexts should expose live room-state helpers from the active runtime client."""
+    sent: list[tuple[str, str, str | None, str, dict[str, object] | None]] = []
+
+    async def hook_message_sender(
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, object] | None,
+    ) -> str | None:
+        sent.append((room_id, body, thread_id, source_hook, extra_content))
+        return "$dispatch-event"
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        query_result = await ctx.query_room_state("!room:localhost", "m.room.name", "")
+        put_result = await ctx.put_room_state(
+            "!room:localhost",
+            "com.mindroom.thread.tags",
+            "$resolved-thread",
+            {"tags": {"queued": True}},
+        )
+        event_id = await ctx.send_message("!room:localhost", "dispatch", trigger_dispatch=True)
+        assert query_result == {"name": "Lobby"}
+        assert put_result is True
+        assert event_id == "$dispatch-event"
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        execution_identity=_execution_identity(),
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> dict[str, object]:
+        return {"echo": kwargs["path"]}
+
+    runtime_context = _tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)
+    runtime_context.client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Lobby"})
+    runtime_context.client.room_put_state.return_value = object()
+
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == {"echo": "notes.txt"}
+    runtime_context.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
+    runtime_context.client.room_put_state.assert_awaited_once_with(
+        "!room:localhost",
+        "com.mindroom.thread.tags",
+        {"tags": {"queued": True}},
+        state_key="$resolved-thread",
+    )
+    assert sent == [
+        (
+            "!room:localhost",
+            "dispatch",
+            None,
+            "tool-policy:tool:before_call",
+            {
+                "com.mindroom.original_sender": "@user:localhost",
+                "com.mindroom._trigger_dispatch": True,
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path) -> None:
     """Sync-tool hooks should keep send_message() on the active request loop under aexecute()."""
     request_thread = threading.get_ident()

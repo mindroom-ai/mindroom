@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -274,22 +275,32 @@ async def test_emit_recursion_guard_drops_nested_custom_events_after_depth_three
 @pytest.mark.asyncio
 async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_path: Path) -> None:
     """Tool-side custom events should flow through the hook registry and shared storage root."""
-    seen: list[tuple[str, str, Path]] = []
+    seen: list[tuple[str, str, Path, dict[str, object] | None, bool]] = []
 
     @hook("todo:item_added")
     async def audit_hook(ctx: CustomEventContext) -> None:
-        seen.append((ctx.payload["item_id"], ctx.source_plugin, ctx.state_root))
+        query_result = await ctx.query_room_state("!room:localhost", "m.room.name", "")
+        put_result = await ctx.put_room_state(
+            "!room:localhost",
+            "com.mindroom.thread.tags",
+            "$thread",
+            {"tags": {"wip": True}},
+        )
+        seen.append((ctx.payload["item_id"], ctx.source_plugin, ctx.state_root, query_result, put_result))
 
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     registry = HookRegistry.from_plugins([_plugin("todo-plugin", [audit_hook])])
+    client = AsyncMock()
+    client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Lobby"})
+    client.room_put_state.return_value = object()
     tool_context = ToolRuntimeContext(
         agent_name="code",
         room_id="!room:localhost",
         thread_id=None,
         resolved_thread_id="$event",
         requester_id="@user:localhost",
-        client=AsyncMock(),
+        client=client,
         config=config,
         runtime_paths=runtime_paths,
         hook_registry=registry,
@@ -300,5 +311,12 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
         await emit_custom_event("todo", "todo:item_added", {"item_id": "123"})
 
     expected_root = get_plugin_state_root("todo-plugin", runtime_paths=runtime_paths)
-    assert seen == [("123", "todo", expected_root)]
+    assert seen == [("123", "todo", expected_root, {"name": "Lobby"}, True)]
     assert expected_root.is_dir()
+    client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
+    client.room_put_state.assert_awaited_once_with(
+        "!room:localhost",
+        "com.mindroom.thread.tags",
+        {"tags": {"wip": True}},
+        state_key="$thread",
+    )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -186,3 +187,39 @@ async def test_schedule_hook_send_message_can_trigger_dispatch(tmp_path: Path) -
     content = mock_hook_send.await_args.args[2]
     assert content["body"] == "dispatch"
     assert content["com.mindroom.source_kind"] == "hook_dispatch"
+
+
+@pytest.mark.asyncio
+async def test_schedule_hook_room_state_helpers_use_live_client(tmp_path: Path) -> None:
+    """schedule:fired hooks should get bound room-state helpers from the scheduler client."""
+    seen: list[tuple[dict[str, object] | None, bool]] = []
+
+    @hook(EVENT_SCHEDULE_FIRED)
+    async def inspect(ctx: ScheduleFiredContext) -> None:
+        query_result = await ctx.query_room_state("!room:localhost", "m.room.name", "")
+        put_result = await ctx.put_room_state(
+            "!room:localhost",
+            "com.mindroom.thread.tags",
+            "$thread",
+            {"tags": {"pending": True}},
+        )
+        seen.append((query_result, put_result))
+        ctx.suppress = True
+
+    config = _config(tmp_path)
+    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [inspect])]))
+    client = AsyncMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Lobby"})
+    client.room_put_state.return_value = object()
+
+    await _execute_scheduled_workflow(client, _workflow("Resume work"), config, runtime_paths_for(config))
+
+    assert seen == [({"name": "Lobby"}, True)]
+    client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
+    client.room_put_state.assert_awaited_once_with(
+        "!room:localhost",
+        "com.mindroom.thread.tags",
+        {"tags": {"pending": True}},
+        state_key="$thread",
+    )

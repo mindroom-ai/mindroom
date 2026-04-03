@@ -362,7 +362,7 @@ await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
 
 - Pattern: `^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$`
 - Must contain at least one colon separator
-- Reserved namespaces: `message`, `agent`, `schedule`, `reaction`, `config`, `tool`
+- Reserved namespaces: `message`, `agent`, `bot`, `schedule`, `reaction`, `config`, `tool`
 - Custom events run in observer mode (`emit()`)
 - Recursion guard: nested emissions stop at depth 3
 
@@ -432,10 +432,11 @@ Every hook context includes these fields:
 
 Every hook context also exposes the following async helpers:
 
-**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None)`**
+**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`**
 Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
 For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
 For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while passing `thread_id=None` explicitly posts at room level.
+When `trigger_dispatch=True`, MindRoom sends the message as source kind `hook_dispatch` so receiving agents handle it as dispatchable automation instead of a non-dispatching hook note.
 
 **`await ctx.query_room_state(room_id, event_type, state_key=None)`**
 Queries Matrix room state events.
@@ -461,7 +462,7 @@ MessageEnvelope(
     attachment_ids: tuple[str, ...],
     mentioned_agents: tuple[str, ...],
     agent_name: str,
-    source_kind: str,  # "message", "edit", "voice", "image", "scheduled", "hook"
+    source_kind: str,  # "message", "edit", "voice", "image", "scheduled", "hook", "hook_dispatch"
 )
 
 ResponseDraft(

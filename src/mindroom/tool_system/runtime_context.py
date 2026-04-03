@@ -8,7 +8,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from mindroom.hooks import CustomEventContext, HookRegistry, emit
+from mindroom.hooks import (
+    CustomEventContext,
+    HookRegistry,
+    build_hook_room_state_putter,
+    build_hook_room_state_querier,
+    emit,
+)
 from mindroom.hooks.types import validate_event_name
 from mindroom.logging_config import get_logger
 
@@ -159,6 +165,8 @@ async def emit_custom_event(
         logger=get_logger("mindroom.hooks.tools").bind(event_name=event_name),
         correlation_id=correlation_id,
         message_sender=context.hook_message_sender,
+        room_state_querier=build_hook_room_state_querier(context.client),
+        room_state_putter=build_hook_room_state_putter(context.client),
         payload=payload,
         source_plugin=plugin_name,
         room_id=context.room_id,

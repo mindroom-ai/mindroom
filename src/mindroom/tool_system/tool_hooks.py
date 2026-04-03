@@ -16,7 +16,14 @@ from weakref import WeakKeyDictionary
 
 from agno.tools.function import FunctionCall
 
-from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, emit, emit_gate
+from mindroom.hooks import (
+    ToolAfterCallContext,
+    ToolBeforeCallContext,
+    build_hook_room_state_putter,
+    build_hook_room_state_querier,
+    emit,
+    emit_gate,
+)
 from mindroom.hooks.types import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
@@ -132,6 +139,12 @@ def _build_context_kwargs(  # noqa: C901
         "runtime_paths": runtime_context.runtime_paths if runtime_context is not None else runtime_paths,
         "correlation_id": correlation_id,
         "message_sender": runtime_context.hook_message_sender if runtime_context is not None else None,
+        "room_state_querier": build_hook_room_state_querier(runtime_context.client)
+        if runtime_context is not None
+        else None,
+        "room_state_putter": build_hook_room_state_putter(runtime_context.client)
+        if runtime_context is not None
+        else None,
     }
 
 

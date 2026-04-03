@@ -75,6 +75,35 @@ async def _send_bound_message(
     return await message_sender(room_id, text, thread_id, source_hook, resolved_extra_content or None)
 
 
+async def _query_bound_room_state(
+    logger: structlog.stdlib.BoundLogger,
+    room_state_querier: HookRoomStateQuerier | None,
+    room_id: str,
+    event_type: str,
+    state_key: str | None = None,
+) -> dict[str, Any] | None:
+    """Query Matrix room state through a bound hook querier when available."""
+    if room_state_querier is None:
+        logger.warning("No room state querier available")
+        return None
+    return await room_state_querier(room_id, event_type, state_key)
+
+
+async def _put_bound_room_state(
+    logger: structlog.stdlib.BoundLogger,
+    room_state_putter: HookRoomStatePutter | None,
+    room_id: str,
+    event_type: str,
+    state_key: str,
+    content: dict[str, Any],
+) -> bool:
+    """Write Matrix room state through a bound hook putter when available."""
+    if room_state_putter is None:
+        logger.warning("No room state putter available")
+        return False
+    return await room_state_putter(room_id, event_type, state_key, content)
+
+
 @dataclass(frozen=True, slots=True)
 class _EnvelopeTargetView:
     """Compatibility view exposing thread targeting as one object."""
@@ -160,10 +189,13 @@ class HookContext:
         state_key: str | None = None,
     ) -> dict[str, Any] | None:
         """Query Matrix room state and return the result when a querier is available."""
-        if self.room_state_querier is None:
-            self.logger.warning("No room state querier available")
-            return None
-        return await self.room_state_querier(room_id, event_type, state_key)
+        return await _query_bound_room_state(
+            self.logger,
+            self.room_state_querier,
+            room_id,
+            event_type,
+            state_key,
+        )
 
     async def put_room_state(
         self,
@@ -173,10 +205,14 @@ class HookContext:
         content: dict[str, Any],
     ) -> bool:
         """Write a Matrix room state event and return ``True`` on success."""
-        if self.room_state_putter is None:
-            self.logger.warning("No room state putter available")
-            return False
-        return await self.room_state_putter(room_id, event_type, state_key, content)
+        return await _put_bound_room_state(
+            self.logger,
+            self.room_state_putter,
+            room_id,
+            event_type,
+            state_key,
+            content,
+        )
 
     async def send_message(
         self,
@@ -351,6 +387,8 @@ class ToolBeforeCallContext:
     logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
     correlation_id: str = ""
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
+    room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
+    room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
 
     def decline(self, reason: str) -> None:
         """Mark the tool call as declined with one model-facing reason."""
@@ -369,6 +407,7 @@ class ToolBeforeCallContext:
         *,
         thread_id: str | None = None,
         extra_content: dict[str, Any] | None = None,
+        trigger_dispatch: bool = False,
     ) -> str | None:
         """Send a Matrix message from a tool hook and return the event ID when available."""
         return await _send_bound_message(
@@ -381,6 +420,39 @@ class ToolBeforeCallContext:
             thread_id=thread_id,
             extra_content=extra_content,
             requester_id=self.requester_id,
+            trigger_dispatch=trigger_dispatch,
+        )
+
+    async def query_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Query Matrix room state and return the result when a querier is available."""
+        return await _query_bound_room_state(
+            self.logger,
+            self.room_state_querier,
+            room_id,
+            event_type,
+            state_key,
+        )
+
+    async def put_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+        content: dict[str, Any],
+    ) -> bool:
+        """Write a Matrix room state event and return ``True`` on success."""
+        return await _put_bound_room_state(
+            self.logger,
+            self.room_state_putter,
+            room_id,
+            event_type,
+            state_key,
+            content,
         )
 
 
@@ -407,6 +479,8 @@ class ToolAfterCallContext:
     logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
     correlation_id: str = ""
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
+    room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
+    room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
 
     @property
     def state_root(self) -> Path:
@@ -420,6 +494,7 @@ class ToolAfterCallContext:
         *,
         thread_id: str | None = None,
         extra_content: dict[str, Any] | None = None,
+        trigger_dispatch: bool = False,
     ) -> str | None:
         """Send a Matrix message from a tool hook and return the event ID when available."""
         return await _send_bound_message(
@@ -432,6 +507,39 @@ class ToolAfterCallContext:
             thread_id=thread_id,
             extra_content=extra_content,
             requester_id=self.requester_id,
+            trigger_dispatch=trigger_dispatch,
+        )
+
+    async def query_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Query Matrix room state and return the result when a querier is available."""
+        return await _query_bound_room_state(
+            self.logger,
+            self.room_state_querier,
+            room_id,
+            event_type,
+            state_key,
+        )
+
+    async def put_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+        content: dict[str, Any],
+    ) -> bool:
+        """Write a Matrix room state event and return ``True`` on success."""
+        return await _put_bound_room_state(
+            self.logger,
+            self.room_state_putter,
+            room_id,
+            event_type,
+            state_key,
+            content,
         )
 
 
