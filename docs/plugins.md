@@ -34,7 +34,7 @@ my-plugin/
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `name` | string | Plugin identifier (required, must not contain `:` and must be unique across configured plugins; invalid or duplicate names abort plugin loading) |
+| `name` | string | Plugin identifier (required, must use only lowercase ASCII letters, digits, `-`, and `_`, and must be unique across configured plugins; invalid or duplicate names abort plugin loading) |
 | `tools_module` | string | Path to the tools module (optional) |
 | `hooks_module` | string | Path to the hooks module relative to the plugin root (optional) |
 | `skills` | list of strings | Relative directories containing skills (optional) |

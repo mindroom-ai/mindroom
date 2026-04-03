@@ -38,7 +38,12 @@ from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_f
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, emit_custom_event, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    emit_custom_event,
+    get_plugin_state_root,
+    tool_runtime_context,
+)
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -1411,3 +1416,11 @@ async def test_create_agent_prepends_bridge_to_real_tool_functions(tmp_path: Pat
         _TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
+
+
+def test_get_plugin_state_root_rejects_invalid_plugin_name(tmp_path: Path) -> None:
+    """Tool runtime state helpers should reject path-like plugin names."""
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    with pytest.raises(ValueError, match="Invalid plugin name"):
+        get_plugin_state_root("../../escaped", runtime_paths=runtime_paths)

@@ -215,18 +215,29 @@ def test_load_plugins_uses_bound_runtime_paths(tmp_path: Path) -> None:
     assert [plugin.name for plugin in plugins] == ["demo-plugin"]
 
 
-def test_load_plugins_rejects_manifest_name_with_colon(tmp_path: Path) -> None:
-    """Colon-containing plugin manifest names should fail during config/runtime binding."""
+@pytest.mark.parametrize(
+    "plugin_name",
+    [
+        "origin:plugin",
+        "../../escaped",
+        "plugin/name",
+        r"plugin\\name",
+        "UpperCase",
+        ".hidden",
+    ],
+)
+def test_load_plugins_rejects_invalid_manifest_name(tmp_path: Path, plugin_name: str) -> None:
+    """Invalid plugin manifest names should fail during config/runtime binding."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "origin:plugin", "tools_module": None, "skills": []}),
+        json.dumps({"name": plugin_name, "tools_module": None, "skills": []}),
         encoding="utf-8",
     )
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    with pytest.raises(ValueError, match="Plugin manifest name must not contain ':'"):
+    with pytest.raises(ValueError, match="Invalid plugin name"):
         _bind_runtime_paths(Config(plugins=["./plugins/bad-name"]), config_path)
 
 

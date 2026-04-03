@@ -13,6 +13,7 @@ from .types import (
     EVENT_TOOL_BEFORE_CALL,
     EnrichmentCachePolicy,
     EnrichmentItem,
+    validate_plugin_name,
 )
 
 
@@ -44,7 +45,7 @@ def _resolve_plugin_state_root(
     if runtime_paths is None:
         msg = "runtime_paths are required to access hook state_root"
         raise RuntimeError(msg)
-    plugin_root = runtime_paths.storage_root / "plugins" / plugin_name
+    plugin_root = runtime_paths.storage_root / "plugins" / validate_plugin_name(plugin_name)
     plugin_root.mkdir(parents=True, exist_ok=True)
     return plugin_root
 

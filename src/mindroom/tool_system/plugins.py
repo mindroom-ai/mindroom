@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.hooks.decorators import iter_module_hooks
-from mindroom.hooks.types import HookCallback  # noqa: TC001
+from mindroom.hooks.types import HookCallback, validate_plugin_name
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.skills import set_plugin_skill_roots
 
@@ -25,11 +25,6 @@ logger = get_logger(__name__)
 
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-
-
-def _is_valid_plugin_name(name: str) -> bool:
-    """Return whether one manifest plugin name is safe for hook provenance tags."""
-    return ":" not in name
 
 
 @dataclass(frozen=True)
@@ -301,11 +296,12 @@ def _parse_manifest(path: Path) -> _PluginManifest | None:  # noqa: PLR0911
     if not isinstance(name, str) or not name.strip():
         logger.warning("Plugin manifest missing name", path=str(path))
         return None
-    normalized_name = name.strip()
-    if not _is_valid_plugin_name(normalized_name):
-        logger.error("Plugin manifest name must not contain ':'", path=str(path), plugin_name=normalized_name)
-        msg = f"Plugin manifest name must not contain ':': {normalized_name!r} ({path})"
-        raise ValueError(msg)
+    try:
+        normalized_name = validate_plugin_name(name)
+    except ValueError as exc:
+        logger.exception("Invalid plugin manifest name", path=str(path), plugin_name=name)
+        msg = f"{exc} ({path})"
+        raise ValueError(msg) from exc
 
     tools_module = data.get("tools_module")
     if tools_module is not None and not isinstance(tools_module, str):

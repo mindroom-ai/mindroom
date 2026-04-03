@@ -15,7 +15,7 @@ from mindroom.hooks import (
     build_hook_room_state_querier,
     emit,
 )
-from mindroom.hooks.types import validate_event_name
+from mindroom.hooks.types import validate_event_name, validate_plugin_name
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -149,10 +149,7 @@ def get_plugin_state_root(
     runtime_paths: RuntimePaths | None = None,
 ) -> Path:
     """Return the canonical plugin state root used by hooks and plugin tools."""
-    normalized_plugin_name = plugin_name.strip()
-    if not normalized_plugin_name:
-        msg = "Plugin name must not be empty"
-        raise ValueError(msg)
+    normalized_plugin_name = validate_plugin_name(plugin_name)
 
     context = get_tool_runtime_context()
     resolved_runtime_paths = runtime_paths or (context.runtime_paths if context is not None else None)

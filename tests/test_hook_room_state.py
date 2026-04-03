@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -21,6 +22,9 @@ from mindroom.hooks import (
 from mindroom.hooks.types import EVENT_MESSAGE_RECEIVED
 from mindroom.logging_config import get_logger
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _config(tmp_path: object) -> Config:
@@ -206,6 +210,23 @@ async def test_hook_context_query_room_state_with_state_key(tmp_path: object) ->
 
     assert result == {"tags": {"pending-restart": True}}
     querier.assert_awaited_once_with("!room:localhost", "com.mindroom.thread.tags", "$thread1")
+
+
+def test_hook_context_state_root_rejects_invalid_plugin_name(tmp_path: Path) -> None:
+    """state_root should reject invalid plugin names instead of escaping plugin storage."""
+    config = _config(tmp_path)
+    ctx = HookContext(
+        event_name=EVENT_MESSAGE_RECEIVED,
+        plugin_name="../../escaped",
+        settings={},
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        logger=get_logger("tests.hook_room_state").bind(event_name=EVENT_MESSAGE_RECEIVED),
+        correlation_id="corr-room-state",
+    )
+
+    with pytest.raises(ValueError, match="Invalid plugin name"):
+        _ = ctx.state_root
 
 
 # -- AgentLifecycleContext inherits room_state_querier --
