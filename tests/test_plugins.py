@@ -235,6 +235,40 @@ def test_load_plugins_rejects_manifest_name_with_colon(tmp_path: Path) -> None:
     assert plugins == []
 
 
+def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tmp_path: Path) -> None:
+    """Duplicate plugin manifest names must be rejected before import side effects run."""
+    first_root = tmp_path / "plugins" / "first"
+    second_root = tmp_path / "plugins" / "second"
+    first_root.mkdir(parents=True)
+    second_root.mkdir(parents=True)
+    manifest = {"name": "shared-plugin", "tools_module": "tools.py", "skills": []}
+    (first_root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (second_root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (first_root / "tools.py").write_text("VALUE = 'first'\n", encoding="utf-8")
+    (second_root / "tools.py").write_text("raise RuntimeError('duplicate should not import')\n", encoding="utf-8")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/first", "./plugins/second"]), config_path)
+
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+
+    try:
+        plugins = load_plugins(config, runtime_paths_for(config))
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._TOOL_MODULE_CACHE.clear()
+        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+
+    assert [plugin.name for plugin in plugins] == ["shared-plugin"]
+    assert plugins[0].root == first_root.resolve()
+
+
 def test_config_normalizes_string_and_object_plugin_entries() -> None:
     """Root config should normalize bare strings into structured plugin entries."""
     config = Config(

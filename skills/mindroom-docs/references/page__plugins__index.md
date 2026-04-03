@@ -27,12 +27,12 @@ my-plugin/
 }
 ```
 
-| Field          | Type            | Description                                                     |
-| -------------- | --------------- | --------------------------------------------------------------- |
-| `name`         | string          | Plugin identifier (required, must not contain `:`)              |
-| `tools_module` | string          | Path to the tools module (optional)                             |
-| `hooks_module` | string          | Path to the hooks module relative to the plugin root (optional) |
-| `skills`       | list of strings | Relative directories containing skills (optional)               |
+| Field          | Type            | Description                                                                                     |
+| -------------- | --------------- | ----------------------------------------------------------------------------------------------- |
+| `name`         | string          | Plugin identifier (required, must not contain `:` and must be unique across configured plugins) |
+| `tools_module` | string          | Path to the tools module (optional)                                                             |
+| `hooks_module` | string          | Path to the hooks module relative to the plugin root (optional)                                 |
+| `skills`       | list of strings | Relative directories containing skills (optional)                                               |
 
 Unknown fields are ignored. If `hooks_module` is omitted, MindRoom auto-scans `tools_module` for `@hook`-decorated functions. If both fields point at the same file, MindRoom imports it once and reuses it for both tool registration and hook discovery.
 

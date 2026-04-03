@@ -101,15 +101,27 @@ def load_plugins(
         return []
     plugins: list[_Plugin] = []
     skill_roots: list[Path] = []
+    seen_plugin_manifest_paths: dict[str, Path] = {}
 
     for plugin_order, plugin_entry in enumerate(plugin_entries):
         if not plugin_entry.enabled:
             continue
 
         root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
-        plugin = _load_plugin(root, plugin_entry, plugin_order)
-        if plugin is None:
+        plugin_base = _load_plugin_base(root)
+        if plugin_base is None:
             continue
+        existing_manifest_path = seen_plugin_manifest_paths.get(plugin_base.name)
+        if existing_manifest_path is not None:
+            logger.warning(
+                "Skipping duplicate plugin manifest name",
+                plugin_name=plugin_base.name,
+                path=str(plugin_base.manifest_path),
+                first_path=str(existing_manifest_path),
+            )
+            continue
+        seen_plugin_manifest_paths[plugin_base.name] = plugin_base.manifest_path
+        plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
         plugins.append(plugin)
         skill_roots.extend(plugin.skill_dirs)
 
@@ -185,11 +197,7 @@ def _parse_python_plugin_spec(plugin_path: str) -> tuple[str, str | None, bool] 
     return module_name, subpath, explicit
 
 
-def _load_plugin(
-    root: Path,
-    entry_config: PluginEntryConfig,
-    plugin_order: int,
-) -> _Plugin | None:
+def _load_plugin_base(root: Path) -> _PluginBase | None:
     if not root.exists() or not root.is_dir():
         logger.warning("Plugin path does not exist", path=str(root))
         return None
@@ -210,7 +218,7 @@ def _load_plugin(
 
     cached = _PLUGIN_CACHE.get(manifest_path)
     if cached and cached.manifest_mtime == manifest_mtime:
-        return _materialize_plugin(cached.plugin, entry_config, plugin_order)
+        return cached.plugin
 
     manifest = _parse_manifest(manifest_path)
     if manifest is None:
@@ -230,7 +238,7 @@ def _load_plugin(
     )
 
     _PLUGIN_CACHE[manifest_path] = _PluginCacheEntry(manifest_mtime=manifest_mtime, plugin=plugin)
-    return _materialize_plugin(plugin, entry_config, plugin_order)
+    return plugin
 
 
 def _materialize_plugin(
