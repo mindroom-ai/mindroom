@@ -123,7 +123,7 @@ export function shouldShowBlockingDiagnosticOverlay(
   if (isAuthDiagnosticMessage(blockingDiagnostic.message)) {
     return true;
   }
-  return !hasLoadedConfig && !hasRecoveryConfig;
+  return !hasLoadedConfig || hasRecoveryConfig;
 }
 
 function AppContent() {

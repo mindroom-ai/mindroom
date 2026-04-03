@@ -1774,7 +1774,7 @@ def test_google_configure_surfaces_runtime_validation_failures(
 
 
 def test_google_configure_rejects_stale_runtime_refresh_after_runtime_swap(tmp_path: Path) -> None:
-    """Google configure should not republish an older request-bound runtime after the app has moved on."""
+    """Google configure should fail stale before mutating the older request-bound runtime."""
     runtime_a = constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "first.yaml",
         storage_path=tmp_path / "first-store",
@@ -1787,19 +1787,21 @@ def test_google_configure_rejects_stale_runtime_refresh_after_runtime_swap(tmp_p
     )
     payload_a = _authored_config_payload("old")
     payload_b = _authored_config_payload("new")
-    original_save_env_credentials = google_integration._save_env_credentials
 
-    def _swap_then_save_env_credentials(
-        client_id: str,
-        client_secret: str,
-        runtime_paths: constants.RuntimePaths,
-        project_id: str | None = None,
-    ) -> constants.RuntimePaths:
+    runtime_a.env_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_a.env_path.write_text("UNRELATED=value\n", encoding="utf-8")
+    original_require_request_snapshot = google_integration._require_request_snapshot
+
+    def _swap_after_request_snapshot(request: Request) -> config_lifecycle.ApiSnapshot:
+        snapshot = original_require_request_snapshot(request)
         _publish_committed_runtime_config(main.app, runtime_b, payload_b)
-        return original_save_env_credentials(client_id, client_secret, runtime_paths, project_id)
+        return snapshot
 
     with (
-        patch("mindroom.api.google_integration._save_env_credentials", side_effect=_swap_then_save_env_credentials),
+        patch(
+            "mindroom.api.google_integration._require_request_snapshot",
+            side_effect=_swap_after_request_snapshot,
+        ),
         TestClient(main.app) as client,
     ):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
@@ -1815,6 +1817,57 @@ def test_google_configure_rejects_stale_runtime_refresh_after_runtime_swap(tmp_p
     assert response.status_code == 409
     assert main._app_runtime_paths(main.app) == runtime_b
     assert main._app_context(main.app).config_data["agents"] == payload_b["agents"]
+    env_contents = runtime_a.env_path.read_text(encoding="utf-8")
+    assert env_contents == "UNRELATED=value\n"
+    assert "GOOGLE_CLIENT_ID=" not in env_contents
+
+
+def test_google_reset_rejects_stale_runtime_refresh_without_mutating_old_runtime(tmp_path: Path) -> None:
+    """Google reset should fail stale before deleting credentials or editing the older runtime `.env`."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = _authored_config_payload("old")
+    payload_b = _authored_config_payload("new")
+    runtime_a.env_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_a.env_path.write_text(
+        "GOOGLE_CLIENT_ID=client-a\nGOOGLE_CLIENT_SECRET=secret-a\nUNRELATED=value\n",
+        encoding="utf-8",
+    )
+    original_require_request_snapshot = google_integration._require_request_snapshot
+
+    def _swap_after_request_snapshot(request: Request) -> config_lifecycle.ApiSnapshot:
+        snapshot = original_require_request_snapshot(request)
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return snapshot
+
+    with (
+        patch(
+            "mindroom.api.google_integration._require_request_snapshot",
+            side_effect=_swap_after_request_snapshot,
+        ),
+        patch("mindroom.api.google_integration.get_runtime_credentials_manager") as mock_get_credentials_manager,
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.post(
+            "/api/google/reset",
+            headers={"Authorization": "Bearer key-a"},
+        )
+
+    assert response.status_code == 409
+    assert main._app_runtime_paths(main.app) == runtime_b
+    assert main._app_context(main.app).config_data["agents"] == payload_b["agents"]
+    env_contents = runtime_a.env_path.read_text(encoding="utf-8")
+    assert env_contents == "GOOGLE_CLIENT_ID=client-a\nGOOGLE_CLIENT_SECRET=secret-a\nUNRELATED=value\n"
+    mock_get_credentials_manager.assert_not_called()
 
 
 def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:

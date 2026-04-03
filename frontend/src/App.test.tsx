@@ -1,6 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { resolveCurrentTab, shouldShowBlockingDiagnosticOverlay } from './App';
+import { useConfigStore } from '@/store/configStore';
+
+import App, { resolveCurrentTab, shouldShowBlockingDiagnosticOverlay } from './App';
+
+vi.mock('@/store/configStore', () => ({
+  useConfigStore: vi.fn(),
+}));
 
 describe('resolveCurrentTab', () => {
   it('defaults to dashboard for empty and unknown paths', () => {
@@ -62,7 +69,7 @@ describe('shouldShowBlockingDiagnosticOverlay', () => {
         },
         { hasLoadedConfig: false, hasRecoveryConfig: true }
       )
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('still blocks generic failures when there is no recoverable config state', () => {
@@ -86,5 +93,60 @@ describe('shouldShowBlockingDiagnosticOverlay', () => {
         { hasLoadedConfig: false, hasRecoveryConfig: false }
       )
     ).toBe(true);
+  });
+});
+
+describe('App recovery mode', () => {
+  beforeEach(() => {
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: vi.fn(() => 'system'),
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+        clear: vi.fn(),
+      },
+    });
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockReturnValue({
+        matches: false,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+      }),
+    });
+    vi.mocked(useConfigStore).mockReturnValue({
+      loadConfig: vi.fn(),
+      config: null,
+      recoveryConfigSource: 'agents:\n  broken: true\n',
+      recoveryConfigSourceOriginal: 'agents:\n  broken: false\n',
+      updateRecoveryConfigSource: vi.fn(),
+      saveRecoveryConfigSource: vi.fn(),
+      syncStatus: 'error',
+      diagnostics: [
+        {
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: true,
+        },
+      ],
+      isLoading: false,
+      selectedAgentId: null,
+      selectedTeamId: null,
+      selectedCultureId: null,
+      selectedRoomId: null,
+    } as never);
+  });
+
+  it('renders the recovery editor when a blocking recovery draft exists', () => {
+    render(<App />);
+
+    expect(screen.getByRole('button', { name: 'Save Replacement Config' })).toBeInTheDocument();
+    expect(
+      screen.getByText(/could not be loaded\. edit the raw configuration/i)
+    ).toBeInTheDocument();
+    expect(screen.getByRole('textbox')).toHaveValue('agents:\n  broken: true\n');
   });
 });

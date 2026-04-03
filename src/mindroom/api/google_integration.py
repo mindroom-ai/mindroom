@@ -247,6 +247,29 @@ def _save_env_credentials(
     return _refresh_runtime_paths(runtime_paths)
 
 
+def _reset_google_credentials(runtime_paths: RuntimePaths) -> RuntimePaths:
+    """Clear persisted Google credentials and remove Google env vars."""
+    get_runtime_credentials_manager(runtime_paths).delete_credentials("google")
+
+    env_path = runtime_paths.env_path
+    if env_path.exists():
+        with env_path.open(encoding="utf-8") as f:
+            lines = f.readlines()
+
+        google_vars = [
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET",
+            "GOOGLE_PROJECT_ID",
+            "GOOGLE_REDIRECT_URI",
+        ]
+        filtered_lines = [line for line in lines if not any(line.startswith(f"{var}=") for var in google_vars)]
+
+        with env_path.open("w", encoding="utf-8") as f:
+            f.writelines(filtered_lines)
+
+    return _refresh_runtime_paths(runtime_paths)
+
+
 @router.get("/status")
 async def get_status(request: Request, agent_name: str | None = None) -> GoogleStatus:
     """Check Google integration status."""
@@ -426,17 +449,20 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
         )
 
     try:
-        # Save to environment
-        runtime_paths = _save_env_credentials(
-            client_id,
-            client_secret,
-            api_runtime_paths(request),
-            project_id,
-        )
         from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
 
         snapshot = _require_request_snapshot(request)
-        _reload_api_runtime_config(request.app, runtime_paths, expected_snapshot=snapshot)
+        _reload_api_runtime_config(
+            request.app,
+            api_runtime_paths(request),
+            expected_snapshot=snapshot,
+            mutate_runtime=lambda runtime_paths: _save_env_credentials(
+                client_id,
+                client_secret,
+                runtime_paths,
+                project_id,
+            ),
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -449,33 +475,16 @@ async def reset(request: Request) -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
-    runtime_paths = api_runtime_paths(request)
     try:
-        # Remove credentials using the manager
-        get_runtime_credentials_manager(runtime_paths).delete_credentials("google")
-
-        # Remove from environment variables
-        env_path = runtime_paths.env_path
-        if env_path.exists():
-            with env_path.open(encoding="utf-8") as f:
-                lines = f.readlines()
-
-            # Filter out Google-related variables
-            google_vars = [
-                "GOOGLE_CLIENT_ID",
-                "GOOGLE_CLIENT_SECRET",
-                "GOOGLE_PROJECT_ID",
-                "GOOGLE_REDIRECT_URI",
-            ]
-            filtered_lines = [line for line in lines if not any(line.startswith(f"{var}=") for var in google_vars)]
-
-            with env_path.open("w", encoding="utf-8") as f:
-                f.writelines(filtered_lines)
-        refreshed_runtime_paths = _refresh_runtime_paths(runtime_paths)
         from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
 
         snapshot = _require_request_snapshot(request)
-        _reload_api_runtime_config(request.app, refreshed_runtime_paths, expected_snapshot=snapshot)
+        _reload_api_runtime_config(
+            request.app,
+            api_runtime_paths(request),
+            expected_snapshot=snapshot,
+            mutate_runtime=_reset_google_credentials,
+        )
     except HTTPException:
         raise
     except Exception as e:
