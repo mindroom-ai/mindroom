@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -32,8 +33,10 @@ _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
 # semantics because updating `resolved` no longer rewrites `blocked`,
 # `priority`, or any other sibling tag state keys.
 #
-# Reads still understand the earlier single-event-per-thread payload so rooms
-# that already contain legacy state remain visible during the migration.
+# Reads still understand the earlier single-event-per-thread payload that used
+# the same `com.mindroom.thread.tags` event type during this feature's
+# development, but this intentionally does not read the removed
+# `com.mindroom.thread.resolution` event type.
 
 
 class ThreadTagsError(RuntimeError):
@@ -195,8 +198,13 @@ def _normalize_json_compatible_value(
     error_type: type[Exception],
 ) -> object:
     """Validate one JSON-compatible nested value."""
-    if value is None or isinstance(value, str | bool | int | float):
+    if value is None or isinstance(value, str | bool | int):
         return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        msg = "data values must be finite JSON-compatible numbers."
+        raise error_type(msg)
     if isinstance(value, list):
         return [_normalize_json_compatible_value(item, error_type=error_type) for item in value]
     if isinstance(value, Mapping):

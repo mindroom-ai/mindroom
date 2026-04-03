@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, call
 
@@ -1202,6 +1203,25 @@ async def test_set_thread_tag_rejects_non_json_compatible_custom_data() -> None:
             "custom",
             set_by="@alice:localhost",
             data={"bad": object()},
+        )
+
+    client.room_get_state_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+async def test_set_thread_tag_rejects_non_finite_float_custom_data(value: float) -> None:
+    """Custom tag data should reject NaN and infinity before any Matrix I/O."""
+    client = AsyncMock()
+
+    with pytest.raises(ThreadTagsError, match="finite JSON-compatible numbers"):
+        await set_thread_tag(
+            client,
+            "!room:localhost",
+            "$thread-root:localhost",
+            "custom",
+            set_by="@alice:localhost",
+            data={"bad": value},
         )
 
     client.room_get_state_event.assert_not_awaited()

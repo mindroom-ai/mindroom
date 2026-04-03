@@ -46,6 +46,18 @@ def _serialized_tags(tags: Mapping[str, ThreadTagRecord]) -> dict[str, dict[str,
     return {tag: record.model_dump(mode="json", exclude_none=True) for tag, record in tags.items()}
 
 
+def _serialized_tags_for_output(
+    tags: Mapping[str, ThreadTagRecord],
+    *,
+    tag: str | None,
+) -> dict[str, dict[str, object]]:
+    """Serialize tags, optionally narrowing to one requested tag."""
+    serialized = _serialized_tags(tags)
+    if tag is None:
+        return serialized
+    return {tag: serialized[tag]} if tag in serialized else {}
+
+
 class ThreadTagsTools(Toolkit):
     """Tools for tagging Matrix threads via shared room state."""
 
@@ -306,7 +318,10 @@ class ThreadTagsTools(Toolkit):
                 room_id=resolved_room_id,
                 room_wide=True,
                 tag=normalized_tag,
-                threads={thread_root_id: _serialized_tags(state.tags) for thread_root_id, state in threads.items()},
+                threads={
+                    thread_root_id: _serialized_tags_for_output(state.tags, tag=normalized_tag)
+                    for thread_root_id, state in threads.items()
+                },
             )
 
         normalized_thread_id = await normalize_thread_root_event_id(
@@ -340,9 +355,7 @@ class ThreadTagsTools(Toolkit):
                 message=str(exc),
             )
 
-        tags = _serialized_tags(state.tags) if state is not None else {}
-        if normalized_tag is not None:
-            tags = {normalized_tag: tags[normalized_tag]} if normalized_tag in tags else {}
+        tags = _serialized_tags_for_output(state.tags, tag=normalized_tag) if state is not None else {}
 
         return self._payload(
             "ok",

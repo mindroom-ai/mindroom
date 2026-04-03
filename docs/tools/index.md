@@ -126,7 +126,9 @@ Tools like `matrix_message` and `thread_tags` use this context to act on the cor
 `thread_tags` can also target another authorized room, but it still checks the target room's canonical thread root and requester membership before writing the shared tag state.
 `thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`.
 `thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread.
+`thread_tags.list_thread_tags(tag=...)` narrows both thread-specific and room-wide responses to the requested tag only.
 `thread_tags` also validates and normalizes predefined payload schemas for `blocked.data.blocked_by`, `waiting.data.waiting_on`, `priority.data.level`, and `due.data.deadline`.
+`thread_tags` intentionally replaces the removed experimental `thread_resolution` tool and does not auto-read old `com.mindroom.thread.resolution` markers.
 
 Attachment IDs from the current conversation are also available in the runtime context.
 Tools that accept `attachment_ids` (such as `matrix_message`) resolve those IDs against the context-scoped attachment registry, preventing one conversation from accessing files uploaded in another.

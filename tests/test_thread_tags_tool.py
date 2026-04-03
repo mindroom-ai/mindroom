@@ -580,6 +580,7 @@ async def test_list_thread_tags_lists_room_wide_when_no_thread_is_available() ->
                     "$thread-two:localhost": _state(
                         "$thread-two:localhost",
                         blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                        resolved=_record(note="done"),
                     ),
                 },
             ),
@@ -592,6 +593,10 @@ async def test_list_thread_tags_lists_room_wide_when_no_thread_is_available() ->
     assert payload["room_wide"] is True
     assert payload["tag"] == "blocked"
     assert list(payload["threads"]) == ["$thread-two:localhost"]
+    assert list(payload["threads"]["$thread-two:localhost"]) == ["blocked"]
+    assert payload["threads"]["$thread-two:localhost"]["blocked"]["data"] == {"blocked_by": ["$other:localhost"]}
+    assert payload["threads"]["$thread-two:localhost"]["blocked"]["set_by"] == "@user:localhost"
+    assert datetime.fromisoformat(payload["threads"]["$thread-two:localhost"]["blocked"]["set_at"]).tzinfo is not None
     mock_list.assert_awaited_once_with(
         context.client,
         context.room_id,
@@ -621,6 +626,7 @@ async def test_list_thread_tags_explicit_same_room_target_can_list_room_wide_fro
                     "$thread-two:localhost": _state(
                         "$thread-two:localhost",
                         blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                        resolved=_record(note="done"),
                     ),
                 },
             ),
@@ -632,6 +638,7 @@ async def test_list_thread_tags_explicit_same_room_target_can_list_room_wide_fro
     assert payload["status"] == "ok"
     assert payload["room_wide"] is True
     assert list(payload["threads"]) == ["$thread-two:localhost"]
+    assert list(payload["threads"]["$thread-two:localhost"]) == ["blocked"]
     mock_list.assert_awaited_once_with(
         context.client,
         context.room_id,
