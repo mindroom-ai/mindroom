@@ -105,6 +105,12 @@ def load_plugins(
     set_skill_roots: bool = True,
 ) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
+    import mindroom.tools  # noqa: F401, PLC0415
+    from mindroom.tool_system.metadata import (  # noqa: PLC0415
+        _capture_tool_registry_snapshot,
+        _restore_tool_registry_snapshot,
+    )
+
     plugin_entries = config.plugins
     if not plugin_entries:
         _sync_loaded_plugin_tools([])
@@ -114,29 +120,34 @@ def load_plugins(
     plugins: list[_Plugin] = []
     skill_roots: list[Path] = []
     plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]] = []
+    snapshot = _capture_tool_registry_snapshot()
+    try:
+        for plugin_order, plugin_entry in enumerate(plugin_entries):
+            if not plugin_entry.enabled:
+                continue
 
-    for plugin_order, plugin_entry in enumerate(plugin_entries):
-        if not plugin_entry.enabled:
-            continue
+            root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
+            plugin_base = _load_plugin_base(root)
+            plugin_bases.append((plugin_base, plugin_entry, plugin_order))
 
-        root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
-        plugin_base = _load_plugin_base(root)
-        plugin_bases.append((plugin_base, plugin_entry, plugin_order))
+        _reject_duplicate_plugin_manifest_names(plugin_bases)
 
-    _reject_duplicate_plugin_manifest_names(plugin_bases)
+        for plugin_base, plugin_entry, plugin_order in plugin_bases:
+            plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
+            plugins.append(plugin)
+            skill_roots.extend(plugin.skill_dirs)
 
-    for plugin_base, plugin_entry, plugin_order in plugin_bases:
-        plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
-        plugins.append(plugin)
-        skill_roots.extend(plugin.skill_dirs)
+        if plugins:
+            logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
 
-    if plugins:
-        logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
+        _sync_loaded_plugin_tools(plugins)
 
-    _sync_loaded_plugin_tools(plugins)
+        if set_skill_roots:
+            set_plugin_skill_roots(skill_roots)
+    except Exception:
+        _restore_tool_registry_snapshot(snapshot)
+        raise
 
-    if set_skill_roots:
-        set_plugin_skill_roots(skill_roots)
     return plugins
 
 

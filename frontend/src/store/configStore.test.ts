@@ -341,6 +341,42 @@ describe('configStore', () => {
       expect(state.syncStatus).toBe('error');
     });
 
+    it('stores backend validation issues when config load returns 422', async () => {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: [
+            {
+              loc: ['plugins', 0],
+              msg: 'Plugin tools_module must be a string',
+              type: 'value_error',
+            },
+          ],
+        }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+
+      const state = useConfigStore.getState();
+      expect(state.syncStatus).toBe('error');
+      expect(state.diagnostics).toEqual([
+        {
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: true,
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['plugins', 0],
+            msg: 'Plugin tools_module must be a string',
+            type: 'value_error',
+          },
+        },
+      ]);
+    });
+
     it('loads config and records a non-blocking diagnostic when agent policy derivation fails during reload', async () => {
       const existingConfig = {
         memory: {

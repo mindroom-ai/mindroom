@@ -597,6 +597,17 @@ class TestConfigShow:
         assert str(missing.resolve()) in output
         assert output.index(str(missing.resolve())) < output.index(str(Path("config.yaml").resolve()))
 
+    def test_show_invalid_utf8_config(self, tmp_path: Path) -> None:
+        """Config show should report unreadable config text cleanly."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_bytes(b"\xff\xfe\x00\x00")
+
+        result = runner.invoke(app, ["config", "show", "--path", str(cfg)])
+
+        assert result.exit_code == 1
+        assert "Invalid configuration" in result.output
+        assert "Could not read configuration text" in result.output
+
 
 # ---------------------------------------------------------------------------
 # mindroom config edit

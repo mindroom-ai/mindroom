@@ -382,7 +382,11 @@ def config_show(
             console.print(f"  {i}. {loc} ({status})")
         raise typer.Exit(1)
 
-    content = config_file.read_text(encoding="utf-8")
+    try:
+        content = config_file.read_text(encoding="utf-8")
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        _format_validation_errors(exc, config_path=config_file)
+        raise typer.Exit(1) from None
 
     if raw:
         print(content, end="")

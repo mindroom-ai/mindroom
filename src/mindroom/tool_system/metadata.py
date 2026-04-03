@@ -27,6 +27,7 @@ from mindroom.tool_system.worker_routing import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from types import ModuleType
 
     from agno.tools import Toolkit
 
@@ -35,7 +36,9 @@ if TYPE_CHECKING:
     from mindroom.credentials import CredentialsManager
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
+_BUILTIN_TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 _PLUGIN_TOOL_METADATA_BY_MODULE: dict[str, dict[str, ToolMetadata]] = {}
+_BUILTIN_TOOL_METADATA: dict[str, ToolMetadata] = {}
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
 _TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "text", "url"})
 AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
@@ -54,9 +57,11 @@ class ToolConfigOverrideError(ValueError):
 class _ToolRegistrySnapshot:
     registry: dict[str, Callable[[], type[Toolkit]]]
     metadata: dict[str, ToolMetadata]
+    builtin_registry: dict[str, Callable[[], type[Toolkit]]]
+    builtin_metadata: dict[str, ToolMetadata]
     module_import_cache: dict[Path, plugin_module._ModuleCacheEntry]
     plugin_tool_metadata_by_module: dict[str, dict[str, ToolMetadata]]
-    plugin_module_names: frozenset[str]
+    plugin_modules: dict[str, ModuleType]
 
 
 def is_authored_override_inherit(value: object) -> bool:
@@ -84,35 +89,48 @@ def restore_plugin_tool_registrations(module_name: str, registrations: dict[str,
 
 def synchronize_plugin_tools(active_module_names: list[str]) -> None:
     """Rebuild the active plugin tool overlay from cached per-module registrations."""
-    desired_plugin_metadata: dict[str, ToolMetadata] = {}
+    desired_metadata = _BUILTIN_TOOL_METADATA.copy()
+    desired_registry = _BUILTIN_TOOL_REGISTRY.copy()
+
     for module_name in active_module_names:
-        desired_plugin_metadata.update(_PLUGIN_TOOL_METADATA_BY_MODULE.get(module_name, {}))
+        for tool_name, plugin_metadata in _PLUGIN_TOOL_METADATA_BY_MODULE.get(module_name, {}).items():
+            desired_metadata[tool_name] = plugin_metadata
+            factory = cast("Callable[[], type[Toolkit]] | None", plugin_metadata.factory)
+            if factory is None:
+                desired_registry.pop(tool_name, None)
+            else:
+                desired_registry[tool_name] = factory
 
-    known_plugin_tool_names = {
-        tool_name for registrations in _PLUGIN_TOOL_METADATA_BY_MODULE.values() for tool_name in registrations
-    }
+    _TOOL_REGISTRY.clear()
+    _TOOL_REGISTRY.update(desired_registry)
+    TOOL_METADATA.clear()
+    TOOL_METADATA.update(desired_metadata)
 
-    for tool_name in known_plugin_tool_names:
-        desired_metadata = desired_plugin_metadata.get(tool_name)
-        if desired_metadata is None:
-            current_metadata = TOOL_METADATA.get(tool_name)
-            if current_metadata is not None and getattr(current_metadata.factory, "__module__", "").startswith(
-                _PLUGIN_MODULE_PREFIX,
-            ):
-                TOOL_METADATA.pop(tool_name, None)
-            current_factory = _TOOL_REGISTRY.get(tool_name)
-            if current_factory is not None and getattr(current_factory, "__module__", "").startswith(
-                _PLUGIN_MODULE_PREFIX,
-            ):
-                _TOOL_REGISTRY.pop(tool_name, None)
-            continue
 
-        TOOL_METADATA[tool_name] = desired_metadata
-        factory = cast("Callable[[], type[Toolkit]] | None", desired_metadata.factory)
-        if factory is None:
-            _TOOL_REGISTRY.pop(tool_name, None)
-        else:
-            _TOOL_REGISTRY[tool_name] = factory
+def _reject_plugin_builtin_tool_collision(tool_name: str) -> None:
+    """Fail plugin registration when it reuses a built-in tool name."""
+    if tool_name in _BUILTIN_TOOL_METADATA:
+        msg = f"Plugin tool '{tool_name}' conflicts with built-in tool '{tool_name}'."
+        raise ValueError(msg)
+
+
+def _register_builtin_tool_metadata(metadata: ToolMetadata) -> None:
+    """Store one built-in tool in the durable built-in registry."""
+    factory = cast("Callable[[], type[Toolkit]] | None", metadata.factory)
+    _BUILTIN_TOOL_METADATA[metadata.name] = metadata
+    TOOL_METADATA[metadata.name] = metadata
+    if factory is None:
+        _BUILTIN_TOOL_REGISTRY.pop(metadata.name, None)
+        _TOOL_REGISTRY.pop(metadata.name, None)
+    else:
+        _BUILTIN_TOOL_REGISTRY[metadata.name] = factory
+        _TOOL_REGISTRY[metadata.name] = factory
+
+
+def _register_plugin_tool_metadata(module_name: str, metadata: ToolMetadata) -> None:
+    """Store one plugin tool in the per-module overlay cache."""
+    _reject_plugin_builtin_tool_collision(metadata.name)
+    _PLUGIN_TOOL_METADATA_BY_MODULE.setdefault(module_name, {})[metadata.name] = metadata
 
 
 def apply_authored_overrides(
@@ -688,13 +706,11 @@ def register_tool_with_metadata(
             factory=func,
         )
 
-        # Store in metadata registry
-        TOOL_METADATA[name] = metadata
-
-        # Also register in TOOL_REGISTRY for actual tool loading
-        _TOOL_REGISTRY[name] = func
         if func.__module__.startswith(_PLUGIN_MODULE_PREFIX):
-            _PLUGIN_TOOL_METADATA_BY_MODULE.setdefault(func.__module__, {})[name] = metadata
+            _register_plugin_tool_metadata(func.__module__, metadata)
+            return func
+
+        _register_builtin_tool_metadata(metadata)
 
         return func
 
@@ -719,13 +735,17 @@ def _capture_tool_registry_snapshot() -> _ToolRegistrySnapshot:
     return _ToolRegistrySnapshot(
         registry=_TOOL_REGISTRY.copy(),
         metadata=TOOL_METADATA.copy(),
+        builtin_registry=_BUILTIN_TOOL_REGISTRY.copy(),
+        builtin_metadata=_BUILTIN_TOOL_METADATA.copy(),
         module_import_cache=plugin_module._MODULE_IMPORT_CACHE.copy(),
         plugin_tool_metadata_by_module={
             module_name: registrations.copy() for module_name, registrations in _PLUGIN_TOOL_METADATA_BY_MODULE.items()
         },
-        plugin_module_names=frozenset(
-            module_name for module_name in sys.modules if module_name.startswith(_PLUGIN_MODULE_PREFIX)
-        ),
+        plugin_modules={
+            module_name: module
+            for module_name, module in sys.modules.items()
+            if module_name.startswith(_PLUGIN_MODULE_PREFIX)
+        },
     )
 
 
@@ -735,6 +755,10 @@ def _restore_tool_registry_snapshot(snapshot: _ToolRegistrySnapshot) -> None:
     _TOOL_REGISTRY.update(snapshot.registry)
     TOOL_METADATA.clear()
     TOOL_METADATA.update(snapshot.metadata)
+    _BUILTIN_TOOL_REGISTRY.clear()
+    _BUILTIN_TOOL_REGISTRY.update(snapshot.builtin_registry)
+    _BUILTIN_TOOL_METADATA.clear()
+    _BUILTIN_TOOL_METADATA.update(snapshot.builtin_metadata)
     plugin_module._MODULE_IMPORT_CACHE.clear()
     plugin_module._MODULE_IMPORT_CACHE.update(snapshot.module_import_cache)
     _PLUGIN_TOOL_METADATA_BY_MODULE.clear()
@@ -745,8 +769,9 @@ def _restore_tool_registry_snapshot(snapshot: _ToolRegistrySnapshot) -> None:
         },
     )
     for module_name in tuple(sys.modules):
-        if module_name.startswith(_PLUGIN_MODULE_PREFIX) and module_name not in snapshot.plugin_module_names:
+        if module_name.startswith(_PLUGIN_MODULE_PREFIX) and module_name not in snapshot.plugin_modules:
             sys.modules.pop(module_name, None)
+    sys.modules.update(snapshot.plugin_modules)
 
 
 @contextmanager

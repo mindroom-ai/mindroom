@@ -367,6 +367,24 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         privateWorkerScopeBackups: {},
       });
     } catch (error) {
+      if (error instanceof configService.ConfigValidationError) {
+        set({
+          diagnostics: [
+            {
+              kind: 'global',
+              message: 'Configuration validation failed',
+              blocking: true,
+            },
+            ...error.issues.map(issue => ({
+              kind: 'validation' as const,
+              issue,
+            })),
+          ],
+          isLoading: false,
+          syncStatus: 'error',
+        });
+        return;
+      }
       set({
         diagnostics: [
           {

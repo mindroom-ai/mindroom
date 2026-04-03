@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 import mindroom.tool_system.plugins as plugin_module
-from mindroom.config.main import Config
+import mindroom.tools  # noqa: F401
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
@@ -591,6 +592,188 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
         )
         bound = _bind_runtime_paths(follow_up_config, config_path)
         assert bound.get_agent("assistant").tool_names == ["toggled_plugin_tool"]
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tmp_path: Path) -> None:
+    """Reloading an enabled plugin should drop tool names it no longer registers."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='old_tool',\n"
+        "    display_name='Old Tool',\n"
+        "    description='Old plugin tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+
+    try:
+        assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo_plugin"]
+        assert "old_tool" in _TOOL_REGISTRY
+
+        tools_path.write_text(
+            "from agno.tools import Toolkit\n"
+            "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+            "\n"
+            "class DemoTool(Toolkit):\n"
+            "    def __init__(self) -> None:\n"
+            "        super().__init__(name='demo', tools=[])\n"
+            "\n"
+            "@register_tool_with_metadata(\n"
+            "    name='new_tool',\n"
+            "    display_name='New Tool',\n"
+            "    description='New plugin tool',\n"
+            "    category=ToolCategory.DEVELOPMENT,\n"
+            ")\n"
+            "def demo_plugin_tools():\n"
+            "    return DemoTool\n",
+            encoding="utf-8",
+        )
+        stat_result = tools_path.stat()
+        os.utime(tools_path, (stat_result.st_atime, stat_result.st_mtime + 1))
+
+        assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo_plugin"]
+        assert "old_tool" not in _TOOL_REGISTRY
+        assert "old_tool" not in TOOL_METADATA
+        assert "new_tool" in _TOOL_REGISTRY
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_load_plugins_rejects_built_in_tool_name_collisions(tmp_path: Path) -> None:
+    """Plugin tools must not shadow built-in tool registrations."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='calculator',\n"
+        "    display_name='Calculator Override',\n"
+        "    description='Should fail',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+
+    with pytest.raises(ConfigRuntimeValidationError, match="conflicts with built-in tool 'calculator'"):
+        _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+
+
+def test_load_plugins_rolls_back_runtime_tool_state_when_later_plugin_fails(tmp_path: Path) -> None:
+    """A later plugin import failure must not leave earlier plugin tools registered."""
+    good_root = tmp_path / "plugins" / "good"
+    bad_root = tmp_path / "plugins" / "bad"
+    good_root.mkdir(parents=True)
+    bad_root.mkdir(parents=True)
+    (good_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "good_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (bad_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "bad_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (good_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='good_plugin_tool',\n"
+        "    display_name='Good Plugin Tool',\n"
+        "    description='Should not leak after failure',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+    (bad_root / "tools.py").write_text("raise RuntimeError('boom')\n", encoding="utf-8")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    config = Config(plugins=["./plugins/good", "./plugins/bad"])
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+
+    try:
+        with pytest.raises(ValueError, match="Plugin tools module execution failed"):
+            load_plugins(config, runtime_paths)
+        assert "good_plugin_tool" not in _TOOL_REGISTRY
+        assert "good_plugin_tool" not in TOOL_METADATA
     finally:
         _TOOL_REGISTRY.clear()
         _TOOL_REGISTRY.update(original_registry)

@@ -58,6 +58,10 @@ export async function loadConfig(): Promise<RawConfig> {
   });
 
   if (!response.ok) {
+    const detail = await responseDetail(response);
+    if (response.status === 422 && isConfigValidationIssueList(detail)) {
+      throw new ConfigValidationError(detail);
+    }
     if (response.status === 401) {
       throw new Error('Authentication required. Please log in to access this instance.');
     }
