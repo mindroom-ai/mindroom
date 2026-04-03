@@ -77,7 +77,6 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     original_metadata = TOOL_METADATA.copy()
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
     try:
@@ -94,8 +93,6 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._TOOL_MODULE_CACHE.clear()
-        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
         set_plugin_skill_roots(original_plugin_roots)
@@ -152,7 +149,6 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
     original_metadata = TOOL_METADATA.copy()
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
     try:
@@ -170,8 +166,6 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._TOOL_MODULE_CACHE.clear()
-        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
         set_plugin_skill_roots(original_plugin_roots)
@@ -409,7 +403,6 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
 
     original_registry = _TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
     try:
@@ -449,8 +442,6 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
         _TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
-        plugin_module._TOOL_MODULE_CACHE.clear()
-        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
 
@@ -489,7 +480,6 @@ def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: P
 
     original_registry = _TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_plugin_roots = _get_plugin_skill_roots()
@@ -528,8 +518,6 @@ def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: P
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._TOOL_MODULE_CACHE.clear()
-        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
         set_plugin_skill_roots(original_plugin_roots)
@@ -569,7 +557,6 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
 
     original_registry = _TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_plugin_roots = _get_plugin_skill_roots()
@@ -611,8 +598,6 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._TOOL_MODULE_CACHE.clear()
-        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
         set_plugin_skill_roots(original_plugin_roots)
@@ -646,7 +631,6 @@ def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tm
     config_path.write_text("agents: {}", encoding="utf-8")
 
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
     try:
@@ -655,8 +639,6 @@ def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tm
     finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._TOOL_MODULE_CACHE.clear()
-        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
 
@@ -704,7 +686,6 @@ def test_load_plugins_discovers_hooks_from_tools_module_when_hooks_module_missin
     config = _bind_runtime_paths(Config(plugins=["./plugins/tools-hooks"]), config_path)
 
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     try:
         plugins = load_plugins(config, runtime_paths_for(config))
@@ -712,8 +693,6 @@ def test_load_plugins_discovers_hooks_from_tools_module_when_hooks_module_missin
     finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._TOOL_MODULE_CACHE.clear()
-        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
 
@@ -748,7 +727,6 @@ def test_load_plugins_discovers_hooks_from_dedicated_hooks_module(tmp_path: Path
     config = _bind_runtime_paths(Config(plugins=["./plugins/separate-hooks"]), config_path)
 
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     try:
         plugins = load_plugins(config, runtime_paths_for(config))
@@ -756,8 +734,6 @@ def test_load_plugins_discovers_hooks_from_dedicated_hooks_module(tmp_path: Path
     finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._TOOL_MODULE_CACHE.clear()
-        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
 
@@ -805,15 +781,12 @@ def test_load_plugins_reuses_same_module_when_tools_and_hooks_share_file(tmp_pat
     config = Config(plugins=[{"path": "./plugins/same-file"}])
 
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     try:
         plugins = load_plugins(config, runtime_paths)
     finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._TOOL_MODULE_CACHE.clear()
-        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
 

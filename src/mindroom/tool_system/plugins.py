@@ -79,7 +79,6 @@ class _ModuleCacheEntry:
 
 
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
-_TOOL_MODULE_CACHE: dict[Path, float] = {}
 _MODULE_IMPORT_CACHE: dict[Path, _ModuleCacheEntry] = {}
 
 
@@ -400,8 +399,6 @@ def _load_plugin_module(
 
     cached = _MODULE_IMPORT_CACHE.get(module_path)
     if cached is not None and cached.mtime == mtime:
-        if kind == "tools":
-            _TOOL_MODULE_CACHE[module_path] = mtime
         return cached.module
 
     module_name = _module_name(plugin_name, module_path)
@@ -437,8 +434,6 @@ def _load_plugin_module(
         raise ValueError(msg) from exc
 
     _MODULE_IMPORT_CACHE[module_path] = _ModuleCacheEntry(mtime=mtime, module=module)
-    if kind == "tools":
-        _TOOL_MODULE_CACHE[module_path] = mtime
     return module
 
 

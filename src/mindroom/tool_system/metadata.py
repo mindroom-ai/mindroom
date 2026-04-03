@@ -54,7 +54,6 @@ class ToolConfigOverrideError(ValueError):
 class _ToolRegistrySnapshot:
     registry: dict[str, Callable[[], type[Toolkit]]]
     metadata: dict[str, ToolMetadata]
-    tool_module_cache: dict[Path, float]
     module_import_cache: dict[Path, plugin_module._ModuleCacheEntry]
     plugin_tool_metadata_by_module: dict[str, dict[str, ToolMetadata]]
     plugin_module_names: frozenset[str]
@@ -720,7 +719,6 @@ def _capture_tool_registry_snapshot() -> _ToolRegistrySnapshot:
     return _ToolRegistrySnapshot(
         registry=_TOOL_REGISTRY.copy(),
         metadata=TOOL_METADATA.copy(),
-        tool_module_cache=plugin_module._TOOL_MODULE_CACHE.copy(),
         module_import_cache=plugin_module._MODULE_IMPORT_CACHE.copy(),
         plugin_tool_metadata_by_module={
             module_name: registrations.copy() for module_name, registrations in _PLUGIN_TOOL_METADATA_BY_MODULE.items()
@@ -737,8 +735,6 @@ def _restore_tool_registry_snapshot(snapshot: _ToolRegistrySnapshot) -> None:
     _TOOL_REGISTRY.update(snapshot.registry)
     TOOL_METADATA.clear()
     TOOL_METADATA.update(snapshot.metadata)
-    plugin_module._TOOL_MODULE_CACHE.clear()
-    plugin_module._TOOL_MODULE_CACHE.update(snapshot.tool_module_cache)
     plugin_module._MODULE_IMPORT_CACHE.clear()
     plugin_module._MODULE_IMPORT_CACHE.update(snapshot.module_import_cache)
     _PLUGIN_TOOL_METADATA_BY_MODULE.clear()

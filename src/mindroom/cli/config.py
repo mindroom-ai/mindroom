@@ -248,13 +248,6 @@ def _get_editor() -> str:
     return "vi"
 
 
-def _iter_validation_messages(
-    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
-) -> list[tuple[str, str]]:
-    """Return user-facing validation messages from one config validation exception."""
-    return [(location.replace(" → ", " -> "), message) for location, message in iter_config_validation_messages(exc)]
-
-
 def _format_validation_errors(
     exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
     config_path: Path | None = None,
@@ -265,8 +258,9 @@ def _format_validation_errors(
     else:
         console.print("[red]Error:[/red] Invalid configuration\n")
     console.print("Issues found:")
-    for location, message in _iter_validation_messages(exc):
-        console.print(f"  [red]*[/red] {location}: {message}")
+    for location, message in iter_config_validation_messages(exc):
+        display_location = location.replace(" → ", " -> ")
+        console.print(f"  [red]*[/red] {display_location}: {message}")
     console.print("\nFix these issues:")
     console.print("  [cyan]mindroom config edit[/cyan]      Edit your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Check config after editing")
