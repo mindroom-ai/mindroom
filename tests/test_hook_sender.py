@@ -10,7 +10,14 @@ import nio
 import pytest
 
 from mindroom.authorization import is_authorized_sender as real_is_authorized_sender
-from mindroom.bot import AgentBot, _DispatchPayload, _MessageContext, _PrecheckedEvent, _ResponseAction
+from mindroom.bot import (
+    AgentBot,
+    _DispatchPayload,
+    _MessageContext,
+    _PrecheckedEvent,
+    _PreparedDispatch,
+    _ResponseAction,
+)
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -19,12 +26,17 @@ from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_MESSAGE_RECEIVED,
+    AfterResponseContext,
     AgentLifecycleContext,
+    BeforeResponseContext,
     HookContext,
     HookMessageSender,
     HookRegistry,
+    MessageEnrichContext,
     MessageEnvelope,
     MessageReceivedContext,
+    ResponseDraft,
+    ResponseResult,
     hook,
 )
 from mindroom.hooks.execution import emit
@@ -108,6 +120,25 @@ def _message_received_context_with_sender(
     context = _message_received_context(tmp_path, plugin_name=plugin_name)
     context.message_sender = sender
     return context
+
+
+def _synthetic_envelope(*, agent_name: str = "code") -> MessageEnvelope:
+    """Return a first-hop synthetic envelope from a message:received relay."""
+    return MessageEnvelope(
+        source_event_id="$hook-event",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        requester_id="@user:localhost",
+        sender_id="@mindroom_router:localhost",
+        body="synthetic",
+        attachment_ids=(),
+        mentioned_agents=(agent_name,),
+        agent_name=agent_name,
+        source_kind="hook_dispatch",
+        hook_source="origin-plugin:message:received",
+        message_received_depth=1,
+    )
 
 
 def _hook_bot(tmp_path: Path) -> AgentBot:
@@ -237,6 +268,83 @@ async def test_hook_context_send_message_supports_multiple_hook_sends(tmp_path: 
             },
             False,
         ),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_kind", ["enrich", "before", "after"])
+async def test_downstream_hook_sends_advance_existing_message_received_depth(
+    tmp_path: Path,
+    context_kind: str,
+) -> None:
+    """Downstream hook contexts should advance an existing synthetic message:received chain."""
+    sent_messages: list[dict[str, object] | None] = []
+
+    async def sender(
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, object] | None,
+        *,
+        trigger_dispatch: bool = False,
+    ) -> str | None:
+        del room_id, body, thread_id, source_hook, trigger_dispatch
+        sent_messages.append(extra_content)
+        return "$event"
+
+    config = _config(tmp_path)
+    base_kwargs = {
+        "plugin_name": "downstream-plugin",
+        "settings": {},
+        "config": config,
+        "runtime_paths": runtime_paths_for(config),
+        "logger": get_logger("tests.hook_sender").bind(event_name="test"),
+        "correlation_id": "corr-depth",
+        "message_sender": sender,
+    }
+    envelope = _synthetic_envelope()
+    if context_kind == "enrich":
+        context = MessageEnrichContext(
+            event_name="message:enrich",
+            envelope=envelope,
+            target_entity_name="code",
+            target_member_names=None,
+            **base_kwargs,
+        )
+    elif context_kind == "before":
+        context = BeforeResponseContext(
+            event_name="message:before_response",
+            draft=ResponseDraft(
+                response_text="hello",
+                response_kind="ai",
+                tool_trace=None,
+                extra_content=None,
+                envelope=envelope,
+            ),
+            **base_kwargs,
+        )
+    else:
+        context = AfterResponseContext(
+            event_name="message:after_response",
+            result=ResponseResult(
+                response_text="hello",
+                response_event_id="$response",
+                delivery_kind="sent",
+                response_kind="ai",
+                envelope=envelope,
+            ),
+            **base_kwargs,
+        )
+
+    event_id = await context.send_message("!room:localhost", "follow-up", trigger_dispatch=True)
+
+    assert event_id == "$event"
+    assert sent_messages == [
+        {
+            "com.mindroom.original_sender": "@user:localhost",
+            HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
+        },
     ]
 
 
@@ -419,6 +527,28 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
     assert dispatch.envelope.message_received_depth == 1
     assert dispatch.envelope.mentioned_agents == ("code",)
     assert hook_calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_message_enrichment_preserves_hook_chain_metadata(tmp_path: Path) -> None:
+    """message:enrich setup should keep hook provenance and synthetic depth intact."""
+    bot = _agent_bot(tmp_path)
+    dispatch = _PreparedDispatch(
+        requester_user_id="@user:localhost",
+        context=_dispatch_context(bot),
+        correlation_id="corr-enrich",
+        envelope=_synthetic_envelope(),
+    )
+
+    prepared = await bot._apply_message_enrichment(
+        dispatch,
+        _DispatchPayload(prompt="hello"),
+        target_entity_name="code",
+        target_member_names=None,
+    )
+
+    assert prepared.envelope.hook_source == "origin-plugin:message:received"
+    assert prepared.envelope.message_received_depth == 1
 
 
 @pytest.mark.asyncio

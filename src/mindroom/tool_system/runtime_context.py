@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks.sender import HookMessageSender
+    from mindroom.hooks.types import HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -52,6 +53,9 @@ class ToolRuntimeContext:
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty)
     correlation_id: str | None = None
     hook_message_sender: HookMessageSender | None = None
+    room_state_querier: HookRoomStateQuerier | None = None
+    room_state_putter: HookRoomStatePutter | None = None
+    message_received_depth: int = 0
 
 
 _TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(
@@ -165,13 +169,14 @@ async def emit_custom_event(
         logger=get_logger("mindroom.hooks.tools").bind(event_name=event_name),
         correlation_id=correlation_id,
         message_sender=context.hook_message_sender,
-        room_state_querier=build_hook_room_state_querier(context.client),
-        room_state_putter=build_hook_room_state_putter(context.client),
+        room_state_querier=context.room_state_querier or build_hook_room_state_querier(context.client),
+        room_state_putter=context.room_state_putter or build_hook_room_state_putter(context.client),
         payload=payload,
         source_plugin=plugin_name,
         room_id=context.room_id,
         thread_id=context.resolved_thread_id or context.thread_id,
         sender_id=context.requester_id,
+        message_received_depth=context.message_received_depth,
     )
     await emit(context.hook_registry, event_name, hook_context)
 

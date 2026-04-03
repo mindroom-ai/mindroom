@@ -63,3 +63,40 @@ def build_hook_room_state_putter(
         return not isinstance(resp, nio.RoomPutStateError)
 
     return _put
+
+
+def chain_hook_room_state_queriers(
+    primary: HookRoomStateQuerier | None,
+    fallback: HookRoomStateQuerier | None,
+) -> HookRoomStateQuerier | None:
+    """Return a room-state querier that falls back on Matrix error responses."""
+    if primary is None:
+        return fallback
+    if fallback is None:
+        return primary
+
+    async def _query(room_id: str, event_type: str, state_key: str | None) -> dict[str, Any] | None:
+        result = await primary(room_id, event_type, state_key)
+        if result is not None:
+            return result
+        return await fallback(room_id, event_type, state_key)
+
+    return _query
+
+
+def chain_hook_room_state_putters(
+    primary: HookRoomStatePutter | None,
+    fallback: HookRoomStatePutter | None,
+) -> HookRoomStatePutter | None:
+    """Return a room-state putter that falls back on Matrix error responses."""
+    if primary is None:
+        return fallback
+    if fallback is None:
+        return primary
+
+    async def _put(room_id: str, event_type: str, state_key: str, content: dict[str, Any]) -> bool:
+        if await primary(room_id, event_type, state_key, content):
+            return True
+        return await fallback(room_id, event_type, state_key, content)
+
+    return _put

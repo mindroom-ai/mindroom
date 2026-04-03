@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 from agno.models.ollama import Ollama
 from agno.tools import Toolkit
@@ -19,6 +20,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_MESSAGE_RECEIVED,
@@ -34,6 +36,7 @@ from mindroom.hooks import (
 from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, emit_custom_event, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
@@ -147,6 +150,10 @@ def _tool_runtime_context(
     *,
     agent_name: str = "code",
     hook_message_sender: object | None = None,
+    room_state_querier: object | None = None,
+    room_state_putter: object | None = None,
+    message_received_depth: int = 0,
+    hook_registry: HookRegistry | None = None,
 ) -> ToolRuntimeContext:
     config = _config(tmp_path)
     return ToolRuntimeContext(
@@ -159,7 +166,11 @@ def _tool_runtime_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         correlation_id="corr-runtime",
+        hook_registry=hook_registry or HookRegistry.empty(),
         hook_message_sender=hook_message_sender,
+        room_state_querier=room_state_querier,
+        room_state_putter=room_state_putter,
+        message_received_depth=message_received_depth,
     )
 
 
@@ -655,6 +666,61 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_tool_hook_context_send_message_advances_existing_message_received_depth(tmp_path: Path) -> None:
+    """Tool hook sends should keep advancing an existing synthetic message:received chain."""
+    sent: list[dict[str, object] | None] = []
+
+    async def hook_message_sender(
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, object] | None,
+        *,
+        trigger_dispatch: bool = False,
+    ) -> str | None:
+        del room_id, body, thread_id, source_hook, trigger_dispatch
+        sent.append(extra_content)
+        return "$dispatch-event"
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        event_id = await ctx.send_message("!room:localhost", "dispatch", trigger_dispatch=True)
+        assert event_id == "$dispatch-event"
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        execution_identity=_execution_identity(),
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> dict[str, object]:
+        return {"echo": kwargs["path"]}
+
+    with (
+        tool_runtime_context(
+            _tool_runtime_context(
+                tmp_path,
+                hook_message_sender=hook_message_sender,
+                message_received_depth=1,
+            ),
+        ),
+        tool_execution_identity(_execution_identity()),
+    ):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == {"echo": "notes.txt"}
+    assert sent == [
+        {
+            "com.mindroom.original_sender": "@user:localhost",
+            HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path: Path) -> None:
     """Tool hook contexts should expose live room-state helpers from the active runtime client."""
     sent: list[tuple[str, str, str | None, str, dict[str, object] | None, bool]] = []
@@ -723,6 +789,76 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
             True,
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_router(tmp_path: Path) -> None:
+    """Bot-built tool runtime contexts should use current-bot-first room-state helpers with router fallback."""
+    seen: list[tuple[dict[str, object] | None, bool]] = []
+    config = _config(tmp_path)
+    bot = _agent_bot(tmp_path, config=config)
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.room_get_state_event.return_value = nio.RoomGetStateEventError(message="forbidden")
+    bot.client.room_put_state.return_value = nio.RoomPutStateError(message="forbidden")
+    router_bot = _agent_bot(tmp_path, config=config, agent_name="router")
+    router_bot.client = AsyncMock(spec=nio.AsyncClient)
+    router_bot.client.rooms = {}
+    router_bot.client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Router Lobby"})
+    router_bot.client.room_put_state.return_value = object()
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.agent_bots = {"router": router_bot, "code": bot}
+    bot.orchestrator = orchestrator
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        query_result = await ctx.query_room_state("!room:localhost", "m.room.name", "")
+        put_result = await ctx.put_room_state(
+            "!room:localhost",
+            "com.mindroom.thread.tags",
+            "$resolved-thread",
+            {"tags": {"queued": True}},
+        )
+        seen.append((query_result, put_result))
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        execution_identity=_execution_identity(),
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> dict[str, object]:
+        return {"echo": kwargs["path"]}
+
+    runtime_context = bot._build_tool_runtime_context(
+        room_id="!room:localhost",
+        thread_id="$thread",
+        reply_to_event_id=None,
+        user_id="@user:localhost",
+    )
+    assert runtime_context is not None
+
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == {"echo": "notes.txt"}
+    assert seen == [({"name": "Router Lobby"}, True)]
+    bot.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
+    bot.client.room_put_state.assert_awaited_once_with(
+        "!room:localhost",
+        "com.mindroom.thread.tags",
+        {"tags": {"queued": True}},
+        state_key="$resolved-thread",
+    )
+    router_bot.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
+    router_bot.client.room_put_state.assert_awaited_once_with(
+        "!room:localhost",
+        "com.mindroom.thread.tags",
+        {"tags": {"queued": True}},
+        state_key="$resolved-thread",
+    )
 
 
 @pytest.mark.asyncio
@@ -1061,6 +1197,72 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
         _TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
+
+
+@pytest.mark.asyncio
+async def test_emit_custom_event_preserves_message_received_depth_and_bound_room_state_accessors(
+    tmp_path: Path,
+) -> None:
+    """Tool-emitted custom events should preserve chain depth and use bound room-state helpers."""
+    custom_event_name = "demo:tool_custom_event"
+    sent: list[dict[str, object] | None] = []
+    seen: list[tuple[dict[str, object] | None, bool]] = []
+    room_state_querier = AsyncMock(return_value={"name": "Lobby"})
+    room_state_putter = AsyncMock(return_value=True)
+
+    async def hook_message_sender(
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, object] | None,
+        *,
+        trigger_dispatch: bool = False,
+    ) -> str | None:
+        del room_id, body, thread_id, source_hook, trigger_dispatch
+        sent.append(extra_content)
+        return "$dispatch-event"
+
+    @hook(custom_event_name)
+    async def on_custom_event(ctx: CustomEventContext) -> None:
+        query_result = await ctx.query_room_state("!room:localhost", "m.room.name", "")
+        put_result = await ctx.put_room_state(
+            "!room:localhost",
+            "com.mindroom.thread.tags",
+            "$resolved-thread",
+            {"tags": {"queued": True}},
+        )
+        seen.append((query_result, put_result))
+        event_id = await ctx.send_message("!room:localhost", "dispatch", trigger_dispatch=True)
+        assert event_id == "$dispatch-event"
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [on_custom_event])])
+    runtime_context = _tool_runtime_context(
+        tmp_path,
+        hook_message_sender=hook_message_sender,
+        room_state_querier=room_state_querier,
+        room_state_putter=room_state_putter,
+        message_received_depth=1,
+        hook_registry=registry,
+    )
+
+    with tool_runtime_context(runtime_context):
+        await emit_custom_event("tool-policy", custom_event_name, {"item_id": "123"})
+
+    assert seen == [({"name": "Lobby"}, True)]
+    room_state_querier.assert_awaited_once_with("!room:localhost", "m.room.name", "")
+    room_state_putter.assert_awaited_once_with(
+        "!room:localhost",
+        "com.mindroom.thread.tags",
+        "$resolved-thread",
+        {"tags": {"queued": True}},
+    )
+    assert sent == [
+        {
+            "com.mindroom.original_sender": "@user:localhost",
+            HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
+        },
+    ]
 
 
 @pytest.mark.asyncio

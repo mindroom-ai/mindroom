@@ -139,12 +139,17 @@ def _build_context_kwargs(  # noqa: C901
         "runtime_paths": runtime_context.runtime_paths if runtime_context is not None else runtime_paths,
         "correlation_id": correlation_id,
         "message_sender": runtime_context.hook_message_sender if runtime_context is not None else None,
-        "room_state_querier": build_hook_room_state_querier(runtime_context.client)
-        if runtime_context is not None
-        else None,
-        "room_state_putter": build_hook_room_state_putter(runtime_context.client)
-        if runtime_context is not None
-        else None,
+        "room_state_querier": (
+            runtime_context.room_state_querier or build_hook_room_state_querier(runtime_context.client)
+            if runtime_context is not None
+            else None
+        ),
+        "room_state_putter": (
+            runtime_context.room_state_putter or build_hook_room_state_putter(runtime_context.client)
+            if runtime_context is not None
+            else None
+        ),
+        "message_received_depth": runtime_context.message_received_depth if runtime_context is not None else 0,
     }
 
 

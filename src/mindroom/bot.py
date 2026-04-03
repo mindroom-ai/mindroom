@@ -170,6 +170,7 @@ from .constants import (
 from .error_handling import get_user_friendly_error_message
 from .history.runtime import create_scope_session_storage, open_scope_storage
 from .history.types import HistoryScope
+from .hooks.state import chain_hook_room_state_putters, chain_hook_room_state_queriers
 from .knowledge.utils import (
     MultiKnowledgeVectorDb,
     ensure_request_knowledge_managers,
@@ -569,43 +570,6 @@ def _hook_ingress_policy(envelope: MessageEnvelope) -> _HookIngressPolicy:
     )
 
 
-def _fallback_room_state_querier(
-    primary: HookRoomStateQuerier | None,
-    fallback: HookRoomStateQuerier | None,
-) -> HookRoomStateQuerier | None:
-    """Return a self-first room-state querier with optional fallback."""
-    if primary is None:
-        return fallback
-    if fallback is None:
-        return primary
-
-    async def _query(room_id: str, event_type: str, state_key: str | None) -> dict[str, Any] | None:
-        result = await primary(room_id, event_type, state_key)
-        if result is not None:
-            return result
-        return await fallback(room_id, event_type, state_key)
-
-    return _query
-
-
-def _fallback_room_state_putter(
-    primary: HookRoomStatePutter | None,
-    fallback: HookRoomStatePutter | None,
-) -> HookRoomStatePutter | None:
-    """Return a self-first room-state putter with optional fallback."""
-    if primary is None:
-        return fallback
-    if fallback is None:
-        return primary
-
-    async def _put(room_id: str, event_type: str, state_key: str, content: dict[str, Any]) -> bool:
-        if await primary(room_id, event_type, state_key, content):
-            return True
-        return await fallback(room_id, event_type, state_key, content)
-
-    return _put
-
-
 def _merge_response_extra_content(
     extra_content: dict[str, Any] | None,
     attachment_ids: list[str] | None,
@@ -758,7 +722,7 @@ class AgentBot:
         fallback = None
         if self.agent_name != ROUTER_AGENT_NAME and self.orchestrator is not None:
             fallback = self.orchestrator._hook_room_state_querier()
-        return _fallback_room_state_querier(primary, fallback)
+        return chain_hook_room_state_queriers(primary, fallback)
 
     def _hook_room_state_putter(self) -> HookRoomStatePutter | None:
         """Return the room-state putter bound into hook contexts for this bot."""
@@ -766,7 +730,7 @@ class AgentBot:
         fallback = None
         if self.agent_name != ROUTER_AGENT_NAME and self.orchestrator is not None:
             fallback = self.orchestrator._hook_room_state_putter()
-        return _fallback_room_state_putter(primary, fallback)
+        return chain_hook_room_state_putters(primary, fallback)
 
     def _build_message_envelope(
         self,
@@ -2941,6 +2905,7 @@ class AgentBot:
         attachment_ids: list[str] | None = None,
         correlation_id: str | None = None,
         resolved_thread_id: str | None = None,
+        source_envelope: MessageEnvelope | None = None,
     ) -> ToolRuntimeContext | None:
         """Build shared runtime context for all tool calls."""
         if self.client is None:
@@ -2967,6 +2932,9 @@ class AgentBot:
             hook_registry=self.hook_registry,
             correlation_id=correlation_id,
             hook_message_sender=self._hook_message_sender(),
+            room_state_querier=self._hook_room_state_querier(),
+            room_state_putter=self._hook_room_state_putter(),
+            message_received_depth=source_envelope.message_received_depth if source_envelope is not None else 0,
         )
 
     def _resolve_runtime_model_for_room(self, room_id: str) -> str:
@@ -3122,6 +3090,7 @@ class AgentBot:
         active_model_name: str | None = None,
         attachment_ids: list[str] | None = None,
         correlation_id: str | None = None,
+        source_envelope: MessageEnvelope | None = None,
     ) -> _PreparedResponseRuntime:
         """Derive prompt metadata and tool runtime from one canonical response target."""
         return _PreparedResponseRuntime(
@@ -3144,6 +3113,7 @@ class AgentBot:
                 attachment_ids=attachment_ids,
                 correlation_id=correlation_id,
                 resolved_thread_id=response_target.resolved_thread_id,
+                source_envelope=source_envelope,
             ),
             execution_identity=self._build_tool_execution_identity(
                 room_id=room_id,
@@ -3235,6 +3205,8 @@ class AgentBot:
             mentioned_agents=dispatch.envelope.mentioned_agents,
             agent_name=target_entity_name,
             source_kind=dispatch.envelope.source_kind,
+            hook_source=dispatch.envelope.hook_source,
+            message_received_depth=dispatch.envelope.message_received_depth,
         )
         model_prompt: str | None = None
         strip_transient_enrichment_after_run = False
@@ -3433,6 +3405,7 @@ class AgentBot:
             active_model_name=model_name,
             attachment_ids=payload.attachment_ids,
             correlation_id=resolved_correlation_id,
+            source_envelope=response_envelope,
         )
         model_message = runtime.model_prompt
         resolved_response_envelope = response_envelope or self._default_response_envelope(
@@ -3854,6 +3827,7 @@ class AgentBot:
             active_model_name=active_model_name,
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
+            source_envelope=response_envelope,
         )
         response_thread_id = effective_response_target.delivery_thread_id
         session_id = effective_response_target.session_id
@@ -4366,6 +4340,7 @@ class AgentBot:
             active_model_name=self._resolve_runtime_model_for_room(room_id),
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
+            source_envelope=response_envelope,
         )
         response_thread_id = effective_response_target.delivery_thread_id
         session_id = effective_response_target.session_id

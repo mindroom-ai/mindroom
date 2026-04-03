@@ -384,6 +384,7 @@ class CustomEventContext(HookContext):
     room_id: str | None
     thread_id: str | None
     sender_id: str | None
+    message_received_depth: int = 0
 
 
 @dataclass(slots=True)
@@ -409,6 +410,7 @@ class ToolBeforeCallContext:
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
+    message_received_depth: int = 0
 
     def decline(self, reason: str) -> None:
         """Mark the tool call as declined with one model-facing reason."""
@@ -502,6 +504,7 @@ class ToolAfterCallContext:
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
+    message_received_depth: int = 0
 
     @property
     def state_root(self) -> Path:
@@ -595,9 +598,16 @@ def _message_received_depth_for_hook_send(context: object) -> int:
     if isinstance(context, MessageReceivedContext):
         return context.envelope.message_received_depth + 1
     if isinstance(context, MessageEnrichContext):
-        return context.envelope.message_received_depth
+        return _next_message_received_depth(context.envelope.message_received_depth)
     if isinstance(context, BeforeResponseContext):
-        return context.draft.envelope.message_received_depth
+        return _next_message_received_depth(context.draft.envelope.message_received_depth)
     if isinstance(context, AfterResponseContext):
-        return context.result.envelope.message_received_depth
+        return _next_message_received_depth(context.result.envelope.message_received_depth)
+    if isinstance(context, CustomEventContext | ToolBeforeCallContext | ToolAfterCallContext):
+        return _next_message_received_depth(context.message_received_depth)
     return 0
+
+
+def _next_message_received_depth(current_depth: int) -> int:
+    """Return the next synthetic-chain depth after one downstream hook hop."""
+    return current_depth + 1 if current_depth > 0 else 0
