@@ -27,6 +27,11 @@ _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+def _is_valid_plugin_name(name: str) -> bool:
+    """Return whether one manifest plugin name is safe for hook provenance tags."""
+    return ":" not in name
+
+
 @dataclass(frozen=True)
 class _PluginManifest:
     """Validated plugin manifest data."""
@@ -273,6 +278,14 @@ def _parse_manifest(path: Path) -> _PluginManifest | None:  # noqa: PLR0911
     if not isinstance(name, str) or not name.strip():
         logger.warning("Plugin manifest missing name", path=str(path))
         return None
+    normalized_name = name.strip()
+    if not _is_valid_plugin_name(normalized_name):
+        logger.warning(
+            "Plugin manifest name must not contain ':'",
+            path=str(path),
+            plugin_name=normalized_name,
+        )
+        return None
 
     tools_module = data.get("tools_module")
     if tools_module is not None and not isinstance(tools_module, str):
@@ -292,7 +305,7 @@ def _parse_manifest(path: Path) -> _PluginManifest | None:  # noqa: PLR0911
         return None
 
     return _PluginManifest(
-        name=name.strip(),
+        name=normalized_name,
         tools_module=tools_module,
         hooks_module=hooks_module,
         skills=raw_skills,
