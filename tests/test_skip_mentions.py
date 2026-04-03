@@ -143,7 +143,7 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
     )
 
     # Extract context - should not detect mentions
-    context = await AgentBot._extract_message_context(bot, room, event_with_skip, full_history=True)
+    context = await AgentBot._extract_message_context_impl(bot, room, event_with_skip, full_history=True)
 
     # Verify mentions were ignored
     assert context.am_i_mentioned is False
@@ -170,7 +170,7 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
     with patch("mindroom.bot.check_agent_mentioned") as mock_check:
         mock_check.return_value = (["email_agent"], True, False)
 
-        context = await AgentBot._extract_message_context(bot, room, event_without_skip, full_history=True)
+        context = await AgentBot._extract_message_context_impl(bot, room, event_without_skip, full_history=True)
 
         # Verify mentions were detected
         assert context.am_i_mentioned is True
@@ -212,7 +212,7 @@ async def test_extract_context_without_skip_metadata_detects_tool_mentions(tmp_p
         },
     )
 
-    context = await AgentBot._extract_message_context(bot, room, event, full_history=True)
+    context = await AgentBot._extract_message_context_impl(bot, room, event, full_history=True)
 
     assert context.am_i_mentioned is True
     assert [agent.full_id for agent in context.mentioned_agents] == [bot.matrix_id.full_id]

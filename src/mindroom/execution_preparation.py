@@ -26,8 +26,13 @@ from mindroom.history.runtime import (
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
-    ResolvedVisibleMessage,
+    VisibleMessageLike,
     replace_visible_message,
+    visible_message_body,
+    visible_message_content,
+    visible_message_event_id,
+    visible_message_sender,
+    visible_message_stream_status,
 )
 from mindroom.streaming import clean_partial_reply_text, is_in_progress_message, is_interrupted_partial_reply
 
@@ -87,7 +92,7 @@ class PreparedExecutionContext:
 
 def build_prompt_with_thread_history(
     prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    thread_history: Sequence[VisibleMessageLike] | None = None,
     *,
     header: str = "Previous conversation in this thread:",
     prompt_intro: str = "Current message:\n",
@@ -101,12 +106,12 @@ def build_prompt_with_thread_history(
     messages = thread_history[-max_messages:] if max_messages is not None else thread_history
     context_lines: list[str] = []
     for msg in messages:
-        body = msg.body
+        body = visible_message_body(msg)
         if not isinstance(body, str) or not body:
             continue
         if max_message_length is not None and len(body) >= max_message_length:
             continue
-        sender = msg.sender
+        sender = visible_message_sender(msg)
         if not isinstance(sender, str) or not sender:
             if missing_sender_label is None:
                 continue
@@ -119,12 +124,12 @@ def build_prompt_with_thread_history(
 
 
 def _classify_partial_reply(
-    msg: ResolvedVisibleMessage,
+    msg: VisibleMessageLike,
     *,
     active_event_ids: Collection[str],
 ) -> _PartialReplyKind | None:
     """Classify a self-authored partial reply from persisted stream metadata first."""
-    status = msg.stream_status
+    status = visible_message_stream_status(msg)
     if status == STREAM_STATUS_COMPLETED:
         return None
 
@@ -132,12 +137,12 @@ def _classify_partial_reply(
     if status in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR}:
         partial_kind = _PartialReplyKind.INTERRUPTED
     elif status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
-        event_id = msg.event_id
+        event_id = visible_message_event_id(msg)
         if isinstance(event_id, str):
             return _PartialReplyKind.IN_PROGRESS if event_id in active_event_ids else _PartialReplyKind.INTERRUPTED
         partial_kind = _PartialReplyKind.IN_PROGRESS
     else:
-        body = msg.body or ""
+        body = visible_message_body(msg) or ""
         if not isinstance(body, str):
             return None
         if is_interrupted_partial_reply(body):
@@ -165,14 +170,14 @@ def _build_unseen_messages_header(partial_reply_kinds: set[_PartialReplyKind]) -
 
 
 def _get_unseen_event_ids_for_metadata(
-    unseen_messages: list[ResolvedVisibleMessage],
+    unseen_messages: list[VisibleMessageLike],
     *,
     in_progress_event_ids: set[str],
 ) -> list[str]:
     """Return unseen event IDs that should be persisted as consumed by this run."""
     event_ids: list[str] = []
     for msg in unseen_messages:
-        event_id = msg.event_id
+        event_id = visible_message_event_id(msg)
         if not isinstance(event_id, str):
             continue
         if event_id in in_progress_event_ids:
@@ -182,21 +187,21 @@ def _get_unseen_event_ids_for_metadata(
 
 
 def _get_unseen_messages_for_sender(
-    thread_history: Sequence[ResolvedVisibleMessage],
+    thread_history: Sequence[VisibleMessageLike],
     *,
     sender_id: str | None,
     seen_event_ids: set[str],
     current_event_id: str | None,
     active_event_ids: Collection[str],
-) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind], set[str]]:
+) -> tuple[list[VisibleMessageLike], set[_PartialReplyKind], set[str]]:
     """Filter thread_history to unseen messages for one Matrix sender."""
-    unseen: list[ResolvedVisibleMessage] = []
+    unseen: list[VisibleMessageLike] = []
     partial_reply_kinds: set[_PartialReplyKind] = set()
     in_progress_event_ids: set[str] = set()
     for msg in thread_history:
-        event_id = msg.event_id
-        sender = msg.sender
-        content = msg.content
+        event_id = visible_message_event_id(msg)
+        sender = visible_message_sender(msg)
+        content = visible_message_content(msg)
         if event_id and event_id in seen_event_ids:
             continue
         if current_event_id and event_id == current_event_id:
@@ -210,7 +215,7 @@ def _get_unseen_messages_for_sender(
             )
             if partial_kind is None:
                 continue
-            body = msg.body
+            body = visible_message_body(msg)
             if not isinstance(body, str):
                 continue
             cleaned_body = _clean_partial_reply_body(body)
@@ -233,7 +238,7 @@ def _get_unseen_messages_for_sender(
 
 def build_prompt_with_unseen_thread_context(
     prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     *,
     seen_event_ids: set[str],
     current_event_id: str | None,
@@ -264,7 +269,7 @@ def build_prompt_with_unseen_thread_context(
 
 def _build_prompt_with_unseen(
     prompt: str,
-    unseen_messages: list[ResolvedVisibleMessage],
+    unseen_messages: list[VisibleMessageLike],
     *,
     partial_reply_kinds: set[_PartialReplyKind] | None,
 ) -> str:
@@ -290,7 +295,7 @@ async def _prepare_execution_context_common(
     scope_context: ScopeSessionContext | None,
     prompt: str,
     fallback_prompt: str | None,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     reply_to_event_id: str | None,
     active_event_ids: Collection[str],
     response_sender_id: str | None,
@@ -357,7 +362,7 @@ async def prepare_agent_execution_context(
     agent: Agent,
     agent_name: str,
     prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     runtime_paths: RuntimePaths,
     config: Config,
     room_id: str | None,
@@ -428,7 +433,7 @@ async def prepare_bound_team_execution_context(
     team: Team,
     prompt: str,
     fallback_prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    thread_history: Sequence[VisibleMessageLike] | None,
     runtime_paths: RuntimePaths,
     config: Config,
     team_name: str | None,

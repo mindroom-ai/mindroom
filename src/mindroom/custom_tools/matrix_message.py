@@ -17,7 +17,7 @@ from mindroom.custom_tools.attachment_helpers import (
     room_access_allowed,
 )
 from mindroom.custom_tools.attachments import send_context_attachments
-from mindroom.custom_tools.matrix_helpers import check_rate_limit
+from mindroom.custom_tools.matrix_helpers import check_rate_limit, message_preview
 from mindroom.interactive import (
     add_reaction_buttons,
     clear_interactive_question,
@@ -27,13 +27,18 @@ from mindroom.interactive import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
-    ResolvedVisibleMessage,
     RoomThreadsPageError,
+    VisibleMessageLike,
     edit_message,
     fetch_thread_history,
     get_latest_thread_event_id_if_needed,
     get_room_threads_page,
     send_message,
+    visible_message_body,
+    visible_message_event_id,
+    visible_message_sender,
+    visible_message_to_dict,
+    visible_message_visible_event_id,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
@@ -399,62 +404,17 @@ class MatrixMessageTools(Toolkit):
             messages=resolved,
         )
 
-    @staticmethod
-    def _message_preview(body: object, max_length: int = 120) -> str:
-        if not isinstance(body, str):
-            return ""
-        compact = " ".join(body.split())
-        if len(compact) <= max_length:
-            return compact
-        return f"{compact[: max_length - 3].rstrip()}..."
-
-    @staticmethod
-    def _message_to_dict(message: ResolvedVisibleMessage | dict[str, object]) -> dict[str, object]:
-        if isinstance(message, ResolvedVisibleMessage):
-            return message.to_dict()
-        return {key: value for key, value in message.items() if isinstance(key, str)}
-
-    @classmethod
-    def _message_event_id(cls, message: ResolvedVisibleMessage | dict[str, object]) -> str | None:
-        if isinstance(message, ResolvedVisibleMessage):
-            return message.event_id
-        event_id = cls._message_to_dict(message).get("event_id")
-        return event_id if isinstance(event_id, str) else None
-
-    @classmethod
-    def _message_sender(cls, message: ResolvedVisibleMessage | dict[str, object]) -> str | None:
-        if isinstance(message, ResolvedVisibleMessage):
-            return message.sender
-        sender = cls._message_to_dict(message).get("sender")
-        return sender if isinstance(sender, str) else None
-
-    @classmethod
-    def _message_body(cls, message: ResolvedVisibleMessage | dict[str, object]) -> str | None:
-        if isinstance(message, ResolvedVisibleMessage):
-            return message.body
-        body = cls._message_to_dict(message).get("body")
-        return body if isinstance(body, str) else None
-
-    @classmethod
-    def _message_visible_event_id(cls, message: ResolvedVisibleMessage | dict[str, object]) -> str | None:
-        if isinstance(message, ResolvedVisibleMessage):
-            return message.visible_event_id
-        latest_event_id = cls._message_to_dict(message).get("latest_event_id")
-        if isinstance(latest_event_id, str):
-            return latest_event_id
-        return cls._message_event_id(message)
-
     def _build_edit_options(
         self,
         context: ToolRuntimeContext,
         *,
-        messages: Sequence[ResolvedVisibleMessage | dict[str, object]],
+        messages: Sequence[VisibleMessageLike],
     ) -> list[dict[str, object]]:
         current_user_id = context.client.user_id
         options: list[dict[str, object]] = []
         for message in reversed(messages):
-            event_id = self._message_event_id(message)
-            sender = self._message_sender(message)
+            event_id = visible_message_event_id(message)
+            sender = visible_message_sender(message)
             if not isinstance(event_id, str) or not isinstance(sender, str):
                 continue
             can_edit = current_user_id is not None and sender == current_user_id
@@ -462,7 +422,7 @@ class MatrixMessageTools(Toolkit):
                 "event_id": event_id,
                 "sender": sender,
                 "can_edit": can_edit,
-                "body_preview": self._message_preview(self._message_body(message)),
+                "body_preview": message_preview(visible_message_body(message)),
             }
             if can_edit:
                 option["edit_action"] = {"action": "edit", "target": event_id}
@@ -574,14 +534,14 @@ class MatrixMessageTools(Toolkit):
         elif isinstance(event, self._VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
             replacement_body = self._bundled_replacement_body(source)
             if replacement_body is not None:
-                body_preview = self._message_preview(replacement_body)
+                body_preview = message_preview(replacement_body)
             else:
                 resolved_message = await extract_and_resolve_message(event, context.client)
-                body_preview = self._message_preview(resolved_message.get("body"))
+                body_preview = message_preview(resolved_message.get("body"))
         else:
             content = source.get("content", {})
             body = content.get("body") if isinstance(content, dict) else None
-            body_preview = self._message_preview(body)
+            body_preview = message_preview(body)
 
         payload = {
             "thread_id": event_id,
@@ -654,7 +614,7 @@ class MatrixMessageTools(Toolkit):
             room_id=room_id,
             thread_id=thread_id,
             limit=read_limit,
-            messages=[self._message_to_dict(message) for message in recent_messages],
+            messages=[visible_message_to_dict(message) for message in recent_messages],
             edit_options=self._build_edit_options(context, messages=recent_messages),
         )
 
@@ -700,7 +660,7 @@ class MatrixMessageTools(Toolkit):
         if thread_id is not None:
             thread_messages = await fetch_thread_history(context.client, room_id, thread_id)
             if thread_messages:
-                latest_thread_event_id = self._message_visible_event_id(thread_messages[-1])
+                latest_thread_event_id = visible_message_visible_event_id(thread_messages[-1])
             if latest_thread_event_id is None:
                 latest_thread_event_id = target
 

@@ -29,6 +29,7 @@ from mindroom.execution_preparation import (
 )
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
+    VisibleMessageLike,
     _stream_status_from_content,
     fetch_thread_history,
 )
@@ -63,7 +64,7 @@ def _get_unseen_messages(
     seen_event_ids: set[str],
     current_event_id: str | None,
     active_event_ids: set[str],
-) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind], set[str]]:
+) -> tuple[list[VisibleMessageLike], set[_PartialReplyKind], set[str]]:
     response_sender_id = config.get_ids(runtime_paths).get(agent_name)
     response_sender = response_sender_id.full_id if response_sender_id is not None else None
     return _get_unseen_messages_for_sender(

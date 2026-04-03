@@ -81,7 +81,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client import VisibleMessageLike
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -644,7 +644,7 @@ async def _prepare_agent_and_prompt(
     config: Config,
     session_id: str | None = None,
     scope_context: ScopeSessionContext | None = None,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    thread_history: Sequence[VisibleMessageLike] | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
     include_interactive_questions: bool = True,
@@ -735,7 +735,7 @@ async def ai_response(  # noqa: C901
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    thread_history: Sequence[VisibleMessageLike] | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
@@ -1010,7 +1010,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    thread_history: Sequence[VisibleMessageLike] | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
     user_id: str | None = None,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -39,7 +39,6 @@ from mindroom.bot import (
     _PreparedDispatch,
     _ResponseAction,
     _ResponseDispatchResult,
-    _SuppressedPlaceholderCleanupError,
 )
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -72,6 +71,8 @@ from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.matrix.client import (
     PermanentMatrixStartupError,
     ResolvedVisibleMessage,
+    ThreadHistoryResult,
+    _ThreadHistoryFastPathUnavailableError,
 )
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
@@ -90,7 +91,6 @@ from mindroom.orchestrator import (
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
-from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import (
     TEST_PASSWORD,
@@ -104,17 +104,20 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _make_matrix_client_mock() -> AsyncMock:
+    """Return a minimal Matrix client mock for bot tests."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+    client.user_id = "@mindroom_test:example.com"
+    return client
+
+
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     """Return a runtime-bound config for bot tests."""
     return bind_runtime_paths(
         config,
         test_runtime_paths(runtime_root),
     )
-
-
-@contextmanager
-def _open_storage(storage: object) -> object:
-    yield storage
 
 
 def _mock_shared_knowledge_manager(
@@ -143,22 +146,12 @@ def _hook_plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
     )
 
 
-def _hook_envelope(
-    *,
-    body: str = "hello",
-    source_event_id: str = "$event",
-    resolved_thread_id: str | None = None,
-) -> MessageEnvelope:
+def _hook_envelope(*, body: str = "hello", source_event_id: str = "$event") -> MessageEnvelope:
     """Create a minimal response envelope for hook-aware bot tests."""
     return MessageEnvelope(
         source_event_id=source_event_id,
         room_id="!test:localhost",
-        target=MessageTarget.resolve(
-            room_id="!test:localhost",
-            thread_id=None,
-            reply_to_event_id=source_event_id,
-            safe_thread_root=resolved_thread_id if resolved_thread_id is not None else source_event_id,
-        ),
+        target=MessageTarget.resolve("!test:localhost", None, source_event_id),
         requester_id="@user:localhost",
         sender_id="@user:localhost",
         body=body,
@@ -198,144 +191,9 @@ def test_get_or_create_lock_evicts_enough_unlocked_entries_to_stay_bounded() -> 
     assert len(locks) == 100
 
 
-def test_response_lifecycle_lock_uses_resolved_thread_root_for_first_turns(
-    tmp_path: Path,
-    mock_agent_user: AgentMatrixUser,
-) -> None:
-    """Different first-turn replies in one room should not serialize on a shared None key."""
-    config = TestAgentBot.create_mock_config(tmp_path)
-    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-    first_lock = bot._response_lifecycle_lock(MessageTarget.resolve("!test:localhost", None, "$event-a"))
-    second_lock = bot._response_lifecycle_lock(MessageTarget.resolve("!test:localhost", None, "$event-b"))
-
-    assert first_lock is not second_lock
-
-
-def test_response_lifecycle_lock_reuses_same_resolved_thread_root(
-    tmp_path: Path,
-    mock_agent_user: AgentMatrixUser,
-) -> None:
-    """Existing-thread and first-turn replies sharing a root should share one lifecycle lock."""
-    config = TestAgentBot.create_mock_config(tmp_path)
-    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-    existing_thread_lock = bot._response_lifecycle_lock(MessageTarget.resolve("!test:localhost", "$root", "$event-a"))
-    first_turn_lock = bot._response_lifecycle_lock(MessageTarget.resolve("!test:localhost", None, "$root"))
-
-    assert existing_thread_lock is first_turn_lock
-
-
-def test_response_lifecycle_lock_stays_room_scoped_in_room_mode(
-    tmp_path: Path,
-    mock_agent_user: AgentMatrixUser,
-) -> None:
-    """Room-mode agents should continue to serialize one room-scoped lifecycle at a time."""
-    config = _runtime_bound_config(
-        Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                    thread_mode="room",
-                ),
-            },
-            teams={},
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
-        ),
-        tmp_path,
-    )
-    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-    first_lock = bot._response_lifecycle_lock(
-        MessageTarget.resolve("!test:localhost", None, "$event-a", room_mode=True),
-    )
-    second_lock = bot._response_lifecycle_lock(
-        MessageTarget.resolve("!test:localhost", None, "$event-b", room_mode=True),
-    )
-
-    assert first_lock is second_lock
-
-
-def test_conversation_session_id_uses_resolved_thread_root_for_first_turns(
-    tmp_path: Path,
-    mock_agent_user: AgentMatrixUser,
-) -> None:
-    """Different first-turn replies in one room should persist into distinct sessions."""
-    config = TestAgentBot.create_mock_config(tmp_path)
-    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-    first_session_id = bot._conversation_session_id(
-        room_id="!test:localhost",
-        thread_id=None,
-        reply_to_event_id="$event-a",
-    )
-    second_session_id = bot._conversation_session_id(
-        room_id="!test:localhost",
-        thread_id=None,
-        reply_to_event_id="$event-b",
-    )
-
-    assert first_session_id == create_session_id("!test:localhost", "$event-a")
-    assert second_session_id == create_session_id("!test:localhost", "$event-b")
-    assert first_session_id != second_session_id
-
-
-def test_conversation_session_id_stays_room_scoped_in_room_mode(
-    tmp_path: Path,
-    mock_agent_user: AgentMatrixUser,
-) -> None:
-    """Room-mode agents should continue to share one room session."""
-    config = _runtime_bound_config(
-        Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                    thread_mode="room",
-                ),
-            },
-            teams={},
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
-        ),
-        tmp_path,
-    )
-    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-    first_session_id = bot._conversation_session_id(
-        room_id="!test:localhost",
-        thread_id=None,
-        reply_to_event_id="$event-a",
-    )
-    second_session_id = bot._conversation_session_id(
-        room_id="!test:localhost",
-        thread_id=None,
-        reply_to_event_id="$event-b",
-    )
-
-    assert first_session_id == create_session_id("!test:localhost", None)
-    assert first_session_id == second_session_id
-
-
 @asynccontextmanager
 async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
     yield
-
-
-async def _empty_event_iterator() -> AsyncGenerator[object, None]:
-    if False:
-        yield None
-
-
-def _make_matrix_client_mock() -> AsyncMock:
-    client = AsyncMock()
-    client.rooms = {}
-    client.add_event_callback = MagicMock()
-    client.add_response_callback = MagicMock()
-    client.room_get_event_relations = MagicMock(return_value=_empty_event_iterator())
-    return client
 
 
 @dataclass
@@ -865,7 +723,9 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Test starting an agent bot."""
-        mock_client = _make_matrix_client_mock()
+        mock_client = AsyncMock()
+        # add_event_callback is a sync method, not async
+        mock_client.add_event_callback = MagicMock()
         mock_login.return_value = mock_client
 
         # Mock ensure_user_account to not change the agent_user
@@ -901,7 +761,8 @@ class TestAgentBot:
         """AgentBot should enter sync directly because orchestrator owns stale cleanup."""
         config = self._config_for_storage(tmp_path)
         call_order: list[str] = []
-        mock_client = _make_matrix_client_mock()
+        mock_client = AsyncMock()
+        mock_client.add_event_callback = MagicMock()
 
         async def _sync_forever(*_args: object, **_kwargs: object) -> None:
             call_order.append("sync")
@@ -1050,7 +911,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.running = True
 
         await bot.stop()
@@ -1064,7 +925,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
@@ -1082,7 +943,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         mock_room = MagicMock()
         mock_event = MagicMock()
@@ -1103,7 +964,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         mock_room = MagicMock()
         mock_event = MagicMock()
@@ -1164,7 +1025,7 @@ class TestAgentBot:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         # Mock presence check to return user online when streaming is enabled
         # We need to create a proper mock response that will be returned by get_presence
@@ -1281,7 +1142,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
@@ -1327,7 +1188,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
@@ -1376,13 +1237,13 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
 
         with (
             patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
-            patch("mindroom.bot.stream_agent_response") as mock_stream_agent_response,
+            patch("mindroom.bot.stream_agent_response", new_callable=AsyncMock) as mock_stream_agent_response,
             patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
         ):
             mock_stream_agent_response.return_value = mock_streaming_response()
@@ -1402,47 +1263,6 @@ class TestAgentBot:
         assert "room_id: !test:localhost" in model_prompt
         assert "thread_id: $event456" in model_prompt
         assert "reply_to_event_id: $event456" in model_prompt
-
-    @pytest.mark.asyncio
-    async def test_process_and_respond_streaming_uses_resolved_thread_root_for_session_id(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Streaming should persist under the canonical thread root when one is provided."""
-
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
-            yield "chunk"
-
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        bot._knowledge_for_agent = MagicMock(return_value=None)
-        bot._handle_interactive_question = AsyncMock()
-
-        with (
-            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
-            patch("mindroom.bot.stream_agent_response") as mock_stream_agent_response,
-            patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
-        ):
-            mock_stream_agent_response.return_value = mock_streaming_response()
-            mock_send_streaming_response.return_value = ("$response", "chunk")
-
-            delivery = await bot._process_and_respond_streaming(
-                room_id="!test:localhost",
-                prompt="Please continue",
-                reply_to_event_id="$reply_plain:localhost",
-                thread_id="$raw_thread:localhost",
-                thread_history=[],
-                user_id="@user:localhost",
-                resolved_thread_id="$canonical_thread:localhost",
-            )
-
-        assert delivery.event_id == "$response"
-        assert mock_stream_agent_response.call_args.kwargs["session_id"] == create_session_id(
-            "!test:localhost",
-            "$canonical_thread:localhost",
-        )
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_resolves_knowledge_once(
@@ -1467,13 +1287,13 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
 
         with (
             patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
-            patch("mindroom.bot.stream_agent_response") as mock_stream_agent_response,
+            patch("mindroom.bot.stream_agent_response", new_callable=AsyncMock) as mock_stream_agent_response,
             patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
         ):
             mock_stream_agent_response.return_value = mock_streaming_response()
@@ -1503,7 +1323,7 @@ class TestAgentBot:
         """Non-streaming responses should persist attachment IDs in message metadata."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
@@ -1539,7 +1359,7 @@ class TestAgentBot:
         """Streaming responses should persist attachment IDs in message metadata."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
 
@@ -1623,7 +1443,7 @@ class TestAgentBot:
         """Metadata populated during generator iteration must appear in extra_content via mutable reference."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
 
@@ -1679,7 +1499,7 @@ class TestAgentBot:
         """CancelledError during streaming must still carry io.mindroom.ai_run in extra_content."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
 
@@ -1800,7 +1620,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
@@ -1831,197 +1651,6 @@ class TestAgentBot:
             running_task.cancel()
             other_room_task.cancel()
             await asyncio.gather(running_task, other_room_task, return_exceptions=True)
-
-    @pytest.mark.asyncio
-    async def test_deliver_generated_response_redacts_suppressed_placeholder(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Suppressing a placeholder-backed response should remove the placeholder event."""
-
-        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-        async def before_hook(ctx: BeforeResponseContext) -> None:
-            ctx.draft.suppress = True
-
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        bot._send_response = AsyncMock()
-        bot._edit_message = AsyncMock()
-        bot._redact_message_event = AsyncMock(return_value=True)
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
-
-        delivery = await bot._deliver_generated_response(
-            room_id="!test:localhost",
-            reply_to_event_id="$event123",
-            thread_id="$thread123",
-            existing_event_id="$placeholder",
-            existing_event_is_placeholder=True,
-            response_text="Handled",
-            response_kind="ai",
-            response_envelope=_hook_envelope(body="Please send an update", source_event_id="$event123"),
-            correlation_id="corr-suppress",
-            tool_trace=None,
-            extra_content=None,
-        )
-
-        assert delivery.suppressed is True
-        assert delivery.event_id is None
-        bot._redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$placeholder",
-            reason="Suppressed placeholder response",
-        )
-        bot._send_response.assert_not_awaited()
-        bot._edit_message.assert_not_awaited()
-        assert bot._resolve_response_event_id(delivery, "$placeholder", "$placeholder") is None
-
-    @pytest.mark.asyncio
-    async def test_deliver_generated_response_suppressed_existing_event_returns_no_final_event(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Suppressing an existing non-placeholder response must not preserve its event id."""
-
-        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-        async def before_hook(ctx: BeforeResponseContext) -> None:
-            ctx.draft.suppress = True
-
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        bot._send_response = AsyncMock()
-        bot._edit_message = AsyncMock()
-        bot._redact_message_event = AsyncMock()
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
-
-        delivery = await bot._deliver_generated_response(
-            room_id="!test:localhost",
-            reply_to_event_id="$event123",
-            thread_id="$thread123",
-            existing_event_id="$existing",
-            existing_event_is_placeholder=False,
-            response_text="Handled",
-            response_kind="ai",
-            response_envelope=_hook_envelope(body="Please send an update", source_event_id="$event123"),
-            correlation_id="corr-suppress-existing",
-            tool_trace=None,
-            extra_content=None,
-        )
-
-        assert delivery.suppressed is True
-        assert delivery.event_id is None
-        bot._send_response.assert_not_awaited()
-        bot._edit_message.assert_not_awaited()
-        bot._redact_message_event.assert_not_awaited()
-        assert bot._resolve_response_event_id(delivery, "$existing", "$existing") is None
-
-    @pytest.mark.asyncio
-    async def test_deliver_generated_response_raises_when_suppressed_placeholder_redaction_fails(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Failed placeholder cleanup should stay retryable instead of preserving the placeholder id."""
-
-        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-        async def before_hook(ctx: BeforeResponseContext) -> None:
-            ctx.draft.suppress = True
-
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        bot._send_response = AsyncMock()
-        bot._edit_message = AsyncMock()
-        bot._redact_message_event = AsyncMock(return_value=False)
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
-
-        with pytest.raises(_SuppressedPlaceholderCleanupError):
-            await bot._deliver_generated_response(
-                room_id="!test:localhost",
-                reply_to_event_id="$event123",
-                thread_id="$thread123",
-                existing_event_id="$placeholder",
-                existing_event_is_placeholder=True,
-                response_text="Handled",
-                response_kind="ai",
-                response_envelope=_hook_envelope(body="Please send an update", source_event_id="$event123"),
-                correlation_id="corr-suppress-failed",
-                tool_trace=None,
-                extra_content=None,
-            )
-
-        bot._redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$placeholder",
-            reason="Suppressed placeholder response",
-        )
-        bot._send_response.assert_not_awaited()
-        bot._edit_message.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_process_and_respond_streaming_redacts_suppressed_provisional_response(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Suppressing after the first streamed send should remove the provisional event."""
-
-        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-        async def before_hook(ctx: BeforeResponseContext) -> None:
-            ctx.draft.suppress = True
-
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
-            yield "chunk"
-
-        config = self._config_for_storage(tmp_path)
-        config.defaults.show_stop_button = False
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        bot._knowledge_for_agent = MagicMock(return_value=None)
-        bot._redact_message_event = AsyncMock(return_value=True)
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
-
-        with (
-            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
-            patch("mindroom.bot.stream_agent_response") as mock_stream_agent_response,
-            patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
-        ):
-            mock_stream_agent_response.return_value = mock_streaming_response()
-            mock_send_streaming_response.return_value = ("$streaming", "chunk")
-            delivery = await bot._process_and_respond_streaming(
-                room_id="!test:localhost",
-                prompt="Please reply in thread",
-                reply_to_event_id="$event456",
-                thread_id=None,
-                thread_history=[],
-                user_id="@user:localhost",
-                response_envelope=_hook_envelope(body="Please reply in thread", source_event_id="$event456"),
-                correlation_id="corr-stream-suppress",
-            )
-
-        assert delivery.suppressed is True
-        assert delivery.event_id is None
-        bot._redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$streaming",
-            reason="Suppressed streamed response",
-        )
-        assert bot._resolve_response_event_id(delivery, "$streaming", None) is None
-
-    def test_resolve_response_event_id_does_not_preserve_placeholder_after_failed_edit(self) -> None:
-        """A failed edit must not report the placeholder as the final delivered event."""
-        delivery = _ResponseDispatchResult(
-            event_id=None,
-            response_text="Handled",
-            delivery_kind=None,
-            suppressed=False,
-        )
-        bot = MagicMock(spec=AgentBot)
-
-        assert AgentBot._resolve_response_event_id(bot, delivery, "$placeholder", "$placeholder") is None
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_applies_before_and_after_hooks_once(
@@ -2063,7 +1692,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
-            patch("mindroom.bot.stream_agent_response") as mock_stream_agent_response,
+            patch("mindroom.bot.stream_agent_response", new_callable=AsyncMock) as mock_stream_agent_response,
             patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
         ):
             mock_stream_agent_response.return_value = mock_streaming_response()
@@ -2101,7 +1730,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
 
@@ -2221,7 +1850,7 @@ class TestAgentBot:
             patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
             patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.bot.team_response", new_callable=AsyncMock, return_value="Team reply"),
-            patch("mindroom.bot.open_scope_storage", return_value=_open_storage(storage)),
+            patch("mindroom.bot.create_scope_session_storage", return_value=storage),
             patch("mindroom.bot.strip_enrichment_from_session_storage") as mock_strip_enrichment,
         ):
             event_id = await bot._generate_team_response_helper(
@@ -2241,7 +1870,11 @@ class TestAgentBot:
         assert event_id == "$team"
         mock_strip_enrichment.assert_called_once_with(
             storage,
-            create_session_id("!test:localhost", "$team-root"),
+            MessageTarget.resolve(
+                room_id="!test:localhost",
+                thread_id=None,
+                reply_to_event_id="$team-root",
+            ).session_id,
             session_type=SessionType.TEAM,
         )
 
@@ -2508,7 +2141,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
@@ -2553,12 +2186,7 @@ class TestAgentBot:
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
             yield
 
-        def discard_background_task(
-            coro: object,
-            *,
-            name: str | None = None,  # noqa: ARG001
-            error_handler: object | None = None,  # noqa: ARG001
-        ) -> None:
+        def discard_background_task(coro: object, *, _name: str) -> None:
             close = getattr(coro, "close", None)
             if callable(close):
                 close()
@@ -2582,7 +2210,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
@@ -2606,6 +2234,62 @@ class TestAgentBot:
         assert mock_ai.call_args.kwargs["show_tool_calls"] is True
         assert mock_ai.call_args.kwargs["prompt"].startswith("[")
         assert mock_ai.call_args.kwargs["prompt"].endswith("Use research skill")
+
+    @pytest.mark.asyncio
+    async def test_skill_command_room_mode_uses_room_level_session_id(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Room-mode skill dispatch should keep the canonical room-level session key."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        thread_mode="room",
+                    ),
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+                defaults=DefaultsConfig(show_tool_calls=False),
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response")
+
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.bot.reprioritize_auto_flush_sessions") as mock_reprioritize,
+            patch("mindroom.bot.mark_auto_flush_dirty_session"),
+            patch("mindroom.bot.create_background_task"),
+        ):
+            mock_ai.return_value = "Skill response"
+            await bot._send_skill_command_response(
+                room_id="!test:localhost",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                prompt="Use room mode skill",
+                agent_name="calculator",
+                user_id="@user:localhost",
+                reply_to_event=None,
+            )
+
+        assert mock_ai.call_args.kwargs["session_id"] == "!test:localhost"
+        assert mock_reprioritize.call_args.kwargs["active_session_id"] == "!test:localhost"
 
     @pytest.mark.asyncio
     async def test_generate_response_prefixes_user_turns_with_local_datetime(
@@ -2639,7 +2323,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         config.timezone = "America/Los_Angeles"
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._process_and_respond = AsyncMock(
             return_value=_ResponseDispatchResult(event_id="$response", response_text="ok", delivery_kind="sent"),
         )
@@ -2665,7 +2349,7 @@ class TestAgentBot:
         with (
             patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", new=fake_store_conversation_memory),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             patch("mindroom.bot.datetime") as mock_datetime,
         ):
             mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -2724,7 +2408,7 @@ class TestAgentBot:
         config.memory.backend = "mem0"
         config.timezone = "America/Los_Angeles"
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._process_and_respond = AsyncMock(
             return_value=_ResponseDispatchResult(event_id="$response", response_text="ok", delivery_kind="sent"),
         )
@@ -2757,7 +2441,7 @@ class TestAgentBot:
         with (
             patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", new=fake_store_conversation_memory),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             patch("mindroom.bot.datetime") as mock_datetime,
         ):
             mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -2820,7 +2504,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._process_and_respond_streaming = AsyncMock(
             return_value=_ResponseDispatchResult(
                 event_id="$thinking",
@@ -2833,7 +2517,7 @@ class TestAgentBot:
         with (
             patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=True),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", new=fake_store_conversation_memory),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
         ):
             await bot._generate_response(
                 room_id="!test:localhost",
@@ -2851,97 +2535,6 @@ class TestAgentBot:
         process_kwargs = bot._process_and_respond_streaming.await_args.kwargs
         assert process_args[5] == "$thinking"
         assert process_kwargs["adopt_existing_placeholder"] is True
-
-    @pytest.mark.asyncio
-    async def test_generate_response_marks_fresh_non_streaming_thinking_message_as_placeholder(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Non-streaming generation should redact a fresh thinking placeholder on suppression."""
-
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
-            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
-            response_function = response_kwargs["response_function"]
-            await response_function("$thinking")
-            return "$thinking"
-
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        bot._process_and_respond = AsyncMock(
-            return_value=_ResponseDispatchResult(
-                event_id=None,
-                response_text="",
-                delivery_kind=None,
-                suppressed=True,
-            ),
-        )
-        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
-
-        with patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False):
-            await bot._generate_response(
-                room_id="!test:localhost",
-                prompt="Continue",
-                reply_to_event_id="$event",
-                thread_id=None,
-                thread_history=[],
-                user_id="@alice:localhost",
-            )
-
-        process_args = bot._process_and_respond.await_args.args
-        process_kwargs = bot._process_and_respond.await_args.kwargs
-        assert process_args[5] == "$thinking"
-        assert process_kwargs["existing_event_is_placeholder"] is True
-
-    @pytest.mark.asyncio
-    async def test_generate_response_disables_streaming_for_existing_event_when_before_hooks_can_suppress(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Existing non-placeholder edits must avoid streaming when before-response hooks can suppress."""
-
-        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-        async def before_hook(ctx: BeforeResponseContext) -> None:
-            ctx.draft.suppress = True
-
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str | None:
-            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
-            response_function = response_kwargs["response_function"]
-            await response_function("$existing")
-            return None
-
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        bot._process_and_respond = AsyncMock(
-            return_value=_ResponseDispatchResult(
-                event_id=None,
-                response_text="",
-                delivery_kind=None,
-                suppressed=True,
-            ),
-        )
-        bot._process_and_respond_streaming = AsyncMock()
-        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
-
-        await bot._generate_response(
-            room_id="!test:localhost",
-            prompt="Continue",
-            reply_to_event_id="$event",
-            thread_id=None,
-            thread_history=[],
-            existing_event_id="$existing",
-            existing_event_is_placeholder=False,
-            user_id="@alice:localhost",
-            response_envelope=_hook_envelope(body="Continue", source_event_id="$event"),
-            correlation_id="corr-existing-edit",
-        )
-
-        bot._process_and_respond.assert_awaited_once()
-        bot._process_and_respond_streaming.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_generate_response_uses_resolved_thread_root_for_thinking_placeholder(
@@ -2972,7 +2565,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._process_and_respond = AsyncMock(
             return_value=_ResponseDispatchResult(
                 event_id="$thinking",
@@ -3001,7 +2594,7 @@ class TestAgentBot:
         with (
             patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", new=fake_store_conversation_memory),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             patch("mindroom.bot.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value="$latest:localhost")),
             patch("mindroom.bot.send_message", new=AsyncMock(side_effect=record_send)),
         ):
@@ -3058,7 +2651,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._process_and_respond = AsyncMock(
             return_value=_ResponseDispatchResult(event_id="$response", response_text="ok", delivery_kind="sent"),
         )
@@ -3067,7 +2660,7 @@ class TestAgentBot:
         with (
             patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", new=fake_store_conversation_memory),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             patch("mindroom.bot.maybe_generate_thread_summary", new_callable=AsyncMock) as mock_thread_summary,
         ):
             await bot._generate_response(
@@ -3101,9 +2694,6 @@ class TestAgentBot:
         scheduled_tasks: list[asyncio.Task[None]] = []
         scheduled_names: list[str] = []
 
-        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
-            return None
-
         def schedule_background_task(
             coro: Coroutine[Any, Any, None],
             *,
@@ -3126,7 +2716,7 @@ class TestAgentBot:
             team_agents=[team_member],
             team_mode="coordinate",
         )
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._generate_team_response_helper = AsyncMock(return_value="$team-response")
 
         resolution = TeamResolution(
@@ -3148,7 +2738,7 @@ class TestAgentBot:
             patch.object(bot, "_materializable_agent_names", return_value={"general"}),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", new=fake_store_conversation_memory),
+            patch("mindroom.bot.store_conversation_memory", new_callable=AsyncMock),
             patch("mindroom.bot.maybe_generate_thread_summary", new_callable=AsyncMock) as mock_thread_summary,
         ):
             event_id = await bot._generate_response(
@@ -3196,7 +2786,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.orchestrator = MagicMock()
         bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
         bot._handle_interactive_question = AsyncMock()
@@ -3233,122 +2823,12 @@ class TestAgentBot:
         assert send_kwargs["adopt_existing_placeholder"] is True
 
     @pytest.mark.asyncio
-    async def test_generate_team_response_helper_redacts_suppressed_streamed_placeholder(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Streaming team suppression should not preserve the provisional placeholder id."""
-
-        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-        async def before_hook(ctx: BeforeResponseContext) -> None:
-            ctx.draft.suppress = True
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
-            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
-            response_function = response_kwargs["response_function"]
-            await response_function("$placeholder")
-            return "$placeholder"
-
-        async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
-            yield "stream chunk"
-
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock()
-        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
-        bot._redact_message_event = AsyncMock(return_value=True)
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
-
-        with (
-            patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=True)),
-            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
-            patch("mindroom.bot.team_response_stream", new=fake_team_response_stream),
-            patch(
-                "mindroom.bot.send_streaming_response",
-                new=AsyncMock(return_value=("$placeholder", "stream chunk")),
-            ),
-        ):
-            event_id = await bot._generate_team_response_helper(
-                room_id="!test:localhost",
-                reply_to_event_id="$event",
-                thread_id="$thread_root",
-                payload=_DispatchPayload(prompt="Continue"),
-                team_agents=[bot.matrix_id],
-                team_mode="coordinate",
-                thread_history=[],
-                requester_user_id="@alice:localhost",
-                existing_event_id="$placeholder",
-                existing_event_is_placeholder=True,
-                response_envelope=_hook_envelope(body="Continue", source_event_id="$event"),
-                correlation_id="corr-team-stream-suppress",
-            )
-
-        assert event_id is None
-        bot._redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$placeholder",
-            reason="Suppressed streamed response",
-        )
-
-    @pytest.mark.asyncio
-    async def test_generate_team_response_helper_returns_none_when_suppressed_placeholder_is_redacted(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Suppressed team placeholder responses should not leak the redacted placeholder id."""
-
-        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-        async def before_hook(ctx: BeforeResponseContext) -> None:
-            ctx.draft.suppress = True
-
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock()
-        bot._redact_message_event = AsyncMock(return_value=True)
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
-
-        with (
-            patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=False)),
-            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
-            patch("mindroom.bot.team_response", new=AsyncMock(return_value="Team handled")),
-        ):
-            event_id = await bot._generate_team_response_helper(
-                room_id="!test:localhost",
-                reply_to_event_id="$event",
-                thread_id="$thread_root",
-                payload=_DispatchPayload(prompt="Continue"),
-                team_agents=[bot.matrix_id],
-                team_mode="coordinate",
-                thread_history=[],
-                requester_user_id="@alice:localhost",
-                existing_event_id="$placeholder",
-                existing_event_is_placeholder=True,
-                response_envelope=_hook_envelope(body="Continue", source_event_id="$event"),
-                correlation_id="corr-team-suppress",
-            )
-
-        assert event_id is None
-        bot._redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$placeholder",
-            reason="Suppressed placeholder response",
-        )
-
-    @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test agent bot not responding when not mentioned."""
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         mock_room = MagicMock()
         mock_event = MagicMock()
@@ -3385,12 +2865,8 @@ class TestAgentBot:
         bot.client = MagicMock(rooms={room_id: local_room})
         bot.orchestrator = MagicMock()
 
-        context = bot._build_tool_runtime_context(
-            room_id=room_id,
-            thread_id="$thread",
-            reply_to_event_id="$event",
-            user_id="@user:localhost",
-        )
+        target = MessageTarget.resolve(room_id=room_id, thread_id="$thread", reply_to_event_id="$event")
+        context = bot._build_tool_runtime_context(target, user_id="@user:localhost")
 
         assert context is not None
         assert context.client is bot.client
@@ -3420,12 +2896,8 @@ class TestAgentBot:
         bot.client = MagicMock(rooms={})
         bot.orchestrator = MagicMock()
 
-        context = bot._build_tool_runtime_context(
-            room_id=room_id,
-            thread_id="$thread",
-            reply_to_event_id="$event",
-            user_id="@user:localhost",
-        )
+        target = MessageTarget.resolve(room_id=room_id, thread_id="$thread", reply_to_event_id="$event")
+        context = bot._build_tool_runtime_context(target, user_id="@user:localhost")
 
         assert context is not None
         assert context.room is None
@@ -3450,12 +2922,8 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = None
 
-        context = bot._build_tool_runtime_context(
-            room_id="!test:localhost",
-            thread_id="$thread",
-            reply_to_event_id="$event",
-            user_id="@user:localhost",
-        )
+        target = MessageTarget.resolve(room_id="!test:localhost", thread_id="$thread", reply_to_event_id="$event")
+        context = bot._build_tool_runtime_context(target, user_id="@user:localhost")
 
         assert context is None
 
@@ -3479,18 +2947,46 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
 
-        context = bot._build_tool_runtime_context(
-            room_id="!test:localhost",
-            thread_id=None,
-            reply_to_event_id="$root_event",
-            user_id="@user:localhost",
-            attachment_ids=["att_1"],
-        )
+        target = MessageTarget.resolve(room_id="!test:localhost", thread_id=None, reply_to_event_id="$root_event")
+        context = bot._build_tool_runtime_context(target, user_id="@user:localhost", attachment_ids=["att_1"])
 
         assert context is not None
         assert context.thread_id is None
         assert context.resolved_thread_id == "$root_event"
         assert context.attachment_ids == ("att_1",)
+
+    def test_response_lifecycle_lock_uses_resolved_thread_root(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Different first-turn thread roots should not share one lifecycle lock."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+        first = MessageTarget.resolve(
+            room_id="!test:localhost",
+            thread_id=None,
+            reply_to_event_id="$root_a",
+        )
+        second = MessageTarget.resolve(
+            room_id="!test:localhost",
+            thread_id=None,
+            reply_to_event_id="$root_b",
+        )
+
+        assert bot._response_lifecycle_lock(first) is bot._response_lifecycle_lock(first)
+        assert bot._response_lifecycle_lock(first) is not bot._response_lifecycle_lock(second)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -3519,7 +3015,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
 
@@ -3565,7 +3061,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
 
@@ -3609,7 +3105,7 @@ class TestAgentBot:
         """Image messages should call _generate_response with images payload."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         tracker = MagicMock()
         tracker.has_responded.return_value = False
@@ -3692,7 +3188,7 @@ class TestAgentBot:
         """Media turns should include attachment IDs already referenced in thread history."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         tracker = MagicMock()
         tracker.has_responded.return_value = False
@@ -3827,7 +3323,7 @@ class TestAgentBot:
         """Image download failure should not mark the event responded without a visible terminal error."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         tracker = MagicMock()
         tracker.has_responded.return_value = False
@@ -3880,7 +3376,7 @@ class TestAgentBot:
         """File messages should call _generate_response with a local media path in prompt."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         tracker = MagicMock()
         tracker.has_responded.return_value = False
@@ -3969,7 +3465,7 @@ class TestAgentBot:
         """File persistence failure should not mark the event responded without a visible terminal error."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         tracker = MagicMock()
         tracker.has_responded.return_value = False
@@ -4030,7 +3526,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
         bot.response_tracker = MagicMock()
@@ -4107,7 +3603,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
         bot.response_tracker = MagicMock()
@@ -4209,7 +3705,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot._send_response = AsyncMock(return_value="$route")
 
@@ -4295,7 +3791,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot._send_response = AsyncMock(return_value="$route")
 
@@ -4383,8 +3879,8 @@ class TestAgentBot:
             runtime_paths=runtime_paths_for(config),
         )
 
-        router_bot.client = _make_matrix_client_mock()
-        general_bot.client = _make_matrix_client_mock()
+        router_bot.client = AsyncMock()
+        general_bot.client = AsyncMock()
         router_bot.response_tracker = MagicMock()
         router_bot.response_tracker.has_responded.return_value = False
         general_bot.response_tracker = MagicMock()
@@ -4489,7 +3985,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._handle_ai_routing = AsyncMock()
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
@@ -4567,7 +4063,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot._handle_ai_routing = AsyncMock()
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
@@ -4621,7 +4117,7 @@ class TestAgentBot:
         """After router routes an image, the selected agent should resolve it via attachments."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         tracker = MagicMock()
         tracker.has_responded.return_value = False
@@ -5333,6 +4829,11 @@ class TestAgentBot:
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
             ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=event.event_id,
+            ),
             correlation_id="$event",
             envelope=_hook_envelope(body="help me", source_event_id="$event"),
         )
@@ -5363,62 +4864,15 @@ class TestAgentBot:
         bot.response_tracker.mark_responded.assert_called_once_with("$event", "$reply")
 
     @pytest.mark.asyncio
-    async def test_execute_dispatch_action_reject_send_failure_leaves_event_retryable(
+    async def test_extract_dispatch_context_uses_thread_snapshot_without_full_history(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Reject handling should not mark the source responded when the visible reply fails to send."""
+        """Dispatch startup should use a lightweight thread snapshot instead of full history."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.response_tracker = MagicMock()
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        event = MagicMock(spec=nio.RoomMessageText)
-        event.event_id = "$event"
-        dispatch = _PreparedDispatch(
-            requester_user_id="@user:localhost",
-            context=_MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-            correlation_id="corr-reject-send-fails",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
-        )
-        action = _ResponseAction(kind="reject", rejection_message="nope")
-
-        async def unused_payload_builder(_context: _MessageContext) -> _DispatchPayload:
-            msg = "reject path should not build payloads"
-            raise AssertionError(msg)
-
-        with patch.object(bot, "_send_response", new=AsyncMock(return_value=None)) as mock_send_response:
-            await bot._execute_dispatch_action(
-                room,
-                event,
-                dispatch,
-                action,
-                unused_payload_builder,
-                processing_log="processing",
-                dispatch_started_monotonic=0.0,
-            )
-
-        mock_send_response.assert_awaited_once()
-        bot.response_tracker.mark_responded.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_extract_dispatch_context_derives_thread_target_and_prefetches_preview_history(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Dispatch startup should fetch preview history for thread-aware action selection."""
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         event = nio.RoomMessageText.from_dict(
@@ -5435,37 +4889,39 @@ class TestAgentBot:
                 "type": "m.room.message",
             },
         )
-
-        preview_history = [
-            _visible_message(
-                event_id="$thread_root",
-                sender="@user:localhost",
-                body="Root",
-                timestamp=1234567889,
-                content={"body": "Root"},
-            ),
+        snapshot = [
+            {
+                "event_id": "$thread_root",
+                "sender": "@user:localhost",
+                "body": "Root",
+                "timestamp": 1234567889,
+                "content": {"body": "Root"},
+            },
         ]
 
-        with patch("mindroom.bot.fetch_thread_history", new=AsyncMock(return_value=preview_history)) as mock_history:
+        with (
+            patch("mindroom.bot.fetch_thread_snapshot", new=AsyncMock(return_value=snapshot)) as mock_snapshot,
+            patch("mindroom.bot.fetch_thread_history", new=AsyncMock()) as mock_history,
+        ):
             context = await bot._extract_dispatch_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
-        assert context.thread_history == preview_history
-        assert context.requires_full_thread_history is False
-        mock_history.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
-        bot.client.room_get_event.assert_not_awaited()
+        assert context.thread_history == snapshot
+        assert context.requires_full_thread_history is True
+        mock_snapshot.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
+        mock_history.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_hydrates_thread_history_once_when_needed(
+    async def test_extract_dispatch_context_skips_rehydration_after_snapshot_fallback(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Hydration should fetch full thread history exactly once after target derivation."""
+        """Fallback snapshots should not trigger a second full-history fetch during hydration."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         event = nio.RoomMessageText.from_dict(
@@ -5482,24 +4938,37 @@ class TestAgentBot:
                 "type": "m.room.message",
             },
         )
-        full_history = [
-            _visible_message(
-                event_id="$thread_root",
-                sender="@user:localhost",
-                body="Root",
-                timestamp=1234567889,
-                content={"body": "Root"},
-            ),
-            _visible_message(
-                event_id="$reply",
-                sender="@mindroom_calculator:localhost",
-                body="Reply",
-                timestamp=1234567890,
-                content={"body": "Reply"},
-            ),
-        ]
+        full_history = ThreadHistoryResult(
+            [
+                {
+                    "event_id": "$thread_root",
+                    "sender": "@user:localhost",
+                    "body": "Root",
+                    "timestamp": 1234567889,
+                    "content": {"body": "Root"},
+                },
+                {
+                    "event_id": "$reply",
+                    "sender": "@mindroom_calculator:localhost",
+                    "body": "Reply",
+                    "timestamp": 1234567890,
+                    "content": {"body": "Reply"},
+                },
+            ],
+            is_full_history=True,
+        )
 
-        with patch("mindroom.bot.fetch_thread_history", new=AsyncMock(return_value=full_history)) as mock_history:
+        with (
+            patch(
+                "mindroom.matrix.client._fetch_thread_context_via_relations",
+                new=AsyncMock(side_effect=_ThreadHistoryFastPathUnavailableError("unsupported")),
+            ),
+            patch(
+                "mindroom.matrix.client._fetch_thread_history_via_room_messages",
+                new=AsyncMock(return_value=full_history),
+            ) as mock_snapshot_fallback,
+            patch("mindroom.bot.fetch_thread_history", new=AsyncMock()) as mock_hydrate_fetch,
+        ):
             context = await bot._extract_dispatch_context(room, event)
             await bot._hydrate_dispatch_context(room, event, context)
 
@@ -5507,8 +4976,8 @@ class TestAgentBot:
         assert context.thread_id == "$thread_root"
         assert context.thread_history == full_history
         assert context.requires_full_thread_history is False
-        mock_history.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
-        bot.client.room_get_event.assert_not_awaited()
+        mock_snapshot_fallback.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
+        mock_hydrate_fetch.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_dispatch_text_message_hydrates_full_history_before_resolving_action(
@@ -5519,7 +4988,7 @@ class TestAgentBot:
         """Dispatch should hydrate full thread history before reply-chain routing decisions."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         event = MagicMock(spec=nio.RoomMessageText)
@@ -5536,37 +5005,42 @@ class TestAgentBot:
                 is_thread=True,
                 thread_id="$thread_root",
                 thread_history=[
-                    _visible_message(
-                        event_id="$thread_root",
-                        sender="@user:localhost",
-                        body="Snapshot root",
-                        timestamp=1,
-                        content={"body": "Snapshot root"},
-                    ),
+                    {
+                        "event_id": "$thread_root",
+                        "sender": "@user:localhost",
+                        "body": "Snapshot root",
+                        "timestamp": 1,
+                        "content": {"body": "Snapshot root"},
+                    },
                 ],
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=True,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id="$thread_root",
+                reply_to_event_id=event.event_id,
             ),
             correlation_id="corr-hydrate-dispatch",
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
         )
         bot.response_tracker = MagicMock()
         full_history = [
-            _visible_message(
-                event_id="$thread_root",
-                sender="@user:localhost",
-                body="Full root",
-                timestamp=1,
-                content={"body": "Full root"},
-            ),
-            _visible_message(
-                event_id="$reply",
-                sender="@mindroom_calculator:localhost",
-                body="Full reply",
-                timestamp=2,
-                content={"body": "Full reply"},
-            ),
+            {
+                "event_id": "$thread_root",
+                "sender": "@user:localhost",
+                "body": "Full root",
+                "timestamp": 1,
+                "content": {"body": "Full root"},
+            },
+            {
+                "event_id": "$reply",
+                "sender": "@mindroom_calculator:localhost",
+                "body": "Full reply",
+                "timestamp": 2,
+                "content": {"body": "Full reply"},
+            },
         ]
         call_order: list[str] = []
 
@@ -5626,7 +5100,7 @@ class TestAgentBot:
         """Skip paths should stop after required routing hydration and avoid payload work."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         event = MagicMock(spec=nio.RoomMessageText)
@@ -5646,6 +5120,11 @@ class TestAgentBot:
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=True,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id="$thread_root",
+                reply_to_event_id=event.event_id,
             ),
             correlation_id="corr-no-action",
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
@@ -5708,6 +5187,11 @@ class TestAgentBot:
                 thread_history=[],
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id="$thread_root",
+                reply_to_event_id=event.event_id,
             ),
             correlation_id="corr-visible-echo",
             envelope=_hook_envelope(body="hello", source_event_id="$text"),
@@ -5775,7 +5259,7 @@ class TestAgentBot:
         """Team dispatch should reuse the early placeholder event for the final answer."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot.logger = MagicMock()
 
@@ -5789,10 +5273,15 @@ class TestAgentBot:
                 am_i_mentioned=True,
                 is_thread=True,
                 thread_id="$thread_root",
-                thread_history=[_visible_message(event_id="$thread_root", sender="@user:localhost")],
+                thread_history=[{"event_id": "$thread_root", "sender": "@user:localhost"}],
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id="$thread_root",
+                reply_to_event_id=event.event_id,
             ),
             correlation_id="corr-team-dispatch",
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
@@ -5837,114 +5326,6 @@ class TestAgentBot:
         bot.response_tracker.mark_responded.assert_called_once_with("$event", "$placeholder")
 
     @pytest.mark.asyncio
-    async def test_execute_dispatch_action_does_not_mark_responded_when_suppressed_placeholder_cleanup_fails(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Failed suppressed-placeholder cleanup should leave the source event retryable."""
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        bot.response_tracker = MagicMock()
-        bot.logger = MagicMock()
-
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        event = MagicMock()
-        event.event_id = "$event"
-        dispatch = _PreparedDispatch(
-            requester_user_id="@user:localhost",
-            context=_MessageContext(
-                am_i_mentioned=True,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[bot.matrix_id],
-                has_non_agent_mentions=False,
-                requires_full_thread_history=False,
-            ),
-            correlation_id="corr-suppress-cleanup-failed",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
-        )
-
-        async def payload_builder(_context: _MessageContext) -> _DispatchPayload:
-            return _DispatchPayload(prompt="help me")
-
-        with (
-            patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
-            patch.object(
-                bot,
-                "_generate_response",
-                new=AsyncMock(side_effect=_SuppressedPlaceholderCleanupError("failed cleanup")),
-            ),
-            patch.object(bot, "_log_dispatch_latency"),
-        ):
-            await bot._execute_dispatch_action(
-                room,
-                event,
-                dispatch,
-                _ResponseAction(kind="individual"),
-                payload_builder,
-                processing_log="processing",
-                dispatch_started_monotonic=0.0,
-            )
-
-        bot.response_tracker.mark_responded.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_execute_dispatch_action_does_not_mark_responded_when_generation_returns_no_final_event(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Suppressed delivery with no final event should keep the source retryable."""
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        bot.response_tracker = MagicMock()
-        bot.logger = MagicMock()
-
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        event = MagicMock()
-        event.event_id = "$event"
-        dispatch = _PreparedDispatch(
-            requester_user_id="@user:localhost",
-            context=_MessageContext(
-                am_i_mentioned=True,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[bot.matrix_id],
-                has_non_agent_mentions=False,
-                requires_full_thread_history=False,
-            ),
-            correlation_id="corr-suppress-cleanup-complete",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
-        )
-
-        async def payload_builder(_context: _MessageContext) -> _DispatchPayload:
-            return _DispatchPayload(prompt="help me")
-
-        with (
-            patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
-            patch.object(bot, "_generate_response", new=AsyncMock(return_value=None)),
-            patch.object(bot, "_log_dispatch_latency"),
-        ):
-            await bot._execute_dispatch_action(
-                room,
-                event,
-                dispatch,
-                _ResponseAction(kind="individual"),
-                payload_builder,
-                processing_log="processing",
-                dispatch_started_monotonic=0.0,
-            )
-
-        bot.response_tracker.mark_responded.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_media_download_failure_edits_visible_placeholder(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -5953,7 +5334,7 @@ class TestAgentBot:
         """Media setup failures after placeholder send should finalize the placeholder with an error."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.logger = MagicMock()
         tracker = MagicMock()
         tracker.has_responded.return_value = False
@@ -6015,7 +5396,7 @@ class TestAgentBot:
         """Placeholder cleanup should send a new terminal error message if editing fails."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._edit_message = AsyncMock(return_value=False)
         bot._send_response = AsyncMock(return_value="$error")
@@ -6023,11 +5404,7 @@ class TestAgentBot:
         response_event_id = await bot._finalize_dispatch_failure(
             room_id="!test:localhost",
             reply_to_event_id="$event",
-            response_target=bot._prepare_response_target(
-                room_id="!test:localhost",
-                thread_id="$thread_root",
-                reply_to_event_id="$event",
-            ),
+            thread_id="$thread_root",
             placeholder_event_id="$placeholder",
             error=RuntimeError("boom"),
         )
@@ -6049,62 +5426,6 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
-    async def test_execute_dispatch_action_finalizes_failure_in_resolved_thread(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """First-turn placeholder cleanup should reuse the canonical delivery thread target."""
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        bot.response_tracker = MagicMock()
-        bot.logger = MagicMock()
-
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        event = MagicMock()
-        event.event_id = "$event"
-        dispatch = _PreparedDispatch(
-            requester_user_id="@user:localhost",
-            context=_MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-                requires_full_thread_history=False,
-            ),
-            correlation_id="corr-payload-error-thread-root",
-            envelope=_hook_envelope(
-                body="hello",
-                source_event_id="$event",
-                resolved_thread_id="$resolved_thread_root",
-            ),
-        )
-
-        async def payload_builder(_context: _MessageContext) -> _DispatchPayload:
-            msg = "setup failed"
-            raise RuntimeError(msg)
-
-        with (
-            patch.object(bot, "_send_response", new=AsyncMock(side_effect=["$placeholder", "$error"])),
-            patch.object(bot, "_edit_message", new=AsyncMock(return_value=False)) as mock_edit,
-        ):
-            await bot._execute_dispatch_action(
-                room,
-                event,
-                dispatch,
-                _ResponseAction(kind="individual"),
-                payload_builder,
-                processing_log="processing",
-                dispatch_started_monotonic=0.0,
-            )
-
-        assert mock_edit.await_args.args[3] == "$resolved_thread_root"
-
-    @pytest.mark.asyncio
     async def test_execute_dispatch_action_marks_new_error_event_when_placeholder_edit_fails(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -6113,7 +5434,7 @@ class TestAgentBot:
         """Dispatch failure fallback should track the new terminal error event."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot.logger = MagicMock()
 
@@ -6131,6 +5452,11 @@ class TestAgentBot:
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=event.event_id,
             ),
             correlation_id="corr-payload-error-1",
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
@@ -6167,7 +5493,7 @@ class TestAgentBot:
         """Incomplete placeholder cleanup should leave the source event retryable."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot.logger = MagicMock()
 
@@ -6185,6 +5511,11 @@ class TestAgentBot:
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=event.event_id,
             ),
             correlation_id="corr-payload-error-2",
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
@@ -6220,7 +5551,7 @@ class TestAgentBot:
         """Dispatch execution should log placeholder and hydration timing fields."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot.logger = MagicMock()
 
@@ -6238,6 +5569,11 @@ class TestAgentBot:
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=event.event_id,
             ),
             correlation_id="corr-latency-log",
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
@@ -6283,6 +5619,7 @@ class TestAgentBot:
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.stream_agent_response")
+    @patch("mindroom.bot.fetch_thread_snapshot")
     @patch("mindroom.bot.fetch_thread_history")
     @patch("mindroom.bot.should_use_streaming")
     @patch("mindroom.bot.get_latest_thread_event_id_if_needed")
@@ -6291,6 +5628,7 @@ class TestAgentBot:
         mock_get_latest_thread: AsyncMock,
         mock_should_use_streaming: AsyncMock,
         mock_fetch_history: AsyncMock,
+        mock_fetch_snapshot: AsyncMock,
         mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
         mock_team_arun: AsyncMock,
@@ -6327,7 +5665,7 @@ class TestAgentBot:
             rooms=["!test:localhost"],
             enable_streaming=enable_streaming,
         )
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         # Mock orchestrator with agent_bots
         mock_orchestrator = MagicMock()
@@ -6355,15 +5693,16 @@ class TestAgentBot:
 
         # Test 1: Thread with only this agent - should respond without mention
         test1_history = [
-            _visible_message(sender="@user:localhost", body="Previous message", timestamp=123, event_id="prev1"),
-            _visible_message(
-                sender=mock_agent_user.user_id,
-                body="My previous response",
-                timestamp=124,
-                event_id="prev2",
-            ),
+            {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
+            {
+                "sender": mock_agent_user.user_id,
+                "body": "My previous response",
+                "timestamp": 124,
+                "event_id": "prev2",
+            },
         ]
         mock_fetch_history.return_value = test1_history
+        mock_fetch_snapshot.return_value = test1_history
 
         # Mock streaming response - return an async generator
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
@@ -6454,6 +5793,7 @@ class TestAgentBot:
             ),
         ]
         mock_fetch_history.return_value = test2_history
+        mock_fetch_snapshot.return_value = test2_history
 
         # Create a new event with a different ID for Test 2
         mock_event_2 = MagicMock()
@@ -6534,7 +5874,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
+        bot.client = AsyncMock()
 
         # Mark an event as already responded
         bot.response_tracker.mark_responded("event123")
@@ -6594,7 +5934,7 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = config
 
         router_bot = MagicMock()
-        router_bot.client = _make_matrix_client_mock()
+        router_bot.client = AsyncMock()
         orchestrator.agent_bots = {"router": router_bot}
 
         room_members = {
@@ -6646,7 +5986,7 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = config
 
         router_bot = MagicMock()
-        router_bot.client = _make_matrix_client_mock()
+        router_bot.client = AsyncMock()
         orchestrator.agent_bots = {"router": router_bot}
 
         async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
@@ -6686,7 +6026,7 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = config
 
         router_bot = MagicMock()
-        router_bot.client = _make_matrix_client_mock()
+        router_bot.client = AsyncMock()
         orchestrator.agent_bots = {"router": router_bot}
 
         state = MatrixState()
@@ -7796,7 +7136,7 @@ class TestMultiAgentOrchestrator:
 
             # Mock the agent clients and ensure_user_account
             for bot in orchestrator.agent_bots.values():
-                bot.client = _make_matrix_client_mock()
+                bot.client = AsyncMock()
                 bot.running = True
                 bot.ensure_user_account = AsyncMock()
 
