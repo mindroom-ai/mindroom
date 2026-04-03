@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 
 import pytest
 
+import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.plugins as plugin_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError
@@ -87,6 +89,79 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
         tool = get_tool_by_name("demo_plugin", runtime_paths_for(config), worker_target=None)
         assert tool.name == "demo"
         assert (plugin_root / "skills").resolve() in _get_plugin_skill_roots()
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_loaded_tool_registry_for_validation_serializes_runtime_plugin_loads(tmp_path: Path) -> None:
+    """Validation should not interleave with a concurrent runtime plugin load."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo-plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='demo_plugin',\n"
+        "    display_name='Demo Plugin',\n"
+        "    description='Demo plugin tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config_with_plugin = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+    config_without_plugins = _bind_runtime_paths(Config(plugins=[]), config_path)
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+    load_finished = threading.Event()
+    failure: list[BaseException] = []
+
+    def _load_plugins_in_thread() -> None:
+        try:
+            load_plugins(config_with_plugin, runtime_paths_for(config_with_plugin))
+        except BaseException as exc:  # pragma: no cover - failure is asserted below
+            failure.append(exc)
+        finally:
+            load_finished.set()
+
+    try:
+        with metadata_module.loaded_tool_registry_for_validation(
+            runtime_paths_for(config_without_plugins),
+            config_without_plugins,
+        ):
+            loader_thread = threading.Thread(target=_load_plugins_in_thread)
+            loader_thread.start()
+            assert not load_finished.wait(0.1)
+
+        loader_thread.join(timeout=1)
+        assert load_finished.is_set()
+        assert failure == []
+        assert "demo_plugin" in TOOL_METADATA
     finally:
         _TOOL_REGISTRY.clear()
         _TOOL_REGISTRY.update(original_registry)

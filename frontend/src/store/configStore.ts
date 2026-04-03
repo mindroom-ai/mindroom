@@ -211,6 +211,7 @@ interface ConfigState {
   agentPoliciesStale: boolean;
   agentPoliciesRequestId: number;
   loadConfigRequestId: number;
+  saveConfigRequestId: number;
   selectedAgentId: string | null;
   selectedTeamId: string | null;
   selectedCultureId: string | null;
@@ -317,6 +318,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   agentPoliciesStale: false,
   agentPoliciesRequestId: 0,
   loadConfigRequestId: 0,
+  saveConfigRequestId: 0,
   selectedAgentId: null,
   selectedTeamId: null,
   selectedCultureId: null,
@@ -497,11 +499,18 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   saveConfig: async () => {
     const { config, agents, teams, cultures, rooms, agentPoliciesStale } = get();
     if (!config) return;
+    const saveConfigRequestId = get().saveConfigRequestId + 1;
+    const savedConfig = config;
+    const savedAgents = agents;
+    const savedTeams = teams;
+    const savedCultures = cultures;
+    const savedRooms = rooms;
 
     set({
       isLoading: true,
       diagnostics: [],
       syncStatus: 'syncing',
+      saveConfigRequestId,
     });
     try {
       const rawEntriesByAgent = new Map(
@@ -575,6 +584,26 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       };
 
       await configService.saveConfig(payload);
+      if (get().saveConfigRequestId != saveConfigRequestId) {
+        return;
+      }
+      const currentState = get();
+      const draftChangedSinceSaveStarted =
+        currentState.config !== savedConfig ||
+        currentState.agents !== savedAgents ||
+        currentState.teams !== savedTeams ||
+        currentState.cultures !== savedCultures ||
+        currentState.rooms !== savedRooms;
+      if (draftChangedSinceSaveStarted) {
+        set({
+          isLoading: false,
+          syncStatus: currentState.syncStatus === 'syncing' ? 'synced' : currentState.syncStatus,
+        });
+        if (currentState.agentPoliciesStale) {
+          void get().refreshAgentPolicies(currentState.agents);
+        }
+        return;
+      }
       rememberRawToolEntries(updatedConfig, rawEntriesByAgent, rawDefaultToolEntries);
       set({
         config: updatedConfig,
@@ -588,6 +617,23 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         void get().refreshAgentPolicies(agents);
       }
     } catch (error) {
+      if (get().saveConfigRequestId != saveConfigRequestId) {
+        return;
+      }
+      const currentState = get();
+      const draftChangedSinceSaveStarted =
+        currentState.config !== savedConfig ||
+        currentState.agents !== savedAgents ||
+        currentState.teams !== savedTeams ||
+        currentState.cultures !== savedCultures ||
+        currentState.rooms !== savedRooms;
+      if (draftChangedSinceSaveStarted) {
+        set({
+          isLoading: false,
+          syncStatus: currentState.syncStatus === 'syncing' ? 'error' : currentState.syncStatus,
+        });
+        return;
+      }
       if (error instanceof configService.ConfigValidationError) {
         set({
           diagnostics: [

@@ -2,7 +2,9 @@
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
+import os
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
@@ -227,9 +229,8 @@ def test_api_lifespan_syncs_env_credentials_on_startup(
     async def _fake_watch_config(
         stop_event: asyncio.Event,
         _app: FastAPI,
-        runtime_paths: constants.RuntimePaths,
     ) -> None:
-        assert runtime_paths == main._app_runtime_paths(main.app)
+        assert main._app_runtime_paths(_app) == main._app_runtime_paths(main.app)
         watch_calls.append("watch")
         await stop_event.wait()
 
@@ -380,11 +381,10 @@ def test_api_lifespan_loads_config_from_injected_runtime(
     async def _idle_watch_config(
         stop_event: asyncio.Event,
         _app: FastAPI,
-        _runtime_paths: constants.RuntimePaths,
     ) -> None:
         await stop_event.wait()
 
-    async def _idle_worker_cleanup(stop_event: asyncio.Event, _runtime_paths: constants.RuntimePaths) -> None:
+    async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
         await stop_event.wait()
 
     monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
@@ -399,34 +399,87 @@ def test_api_lifespan_loads_config_from_injected_runtime(
 
 
 @pytest.mark.asyncio
-async def test_watch_config_uses_single_file_watcher(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Config watching should target the config file itself, not the whole runtime directory."""
-    watched_paths: list[Path] = []
+async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Config watching should follow the app's current runtime paths."""
+    loaded_paths: list[Path] = []
+    load_event = asyncio.Event()
     stop_event = asyncio.Event()
-    config_path = tmp_path / "config.yaml"
-
-    async def _fake_watch_file(
-        file_path: Path,
-        callback: Callable[[], Awaitable[object]],
-        stop_event: asyncio.Event | None = None,
-    ) -> None:
-        watched_paths.append(file_path)
-        assert stop_event is not None
-        await callback()
-        stop_event.set()
-
-    runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
-    main.initialize_api_app(main.app, runtime_paths)
-    monkeypatch.setattr(main, "watch_file", _fake_watch_file)
+    first_config_path = tmp_path / "first.yaml"
+    second_config_path = tmp_path / "second.yaml"
+    first_config_path.write_text("models: {}\n", encoding="utf-8")
+    second_config_path.write_text("models: {}\n", encoding="utf-8")
+    first_runtime = constants.resolve_primary_runtime_paths(config_path=first_config_path, process_env={})
+    second_runtime = constants.resolve_primary_runtime_paths(config_path=second_config_path, process_env={})
+    main.initialize_api_app(main.app, first_runtime)
     monkeypatch.setattr(
         main,
         "_load_config_from_file",
-        lambda _runtime_paths, _app: watched_paths.append(Path("loaded")),
+        lambda runtime_paths, _app: _record_loaded_path(runtime_paths, loaded_paths, load_event),
     )
 
-    await main._watch_config(stop_event, main.app, main._app_runtime_paths(main.app))
+    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
 
-    assert watched_paths == [config_path, Path("loaded")]
+    await asyncio.sleep(0.02)
+    first_timestamp = time.time() + 1
+    first_config_path.write_text("models: {default: {provider: openai, id: gpt-5.4}}\n", encoding="utf-8")
+    os.utime(first_config_path, (first_timestamp, first_timestamp))
+    await asyncio.wait_for(load_event.wait(), timeout=1)
+    assert loaded_paths == [first_config_path]
+
+    main.initialize_api_app(main.app, second_runtime)
+    load_event.clear()
+    await asyncio.sleep(0.02)
+    second_timestamp = first_timestamp + 1
+    second_config_path.write_text("models: {default: {provider: openai, id: gpt-5.4}}\n", encoding="utf-8")
+    os.utime(second_config_path, (second_timestamp, second_timestamp))
+    await asyncio.wait_for(load_event.wait(), timeout=1)
+    assert loaded_paths == [first_config_path, second_config_path]
+
+    stop_event.set()
+    await watch_task
+
+    assert loaded_paths == [first_config_path, second_config_path]
+
+
+def _record_loaded_path(
+    runtime_paths: constants.RuntimePaths,
+    loaded_paths: list[Path],
+    load_event: asyncio.Event,
+) -> None:
+    loaded_paths.append(runtime_paths.config_path)
+    load_event.set()
+
+
+@pytest.mark.asyncio
+async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker cleanup should use the current runtime, not the startup runtime."""
+    stop_event = asyncio.Event()
+    first_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "first.yaml", process_env={})
+    second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
+    cleanup_paths: list[Path] = []
+
+    def _fake_cleanup(runtime_paths: constants.RuntimePaths) -> int:
+        cleanup_paths.append(runtime_paths.config_path)
+        if len(cleanup_paths) == 1:
+            main.initialize_api_app(main.app, second_runtime)
+        else:
+            stop_event.set()
+        return 0
+
+    async def _fake_to_thread(func: Callable[..., int], *args: object) -> int:
+        return func(*args)
+
+    main.initialize_api_app(main.app, first_runtime)
+    monkeypatch.setattr(main, "_worker_cleanup_interval_seconds", lambda _runtime_paths: 0.01)
+    monkeypatch.setattr(main, "_cleanup_workers_once", _fake_cleanup)
+    monkeypatch.setattr(main.asyncio, "to_thread", _fake_to_thread)
+
+    await main._worker_cleanup_loop(stop_event, main.app, idle_poll_interval_seconds=0.01)
+
+    assert cleanup_paths == [first_runtime.config_path, second_runtime.config_path]
 
 
 def test_health_check(test_client: TestClient) -> None:
@@ -1785,11 +1838,10 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     async def _idle_watch_config(
         stop_event: asyncio.Event,
         _app: FastAPI,
-        _runtime_paths: constants.RuntimePaths,
     ) -> None:
         await stop_event.wait()
 
-    async def _idle_worker_cleanup(stop_event: asyncio.Event, _runtime_paths: constants.RuntimePaths) -> None:
+    async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
         await stop_event.wait()
 
     monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005

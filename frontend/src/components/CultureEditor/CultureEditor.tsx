@@ -27,6 +27,7 @@ export function CultureEditor() {
     deleteCulture,
     saveConfig,
     isDirty,
+    isLoading,
     selectCulture,
   } = useConfigStore();
 
@@ -82,6 +83,7 @@ export function CultureEditor() {
       isDirty={isDirty}
       onSave={handleSave}
       onDelete={handleDelete}
+      disableSave={isLoading}
       onBack={() => selectCulture(null)}
     >
       <FieldGroup

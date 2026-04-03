@@ -14,6 +14,7 @@ This branch fixed recurring regressions in four areas.
 - User-facing config-load error handling.
 - Frontend stale-state handling during async config refresh.
 - Hook ingress and runtime-context plumbing.
+- API runtime rebinding for long-lived background tasks.
 
 The fixes are now materially better than `origin/main`.
 
@@ -30,6 +31,7 @@ Current state:
 
 - Plugin tool state is now transactional and explicit enough to be correct.
 - The code still depends on import-time decorator registration to discover plugin tools.
+- Validation now serializes registry mutation with runtime loads, but it still does so by mutating and restoring process-global registries under a lock.
 - There are still several moving parts, including module caches, manifest caches, per-module tool metadata, and the committed live overlay.
 
 Why this is next:
@@ -37,10 +39,12 @@ Why this is next:
 - This is still the most complex seam touched by the branch.
 - It was the source of the largest cluster of regressions during review.
 - Future changes here are still more likely than average to reintroduce stale-state bugs.
+- The current lock-based validation safety is correct enough for merge, but it is not the end-state design.
 
 Refactor target:
 
 - Make plugin loading build an explicit candidate tool-registration map before commit.
+- Make validation resolve tool metadata without mutating the live process-global registry at all.
 - Reduce reliance on ambient module side effects as the durable source of truth.
 - Keep built-in tools as one base layer and plugin tools as one committed overlay.
 - Keep collision checks centralized and unconditional.
@@ -48,6 +52,7 @@ Refactor target:
 Acceptance criteria:
 
 - One active plugin load path builds candidate registrations first and commits once.
+- Validation reads do not need to snapshot and restore global registry state.
 - Plugin add, remove, re-add, manifest rename, and export rename all work from the same model.
 - Tool-name collisions fail at one clear boundary.
 - Tests cover whole-plugin removal, intra-plugin duplicate names, cross-plugin collisions, manifest-only rename, and failed multi-plugin load rollback.
@@ -95,8 +100,9 @@ Files:
 
 Current state:
 
-- The store now guards both `loadConfig()` and `refreshAgentPolicies()` against stale overlapping responses.
-- The sequencing pattern is duplicated in two places.
+- The store now guards `loadConfig()`, `refreshAgentPolicies()`, and `saveConfig()` against stale overlapping responses.
+- The sequencing pattern is still duplicated across multiple async actions.
+- Invalid-config recovery diagnostics are now visible, but the dashboard still lacks a true raw-config recovery editor for cases the structured UI cannot represent.
 
 Why this is next:
 
@@ -106,16 +112,45 @@ Why this is next:
 Refactor target:
 
 - Extract one small internal request-version helper or store utility for async actions that replace committed state.
-- Keep the distinction between validation-failure clears and generic-load-error preservation.
+- Keep the distinction between validation-failure clears, generic-load-error preservation, and save-result sequencing.
 - Keep diagnostics behavior explicit.
+- Decide explicitly whether dashboard invalid-config recovery should stay structured-only or gain a raw full-config editor.
 
 Acceptance criteria:
 
-- `loadConfig()` and `refreshAgentPolicies()` share one clear sequencing pattern.
+- `loadConfig()`, `refreshAgentPolicies()`, and `saveConfig()` share one clear sequencing pattern.
 - Overlapping success, validation failure, and generic failure cases are all covered in store tests.
 - A future async store action should have one obvious way to avoid stale commits.
 
-## Priority 4: Continue Shrinking `bot.py`
+## Priority 4: Move API Background Runtime Lifecycles Out Of `main.py`
+
+Files:
+
+- `src/mindroom/api/main.py`
+- `src/mindroom/api/config_lifecycle.py`
+
+Current state:
+
+- The config watcher and worker cleanup loop now read current runtime state instead of closing over startup `RuntimePaths`.
+- The lifecycle policy still lives in `api.main`.
+
+Why this is next:
+
+- The rebinding bug showed that long-lived API tasks and request-time runtime state need one owner.
+- Keeping the lifecycle policy in `main.py` makes it easier for future runtime-refresh changes to miss a sibling background task.
+
+Refactor target:
+
+- Move app-bound config watching and runtime-bound background loop helpers into a small lifecycle module next to `config_lifecycle.py`.
+- Keep `main.py` focused on route assembly and app wiring.
+
+Acceptance criteria:
+
+- Request-time runtime refresh and background loops share the same app-bound runtime source of truth.
+- Long-lived tasks do not capture startup runtime paths directly.
+- Tests cover runtime rebinding for watcher and cleanup loops at the module boundary.
+
+## Priority 5: Continue Shrinking `bot.py`
 
 Files:
 
@@ -164,4 +199,5 @@ Acceptance criteria:
 1. Simplify plugin tool loading.
 2. Finish config-load error consolidation.
 3. Reduce frontend async store duplication.
-4. Continue shrinking `bot.py` with one clearly justified extraction at a time.
+4. Move API background runtime lifecycles out of `main.py`.
+5. Continue shrinking `bot.py` with one clearly justified extraction at a time.

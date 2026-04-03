@@ -51,7 +51,11 @@ import {
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/contexts/ThemeContext';
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
-import { getGlobalConfigDiagnostics } from '@/lib/configValidation';
+import {
+  getConfigValidationIssues,
+  getGlobalConfigDiagnostics,
+  type GlobalConfigDiagnostic,
+} from '@/lib/configValidation';
 import { cn } from '@/lib/utils';
 
 const queryClient = new QueryClient();
@@ -97,9 +101,33 @@ export function resolveCurrentTab(pathname: string): string {
   return DEFAULT_TAB;
 }
 
+function isAuthDiagnosticMessage(message: string): boolean {
+  return message.includes('Authentication required') || message.includes('Access denied');
+}
+
+export function shouldShowBlockingDiagnosticOverlay(
+  blockingDiagnostic: GlobalConfigDiagnostic | null,
+  {
+    hasLoadedConfig,
+    hasValidationIssues,
+  }: {
+    hasLoadedConfig: boolean;
+    hasValidationIssues: boolean;
+  }
+): boolean {
+  if (blockingDiagnostic == null) {
+    return false;
+  }
+  if (isAuthDiagnosticMessage(blockingDiagnostic.message)) {
+    return true;
+  }
+  return !hasLoadedConfig && !hasValidationIssues;
+}
+
 function AppContent() {
   const {
     loadConfig,
+    config,
     syncStatus,
     diagnostics,
     selectedAgentId,
@@ -118,9 +146,16 @@ function AppContent() {
   const currentTab = resolveCurrentTab(location.pathname);
   const currentNavItem = NAV_ITEMS.find(item => item.value === currentTab) || NAV_ITEMS[0];
   const CurrentNavIcon = currentNavItem.icon;
+  const validationIssues = getConfigValidationIssues(diagnostics);
   const globalDiagnostics = getGlobalConfigDiagnostics(diagnostics);
   const blockingDiagnostic = globalDiagnostics.find(diagnostic => diagnostic.blocking) ?? null;
-  const bannerDiagnostics = globalDiagnostics.filter(diagnostic => !diagnostic.blocking);
+  const showBlockingDiagnosticOverlay = shouldShowBlockingDiagnosticOverlay(blockingDiagnostic, {
+    hasLoadedConfig: config != null,
+    hasValidationIssues: validationIssues.length > 0,
+  });
+  const visibleGlobalDiagnostics = showBlockingDiagnosticOverlay
+    ? globalDiagnostics.filter(diagnostic => !diagnostic.blocking)
+    : globalDiagnostics;
 
   useEffect(() => {
     // Load configuration on mount
@@ -194,10 +229,9 @@ function AppContent() {
     return 'https://app.mindroom.chat';
   };
 
-  if (blockingDiagnostic) {
+  if (showBlockingDiagnosticOverlay && blockingDiagnostic) {
     const error = blockingDiagnostic.message;
-    const isAuthError =
-      error.includes('Authentication required') || error.includes('Access denied');
+    const isAuthError = isAuthDiagnosticMessage(error);
     const isDifferentInstance = error.includes('Access denied');
 
     return (
@@ -321,7 +355,7 @@ function AppContent() {
           </div>
         </header>
 
-        {bannerDiagnostics.map((diagnostic, index) => (
+        {visibleGlobalDiagnostics.map((diagnostic, index) => (
           <div
             key={`${diagnostic.kind}-${diagnostic.message}-${index}`}
             className="border-b border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive sm:px-6"
@@ -329,6 +363,27 @@ function AppContent() {
             {diagnostic.message}
           </div>
         ))}
+
+        {config == null && validationIssues.length > 0 && (
+          <div className="border-b border-destructive/20 bg-destructive/5 px-3 py-4 text-sm text-destructive sm:px-6">
+            <div className="space-y-2">
+              <p className="font-medium">Current configuration is invalid.</p>
+              <p className="text-destructive/80">
+                Fix the reported issues in <code>config.yaml</code> or the referenced plugin
+                manifests, then retry loading the dashboard.
+              </p>
+              <ul className="list-disc space-y-1 pl-5">
+                {validationIssues.map((issue, index) => (
+                  <li key={`${issue.loc.join('.')}-${issue.msg}-${index}`}>
+                    <span className="font-medium">{issue.loc.join(' → ') || 'config'}</span>
+                    {': '}
+                    {issue.msg}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
 
         {/* Main Content */}
         <div className="flex-1 overflow-hidden">

@@ -26,7 +26,6 @@ from mindroom.api.config_lifecycle import raise_for_config_load_result as raise_
 from mindroom.api.config_lifecycle import read_app_committed_config as read_api_app_committed_config
 from mindroom.api.config_lifecycle import read_committed_config as read_api_committed_config
 from mindroom.api.config_lifecycle import replace_committed_config as replace_api_committed_config
-from mindroom.api.config_lifecycle import watch_config as watch_api_config
 from mindroom.api.config_lifecycle import write_app_committed_config as write_api_app_committed_config
 
 # Import routers
@@ -42,7 +41,6 @@ from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
 from mindroom.credentials_sync import sync_env_to_credentials
-from mindroom.file_watcher import watch_file
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 from mindroom.logging_config import get_logger
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
@@ -165,19 +163,28 @@ def _cleanup_workers_once(runtime_paths: constants.RuntimePaths) -> int:
     return len(cleaned_workers)
 
 
-async def _worker_cleanup_loop(stop_event: asyncio.Event, runtime_paths: constants.RuntimePaths) -> None:
-    """Periodically clean idle workers in the primary runtime."""
-    interval_seconds = _worker_cleanup_interval_seconds(runtime_paths)
-    if interval_seconds <= 0:
-        return
-
+async def _worker_cleanup_loop(
+    stop_event: asyncio.Event,
+    api_app: FastAPI,
+    *,
+    idle_poll_interval_seconds: float = 1.0,
+) -> None:
+    """Periodically clean idle workers using the app's current runtime paths."""
     while not stop_event.is_set():
+        runtime_paths = _app_runtime_paths(api_app)
+        interval_seconds = _worker_cleanup_interval_seconds(runtime_paths)
+        if interval_seconds <= 0:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=idle_poll_interval_seconds)
+                break
+            except TimeoutError:
+                continue
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
             break
         except TimeoutError:
             try:
-                await asyncio.to_thread(_cleanup_workers_once, runtime_paths)
+                await asyncio.to_thread(_cleanup_workers_once, _app_runtime_paths(api_app))
             except Exception:
                 logger.exception("Background worker cleanup failed")
 
@@ -272,15 +279,39 @@ def _app_auth_state(api_app: FastAPI) -> _ApiAuthState:
 async def _watch_config(
     stop_event: asyncio.Event,
     api_app: FastAPI,
-    runtime_paths: constants.RuntimePaths,
+    *,
+    poll_interval_seconds: float = 1.0,
 ) -> None:
-    """Watch config.yaml for changes."""
-    await watch_api_config(
-        stop_event,
-        runtime_paths,
-        lambda: _load_config_from_file(runtime_paths, api_app),
-        watch_file_impl=watch_file,
-    )
+    """Watch the current config file, rebinding automatically when runtime paths change."""
+    watched_config_path: Path | None = None
+    last_mtime = 0.0
+
+    while not stop_event.is_set():
+        runtime_paths = _app_runtime_paths(api_app)
+        config_path = runtime_paths.config_path
+        if config_path != watched_config_path:
+            watched_config_path = config_path
+            try:
+                last_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
+            except (OSError, PermissionError):
+                last_mtime = 0.0
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=poll_interval_seconds)
+            break
+        except TimeoutError:
+            pass
+
+        try:
+            current_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
+            if current_mtime != last_mtime:
+                last_mtime = current_mtime
+                logger.info("Config file changed", path=str(config_path))
+                _load_config_from_file(runtime_paths, api_app)
+        except (OSError, PermissionError):
+            last_mtime = 0.0
+        except Exception:
+            logger.exception("Exception during file watcher callback - continuing to watch")
 
 
 @asynccontextmanager
@@ -300,8 +331,8 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     sync_env_to_credentials(runtime_paths=runtime_paths)
 
     stop_event = asyncio.Event()
-    watch_task = asyncio.create_task(_watch_config(stop_event, _app, runtime_paths))
-    worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event, runtime_paths))
+    watch_task = asyncio.create_task(_watch_config(stop_event, _app))
+    worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event, _app))
 
     yield
 

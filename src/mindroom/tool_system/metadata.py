@@ -6,6 +6,7 @@ import functools
 import importlib
 import os
 import sys
+import threading
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
@@ -43,6 +44,7 @@ _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
 _TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "text", "url"})
 AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
 _PLUGIN_MODULE_PREFIX = "mindroom_plugin_"
+_TOOL_REGISTRY_STATE_LOCK = threading.RLock()
 
 
 class ToolInitOverrideError(ValueError):
@@ -85,6 +87,13 @@ def restore_plugin_tool_registrations(module_name: str, registrations: dict[str,
         _PLUGIN_TOOL_METADATA_BY_MODULE[module_name] = registrations.copy()
     else:
         _PLUGIN_TOOL_METADATA_BY_MODULE.pop(module_name, None)
+
+
+@contextmanager
+def locked_tool_registry_state() -> Iterator[None]:
+    """Serialize mutations of the process-global tool and plugin registries."""
+    with _TOOL_REGISTRY_STATE_LOCK:
+        yield
 
 
 def synchronize_plugin_tools(active_plugins: list[tuple[str, str]]) -> None:
@@ -790,12 +799,13 @@ def loaded_tool_registry_for_validation(
     config: Config,
 ) -> Iterator[None]:
     """Temporarily load plugin tools for validation without leaking global registry state."""
-    snapshot = _capture_tool_registry_snapshot()
-    try:
-        ensure_tool_registry_loaded(runtime_paths, config)
-        yield
-    finally:
-        _restore_tool_registry_snapshot(snapshot)
+    with locked_tool_registry_state():
+        snapshot = _capture_tool_registry_snapshot()
+        try:
+            ensure_tool_registry_loaded(runtime_paths, config)
+            yield
+        finally:
+            _restore_tool_registry_snapshot(snapshot)
 
 
 def resolved_tool_metadata_for_runtime(

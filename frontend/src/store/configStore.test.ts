@@ -48,6 +48,7 @@ describe('configStore', () => {
       agentPoliciesStale: false,
       agentPoliciesRequestId: 0,
       loadConfigRequestId: 0,
+      saveConfigRequestId: 0,
       selectedAgentId: null,
       selectedTeamId: null,
       selectedCultureId: null,
@@ -1205,6 +1206,197 @@ describe('configStore', () => {
           },
         },
       ]);
+    });
+
+    it('ignores stale successful save results after a newer validation failure', async () => {
+      const pendingSaveResponse = deferred<{
+        ok: boolean;
+        json: () => Promise<{ success: true }>;
+      }>();
+      const config: Config = {
+        models: {
+          default: { provider: 'test', id: 'test-model' },
+        },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-ada-002',
+            },
+          },
+        },
+        agents: {
+          helper: {
+            display_name: 'Helper',
+            role: 'Helpful',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+      };
+      const agents = [
+        {
+          id: 'helper',
+          display_name: 'Helper',
+          role: 'Helpful',
+          tools: [],
+          skills: [],
+          instructions: [],
+          rooms: [],
+        },
+      ];
+      useConfigStore.setState({
+        config,
+        agents,
+        isDirty: true,
+      });
+
+      (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise).mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: [
+            {
+              loc: ['agents', 'helper', 'role'],
+              msg: 'role is required',
+              type: 'value_error',
+            },
+          ],
+        }),
+      });
+
+      const firstSavePromise = useConfigStore.getState().saveConfig();
+      const secondSavePromise = useConfigStore.getState().saveConfig();
+
+      await secondSavePromise;
+
+      let state = useConfigStore.getState();
+      expect(state.saveConfigRequestId).toBe(2);
+      expect(state.syncStatus).toBe('error');
+      expect(state.isDirty).toBe(true);
+      expect(state.diagnostics).toEqual([
+        {
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: false,
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'helper', 'role'],
+            msg: 'role is required',
+            type: 'value_error',
+          },
+        },
+      ]);
+
+      pendingSaveResponse.resolve({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+      await firstSavePromise;
+
+      state = useConfigStore.getState();
+      expect(state.saveConfigRequestId).toBe(2);
+      expect(state.syncStatus).toBe('error');
+      expect(state.isDirty).toBe(true);
+      expect(state.diagnostics).toEqual([
+        {
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: false,
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'helper', 'role'],
+            msg: 'role is required',
+            type: 'value_error',
+          },
+        },
+      ]);
+    });
+
+    it('preserves newer draft edits when an older save finishes later', async () => {
+      const pendingSaveResponse = deferred<{
+        ok: boolean;
+        json: () => Promise<{ success: true }>;
+      }>();
+      const config: Config = {
+        models: {
+          default: { provider: 'test', id: 'test-model' },
+        },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-ada-002',
+            },
+          },
+        },
+        agents: {
+          helper: {
+            display_name: 'Helper',
+            role: 'Helpful',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+      };
+      const agents = [
+        {
+          id: 'helper',
+          display_name: 'Helper',
+          role: 'Helpful',
+          tools: [],
+          skills: [],
+          instructions: [],
+          rooms: [],
+        },
+      ];
+      useConfigStore.setState({
+        config,
+        agents,
+        isDirty: true,
+        privateWorkerScopeBackups: {
+          helper: 'shared',
+        },
+      });
+
+      (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
+
+      const savePromise = useConfigStore.getState().saveConfig();
+      useConfigStore.getState().updateAgent('helper', { role: 'Still editing' });
+
+      pendingSaveResponse.resolve({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+      await savePromise;
+
+      const state = useConfigStore.getState();
+      expect(state.agents[0].role).toBe('Still editing');
+      expect(state.isDirty).toBe(true);
+      expect(state.privateWorkerScopeBackups).toEqual({
+        helper: 'shared',
+      });
+      expect(state.syncStatus).toBe('synced');
     });
 
     it('refreshes agent policies after a successful save when preview state is stale', async () => {

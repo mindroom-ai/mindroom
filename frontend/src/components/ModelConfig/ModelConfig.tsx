@@ -300,7 +300,7 @@ function renderTableValue<TContext>(
 }
 
 export function ModelConfig() {
-  const { config, updateModel, deleteModel, saveConfig } = useConfigStore();
+  const { config, updateModel, deleteModel, saveConfig, isLoading } = useConfigStore();
 
   const [providerKeys, setProviderKeys] = useState<Record<string, KeyStatus>>({});
   const [modelKeys, setModelKeys] = useState<Record<string, KeyStatus>>({});
@@ -1239,6 +1239,7 @@ export function ModelConfig() {
       onSave={() => saveConfig()}
       onDelete={() => {}}
       showActions={false}
+      disableSave={isLoading}
       className="h-full"
     >
       <div className="space-y-4">
@@ -1416,7 +1417,12 @@ export function ModelConfig() {
           </div>
         </div>
 
-        <Button onClick={() => saveConfig()} variant="default" className="w-full">
+        <Button
+          onClick={() => saveConfig()}
+          variant="default"
+          className="w-full"
+          disabled={isLoading}
+        >
           <Save className="mr-2 h-4 w-4" />
           Save All Changes
         </Button>

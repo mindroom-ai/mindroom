@@ -52,6 +52,7 @@ export function AgentEditor() {
     config,
     agentPoliciesByAgent,
     isDirty,
+    isLoading,
     selectAgent,
     getAgentToolOverrides,
   } = useConfigStore();
@@ -506,6 +507,7 @@ export function AgentEditor() {
       isDirty={isDirty}
       onSave={handleSave}
       onDelete={handleDelete}
+      disableSave={isLoading}
       onBack={() => selectAgent(null)}
     >
       {agentRootError && (
