@@ -40,6 +40,7 @@ from mindroom.matrix.client import (
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import get_agents_in_thread
 
 if TYPE_CHECKING:
@@ -668,6 +669,7 @@ Examples of event/condition phrasing to include in the message (do not include t
 async def _build_workflow_message_content(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
+    target: MessageTarget,
     config: Config,
     runtime_paths: RuntimePaths,
     message_text: str,
@@ -685,17 +687,41 @@ async def _build_workflow_message_content(
         f"⏰ [Automated Task]\n{message_text}\n\n_Note: Automated task - follow-up expected when complete._"
     )
     assert workflow.room_id is not None  # Caller checks this
-    latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-        client,
-        workflow.room_id,
-        workflow.thread_id,
-    )
+    latest_thread_event_id = None
+    if target.resolved_thread_id is not None:
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            client,
+            workflow.room_id,
+            target.resolved_thread_id,
+        )
     return format_message_with_mentions(
         config,
         runtime_paths,
         automated_message,
         sender_domain=config.get_domain(runtime_paths),
-        thread_event_id=workflow.thread_id,
+        thread_event_id=target.resolved_thread_id,
+        latest_thread_event_id=latest_thread_event_id,
+    )
+
+
+async def _build_scheduled_failure_content(
+    client: nio.AsyncClient,
+    workflow: ScheduledWorkflow,
+    target: MessageTarget,
+    error_message: str,
+) -> dict[str, typing.Any]:
+    """Build a failure message that follows the scheduled workflow target."""
+    latest_thread_event_id = None
+    if target.resolved_thread_id is not None:
+        assert workflow.room_id is not None
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            client,
+            workflow.room_id,
+            target.resolved_thread_id,
+        )
+    return build_message_content(
+        body=error_message,
+        thread_event_id=target.resolved_thread_id,
         latest_thread_event_id=latest_thread_event_id,
     )
 
@@ -711,6 +737,12 @@ async def _execute_scheduled_workflow(
     if not workflow.room_id:
         logger.error("Cannot execute workflow without room_id")
         return False
+
+    target = MessageTarget.for_scheduled_task(
+        workflow,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
 
     try:
         message_text = workflow.message
@@ -729,7 +761,7 @@ async def _execute_scheduled_workflow(
                 task_id=task_id,
                 workflow=workflow,
                 room_id=workflow.room_id,
-                thread_id=workflow.thread_id,
+                thread_id=target.resolved_thread_id,
                 created_by=workflow.created_by,
                 message_text=message_text,
             )
@@ -742,6 +774,7 @@ async def _execute_scheduled_workflow(
         content = await _build_workflow_message_content(
             client,
             workflow,
+            target,
             config,
             runtime_paths,
             message_text,
@@ -755,7 +788,7 @@ async def _execute_scheduled_workflow(
         logger.info(
             "Executed scheduled workflow",
             description=workflow.description,
-            thread_id=workflow.thread_id,
+            thread_id=target.resolved_thread_id,
             new_thread=workflow.new_thread,
             event_id=event_id,
         )
@@ -763,11 +796,7 @@ async def _execute_scheduled_workflow(
         logger.exception("Failed to execute scheduled workflow")
         if workflow.room_id:
             error_message = f"❌ Scheduled task failed: {workflow.description}\nError: {e!s}"
-            error_content = build_message_content(
-                body=error_message,
-                thread_event_id=workflow.thread_id,
-                latest_thread_event_id=workflow.thread_id,
-            )
+            error_content = await _build_scheduled_failure_content(client, workflow, target, error_message)
             try:
                 await send_message(client, workflow.room_id, error_content)
             except Exception:
@@ -865,10 +894,11 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         logger.exception(f"Error in cron task {task_id}")
         if workflow.room_id:
             error_message = f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
-            error_content = build_message_content(
-                body=error_message,
-                thread_event_id=workflow.thread_id,
-                latest_thread_event_id=workflow.thread_id,
+            error_content = await _build_scheduled_failure_content(
+                client,
+                workflow,
+                MessageTarget.for_scheduled_task(workflow, config=config, runtime_paths=runtime_paths),
+                error_message,
             )
             await send_message(client, workflow.room_id, error_content)
     finally:
@@ -953,10 +983,11 @@ async def _run_once_task(  # noqa: C901, PLR0912
         logger.exception(f"Error in one-time task {task_id}")
         if workflow.room_id:
             error_message = f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
-            error_content = build_message_content(
-                body=error_message,
-                thread_event_id=workflow.thread_id,
-                latest_thread_event_id=workflow.thread_id,
+            error_content = await _build_scheduled_failure_content(
+                client,
+                workflow,
+                MessageTarget.for_scheduled_task(workflow, config=config, runtime_paths=runtime_paths),
+                error_message,
             )
             await send_message(client, workflow.room_id, error_content)
         if latest_pending_task is not None:

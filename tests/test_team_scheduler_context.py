@@ -16,6 +16,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -33,8 +34,7 @@ def _response_envelope() -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$user_event",
         room_id="!team:localhost",
-        thread_id="$thread_root",
-        resolved_thread_id="$thread_root",
+        target=MessageTarget.resolve("!team:localhost", "$thread_root", "$user_event"),
         requester_id="@user:localhost",
         sender_id="@user:localhost",
         body="Please coordinate and schedule a reminder",

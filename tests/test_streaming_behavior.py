@@ -21,6 +21,7 @@ from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
     IN_PROGRESS_MARKER,
@@ -816,8 +817,12 @@ class TestStreamingBehavior:
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
             room_id="!test:localhost",
-            thread_id=None,
-            resolved_thread_id="$thread_root:localhost",
+            target=MessageTarget.resolve(
+                room_id="!test:localhost",
+                thread_id=None,
+                reply_to_event_id="$reply_plain:localhost",
+                safe_thread_root="$thread_root:localhost",
+            ),
             requester_id="@user:localhost",
             sender_id="@user:localhost",
             body="Continue",
@@ -865,6 +870,44 @@ class TestStreamingBehavior:
         assert first_content["m.relates_to"]["rel_type"] == "m.thread"
         assert first_content["m.relates_to"]["event_id"] == "$thread_root:localhost"
         assert first_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply_plain:localhost"
+
+    @pytest.mark.asyncio
+    async def test_streaming_target_syncs_scalar_fields_before_send(self) -> None:
+        """Canonical target values must override stale scalar fields before delivery."""
+        sent_messages: list[tuple[str, dict[str, object]]] = []
+        target = MessageTarget.resolve(
+            room_id="!canonical:localhost",
+            thread_id="$thread:localhost",
+            reply_to_event_id="$reply:localhost",
+        )
+
+        async def record_send(_client: object, room_id: str, content: dict[str, object]) -> str:
+            sent_messages.append((room_id, content))
+            return "$stream_1"
+
+        with patch("mindroom.streaming.send_message", new=record_send):
+            streaming = StreamingResponse(
+                room_id="!stale:localhost",
+                reply_to_event_id="$stale_reply:localhost",
+                thread_id="$stale_thread:localhost",
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                target=target,
+            )
+
+            assert streaming.room_id == "!canonical:localhost"
+            assert streaming.thread_id == "$thread:localhost"
+            assert streaming.reply_to_event_id == "$reply:localhost"
+
+            await streaming.update_content("Hello world", AsyncMock())
+
+        assert sent_messages
+        room_id, content = sent_messages[0]
+        assert room_id == "!canonical:localhost"
+        assert isinstance(content["m.relates_to"], dict)
+        assert content["m.relates_to"]["event_id"] == "$thread:localhost"
+        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply:localhost"
 
     @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(

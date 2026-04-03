@@ -47,6 +47,7 @@ from mindroom.hooks.execution import emit
 from mindroom.hooks.sender import HookMessageSender as SenderAlias
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.tool_system.skills import _SkillCommandDispatch, _SkillCommandSpec
 from tests.conftest import (
@@ -103,8 +104,7 @@ def _message_received_context(tmp_path: Path, *, plugin_name: str = "") -> Messa
         envelope=MessageEnvelope(
             source_event_id="$event",
             room_id="!room:localhost",
-            thread_id=None,
-            resolved_thread_id="$event",
+            target=MessageTarget.resolve("!room:localhost", None, "$event"),
             requester_id="@user:localhost",
             sender_id="@user:localhost",
             body="hello",
@@ -132,8 +132,11 @@ def _synthetic_envelope(*, agent_name: str = "code") -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$hook-event",
         room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
+        target=MessageTarget.resolve(
+            "!room:localhost",
+            "$thread",
+            "$hook-event",
+        ),
         requester_id="@user:localhost",
         sender_id="@mindroom_router:localhost",
         body="synthetic",

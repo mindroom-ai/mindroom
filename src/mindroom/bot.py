@@ -101,6 +101,7 @@ from mindroom.memory.auto_flush import (
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.stop import StopManager
 from mindroom.streaming import (
     IN_PROGRESS_MARKER,
@@ -458,6 +459,7 @@ class _PreparedDispatch:
     context: _MessageContext
     correlation_id: str
     envelope: MessageEnvelope
+    target: MessageTarget | None = None
 
 
 @dataclass(frozen=True)
@@ -489,9 +491,18 @@ class _ResponseDispatchResult:
 class _ResponseTarget:
     """Canonical thread target and persisted session scope for one response lifecycle."""
 
-    resolved_thread_id: str | None
+    target: MessageTarget
     delivery_thread_id: str | None
-    session_id: str
+
+    @property
+    def resolved_thread_id(self) -> str | None:
+        """Return the canonical resolved thread root."""
+        return self.target.resolved_thread_id
+
+    @property
+    def session_id(self) -> str:
+        """Return the canonical persisted session ID."""
+        return self.target.session_id
 
 
 @dataclass(frozen=True)
@@ -658,27 +669,35 @@ class AgentBot:
             return "team"
         return "agent"
 
-    def _response_lifecycle_lock(
+    def _response_lifecycle_lock(self, target: MessageTarget) -> asyncio.Lock:
+        """Return the per-target lock that serializes one response lifecycle."""
+        return _get_or_create_lock(
+            cast("dict[object, asyncio.Lock]", self._response_lifecycle_locks),
+            (target.room_id, target.resolved_thread_id),
+        )
+
+    def _build_message_target(
         self,
+        *,
         room_id: str,
         thread_id: str | None,
         reply_to_event_id: str | None,
-        *,
-        resolved_thread_id: str | None = None,
-    ) -> asyncio.Lock:
-        """Return the per-thread lock that serializes one response lifecycle."""
-        effective_resolved_thread_id = (
-            resolved_thread_id
-            if resolved_thread_id is not None
-            else self._resolved_conversation_thread_id(
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=reply_to_event_id,
-            )
+        event_source: dict[str, Any] | None = None,
+        thread_mode_override: Literal["thread", "room"] | None = None,
+    ) -> MessageTarget:
+        """Build the canonical delivery target for one outbound response."""
+        effective_thread_mode = thread_mode_override or self.config.get_entity_thread_mode(
+            self.agent_name,
+            self.runtime_paths,
+            room_id=room_id,
         )
-        return _get_or_create_lock(
-            cast("dict[object, asyncio.Lock]", self._response_lifecycle_locks),
-            (room_id, effective_resolved_thread_id),
+        safe_thread_root = EventInfo.from_event(event_source).safe_thread_root if event_source is not None else None
+        return MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            safe_thread_root=safe_thread_root,
+            room_mode=effective_thread_mode == "room",
         )
 
     def _resolved_conversation_thread_id(
@@ -689,11 +708,11 @@ class AgentBot:
         reply_to_event_id: str | None,
     ) -> str | None:
         """Return the canonical conversation root for locks and persisted sessions."""
-        return self._resolve_reply_thread_id(
-            thread_id,
-            reply_to_event_id,
+        return self._build_message_target(
             room_id=room_id,
-        )
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        ).resolved_thread_id
 
     def _conversation_session_id(
         self,
@@ -704,16 +723,14 @@ class AgentBot:
         resolved_thread_id: str | None = None,
     ) -> str:
         """Return the canonical persisted session ID for one response lifecycle."""
-        return create_session_id(
-            room_id,
-            resolved_thread_id
-            if resolved_thread_id is not None
-            else self._resolved_conversation_thread_id(
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=reply_to_event_id,
-            ),
+        target = self._build_message_target(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
         )
+        if resolved_thread_id is not None and target.resolved_thread_id != resolved_thread_id:
+            target = target.with_thread_root(resolved_thread_id)
+        return target.session_id
 
     def _coalescing_enabled(self) -> bool:
         """Return whether live coalescing is enabled for this bot."""
@@ -940,6 +957,7 @@ class AgentBot:
         event: _DispatchEvent,
         requester_user_id: str,
         context: _MessageContext,
+        target: MessageTarget | None = None,
         attachment_ids: list[str] | None = None,
         agent_name: str | None = None,
         body: str | None = None,
@@ -975,17 +993,17 @@ class AgentBot:
             depth_override = content.get(HOOK_MESSAGE_RECEIVED_DEPTH_KEY)
             if isinstance(depth_override, int) and not isinstance(depth_override, bool) and depth_override > 0:
                 message_received_depth = depth_override
+        resolved_target = target or self._build_message_target(
+            room_id=room_id,
+            thread_id=context.thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
 
         return MessageEnvelope(
             source_event_id=event.event_id,
             room_id=room_id,
-            thread_id=context.thread_id,
-            resolved_thread_id=self._resolve_reply_thread_id(
-                context.thread_id,
-                event.event_id,
-                room_id=room_id,
-                event_source=event.source,
-            ),
+            target=resolved_target,
             requester_id=requester_user_id,
             sender_id=event.sender,
             body=body or event.body,
@@ -1048,11 +1066,18 @@ class AgentBot:
         agent_name: str | None = None,
     ) -> MessageEnvelope:
         """Build the default outbound envelope when hooks did not supply one."""
+        target = self._build_message_target(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_mode_override="room" if resolved_thread_id is None else None,
+        )
+        if target.resolved_thread_id != resolved_thread_id:
+            target = target.with_thread_root(resolved_thread_id)
         return MessageEnvelope(
             source_event_id=reply_to_event_id,
             room_id=room_id,
-            thread_id=thread_id,
-            resolved_thread_id=resolved_thread_id,
+            target=target,
             requester_id=requester_id,
             sender_id=requester_id,
             body=body,
@@ -1164,15 +1189,19 @@ class AgentBot:
         messages and store room-level state. In thread mode, this prefers an
         existing thread ID and falls back to a safe root/reply target.
         """
-        effective_thread_mode = thread_mode_override or self.config.get_entity_thread_mode(
-            self.agent_name,
-            self.runtime_paths,
+        if room_id is None:
+            effective_thread_mode = thread_mode_override
+            if effective_thread_mode == "room":
+                return None
+            safe_thread_root = EventInfo.from_event(event_source).safe_thread_root if event_source is not None else None
+            return thread_id or safe_thread_root or reply_to_event_id
+        return self._build_message_target(
             room_id=room_id,
-        )
-        if effective_thread_mode == "room":
-            return None
-        event_info = EventInfo.from_event(event_source)
-        return thread_id or event_info.safe_thread_root or reply_to_event_id
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            event_source=event_source,
+            thread_mode_override=thread_mode_override,
+        ).resolved_thread_id
 
     def _resolve_response_thread_root(
         self,
@@ -1193,34 +1222,30 @@ class AgentBot:
         room_id: str,
         thread_id: str | None,
         reply_to_event_id: str | None,
+        target: MessageTarget | None = None,
         existing_event_id: str | None = None,
         existing_event_is_placeholder: bool = False,
         resolved_thread_id: str | None = None,
         response_envelope: MessageEnvelope | None = None,
     ) -> _ResponseTarget:
         """Compute the canonical thread target for one response lifecycle."""
-        effective_resolved_thread_id = (
-            resolved_thread_id
-            if resolved_thread_id is not None
-            else self._resolve_response_thread_root(
-                thread_id,
-                reply_to_event_id,
-                room_id=room_id,
-                response_envelope=response_envelope,
-            )
-        )
-        return _ResponseTarget(
-            resolved_thread_id=effective_resolved_thread_id,
-            delivery_thread_id=(
-                effective_resolved_thread_id
-                if existing_event_id is None or existing_event_is_placeholder
-                else thread_id
-            ),
-            session_id=self._conversation_session_id(
+        effective_target = (
+            target
+            or (response_envelope.target if response_envelope is not None else None)
+            or self._build_message_target(
                 room_id=room_id,
                 thread_id=thread_id,
                 reply_to_event_id=reply_to_event_id,
-                resolved_thread_id=effective_resolved_thread_id,
+            )
+        )
+        if resolved_thread_id is not None and effective_target.resolved_thread_id != resolved_thread_id:
+            effective_target = effective_target.with_thread_root(resolved_thread_id)
+        return _ResponseTarget(
+            target=effective_target,
+            delivery_thread_id=(
+                effective_target.resolved_thread_id
+                if existing_event_id is None or existing_event_is_placeholder
+                else thread_id
             ),
         )
 
@@ -2683,11 +2708,18 @@ class AgentBot:
 
         context = await self._extract_dispatch_context(room, event)
         correlation_id = event.event_id
+        target = self._build_message_target(
+            room_id=room.room_id,
+            thread_id=context.thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
         envelope = self._build_message_envelope(
             room_id=room.room_id,
             event=event,
             requester_user_id=effective_requester_user_id,
             context=context,
+            target=target,
         )
         ingress_policy = hook_ingress_policy(envelope)
         if await self._emit_message_received_hooks(
@@ -2706,6 +2738,7 @@ class AgentBot:
         return _PreparedDispatch(
             requester_user_id=effective_requester_user_id,
             context=context,
+            target=target,
             correlation_id=correlation_id,
             envelope=envelope,
         )
@@ -3634,8 +3667,7 @@ class AgentBot:
         envelope = MessageEnvelope(
             source_event_id=dispatch.envelope.source_event_id,
             room_id=dispatch.envelope.room_id,
-            thread_id=dispatch.envelope.thread_id,
-            resolved_thread_id=dispatch.envelope.resolved_thread_id,
+            target=dispatch.envelope.target,
             requester_id=dispatch.envelope.requester_id,
             sender_id=dispatch.envelope.sender_id,
             body=dispatch.envelope.body,
@@ -3761,12 +3793,7 @@ class AgentBot:
             existing_event_is_placeholder=existing_event_is_placeholder,
             response_envelope=response_envelope,
         )
-        lifecycle_lock = self._response_lifecycle_lock(
-            room_id,
-            thread_id,
-            reply_to_event_id,
-            resolved_thread_id=effective_response_target.resolved_thread_id,
-        )
+        lifecycle_lock = self._response_lifecycle_lock(effective_response_target.target)
         async with lifecycle_lock:
             return await self._generate_team_response_helper_locked(
                 room_id=room_id,
@@ -3928,6 +3955,7 @@ class AgentBot:
                             existing_event_id=message_id,
                             adopt_existing_placeholder=message_id is not None
                             and (existing_event_is_placeholder or existing_event_id is None),
+                            target=response_target.target,
                             room_mode=room_mode,
                         )
                 if event_id is None:
@@ -4402,12 +4430,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
         )
-        lifecycle_lock = self._response_lifecycle_lock(
-            room_id,
-            thread_id,
-            reply_to_event_id,
-            resolved_thread_id=response_target.resolved_thread_id,
-        )
+        lifecycle_lock = self._response_lifecycle_lock(response_target.target)
         async with lifecycle_lock:
             return await self._send_skill_command_response_locked(
                 room_id=room_id,
@@ -4859,6 +4882,7 @@ class AgentBot:
                         streaming_cls=StreamingResponse,
                         existing_event_id=existing_event_id,
                         adopt_existing_placeholder=adopt_existing_placeholder,
+                        target=effective_response_target.target,
                         room_mode=room_mode,
                         show_tool_calls=self.show_tool_calls,
                         extra_content=response_extra_content,
@@ -5061,12 +5085,7 @@ class AgentBot:
             existing_event_is_placeholder=existing_event_is_placeholder,
             response_envelope=response_envelope,
         )
-        lifecycle_lock = self._response_lifecycle_lock(
-            room_id,
-            thread_id,
-            reply_to_event_id,
-            resolved_thread_id=response_target.resolved_thread_id,
-        )
+        lifecycle_lock = self._response_lifecycle_lock(response_target.target)
         async with lifecycle_lock:
             return await self._generate_response_locked(
                 room_id=room_id,

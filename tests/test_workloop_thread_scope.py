@@ -31,6 +31,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.execution import emit, emit_collect
 from mindroom.logging_config import get_logger
+from mindroom.message_target import MessageTarget
 from mindroom.scheduling import ScheduledWorkflow
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
@@ -141,11 +142,18 @@ def _message_envelope(
     thread_id: str | None = None,
     resolved_thread_id: str | None = "$thread_root",
 ) -> MessageEnvelope:
+    target = MessageTarget.resolve(
+        room_id="!room:localhost",
+        thread_id=thread_id,
+        reply_to_event_id="$event",
+        safe_thread_root=resolved_thread_id if thread_id is None else None,
+    )
+    if thread_id is not None:
+        target = target.with_thread_root(resolved_thread_id)
     return MessageEnvelope(
         source_event_id="$event",
         room_id="!room:localhost",
-        thread_id=thread_id,
-        resolved_thread_id=resolved_thread_id,
+        target=target,
         requester_id="@user:localhost",
         sender_id="@user:localhost",
         body=body,

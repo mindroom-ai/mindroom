@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import mindroom.tools  # noqa: F401
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import ORIGINAL_SENDER_KEY, resolve_runtime_paths
 from mindroom.custom_tools import subagents as subagents_module
 from mindroom.custom_tools.subagents import SubAgentsTools
 from mindroom.thread_utils import create_session_id
@@ -36,6 +36,7 @@ def _make_config(*, thread_mode: str = "thread") -> MagicMock:
         "code": SimpleNamespace(tools=["shell"]),
         "research": SimpleNamespace(tools=["shell"]),
     }
+    config.get_domain = MagicMock(return_value="localhost")
     config.get_entity_thread_mode = MagicMock(return_value=thread_mode)
     return config
 
@@ -164,6 +165,33 @@ async def test_sessions_send_relays_original_sender(
         thread_id=ctx.thread_id,
         original_sender=ctx.requester_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Threaded subagent sends should include the latest thread event for fallback replies."""
+    send_mock = AsyncMock(return_value="$evt")
+    latest_mock = AsyncMock(return_value="$latest:localhost")
+    monkeypatch.setattr(subagents_module, "send_message", send_mock)
+    monkeypatch.setattr(subagents_module, "get_latest_thread_event_id_if_needed", latest_mock)
+    ctx = _make_context(tmp_path, requester_id="@user:localhost")
+
+    await subagents_module._send_matrix_text(
+        ctx,
+        room_id=ctx.room_id,
+        text="hello",
+        thread_id=ctx.thread_id,
+        original_sender=ctx.requester_id,
+    )
+
+    latest_mock.assert_awaited_once_with(ctx.client, ctx.room_id, ctx.thread_id)
+    content = send_mock.await_args.args[2]
+    assert content["m.relates_to"]["event_id"] == ctx.thread_id
+    assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest:localhost"
+    assert content[ORIGINAL_SENDER_KEY] == ctx.requester_id
 
 
 @pytest.mark.asyncio

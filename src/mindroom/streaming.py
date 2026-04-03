@@ -22,6 +22,7 @@ from mindroom.constants import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import edit_message, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -159,6 +160,7 @@ class StreamingResponse:
     sender_domain: str
     config: Config
     runtime_paths: RuntimePaths
+    target: MessageTarget | None = None
     accumulated_text: str = ""
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
@@ -178,6 +180,20 @@ class StreamingResponse:
     chars_since_last_update: int = 0
     in_progress_update_count: int = 0
     placeholder_progress_sent: bool = False
+
+    def __post_init__(self) -> None:
+        """Normalize transitional target fields onto one canonical target."""
+        if self.target is None:
+            self.target = MessageTarget.resolve(
+                room_id=self.room_id,
+                thread_id=self.thread_id,
+                reply_to_event_id=self.reply_to_event_id,
+                room_mode=self.room_mode,
+            )
+        self.room_id = self.target.room_id
+        self.thread_id = self.target.thread_id
+        self.reply_to_event_id = self.target.reply_to_event_id
+        self.room_mode = self.target.is_room_mode
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
@@ -302,7 +318,8 @@ class StreamingResponse:
         if not self.accumulated_text.strip() and not allow_empty_progress:
             return True
 
-        effective_thread_id = None if self.room_mode else self.thread_id
+        assert self.target is not None
+        effective_thread_id = self.target.resolved_thread_id
 
         # Add in-progress marker during streaming (not on final update)
         text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
@@ -326,7 +343,7 @@ class StreamingResponse:
             text=display_text,
             sender_domain=self.sender_domain,
             thread_event_id=effective_thread_id,
-            reply_to_event_id=None if self.room_mode else self.reply_to_event_id,
+            reply_to_event_id=None if self.room_mode else self.target.reply_to_event_id,
             latest_thread_event_id=latest_for_message,
             tool_trace=self.tool_trace if self.show_tool_calls else None,
             extra_content=extra_content,
@@ -508,44 +525,27 @@ async def send_streaming_response(
     existing_event_id: str | None = None,
     adopt_existing_placeholder: bool = False,
     room_mode: bool = False,
+    target: MessageTarget | None = None,
     show_tool_calls: bool = True,
     extra_content: dict[str, Any] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> tuple[str | None, str]:
-    """Stream chunks to a Matrix room, returning (event_id, accumulated_text).
+    """Stream chunks to a Matrix room, returning (event_id, accumulated_text)."""
+    resolved_target = target or MessageTarget.resolve(
+        room_id=room_id,
+        thread_id=thread_id,
+        reply_to_event_id=reply_to_event_id,
+        room_mode=room_mode,
+    )
 
-    Args:
-        client: Matrix client
-        room_id: Destination room
-        reply_to_event_id: Event to reply to (can be None when in a thread)
-        thread_id: Canonical thread root if sending in a thread
-        sender_domain: Sender's homeserver domain for mention formatting
-        config: App config for mention formatting
-        runtime_paths: Explicit runtime context for mention formatting
-        response_stream: Async iterator yielding text chunks or response events
-        streaming_cls: StreamingResponse class to use (default: StreamingResponse, alternative: ReplacementStreamingResponse)
-        header: Optional text prefix to send before chunks
-        existing_event_id: If editing an existing message, pass its ID
-        adopt_existing_placeholder: Treat an existing event as a bot-created
-            thinking placeholder so terminal finalize still edits it even if no
-            chunks arrive.
-        room_mode: If True, skip thread relations (for bridges/mobile)
-        show_tool_calls: Whether to include tool call text inline in the streamed message
-        extra_content: Optional custom metadata fields merged into each event
-        tool_trace_collector: Optional list updated with the final tool trace
-
-    Returns:
-        Tuple of (final event_id or None, full accumulated text)
-
-    """
-    if room_mode:
+    if resolved_target.is_room_mode:
         latest_thread_event_id = None
     else:
         latest_thread_event_id = await get_latest_thread_event_id_if_needed(
             client,
             room_id,
-            thread_id,
-            reply_to_event_id,
+            resolved_target.resolved_thread_id,
+            resolved_target.reply_to_event_id,
             existing_event_id,
         )
 
@@ -557,8 +557,9 @@ async def send_streaming_response(
         sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
+        target=resolved_target,
         latest_thread_event_id=latest_thread_event_id,
-        room_mode=room_mode,
+        room_mode=resolved_target.is_room_mode,
         show_tool_calls=show_tool_calls,
         extra_content=extra_content,
         update_interval=sc.update_interval,
