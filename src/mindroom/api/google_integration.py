@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import Flow
 
+    from mindroom.api.config_lifecycle import ApiSnapshot
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/google", tags=["google-integration"])
@@ -191,6 +192,17 @@ def _refresh_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
         storage_path=runtime_paths.storage_root,
         process_env=dict(runtime_paths.process_env),
     )
+
+
+def _require_request_snapshot(request: Request) -> ApiSnapshot:
+    """Return the auth-bound API snapshot for one protected dashboard request."""
+    from mindroom.api.main import request_api_snapshot  # noqa: PLC0415
+
+    snapshot = request_api_snapshot(request)
+    if snapshot is None:
+        msg = "Authenticated request is missing its bound API snapshot"
+        raise RuntimeError(msg)
+    return snapshot
 
 
 def _save_env_credentials(
@@ -423,7 +435,8 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
         )
         from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
 
-        _reload_api_runtime_config(request.app, runtime_paths)
+        snapshot = _require_request_snapshot(request)
+        _reload_api_runtime_config(request.app, runtime_paths, expected_snapshot=snapshot)
     except HTTPException:
         raise
     except Exception as e:
@@ -461,7 +474,8 @@ async def reset(request: Request) -> dict[str, Any]:
         refreshed_runtime_paths = _refresh_runtime_paths(runtime_paths)
         from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
 
-        _reload_api_runtime_config(request.app, refreshed_runtime_paths)
+        snapshot = _require_request_snapshot(request)
+        _reload_api_runtime_config(request.app, refreshed_runtime_paths, expected_snapshot=snapshot)
     except HTTPException:
         raise
     except Exception as e:

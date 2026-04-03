@@ -14,6 +14,7 @@ from mindroom import constants
 from mindroom.api import main
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge.manager import initialize_shared_knowledge_managers, shutdown_shared_knowledge_managers
 
@@ -50,6 +51,7 @@ def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
     """Publish one committed config snapshot for request-path tests."""
     context = main._app_context(api_app)
     context.config_data = config.authored_model_dump()
+    context.runtime_config = config
     context.config_load_result = main.ConfigLoadResult(success=True)
 
 
@@ -341,6 +343,24 @@ def test_knowledge_routes_use_committed_snapshot_until_reload(test_client: TestC
         ),
         encoding="utf-8",
     )
+
+    response = test_client.get("/api/knowledge/bases")
+
+    assert response.status_code == 200
+    assert response.json()["bases"][0]["name"] == "research"
+
+
+def test_knowledge_routes_ignore_unpublished_plugin_drift(test_client: TestClient, tmp_path: Path) -> None:
+    """Knowledge routes should keep serving the published snapshot when plugin files drift on disk."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    plugin_root = runtime_paths.config_path.parent / "plugins" / "demo_plugin"
+    plugin_root.mkdir(parents=True)
+    manifest_path = plugin_root / "mindroom.plugin.json"
+    manifest_path.write_text('{"name": "demo_plugin", "skills": []}', encoding="utf-8")
+    config = _knowledge_config(tmp_path / "published")
+    config.plugins = [PluginEntryConfig(path="./plugins/demo_plugin")]
+    _publish_committed_runtime_config(test_client.app, config)
+    manifest_path.write_text('{"name": "BadName", "skills": []}', encoding="utf-8")
 
     response = test_client.get("/api/knowledge/bases")
 

@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
-from mindroom.api import config_lifecycle, main
+from mindroom.api import config_lifecycle, google_integration, main
 from mindroom.api import workers as workers_api
 from mindroom.config.main import Config
 from mindroom.matrix.health import (
@@ -93,7 +93,9 @@ def _publish_committed_runtime_config(
     """Publish one committed config snapshot for request-bound API tests."""
     main.initialize_api_app(api_app, runtime_paths)
     context = main._app_context(api_app)
-    context.config_data = Config.validate_with_runtime(authored_payload, runtime_paths).authored_model_dump()
+    runtime_config = Config.validate_with_runtime(authored_payload, runtime_paths)
+    context.config_data = runtime_config.authored_model_dump()
+    context.runtime_config = runtime_config
     context.config_load_result = main.ConfigLoadResult(success=True)
     context.auth_state = None
 
@@ -1771,6 +1773,50 @@ def test_google_configure_surfaces_runtime_validation_failures(
     assert "mindroom_user.username" in str(after_response.json()["detail"])
 
 
+def test_google_configure_rejects_stale_runtime_refresh_after_runtime_swap(tmp_path: Path) -> None:
+    """Google configure should not republish an older request-bound runtime after the app has moved on."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = _authored_config_payload("old")
+    payload_b = _authored_config_payload("new")
+    original_save_env_credentials = google_integration._save_env_credentials
+
+    def _swap_then_save_env_credentials(
+        client_id: str,
+        client_secret: str,
+        runtime_paths: constants.RuntimePaths,
+        project_id: str | None = None,
+    ) -> constants.RuntimePaths:
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return original_save_env_credentials(client_id, client_secret, runtime_paths, project_id)
+
+    with (
+        patch("mindroom.api.google_integration._save_env_credentials", side_effect=_swap_then_save_env_credentials),
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.post(
+            "/api/google/configure",
+            headers={"Authorization": "Bearer key-a"},
+            json={
+                "client_id": "configured-client-id",
+                "client_secret": "configured-client-secret",
+            },
+        )
+
+    assert response.status_code == 409
+    assert main._app_runtime_paths(main.app) == runtime_b
+    assert main._app_context(main.app).config_data["agents"] == payload_b["agents"]
+
+
 def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:
     """Home Assistant connect should use state instead of encoding agent_name in the callback URL."""
     config = _config_with_worker_scope("shared")
@@ -2382,7 +2428,7 @@ def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path)
     call_lock = threading.Lock()
     call_count = 0
     original_loader = config_lifecycle.load_runtime_config_model
-    results: list[dict[str, Any] | None] = [None, None]
+    results: list[tuple[Config, dict[str, Any]] | None] = [None, None]
 
     def _interleaving_loader(validation_runtime_paths: constants.RuntimePaths) -> Config:
         nonlocal call_count
@@ -2412,8 +2458,8 @@ def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path)
     assert not second_thread.is_alive()
     assert results[0] is not None
     assert results[1] is not None
-    assert results[0]["agents"] == {"agent_a": {"display_name": "Agent A", "role": "role a", "rooms": []}}
-    assert results[1]["agents"] == {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}}
+    assert results[0][1]["agents"] == {"agent_a": {"display_name": "Agent A", "role": "role a", "rooms": []}}
+    assert results[1][1]["agents"] == {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}}
 
 
 def test_run_config_write_restores_original_config_before_releasing_lock(tmp_path: Path) -> None:
@@ -3380,6 +3426,52 @@ def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None
             "/api/config/save",
             headers={"Authorization": "Bearer key-a"},
             json=_authored_config_payload("written"),
+        )
+
+    assert response.status_code == 409
+    assert Config.validate_with_runtime(yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8")), runtime_b)
+    assert yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8"))["agents"] == payload_b["agents"]
+
+
+def test_protected_crud_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:
+    """Legacy CRUD writes should fail stale instead of mutating a newer runtime after auth succeeds."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = _authored_config_payload("old")
+    payload_b = _authored_config_payload("new")
+    runtime_b.config_path.write_text(yaml.safe_dump(payload_b), encoding="utf-8")
+    original_write = main.write_api_committed_config
+
+    def _swap_then_write(
+        request: Request,
+        mutate: Callable[[dict[str, Any]], object],
+        *,
+        error_prefix: str,
+    ) -> object:
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return original_write(request, mutate, error_prefix=error_prefix)
+
+    with (
+        patch.object(main, "write_api_committed_config", side_effect=_swap_then_write),
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.put(
+            "/api/config/agents/assistant",
+            headers={"Authorization": "Bearer key-a"},
+            json={
+                "display_name": "Assistant",
+                "role": "updated",
+                "rooms": ["updated-room"],
+            },
         )
 
     assert response.status_code == 409

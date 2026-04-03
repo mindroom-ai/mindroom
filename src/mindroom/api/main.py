@@ -31,6 +31,7 @@ from mindroom.api.config_lifecycle import replace_raw_config_source as replace_a
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
 from mindroom.api.config_lifecycle import write_app_committed_config as write_api_app_committed_config
+from mindroom.api.config_lifecycle import write_committed_config as write_api_committed_config
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
@@ -56,6 +57,8 @@ from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
+
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 _UNSET = object()
@@ -211,12 +214,14 @@ def _published_snapshot(
     increment_generation: bool = True,
     runtime_paths: constants.RuntimePaths | None = None,
     config_data: dict[str, Any] | None = None,
+    runtime_config: Config | None | object = _UNSET,
     config_load_result: ConfigLoadResult | None | object = _UNSET,
     auth_state: _ApiAuthState | None | object = _UNSET,
 ) -> ApiSnapshot:
     """Return one new published snapshot with an incremented generation."""
     updated_runtime_paths = snapshot.runtime_paths if runtime_paths is None else runtime_paths
     updated_config_data = snapshot.config_data if config_data is None else config_data
+    updated_runtime_config = snapshot.runtime_config if runtime_config is _UNSET else runtime_config
     updated_config_load_result = (
         snapshot.config_load_result
         if config_load_result is _UNSET
@@ -227,6 +232,7 @@ def _published_snapshot(
         generation=snapshot.generation + 1 if increment_generation else snapshot.generation,
         runtime_paths=updated_runtime_paths,
         config_data=updated_config_data,
+        runtime_config=cast("Config | None", updated_runtime_config),
         config_load_result=updated_config_load_result,
         auth_state=updated_auth_state,
     )
@@ -262,6 +268,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
                 generation=0,
                 runtime_paths=runtime_paths,
                 config_data={},
+                runtime_config=None,
                 config_load_result=None,
                 auth_state=None,
             ),
@@ -276,6 +283,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         current_snapshot = current_state.snapshot
         auth_state = current_snapshot.auth_state if current_snapshot.runtime_paths == runtime_paths else None
         config_data = current_snapshot.config_data if current_snapshot.runtime_paths == runtime_paths else {}
+        runtime_config = current_snapshot.runtime_config if current_snapshot.runtime_paths == runtime_paths else None
         config_load_result = (
             current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
         )
@@ -283,6 +291,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             current_snapshot,
             runtime_paths=runtime_paths,
             config_data=config_data,
+            runtime_config=runtime_config,
             auth_state=auth_state,
             config_load_result=config_load_result,
         )
@@ -438,6 +447,16 @@ def _run_config_write[T](
     return write_api_app_committed_config(api_app, mutate, error_prefix=error_prefix)
 
 
+def _run_request_config_write[T](
+    request: Request,
+    mutate: Callable[[dict[str, Any]], T],
+    *,
+    error_prefix: str,
+) -> T:
+    """Validate, save, and swap config against the request-bound snapshot."""
+    return write_api_committed_config(request, mutate, error_prefix=error_prefix)
+
+
 def _read_committed_config[T](
     api_app: FastAPI,
     reader: Callable[[dict[str, Any]], T],
@@ -446,9 +465,47 @@ def _read_committed_config[T](
     return read_api_app_committed_config(api_app, reader)
 
 
-def _reload_api_runtime_config(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
+def _read_request_committed_config[T](
+    request: Request,
+    reader: Callable[[dict[str, Any]], T],
+) -> T:
+    """Read committed API config from the request-bound snapshot."""
+    return read_api_committed_config(request, reader)
+
+
+def _reload_api_runtime_config(
+    api_app: FastAPI,
+    runtime_paths: constants.RuntimePaths,
+    *,
+    expected_snapshot: ApiSnapshot | None = None,
+) -> None:
     """Rebind the API app to one runtime and surface structured config reload failures."""
-    initialize_api_app(api_app, runtime_paths)
+    app_state = _app_state(api_app)
+    with app_state.config_lock:
+        current_state = _app_state(api_app)
+        current_snapshot = current_state.snapshot
+        if expected_snapshot is not None and (
+            current_snapshot.generation != expected_snapshot.generation
+            or current_snapshot.runtime_paths != expected_snapshot.runtime_paths
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Configuration changed while request was in progress. Retry the operation.",
+            )
+        auth_state = current_snapshot.auth_state if current_snapshot.runtime_paths == runtime_paths else None
+        config_data = current_snapshot.config_data if current_snapshot.runtime_paths == runtime_paths else {}
+        runtime_config = current_snapshot.runtime_config if current_snapshot.runtime_paths == runtime_paths else None
+        config_load_result = (
+            current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
+        )
+        current_state.snapshot = _published_snapshot(
+            current_snapshot,
+            runtime_paths=runtime_paths,
+            config_data=config_data,
+            runtime_config=runtime_config,
+            auth_state=auth_state,
+            config_load_result=config_load_result,
+        )
     _load_config_from_file(runtime_paths, api_app)
     raise_api_config_load_result(_app_context(api_app).config_load_result)
 
@@ -1009,7 +1066,7 @@ async def get_agents(request: Request, _user: Annotated[dict, Depends(verify_use
             agent_list.append(agent)
         return agent_list
 
-    return _read_committed_config(request.app, read_agents)
+    return _read_request_committed_config(request, read_agents)
 
 
 @app.put("/api/config/agents/{agent_id}")
@@ -1026,8 +1083,8 @@ async def update_agent(
             candidate_config["agents"] = {}
         candidate_config["agents"][agent_id] = _sanitize_entity_payload(agent_data)
 
-    _run_config_write(
-        request.app,
+    _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to save agent",
     )
@@ -1050,8 +1107,8 @@ async def create_agent(
         candidate_config["agents"][agent_id] = _sanitize_entity_payload(agent_data)
         return agent_id
 
-    agent_id = _run_config_write(
-        request.app,
+    agent_id = _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to create agent",
     )
@@ -1071,8 +1128,8 @@ async def delete_agent(
             raise HTTPException(status_code=404, detail="Agent not found")
         del candidate_config["agents"][agent_id]
 
-    _run_config_write(
-        request.app,
+    _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to delete agent",
     )
@@ -1092,7 +1149,7 @@ async def get_teams(request: Request, _user: Annotated[dict, Depends(verify_user
             team_list.append(team)
         return team_list
 
-    return _read_committed_config(request.app, read_teams)
+    return _read_request_committed_config(request, read_teams)
 
 
 @app.put("/api/config/teams/{team_id}")
@@ -1109,8 +1166,8 @@ async def update_team(
             candidate_config["teams"] = {}
         candidate_config["teams"][team_id] = _sanitize_entity_payload(team_data)
 
-    _run_config_write(
-        request.app,
+    _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to save team",
     )
@@ -1133,8 +1190,8 @@ async def create_team(
         candidate_config["teams"][team_id] = _sanitize_entity_payload(team_data)
         return team_id
 
-    team_id = _run_config_write(
-        request.app,
+    team_id = _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to create team",
     )
@@ -1154,8 +1211,8 @@ async def delete_team(
             raise HTTPException(status_code=404, detail="Team not found")
         del candidate_config["teams"][team_id]
 
-    _run_config_write(
-        request.app,
+    _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to delete team",
     )
@@ -1165,8 +1222,8 @@ async def delete_team(
 @app.get("/api/config/models")
 async def get_models(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get all model configurations."""
-    return _read_committed_config(
-        request.app,
+    return _read_request_committed_config(
+        request,
         lambda config_data: dict(config_data.get("models", {})) if config_data.get("models") else {},
     )
 
@@ -1185,8 +1242,8 @@ async def update_model(
             candidate_config["models"] = {}
         candidate_config["models"][model_id] = model_data
 
-    _run_config_write(
-        request.app,
+    _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to save model",
     )
@@ -1196,8 +1253,8 @@ async def update_model(
 @app.get("/api/config/room-models")
 async def get_room_models(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get room-specific model overrides."""
-    return _read_committed_config(
-        request.app,
+    return _read_request_committed_config(
+        request,
         lambda config_data: dict(config_data.get("room_models", {})) if config_data.get("room_models") else {},
     )
 
@@ -1213,8 +1270,8 @@ async def update_room_models(
     def mutate(candidate_config: dict[str, Any]) -> None:
         candidate_config["room_models"] = room_models
 
-    _run_config_write(
-        request.app,
+    _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to save room models",
     )
@@ -1232,7 +1289,7 @@ async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(v
             rooms.update(agent_rooms)
         return sorted(rooms)
 
-    return _read_committed_config(request.app, read_rooms)
+    return _read_request_committed_config(request, read_rooms)
 
 
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)

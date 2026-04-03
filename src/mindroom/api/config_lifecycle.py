@@ -66,6 +66,7 @@ class ApiSnapshot:
     generation: int
     runtime_paths: constants.RuntimePaths
     config_data: dict[str, Any]
+    runtime_config: Config | None = None
     config_load_result: ConfigLoadResult | None = None
     auth_state: Any | None = None
 
@@ -103,10 +104,11 @@ def _config_error_detail(
 
 def _load_config_result(
     runtime_paths: constants.RuntimePaths,
-) -> tuple[ConfigLoadResult, dict[str, Any] | None]:
+) -> tuple[ConfigLoadResult, dict[str, Any] | None, Config | None]:
     """Load and validate one config file without mutating shared app state."""
     try:
-        validated_payload = load_runtime_config_model(runtime_paths).authored_model_dump()
+        runtime_config = load_runtime_config_model(runtime_paths)
+        validated_payload = runtime_config.authored_model_dump()
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         detail = _config_error_detail(exc)
         logger.warning(
@@ -114,16 +116,17 @@ def _load_config_result(
             config_path=str(runtime_paths.config_path),
             errors=detail,
         )
-        return ConfigLoadResult(success=False, error_status_code=422, error_detail=detail), None
+        return ConfigLoadResult(success=False, error_status_code=422, error_detail=detail), None, None
     except Exception:
         logger.exception("Failed to load API config", config_path=str(runtime_paths.config_path))
         return (
             ConfigLoadResult(success=False, error_status_code=500, error_detail="Failed to load configuration"),
             None,
+            None,
         )
     else:
         logger.info("Loaded API config", config_path=str(runtime_paths.config_path))
-        return ConfigLoadResult(success=True), validated_payload
+        return ConfigLoadResult(success=True), validated_payload, runtime_config
 
 
 def load_runtime_config(runtime_paths: constants.RuntimePaths) -> tuple[Config, constants.RuntimePaths]:
@@ -183,10 +186,10 @@ def _save_raw_config_source_to_file(
 def _validated_config_payload(
     raw_config: dict[str, Any],
     runtime_paths: constants.RuntimePaths,
-) -> dict[str, Any]:
+) -> tuple[Config, dict[str, Any]]:
     """Normalize and validate one config payload against the active runtime."""
     validated_config = Config.validate_with_runtime(raw_config, runtime_paths)
-    return validated_config.authored_model_dump()
+    return validated_config, validated_config.authored_model_dump()
 
 
 def _app_config_state(api_app: FastAPI) -> ApiState:
@@ -232,10 +235,14 @@ def _published_snapshot(
     snapshot: ApiSnapshot,
     *,
     config_data: dict[str, Any] | None = None,
+    runtime_config: Config | None | object = _UNSET,
     config_load_result: ConfigLoadResult | None | object = _UNSET,
 ) -> ApiSnapshot:
     """Return one new published snapshot with an incremented generation."""
     updated_config_data = snapshot.config_data if config_data is None else config_data
+    updated_runtime_config = (
+        snapshot.runtime_config if runtime_config is _UNSET else cast("Config | None", runtime_config)
+    )
     updated_load_result = (
         snapshot.config_load_result
         if config_load_result is _UNSET
@@ -245,6 +252,7 @@ def _published_snapshot(
         snapshot,
         generation=snapshot.generation + 1,
         config_data=updated_config_data,
+        runtime_config=updated_runtime_config,
         config_load_result=updated_load_result,
     )
 
@@ -266,15 +274,15 @@ def _build_mutated_config[T](
     snapshot: ApiSnapshot,
     mutate: Callable[[dict[str, Any]], T],
     runtime_paths: constants.RuntimePaths,
-) -> tuple[T, dict[str, Any]]:
+) -> tuple[T, dict[str, Any], Config]:
     """Build one validated config payload from a committed snapshot off-lock."""
     raise_for_config_load_result(snapshot.config_load_result)
     if not snapshot.config_data:
         _raise_missing_loaded_config()
     candidate_config = deepcopy(snapshot.config_data)
     result = mutate(candidate_config)
-    validated_payload = _validated_config_payload(candidate_config, runtime_paths)
-    return result, validated_payload
+    validated_config, validated_payload = _validated_config_payload(candidate_config, runtime_paths)
+    return result, validated_payload, validated_config
 
 
 def _commit_mutated_snapshot[T](
@@ -284,6 +292,7 @@ def _commit_mutated_snapshot[T](
     expected_generation: int,
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
+    validated_config: Config,
     result: T,
 ) -> T:
     """Commit one previously validated mutation if the targeted snapshot is still current."""
@@ -297,6 +306,7 @@ def _commit_mutated_snapshot[T](
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,
+            runtime_config=validated_config,
             config_load_result=ConfigLoadResult(success=True),
         )
         return result
@@ -305,7 +315,7 @@ def _commit_mutated_snapshot[T](
 def _validate_replacement_payload(
     new_config: dict[str, Any],
     runtime_paths: constants.RuntimePaths,
-) -> dict[str, Any]:
+) -> tuple[Config, dict[str, Any]]:
     """Validate one replacement config payload off-lock."""
     return _validated_config_payload(new_config, runtime_paths)
 
@@ -313,7 +323,7 @@ def _validate_replacement_payload(
 def _validate_raw_config_source(
     source: str,
     runtime_paths: constants.RuntimePaths,
-) -> dict[str, Any]:
+) -> tuple[Config, dict[str, Any]]:
     """Validate raw YAML source against the current runtime without mutating the live file."""
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -327,7 +337,8 @@ def _validate_raw_config_source(
         validation_path = Path(tmp.name)
     validation_runtime_paths = replace(runtime_paths, config_path=validation_path)
     try:
-        return load_runtime_config_model(validation_runtime_paths).authored_model_dump()
+        runtime_config = load_runtime_config_model(validation_runtime_paths)
+        return runtime_config, runtime_config.authored_model_dump()
     finally:
         validation_path.unlink(missing_ok=True)
 
@@ -339,6 +350,7 @@ def _commit_replaced_snapshot(
     expected_generation: int,
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
+    validated_config: Config,
 ) -> None:
     """Commit one previously validated replacement payload if the snapshot is still current."""
     with initial_state.config_lock:
@@ -350,6 +362,7 @@ def _commit_replaced_snapshot(
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,
+            runtime_config=validated_config,
             config_load_result=ConfigLoadResult(success=True),
         )
 
@@ -361,6 +374,7 @@ def _commit_raw_replaced_snapshot(
     expected_generation: int,
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
+    validated_config: Config,
     source: str,
 ) -> None:
     """Commit one raw replacement payload if the targeted snapshot is still current."""
@@ -373,6 +387,7 @@ def _commit_raw_replaced_snapshot(
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,
+            runtime_config=validated_config,
             config_load_result=ConfigLoadResult(success=True),
         )
 
@@ -392,13 +407,18 @@ def _build_and_commit_mutation[T](
     else:
         snapshot = initial_snapshot
     try:
-        result, validated_payload = _build_mutated_config(snapshot, mutate, snapshot.runtime_paths)
+        result, validated_payload, validated_config = _build_mutated_config(
+            snapshot,
+            mutate,
+            snapshot.runtime_paths,
+        )
         return _commit_mutated_snapshot(
             api_app,
             initial_state,
             expected_generation=snapshot.generation,
             runtime_paths=snapshot.runtime_paths,
             validated_payload=validated_payload,
+            validated_config=validated_config,
             result=result,
         )
     except HTTPException:
@@ -426,13 +446,14 @@ def _build_and_commit_replacement(
     else:
         snapshot = initial_snapshot
     try:
-        validated_payload = _validate_replacement_payload(new_config, snapshot.runtime_paths)
+        validated_config, validated_payload = _validate_replacement_payload(new_config, snapshot.runtime_paths)
         _commit_replaced_snapshot(
             api_app,
             initial_state,
             expected_generation=snapshot.generation,
             runtime_paths=snapshot.runtime_paths,
             validated_payload=validated_payload,
+            validated_config=validated_config,
         )
     except HTTPException:
         raise
@@ -459,13 +480,14 @@ def _build_and_commit_raw_replacement(
     else:
         snapshot = initial_snapshot
     try:
-        validated_payload = _validate_raw_config_source(source, snapshot.runtime_paths)
+        validated_config, validated_payload = _validate_raw_config_source(source, snapshot.runtime_paths)
         _commit_raw_replaced_snapshot(
             api_app,
             initial_state,
             expected_generation=snapshot.generation,
             runtime_paths=snapshot.runtime_paths,
             validated_payload=validated_payload,
+            validated_config=validated_config,
             source=source,
         )
     except HTTPException:
@@ -483,7 +505,7 @@ def load_config_from_file(
     config_lock: ApiConfigLock,
 ) -> ConfigLoadResult:
     """Load config from the runtime config file into the shared cache."""
-    result, validated_payload = _load_config_result(runtime_paths)
+    result, validated_payload, _runtime_config = _load_config_result(runtime_paths)
     if validated_payload is not None:
         with config_lock:
             config_data.clear()
@@ -495,7 +517,7 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
     """Load config from disk into one API app's committed config cache."""
     initial_state = _app_config_state(api_app)
     snapshot = initial_state.snapshot
-    result, validated_payload = _load_config_result(runtime_paths)
+    result, validated_payload, runtime_config = _load_config_result(runtime_paths)
     with initial_state.config_lock:
         current_state = _app_config_state(api_app)
         current = current_state.snapshot
@@ -509,6 +531,7 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload if validated_payload is not None else current.config_data,
+            runtime_config=runtime_config if runtime_config is not None else current.runtime_config,
             config_load_result=result,
         )
     return result.success
@@ -553,7 +576,9 @@ def read_app_committed_runtime_config(
         if not snapshot.config_data:
             _raise_missing_loaded_config()
         runtime_paths = snapshot.runtime_paths
-        return Config.validate_with_runtime(snapshot.config_data, runtime_paths), runtime_paths
+        if snapshot.runtime_config is not None:
+            return snapshot.runtime_config, runtime_paths
+        return Config.model_validate(snapshot.config_data, context={"runtime_paths": runtime_paths}), runtime_paths
 
 
 def read_committed_config[T](
@@ -589,7 +614,9 @@ def read_committed_runtime_config(
     if not snapshot.config_data:
         _raise_missing_loaded_config()
     runtime_paths = snapshot.runtime_paths
-    return Config.validate_with_runtime(snapshot.config_data, runtime_paths), runtime_paths
+    if snapshot.runtime_config is not None:
+        return snapshot.runtime_config, runtime_paths
+    return Config.model_validate(snapshot.config_data, context={"runtime_paths": runtime_paths}), runtime_paths
 
 
 def write_committed_config[T](
