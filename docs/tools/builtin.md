@@ -93,7 +93,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | Icon | Tool | Description | Config Required |
 |------|------|-------------|-----------------|
 | :lucide-message-square: | `matrix_message` | Native Matrix messaging actions (`send`, `reply`, `thread-reply`, `react`, `read`, `thread-list`, `edit`, `context`) | - |
-| :lucide-check-check: | `thread_resolution` | Resolve or reopen Matrix threads using shared room-state markers (`resolve_thread`, `unresolve_thread`) | - |
+| :lucide-tags: | `thread_tags` | Tag, untag, and inspect Matrix threads using shared room-state markers (`tag_thread`, `untag_thread`, `list_thread_tags`) | - |
 | :lucide-message-square: | `gmail` | Read, search, and manage Gmail emails | Google OAuth |
 | :lucide-message-square: | `slack` | Send messages and manage channels | `token` |
 | :lucide-message-square: | `discord` | Interact with Discord channels and servers | `bot_token` |
@@ -106,6 +106,21 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-message-square: | `x` | Post tweets, send DMs, and search X/Twitter | `bearer_token` or OAuth (`consumer_key`, `consumer_secret`, `access_token`, `access_token_secret`); optional: `include_post_metrics`, `wait_on_rate_limit` |
 | :lucide-message-square: | `reddit` | Reddit browsing and interaction | `client_id`, `client_secret` |
 | :lucide-message-square: | `zoom` | Video conferencing and meetings | `account_id`, `client_id`, `client_secret` |
+
+### `thread_tags`
+
+`tag_thread` adds or updates one tag on the active thread by default.
+`untag_thread` removes one tag from the active thread by default.
+Passing `room_id` for the current room does not disable that same-room thread fallback for the write operations.
+`list_thread_tags` also defaults to the active thread.
+To list every tagged thread in a room from inside an active thread, pass `room_id` without `thread_id`.
+`list_thread_tags(tag=...)` returns only the requested tag in both thread-specific and room-wide responses.
+The predefined `blocked` payload accepts `data.blocked_by` as a list of non-empty strings.
+The predefined `waiting` payload accepts `data.waiting_on` as one non-empty string.
+The predefined `priority` payload accepts `data.level` as `high`, `medium`, or `low`.
+The predefined `due` payload accepts `data.deadline` as an ISO-8601 timestamp.
+All predefined payloads are normalized before they are persisted, and malformed persisted tag payloads are ignored on read.
+This intentionally replaces the removed experimental `thread_resolution` tool and does not auto-read old `com.mindroom.thread.resolution` markers.
 
 ## Project Management
 
