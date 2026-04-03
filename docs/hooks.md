@@ -456,8 +456,7 @@ Transport exceptions from the underlying Matrix client propagate to the hook.
 MessageEnvelope(
     source_event_id: str,
     room_id: str,
-    thread_id: str | None,
-    resolved_thread_id: str | None,
+    target: MessageTarget,
     requester_id: str,
     sender_id: str,
     body: str,
@@ -468,6 +467,10 @@ MessageEnvelope(
     hook_source: str | None = None,
     message_received_depth: int = 0,  # internal synthetic-chain depth for hook-originated relays
 )
+
+# target.thread_id preserves the raw inbound thread ID.
+# target.resolved_thread_id is the delivery thread after safe-root and room-mode resolution.
+# target.session_id is the canonical persistence key for the conversation.
 
 ResponseDraft(
     response_text: str,
@@ -512,6 +515,9 @@ ToolAfterCallContext(
     duration_ms: float,
 )
 ```
+
+For `schedule:fired`, `ScheduleFiredContext.thread_id` is the resolved delivery thread.
+This may differ from `workflow.thread_id` when the workflow starts a new thread or resolves to room mode.
 
 ## Testing
 
