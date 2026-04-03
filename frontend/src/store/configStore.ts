@@ -433,18 +433,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         );
         return;
       }
-      set(
-        clearedLoadedConfigState(
-          [
-            {
-              kind: 'global',
-              message: error instanceof Error ? error.message : 'Failed to load config',
-              blocking: true,
-            },
-          ],
-          nextAgentPoliciesRequestId
-        )
-      );
+      set({
+        diagnostics: [
+          {
+            kind: 'global',
+            message: error instanceof Error ? error.message : 'Failed to load config',
+            blocking: true,
+          },
+        ],
+        isLoading: false,
+        syncStatus: 'error',
+      });
     }
   },
 

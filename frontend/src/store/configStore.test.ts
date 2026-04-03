@@ -332,6 +332,59 @@ describe('configStore', () => {
     });
 
     it('should handle load errors', async () => {
+      const existingConfig: Config = {
+        memory: {
+          backend: 'mem0',
+          embedder: {
+            provider: 'openai',
+            config: { model: 'text-embedding-3-small' },
+          },
+        },
+        models: {
+          default: { provider: 'ollama', id: 'test-model' },
+        },
+        agents: {
+          assistant: {
+            display_name: 'Assistant',
+            role: 'Helpful',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ['lobby'],
+          },
+        },
+        defaults: { markdown: true },
+        router: { model: 'default' },
+      };
+      const existingAgent: Agent = {
+        id: 'assistant',
+        display_name: 'Assistant',
+        role: 'Helpful',
+        tools: [],
+        skills: [],
+        instructions: [],
+        rooms: ['lobby'],
+      };
+      useConfigStore.setState({
+        config: existingConfig,
+        agents: [existingAgent],
+        rooms: [
+          {
+            id: 'lobby',
+            display_name: 'Lobby',
+            description: '',
+            agents: ['assistant'],
+          },
+        ],
+        selectedAgentId: 'assistant',
+        isDirty: true,
+        privateWorkerScopeBackups: {
+          assistant: 'shared',
+        },
+        agentPoliciesByAgent: {
+          assistant: makeAgentPolicy('assistant'),
+        },
+      });
       (global.fetch as any).mockRejectedValueOnce(new Error('Network error'));
 
       const { loadConfig } = useConfigStore.getState();
@@ -339,6 +392,31 @@ describe('configStore', () => {
 
       const state = useConfigStore.getState();
       expect(state.syncStatus).toBe('error');
+      expect(state.config).toEqual(existingConfig);
+      expect(state.agents).toEqual([existingAgent]);
+      expect(state.rooms).toEqual([
+        {
+          id: 'lobby',
+          display_name: 'Lobby',
+          description: '',
+          agents: ['assistant'],
+        },
+      ]);
+      expect(state.selectedAgentId).toBe('assistant');
+      expect(state.isDirty).toBe(true);
+      expect(state.privateWorkerScopeBackups).toEqual({
+        assistant: 'shared',
+      });
+      expect(state.agentPoliciesByAgent).toEqual({
+        assistant: makeAgentPolicy('assistant'),
+      });
+      expect(state.diagnostics).toEqual([
+        {
+          kind: 'global',
+          message: 'Network error',
+          blocking: true,
+        },
+      ]);
     });
 
     it('stores backend validation issues and clears stale config when load returns 422', async () => {
