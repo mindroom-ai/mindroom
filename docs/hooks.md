@@ -335,18 +335,6 @@ async def audit_completion(ctx):
     append_jsonl(ctx.state_root / "events.jsonl", {"item_id": ctx.payload["item_id"]})
 ```
 
-### Emitting from hook code
-
-```python
-from mindroom.hooks.execution import emit
-
-
-@hook("todo:item_added")
-async def on_item_added(ctx):
-    # Process the item, then emit a follow-up event
-    await emit(ctx.hook_registry, "todo:processed", ctx)
-```
-
 ### Emitting from tool code
 
 Tools emit custom events through the runtime context:
@@ -357,6 +345,9 @@ from mindroom.tool_system.runtime_context import emit_custom_event
 # Inside a tool method:
 await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
 ```
+
+Hook contexts do not expose a `hook_registry`, so hook callbacks cannot emit custom events directly through `ctx`.
+If you are writing internal code or tests and already have an explicit `HookRegistry`, you can still call `emit(registry, event_name, context)` manually.
 
 ### Event name rules
 
