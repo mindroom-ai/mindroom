@@ -303,12 +303,9 @@ def _parse_manifest(path: Path) -> _PluginManifest | None:  # noqa: PLR0911
         return None
     normalized_name = name.strip()
     if not _is_valid_plugin_name(normalized_name):
-        logger.warning(
-            "Plugin manifest name must not contain ':'",
-            path=str(path),
-            plugin_name=normalized_name,
-        )
-        return None
+        logger.error("Plugin manifest name must not contain ':'", path=str(path), plugin_name=normalized_name)
+        msg = f"Plugin manifest name must not contain ':': {normalized_name!r} ({path})"
+        raise ValueError(msg)
 
     tools_module = data.get("tools_module")
     if tools_module is not None and not isinstance(tools_module, str):

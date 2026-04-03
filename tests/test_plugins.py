@@ -216,7 +216,7 @@ def test_load_plugins_uses_bound_runtime_paths(tmp_path: Path) -> None:
 
 
 def test_load_plugins_rejects_manifest_name_with_colon(tmp_path: Path) -> None:
-    """Plugin manifest names must not contain ':' because hook provenance uses colon separators."""
+    """Colon-containing plugin manifest names should fail during config/runtime binding."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -226,11 +226,8 @@ def test_load_plugins_rejects_manifest_name_with_colon(tmp_path: Path) -> None:
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    config = _bind_runtime_paths(Config(plugins=["./plugins/bad-name"]), config_path)
-
-    plugins = load_plugins(config, runtime_paths_for(config))
-
-    assert plugins == []
+    with pytest.raises(ValueError, match="Plugin manifest name must not contain ':'"):
+        _bind_runtime_paths(Config(plugins=["./plugins/bad-name"]), config_path)
 
 
 def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tmp_path: Path) -> None:
