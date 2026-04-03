@@ -188,6 +188,43 @@ async def test_tag_thread_explicit_thread_id_overrides_same_room_context() -> No
 
 
 @pytest.mark.asyncio
+async def test_tag_thread_explicit_same_room_id_keeps_context_thread_fallback() -> None:
+    """Repeating the current room ID should still target the active thread for writes."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.normalize_thread_root_event_id",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ) as mock_normalize,
+        patch(
+            "mindroom.custom_tools.thread_tags.set_thread_tag",
+            new=AsyncMock(return_value=_state("$ctx-thread:localhost", resolved=_record())),
+        ) as mock_set,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.tag_thread("resolved", room_id=context.room_id))
+
+    assert payload["status"] == "ok"
+    assert payload["thread_id"] == "$ctx-thread:localhost"
+    mock_normalize.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$ctx-thread:localhost",
+    )
+    mock_set.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$ctx-thread:localhost",
+        "resolved",
+        set_by=context.requester_id,
+        note=None,
+        data=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_untag_thread_defaults_to_context_thread_id() -> None:
     """Untag should use the active thread root when not overridden."""
     tool = ThreadTagsTools()
@@ -254,6 +291,41 @@ async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> 
         context.client,
         context.room_id,
         "$explicit-thread:localhost",
+        "resolved",
+        requester_user_id=context.requester_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_untag_thread_explicit_same_room_id_keeps_context_thread_fallback() -> None:
+    """Repeating the current room ID should still target the active thread for untag."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.normalize_thread_root_event_id",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ) as mock_normalize,
+        patch(
+            "mindroom.custom_tools.thread_tags.remove_thread_tag",
+            new=AsyncMock(return_value=_state("$ctx-thread:localhost")),
+        ) as mock_remove,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.untag_thread("resolved", room_id=context.room_id))
+
+    assert payload["status"] == "ok"
+    assert payload["thread_id"] == "$ctx-thread:localhost"
+    mock_normalize.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$ctx-thread:localhost",
+    )
+    mock_remove.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$ctx-thread:localhost",
         "resolved",
         requester_user_id=context.requester_id,
     )

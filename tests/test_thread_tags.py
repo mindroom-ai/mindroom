@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, call
 
@@ -63,6 +63,57 @@ def _tag_record_content(
 
 def _thread_tags_content(**tags: dict[str, object]) -> dict[str, object]:
     return {"tags": tags}
+
+
+def _thread_tag_state_key(thread_root_id: str, tag: str) -> str:
+    return json.dumps([thread_root_id, tag], separators=(",", ":"))
+
+
+def _thread_tag_state_event(
+    thread_root_id: str,
+    tag: str,
+    *,
+    content: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "type": THREAD_TAGS_EVENT_TYPE,
+        "state_key": _thread_tag_state_key(thread_root_id, tag),
+        "content": content if content is not None else _tag_record_content(),
+    }
+
+
+def _legacy_thread_tags_event(
+    thread_root_id: str,
+    *,
+    content: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "type": THREAD_TAGS_EVENT_TYPE,
+        "state_key": thread_root_id,
+        "content": content if content is not None else _thread_tags_content(resolved=_tag_record_content()),
+    }
+
+
+def _thread_tags_room_state_response(*events: dict[str, object]) -> nio.RoomGetStateResponse:
+    return nio.RoomGetStateResponse(
+        events=list(events),
+        room_id="!room:localhost",
+    )
+
+
+def _thread_tags_room_state_from_current(
+    current_events: dict[str, dict[str, object]],
+) -> nio.RoomGetStateResponse:
+    return _thread_tags_room_state_response(
+        *[
+            {
+                "type": THREAD_TAGS_EVENT_TYPE,
+                "state_key": state_key,
+                "content": content,
+            }
+            for state_key, content in current_events.items()
+        ],
+    )
 
 
 def _power_levels_response(
@@ -155,35 +206,30 @@ async def test_set_thread_tag_writes_state_and_returns_state() -> None:
         "@alice:localhost",
     )
 
-    current_content: dict[str, object] | None = None
+    current_events: dict[str, dict[str, object]] = {}
 
     async def room_get_state_event(**kwargs: object) -> object:
-        event_type = kwargs["event_type"]
-        if event_type == "m.room.power_levels":
-            return _power_levels_response(
-                users={
-                    "@mindroom_general:localhost": 50,
-                    "@alice:localhost": 50,
-                },
-            )
-
-        if current_content is None:
-            return _thread_tags_state_error(message="missing", status_code="M_NOT_FOUND")
-        return _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=current_content,
+        assert kwargs["event_type"] == "m.room.power_levels"
+        return _power_levels_response(
+            users={
+                "@mindroom_general:localhost": 50,
+                "@alice:localhost": 50,
+            },
         )
 
-    async def room_put_state(**kwargs: object) -> object:
-        nonlocal current_content
+    async def room_get_state(room_id: str) -> object:
+        assert room_id == "!room:localhost"
+        return _thread_tags_room_state_from_current(current_events)
 
-        current_content = kwargs["content"]
+    async def room_put_state(**kwargs: object) -> object:
+        current_events[kwargs["state_key"]] = kwargs["content"]
         return nio.RoomPutStateResponse.from_dict(
             {"event_id": "$state"},
             room_id="!room:localhost",
         )
 
     client.room_get_state_event.side_effect = room_get_state_event
+    client.room_get_state.side_effect = room_get_state
     client.room_put_state.side_effect = room_put_state
 
     state = await set_thread_tag(
@@ -199,10 +245,10 @@ async def test_set_thread_tag_writes_state_and_returns_state() -> None:
     _, kwargs = client.room_put_state.await_args
     assert kwargs["room_id"] == "!room:localhost"
     assert kwargs["event_type"] == THREAD_TAGS_EVENT_TYPE
-    assert kwargs["state_key"] == "$thread-root:localhost"
-    assert kwargs["content"]["tags"]["resolved"]["set_by"] == "@alice:localhost"
-    assert kwargs["content"]["tags"]["resolved"]["note"] == "Fixed in abc123"
-    assert kwargs["content"]["tags"]["resolved"]["data"] == {}
+    assert kwargs["state_key"] == _thread_tag_state_key("$thread-root:localhost", "resolved")
+    assert kwargs["content"]["set_by"] == "@alice:localhost"
+    assert kwargs["content"]["note"] == "Fixed in abc123"
+    assert kwargs["content"]["data"] == {}
     assert state.thread_root_id == "$thread-root:localhost"
     assert list(state.tags) == ["resolved"]
     assert state.tags["resolved"].set_by == "@alice:localhost"
@@ -219,48 +265,64 @@ async def test_set_thread_tag_merges_existing_valid_tags_and_drops_malformed_sib
         "@alice:localhost",
     )
 
-    current_content: dict[str, object] = _thread_tags_content(
-        blocked=_tag_record_content(data={"blocked_by": ["  $other:localhost  "]}),
-        **{
-            "bad tag!": _tag_record_content(),
-            "waiting": _tag_record_content(data={"waiting_on": 42}),
-            "review": {
-                "set_by": "@user:localhost",
-                "set_at": "2026-03-21T19:02:03+00:00",
-                "note": 42,
-                "data": {},
-            },
-            "custom": {
-                "set_by": "@user:localhost",
-                "set_at": "2026-03-21T19:02:03+00:00",
-                "data": [],
-            },
+    current_events: dict[str, dict[str, object]] = {
+        _thread_tag_state_key("$thread-root:localhost", "blocked"): _tag_record_content(
+            data={"blocked_by": ["  $other:localhost  "]},
+        ),
+        _thread_tag_state_key("$thread-root:localhost", "waiting"): _tag_record_content(data={"waiting_on": 42}),
+        _thread_tag_state_key("$thread-root:localhost", "review"): {
+            "set_by": "@user:localhost",
+            "set_at": "2026-03-21T19:02:03+00:00",
+            "note": 42,
+            "data": {},
         },
-    )
+        _thread_tag_state_key("$thread-root:localhost", "custom"): {
+            "set_by": "@user:localhost",
+            "set_at": "2026-03-21T19:02:03+00:00",
+            "data": [],
+        },
+        "$thread-root:localhost": _thread_tags_content(
+            blocked=_tag_record_content(data={"blocked_by": ["  $other:localhost  "]}),
+            **{
+                "bad tag!": _tag_record_content(),
+                "waiting": _tag_record_content(data={"waiting_on": 42}),
+                "review": {
+                    "set_by": "@user:localhost",
+                    "set_at": "2026-03-21T19:02:03+00:00",
+                    "note": 42,
+                    "data": {},
+                },
+                "custom": {
+                    "set_by": "@user:localhost",
+                    "set_at": "2026-03-21T19:02:03+00:00",
+                    "data": [],
+                },
+            },
+        ),
+    }
 
     async def room_get_state_event(**kwargs: object) -> object:
-        if kwargs["event_type"] == "m.room.power_levels":
-            return _power_levels_response(
-                users={
-                    "@mindroom_general:localhost": 50,
-                    "@alice:localhost": 50,
-                },
-            )
-        return _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=current_content,
+        assert kwargs["event_type"] == "m.room.power_levels"
+        return _power_levels_response(
+            users={
+                "@mindroom_general:localhost": 50,
+                "@alice:localhost": 50,
+            },
         )
 
-    async def room_put_state(**kwargs: object) -> object:
-        nonlocal current_content
+    async def room_get_state(room_id: str) -> object:
+        assert room_id == "!room:localhost"
+        return _thread_tags_room_state_from_current(current_events)
 
-        current_content = kwargs["content"]
+    async def room_put_state(**kwargs: object) -> object:
+        current_events[kwargs["state_key"]] = kwargs["content"]
         return nio.RoomPutStateResponse.from_dict(
             {"event_id": "$state"},
             room_id="!room:localhost",
         )
 
     client.room_get_state_event.side_effect = room_get_state_event
+    client.room_get_state.side_effect = room_get_state
     client.room_put_state.side_effect = room_put_state
 
     state = await set_thread_tag(
@@ -276,7 +338,8 @@ async def test_set_thread_tag_merges_existing_valid_tags_and_drops_malformed_sib
     assert state.tags["blocked"].data == {"blocked_by": ["$other:localhost"]}
     assert state.tags["priority"].data == {"level": "high"}
     _, kwargs = client.room_put_state.await_args
-    assert set(kwargs["content"]["tags"]) == {"blocked", "priority"}
+    assert kwargs["state_key"] == _thread_tag_state_key("$thread-root:localhost", "priority")
+    assert kwargs["content"]["data"] == {"level": "high"}
 
 
 @pytest.mark.asyncio
@@ -311,7 +374,7 @@ async def test_set_thread_tag_raises_on_write_error() -> None:
 
 @pytest.mark.asyncio
 async def test_set_thread_tag_retries_when_verification_detects_concurrent_overwrite() -> None:
-    """A failed verification read should retry the full merge so both tags survive."""
+    """A concurrently added sibling tag should survive without forcing a retry."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
     client.joined_members.return_value = _joined_members_response(
@@ -319,35 +382,31 @@ async def test_set_thread_tag_retries_when_verification_detects_concurrent_overw
         "@alice:localhost",
     )
 
-    current_content: dict[str, object] | None = None
+    current_events: dict[str, dict[str, object]] = {}
 
     async def room_get_state_event(**kwargs: object) -> object:
-        event_type = kwargs["event_type"]
-        if event_type == "m.room.power_levels":
-            return _power_levels_response(
-                users={
-                    "@mindroom_general:localhost": 50,
-                    "@alice:localhost": 50,
-                },
-            )
-
-        if current_content is None:
-            return _thread_tags_state_error(message="missing", status_code="M_NOT_FOUND")
-        return _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=current_content,
+        assert kwargs["event_type"] == "m.room.power_levels"
+        return _power_levels_response(
+            users={
+                "@mindroom_general:localhost": 50,
+                "@alice:localhost": 50,
+            },
         )
 
     write_attempts = 0
 
+    async def room_get_state(room_id: str) -> object:
+        assert room_id == "!room:localhost"
+        return _thread_tags_room_state_from_current(current_events)
+
     async def room_put_state(**kwargs: object) -> object:
-        nonlocal current_content, write_attempts
+        nonlocal write_attempts
 
         write_attempts += 1
-        current_content = kwargs["content"]
+        current_events[kwargs["state_key"]] = kwargs["content"]
         if write_attempts == 1:
-            current_content = _thread_tags_content(
-                blocked=_tag_record_content(data={"blocked_by": ["$other:localhost"]}),
+            current_events[_thread_tag_state_key("$thread-root:localhost", "blocked")] = _tag_record_content(
+                data={"blocked_by": ["$other:localhost"]},
             )
 
         return nio.RoomPutStateResponse.from_dict(
@@ -356,6 +415,7 @@ async def test_set_thread_tag_retries_when_verification_detects_concurrent_overw
         )
 
     client.room_get_state_event.side_effect = room_get_state_event
+    client.room_get_state.side_effect = room_get_state
     client.room_put_state.side_effect = room_put_state
 
     state = await set_thread_tag(
@@ -366,12 +426,12 @@ async def test_set_thread_tag_retries_when_verification_detects_concurrent_overw
         set_by="@alice:localhost",
     )
 
-    assert write_attempts == 2
+    assert write_attempts == 1
     assert set(state.tags) == {"blocked", "resolved"}
     assert state.tags["blocked"].data == {"blocked_by": ["$other:localhost"]}
     assert state.tags["resolved"].set_by == "@alice:localhost"
     _, final_kwargs = client.room_put_state.await_args
-    assert set(final_kwargs["content"]["tags"]) == {"blocked", "resolved"}
+    assert final_kwargs["state_key"] == _thread_tag_state_key("$thread-root:localhost", "resolved")
 
 
 @pytest.mark.asyncio
@@ -384,39 +444,33 @@ async def test_set_thread_tag_retries_when_verification_detects_same_tag_payload
         "@alice:localhost",
     )
 
-    current_content: dict[str, object] | None = None
+    current_events: dict[str, dict[str, object]] = {}
 
     async def room_get_state_event(**kwargs: object) -> object:
-        event_type = kwargs["event_type"]
-        if event_type == "m.room.power_levels":
-            return _power_levels_response(
-                users={
-                    "@mindroom_general:localhost": 50,
-                    "@alice:localhost": 50,
-                },
-            )
-
-        if current_content is None:
-            return _thread_tags_state_error(message="missing", status_code="M_NOT_FOUND")
-        return _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=current_content,
+        assert kwargs["event_type"] == "m.room.power_levels"
+        return _power_levels_response(
+            users={
+                "@mindroom_general:localhost": 50,
+                "@alice:localhost": 50,
+            },
         )
 
     write_attempts = 0
 
+    async def room_get_state(room_id: str) -> object:
+        assert room_id == "!room:localhost"
+        return _thread_tags_room_state_from_current(current_events)
+
     async def room_put_state(**kwargs: object) -> object:
-        nonlocal current_content, write_attempts
+        nonlocal write_attempts
 
         write_attempts += 1
-        current_content = kwargs["content"]
+        current_events[kwargs["state_key"]] = kwargs["content"]
         if write_attempts == 1:
-            current_content = _thread_tags_content(
-                resolved=_tag_record_content(
-                    set_by="@bob:localhost",
-                    note="from bob",
-                    data={"source": "bob"},
-                ),
+            current_events[_thread_tag_state_key("$thread-root:localhost", "resolved")] = _tag_record_content(
+                set_by="@bob:localhost",
+                note="from bob",
+                data={"source": "bob"},
             )
 
         return nio.RoomPutStateResponse.from_dict(
@@ -425,6 +479,7 @@ async def test_set_thread_tag_retries_when_verification_detects_same_tag_payload
         )
 
     client.room_get_state_event.side_effect = room_get_state_event
+    client.room_get_state.side_effect = room_get_state
     client.room_put_state.side_effect = room_put_state
 
     state = await set_thread_tag(
@@ -443,14 +498,14 @@ async def test_set_thread_tag_retries_when_verification_detects_same_tag_payload
     assert state.tags["resolved"].note == "from alice"
     assert state.tags["resolved"].data == {"source": "alice"}
     _, final_kwargs = client.room_put_state.await_args
-    assert final_kwargs["content"]["tags"]["resolved"]["set_by"] == "@alice:localhost"
-    assert final_kwargs["content"]["tags"]["resolved"]["note"] == "from alice"
-    assert final_kwargs["content"]["tags"]["resolved"]["data"] == {"source": "alice"}
+    assert final_kwargs["content"]["set_by"] == "@alice:localhost"
+    assert final_kwargs["content"]["note"] == "from alice"
+    assert final_kwargs["content"]["data"] == {"source": "alice"}
 
 
 @pytest.mark.asyncio
 async def test_set_thread_tag_retries_when_verification_detects_lost_sibling_tag() -> None:
-    """A verification read that drops one sibling should force another merge attempt."""
+    """A new-format write should keep a legacy sibling tag without a merge retry."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
     client.joined_members.return_value = _joined_members_response(
@@ -458,62 +513,34 @@ async def test_set_thread_tag_retries_when_verification_detects_lost_sibling_tag
         "@alice:localhost",
     )
 
-    current_content: dict[str, object] | None = None
-    thread_reads = 0
+    current_events: dict[str, dict[str, object]] = {
+        "$thread-root:localhost": _thread_tags_content(
+            blocked=_tag_record_content(note="original sibling"),
+        ),
+    }
 
     async def room_get_state_event(**kwargs: object) -> object:
-        nonlocal thread_reads
-
-        event_type = kwargs["event_type"]
-        if event_type == "m.room.power_levels":
-            return _power_levels_response(
-                users={
-                    "@mindroom_general:localhost": 50,
-                    "@alice:localhost": 50,
-                },
-            )
-
-        thread_reads += 1
-        if thread_reads == 1:
-            return _thread_tags_state_response(
-                "$thread-root:localhost",
-                content=_thread_tags_content(
-                    blocked=_tag_record_content(note="original sibling"),
-                ),
-            )
-        if thread_reads == 2:
-            assert current_content is not None
-            return _thread_tags_state_response(
-                "$thread-root:localhost",
-                content=_thread_tags_content(
-                    resolved=current_content["tags"]["resolved"],
-                ),
-            )
-        if thread_reads == 3:
-            return _thread_tags_state_response(
-                "$thread-root:localhost",
-                content=_thread_tags_content(
-                    blocked=_tag_record_content(note="original sibling"),
-                ),
-            )
-        return _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=current_content,
+        assert kwargs["event_type"] == "m.room.power_levels"
+        return _power_levels_response(
+            users={
+                "@mindroom_general:localhost": 50,
+                "@alice:localhost": 50,
+            },
         )
 
-    write_attempts = 0
+    async def room_get_state(room_id: str) -> object:
+        assert room_id == "!room:localhost"
+        return _thread_tags_room_state_from_current(current_events)
 
     async def room_put_state(**kwargs: object) -> object:
-        nonlocal current_content, write_attempts
-
-        write_attempts += 1
-        current_content = kwargs["content"]
+        current_events[kwargs["state_key"]] = kwargs["content"]
         return nio.RoomPutStateResponse.from_dict(
-            {"event_id": f"$state-{write_attempts}"},
+            {"event_id": "$state"},
             room_id="!room:localhost",
         )
 
     client.room_get_state_event.side_effect = room_get_state_event
+    client.room_get_state.side_effect = room_get_state
     client.room_put_state.side_effect = room_put_state
 
     state = await set_thread_tag(
@@ -524,7 +551,6 @@ async def test_set_thread_tag_retries_when_verification_detects_lost_sibling_tag
         set_by="@alice:localhost",
     )
 
-    assert write_attempts == 2
     assert set(state.tags) == {"blocked", "resolved"}
     assert state.tags["blocked"].note == "original sibling"
 
@@ -534,25 +560,23 @@ async def test_remove_thread_tag_writes_updated_state() -> None:
     """Removing one tag should leave the remaining tag state intact."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
-    client.room_get_state_event.side_effect = [
-        _power_levels_response(
-            users={
-                "@mindroom_general:localhost": 50,
-                "@alice:localhost": 50,
-            },
-        ),
-        _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=_thread_tags_content(
-                resolved=_tag_record_content(),
-                blocked=_tag_record_content(data={"blocked_by": ["$other:localhost"]}),
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={
+            "@mindroom_general:localhost": 50,
+            "@alice:localhost": 50,
+        },
+    )
+    client.room_get_state.side_effect = [
+        _thread_tags_room_state_response(
+            _thread_tag_state_event("$thread-root:localhost", "resolved"),
+            _thread_tag_state_event(
+                "$thread-root:localhost",
+                "blocked",
+                content=_tag_record_content(data={"blocked_by": ["$other:localhost"]}),
             ),
         ),
-        _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=_thread_tags_content(
-                resolved=_tag_record_content(),
-            ),
+        _thread_tags_room_state_response(
+            _thread_tag_state_event("$thread-root:localhost", "resolved"),
         ),
     ]
     client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
@@ -577,10 +601,8 @@ async def test_remove_thread_tag_writes_updated_state() -> None:
     _, kwargs = client.room_put_state.await_args
     assert kwargs["room_id"] == "!room:localhost"
     assert kwargs["event_type"] == THREAD_TAGS_EVENT_TYPE
-    assert kwargs["state_key"] == "$thread-root:localhost"
-    assert kwargs["content"]["tags"]["resolved"]["set_by"] == "@user:localhost"
-    assert kwargs["content"]["tags"]["resolved"]["data"] == {}
-    assert datetime.fromisoformat(kwargs["content"]["tags"]["resolved"]["set_at"]).tzinfo is not None
+    assert kwargs["state_key"] == _thread_tag_state_key("$thread-root:localhost", "blocked")
+    assert kwargs["content"] == {}
 
 
 @pytest.mark.asyncio
@@ -588,15 +610,17 @@ async def test_remove_thread_tag_writes_empty_state_for_last_tag() -> None:
     """Removing the last tag should write an empty content payload."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
-    client.room_get_state_event.side_effect = [
-        _power_levels_response(
-            users={
-                "@mindroom_general:localhost": 50,
-                "@alice:localhost": 50,
-            },
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={
+            "@mindroom_general:localhost": 50,
+            "@alice:localhost": 50,
+        },
+    )
+    client.room_get_state.side_effect = [
+        _thread_tags_room_state_response(
+            _thread_tag_state_event("$thread-root:localhost", "resolved"),
         ),
-        _thread_tags_state_response("$thread-root:localhost"),
-        _thread_tags_state_error(message="missing", status_code="M_NOT_FOUND"),
+        _thread_tags_room_state_response(),
     ]
     client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
         {"event_id": "$state"},
@@ -620,7 +644,7 @@ async def test_remove_thread_tag_writes_empty_state_for_last_tag() -> None:
         room_id="!room:localhost",
         event_type=THREAD_TAGS_EVENT_TYPE,
         content={},
-        state_key="$thread-root:localhost",
+        state_key=_thread_tag_state_key("$thread-root:localhost", "resolved"),
     )
 
 
@@ -629,15 +653,13 @@ async def test_remove_thread_tag_rejects_missing_existing_state() -> None:
     """Removing should fail instead of creating a tombstone for a missing state event."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
-    client.room_get_state_event.side_effect = [
-        _power_levels_response(
-            users={
-                "@mindroom_general:localhost": 50,
-                "@alice:localhost": 50,
-            },
-        ),
-        _thread_tags_state_error(message="missing", status_code="M_NOT_FOUND"),
-    ]
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={
+            "@mindroom_general:localhost": 50,
+            "@alice:localhost": 50,
+        },
+    )
+    client.room_get_state.return_value = _thread_tags_room_state_response()
     client.joined_members.return_value = _joined_members_response(
         "@mindroom_general:localhost",
         "@alice:localhost",
@@ -665,38 +687,34 @@ async def test_remove_thread_tag_retries_when_verification_detects_concurrent_re
         "@alice:localhost",
     )
 
-    current_content: dict[str, object] | None = _thread_tags_content(
-        resolved=_tag_record_content(),
-    )
+    current_events: dict[str, dict[str, object]] = {
+        _thread_tag_state_key("$thread-root:localhost", "resolved"): _tag_record_content(),
+    }
 
     async def room_get_state_event(**kwargs: object) -> object:
-        event_type = kwargs["event_type"]
-        if event_type == "m.room.power_levels":
-            return _power_levels_response(
-                users={
-                    "@mindroom_general:localhost": 50,
-                    "@alice:localhost": 50,
-                },
-            )
-
-        if current_content is None:
-            return _thread_tags_state_error(message="missing", status_code="M_NOT_FOUND")
-        return _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=current_content,
+        assert kwargs["event_type"] == "m.room.power_levels"
+        return _power_levels_response(
+            users={
+                "@mindroom_general:localhost": 50,
+                "@alice:localhost": 50,
+            },
         )
 
     write_attempts = 0
 
+    async def room_get_state(room_id: str) -> object:
+        assert room_id == "!room:localhost"
+        return _thread_tags_room_state_from_current(current_events)
+
     async def room_put_state(**kwargs: object) -> object:
-        nonlocal current_content, write_attempts
+        nonlocal write_attempts
 
         write_attempts += 1
-        current_content = kwargs["content"]
+        current_events[kwargs["state_key"]] = kwargs["content"]
         if write_attempts == 1:
-            current_content = _thread_tags_content(
-                resolved=_tag_record_content(),
-                blocked=_tag_record_content(data={"blocked_by": ["$other:localhost"]}),
+            current_events[_thread_tag_state_key("$thread-root:localhost", "resolved")] = _tag_record_content()
+            current_events[_thread_tag_state_key("$thread-root:localhost", "blocked")] = _tag_record_content(
+                data={"blocked_by": ["$other:localhost"]},
             )
 
         return nio.RoomPutStateResponse.from_dict(
@@ -705,6 +723,7 @@ async def test_remove_thread_tag_retries_when_verification_detects_concurrent_re
         )
 
     client.room_get_state_event.side_effect = room_get_state_event
+    client.room_get_state.side_effect = room_get_state
     client.room_put_state.side_effect = room_put_state
 
     state = await remove_thread_tag(
@@ -719,58 +738,50 @@ async def test_remove_thread_tag_retries_when_verification_detects_concurrent_re
     assert list(state.tags) == ["blocked"]
     assert state.tags["blocked"].data == {"blocked_by": ["$other:localhost"]}
     _, final_kwargs = client.room_put_state.await_args
-    assert list(final_kwargs["content"]["tags"]) == ["blocked"]
+    assert final_kwargs["content"] == {}
 
 
 @pytest.mark.asyncio
 async def test_remove_thread_tag_retries_when_verification_detects_sibling_payload_change() -> None:
-    """A sibling payload change should force one more read before the remove reports success."""
+    """A concurrently added sibling tag should survive one remove write without a retry."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
-    client.room_get_state_event.side_effect = [
-        _power_levels_response(
-            users={
-                "@mindroom_general:localhost": 50,
-                "@alice:localhost": 50,
-            },
-        ),
-        _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=_thread_tags_content(
-                resolved=_tag_record_content(),
-                blocked=_tag_record_content(
-                    note="original sibling",
-                    data={"blocked_by": ["$other:localhost"]},
-                ),
-            ),
-        ),
-        _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=_thread_tags_content(
-                blocked=_tag_record_content(
-                    note="changed once",
-                    data={"blocked_by": ["$other-one:localhost"]},
-                ),
-            ),
-        ),
-        _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=_thread_tags_content(
-                blocked=_tag_record_content(
-                    note="changed twice",
-                    data={"blocked_by": ["$other-two:localhost"]},
-                ),
-            ),
-        ),
-    ]
-    client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
-        {"event_id": "$state"},
-        room_id="!room:localhost",
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={
+            "@mindroom_general:localhost": 50,
+            "@alice:localhost": 50,
+        },
     )
     client.joined_members.return_value = _joined_members_response(
         "@mindroom_general:localhost",
         "@alice:localhost",
     )
+
+    current_events: dict[str, dict[str, object]] = {
+        _thread_tag_state_key("$thread-root:localhost", "resolved"): _tag_record_content(),
+    }
+    write_attempts = 0
+
+    async def room_get_state(room_id: str) -> object:
+        assert room_id == "!room:localhost"
+        return _thread_tags_room_state_from_current(current_events)
+
+    async def room_put_state(**kwargs: object) -> object:
+        nonlocal write_attempts
+
+        write_attempts += 1
+        current_events[kwargs["state_key"]] = kwargs["content"]
+        current_events[_thread_tag_state_key("$thread-root:localhost", "blocked")] = _tag_record_content(
+            note="added concurrently",
+            data={"blocked_by": ["$other:localhost"]},
+        )
+        return nio.RoomPutStateResponse.from_dict(
+            {"event_id": "$state"},
+            room_id="!room:localhost",
+        )
+
+    client.room_get_state.side_effect = room_get_state
+    client.room_put_state.side_effect = room_put_state
 
     state = await remove_thread_tag(
         client,
@@ -781,13 +792,10 @@ async def test_remove_thread_tag_retries_when_verification_detects_sibling_paylo
     )
 
     assert list(state.tags) == ["blocked"]
-    assert state.tags["blocked"].note == "changed twice"
-    assert state.tags["blocked"].data == {"blocked_by": ["$other-two:localhost"]}
+    assert state.tags["blocked"].note == "added concurrently"
+    assert state.tags["blocked"].data == {"blocked_by": ["$other:localhost"]}
+    assert write_attempts == 1
     client.room_put_state.assert_awaited_once()
-    _, kwargs = client.room_put_state.await_args
-    assert kwargs["content"]["tags"]["blocked"]["note"] == "original sibling"
-    assert kwargs["content"]["tags"]["blocked"]["data"] == {"blocked_by": ["$other:localhost"]}
-    assert client.room_get_state_event.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -795,22 +803,22 @@ async def test_remove_thread_tag_accepts_empty_state_after_concurrent_last_sibli
     """A post-write empty reread should be accepted when another actor removed the last sibling."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
-    client.room_get_state_event.side_effect = [
-        _power_levels_response(
-            users={
-                "@mindroom_general:localhost": 50,
-                "@alice:localhost": 50,
-            },
-        ),
-        _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=_thread_tags_content(
-                resolved=_tag_record_content(),
-                blocked=_tag_record_content(data={"blocked_by": ["$other:localhost"]}),
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={
+            "@mindroom_general:localhost": 50,
+            "@alice:localhost": 50,
+        },
+    )
+    client.room_get_state.side_effect = [
+        _thread_tags_room_state_response(
+            _thread_tag_state_event("$thread-root:localhost", "resolved"),
+            _thread_tag_state_event(
+                "$thread-root:localhost",
+                "blocked",
+                content=_tag_record_content(data={"blocked_by": ["$other:localhost"]}),
             ),
         ),
-        _thread_tags_state_error(message="missing", status_code="M_NOT_FOUND"),
-        _thread_tags_state_error(message="missing", status_code="M_NOT_FOUND"),
+        _thread_tags_room_state_response(),
     ]
     client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
         {"event_id": "$state"},
@@ -838,15 +846,15 @@ async def test_remove_thread_tag_rejects_missing_tag() -> None:
     """Removing an absent tag should be an explicit error."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
-    client.room_get_state_event.side_effect = [
-        _power_levels_response(
-            users={
-                "@mindroom_general:localhost": 50,
-                "@alice:localhost": 50,
-            },
-        ),
-        _thread_tags_state_response("$thread-root:localhost"),
-    ]
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={
+            "@mindroom_general:localhost": 50,
+            "@alice:localhost": 50,
+        },
+    )
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _thread_tag_state_event("$thread-root:localhost", "resolved"),
+    )
     client.joined_members.return_value = _joined_members_response(
         "@mindroom_general:localhost",
         "@alice:localhost",
@@ -868,11 +876,16 @@ async def test_remove_thread_tag_rejects_missing_tag() -> None:
 async def test_get_thread_tags_parses_valid_state() -> None:
     """A valid room-state payload should return parsed tags for the thread."""
     client = AsyncMock()
-    client.room_get_state_event.return_value = _thread_tags_state_response(
-        "$thread-root:localhost",
-        content=_thread_tags_content(
-            resolved=_tag_record_content(note="done"),
-            blocked=_tag_record_content(data={"blocked_by": ["$other:localhost"]}),
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _thread_tag_state_event(
+            "$thread-root:localhost",
+            "resolved",
+            content=_tag_record_content(note="done"),
+        ),
+        _thread_tag_state_event(
+            "$thread-root:localhost",
+            "blocked",
+            content=_tag_record_content(data={"blocked_by": ["$other:localhost"]}),
         ),
     )
 
@@ -893,20 +906,36 @@ async def test_get_thread_tags_parses_valid_state() -> None:
 @pytest.mark.parametrize(
     "response",
     [
-        _thread_tags_state_error(message="missing", status_code="M_NOT_FOUND"),
-        _thread_tags_state_response("$thread-root:localhost", content={}),
-        _thread_tags_state_response("$thread-root:localhost", content={"tags": {}}),
-        _thread_tags_state_response("$thread-root:localhost", content={"tags": "invalid"}),
-        _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=_thread_tags_content(resolved={"set_by": "@user:localhost", "set_at": "bad", "data": {}}),
+        _thread_tags_room_state_response(),
+        _thread_tags_room_state_response(
+            {
+                "type": THREAD_TAGS_EVENT_TYPE,
+                "state_key": _thread_tag_state_key("$thread-root:localhost", "resolved"),
+                "content": {},
+            },
+        ),
+        _thread_tags_room_state_response(
+            _legacy_thread_tags_event("$thread-root:localhost", content={}),
+        ),
+        _thread_tags_room_state_response(
+            _legacy_thread_tags_event("$thread-root:localhost", content={"tags": {}}),
+        ),
+        _thread_tags_room_state_response(
+            _legacy_thread_tags_event("$thread-root:localhost", content={"tags": "invalid"}),
+        ),
+        _thread_tags_room_state_response(
+            _thread_tag_state_event(
+                "$thread-root:localhost",
+                "resolved",
+                content={"set_by": "@user:localhost", "set_at": "bad", "data": {}},
+            ),
         ),
     ],
 )
 async def test_get_thread_tags_returns_none_for_missing_empty_and_malformed(response: object) -> None:
     """Missing, empty, or fully malformed state should be treated as untagged."""
     client = AsyncMock()
-    client.room_get_state_event.return_value = response
+    client.room_get_state.return_value = response
 
     state = await get_thread_tags(
         client,
@@ -921,19 +950,32 @@ async def test_get_thread_tags_returns_none_for_missing_empty_and_malformed(resp
 async def test_get_thread_tags_drops_malformed_tags_and_preserves_valid_siblings() -> None:
     """Malformed tags should be ignored without discarding valid siblings."""
     client = AsyncMock()
-    client.room_get_state_event.return_value = _thread_tags_state_response(
-        "$thread-root:localhost",
-        content=_thread_tags_content(
-            resolved=_tag_record_content(),
-            blocked=_tag_record_content(data={"blocked_by": "$not-a-list"}),
-            due=_tag_record_content(data={"deadline": "not-a-date"}),
-            review={
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _thread_tag_state_event("$thread-root:localhost", "resolved"),
+        _thread_tag_state_event(
+            "$thread-root:localhost",
+            "blocked",
+            content=_tag_record_content(data={"blocked_by": "$not-a-list"}),
+        ),
+        _thread_tag_state_event(
+            "$thread-root:localhost",
+            "due",
+            content=_tag_record_content(data={"deadline": "not-a-date"}),
+        ),
+        _thread_tag_state_event(
+            "$thread-root:localhost",
+            "review",
+            content={
                 "set_by": "@user:localhost",
                 "set_at": "2026-03-21T19:02:03+00:00",
                 "note": 42,
                 "data": {},
             },
-            custom={
+        ),
+        _thread_tag_state_event(
+            "$thread-root:localhost",
+            "custom",
+            content={
                 "set_by": "@user:localhost",
                 "set_at": "2026-03-21T19:02:03+00:00",
                 "data": [],
@@ -955,62 +997,53 @@ async def test_get_thread_tags_drops_malformed_tags_and_preserves_valid_siblings
 async def test_list_tagged_threads_filters_non_matching_events_and_supports_tag_filter() -> None:
     """Room-wide listing should keep only valid tag state and support tag filtering."""
     client = AsyncMock()
-    client.room_get_state.return_value = nio.RoomGetStateResponse(
-        events=[
-            {
-                "type": THREAD_TAGS_EVENT_TYPE,
-                "state_key": "$thread-one:localhost",
-                "content": _thread_tags_content(resolved=_tag_record_content()),
-            },
-            {
-                "type": THREAD_TAGS_EVENT_TYPE,
-                "state_key": "$thread-two:localhost",
-                "content": _thread_tags_content(blocked=_tag_record_content(data={"blocked_by": ["$other:localhost"]})),
-            },
-            {
-                "type": THREAD_TAGS_EVENT_TYPE,
-                "state_key": "$thread-three:localhost",
-                "content": _thread_tags_content(blocked=_tag_record_content(data={"blocked_by": "$bad"})),
-            },
-            {
-                "type": THREAD_TAGS_EVENT_TYPE,
-                "state_key": "$thread-four:localhost",
-                "content": {},
-            },
-            {
-                "type": THREAD_TAGS_EVENT_TYPE,
-                "state_key": "$thread-six:localhost",
-                "content": {
-                    "tags": {
-                        "custom": {
-                            "set_by": "@user:localhost",
-                            "set_at": "2026-03-21T19:02:03+00:00",
-                            "data": [],
-                        },
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _thread_tag_state_event("$thread-one:localhost", "resolved"),
+        _thread_tag_state_event(
+            "$thread-two:localhost",
+            "blocked",
+            content=_tag_record_content(data={"blocked_by": ["$other:localhost"]}),
+        ),
+        _thread_tag_state_event(
+            "$thread-three:localhost",
+            "blocked",
+            content=_tag_record_content(data={"blocked_by": "$bad"}),
+        ),
+        {
+            "type": THREAD_TAGS_EVENT_TYPE,
+            "state_key": _thread_tag_state_key("$thread-four:localhost", "resolved"),
+            "content": {},
+        },
+        _legacy_thread_tags_event(
+            "$thread-six:localhost",
+            content={
+                "tags": {
+                    "custom": {
+                        "set_by": "@user:localhost",
+                        "set_at": "2026-03-21T19:02:03+00:00",
+                        "data": [],
                     },
                 },
             },
-            {
-                "type": THREAD_TAGS_EVENT_TYPE,
-                "state_key": "$thread-seven:localhost",
-                "content": {
-                    "tags": {
-                        "review": {
-                            "set_by": "@user:localhost",
-                            "set_at": "2026-03-21T19:02:03+00:00",
-                            "note": 42,
-                            "data": {},
-                        },
+        ),
+        _legacy_thread_tags_event(
+            "$thread-seven:localhost",
+            content={
+                "tags": {
+                    "review": {
+                        "set_by": "@user:localhost",
+                        "set_at": "2026-03-21T19:02:03+00:00",
+                        "note": 42,
+                        "data": {},
                     },
                 },
             },
-            {
-                "type": "com.mindroom.other",
-                "state_key": "$thread-five:localhost",
-                "content": _thread_tags_content(resolved=_tag_record_content()),
-            },
-        ],
-        room_id="!room:localhost",
+        ),
+        {
+            "type": "com.mindroom.other",
+            "state_key": "$thread-five:localhost",
+            "content": _thread_tags_content(resolved=_tag_record_content()),
+        },
     )
 
     all_threads = await list_tagged_threads(client, "!room:localhost")
@@ -1058,33 +1091,30 @@ async def test_set_thread_tag_normalizes_supported_predefined_payloads() -> None
         "@alice:localhost",
     )
 
-    current_content: dict[str, object] | None = None
+    current_events: dict[str, dict[str, object]] = {}
 
     async def room_get_state_event(**kwargs: object) -> object:
-        if kwargs["event_type"] == "m.room.power_levels":
-            return _power_levels_response(
-                users={
-                    "@mindroom_general:localhost": 50,
-                    "@alice:localhost": 50,
-                },
-            )
-        if current_content is None:
-            return _thread_tags_state_error(message="missing", status_code="M_NOT_FOUND")
-        return _thread_tags_state_response(
-            "$thread-root:localhost",
-            content=current_content,
+        assert kwargs["event_type"] == "m.room.power_levels"
+        return _power_levels_response(
+            users={
+                "@mindroom_general:localhost": 50,
+                "@alice:localhost": 50,
+            },
         )
 
-    async def room_put_state(**kwargs: object) -> object:
-        nonlocal current_content
+    async def room_get_state(room_id: str) -> object:
+        assert room_id == "!room:localhost"
+        return _thread_tags_room_state_from_current(current_events)
 
-        current_content = kwargs["content"]
+    async def room_put_state(**kwargs: object) -> object:
+        current_events[kwargs["state_key"]] = kwargs["content"]
         return nio.RoomPutStateResponse.from_dict(
             {"event_id": "$state"},
             room_id="!room:localhost",
         )
 
     client.room_get_state_event.side_effect = room_get_state_event
+    client.room_get_state.side_effect = room_get_state
     client.room_put_state.side_effect = room_put_state
 
     state = await set_thread_tag(
@@ -1251,12 +1281,9 @@ async def test_thread_tags_write_rejects_when_power_levels_fetch_fails(action: s
 async def test_get_thread_tags_raises_for_non_missing_state_fetch_error() -> None:
     """State read failures should not be reported as missing tags."""
     client = AsyncMock()
-    client.room_get_state_event.return_value = _thread_tags_state_error(
-        message="forbidden",
-        status_code="M_FORBIDDEN",
-    )
+    client.room_get_state.return_value = object()
 
-    with pytest.raises(ThreadTagsError, match="Failed to fetch thread tags state"):
+    with pytest.raises(ThreadTagsError, match="Failed to fetch room state for thread tags"):
         await get_thread_tags(
             client,
             "!room:localhost",

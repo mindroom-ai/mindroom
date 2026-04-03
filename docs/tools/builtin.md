@@ -107,6 +107,19 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-message-square: | `reddit` | Reddit browsing and interaction | `client_id`, `client_secret` |
 | :lucide-message-square: | `zoom` | Video conferencing and meetings | `account_id`, `client_id`, `client_secret` |
 
+### `thread_tags`
+
+`tag_thread` adds or updates one tag on the active thread by default.
+`untag_thread` removes one tag from the active thread by default.
+Passing `room_id` for the current room does not disable that same-room thread fallback for the write operations.
+`list_thread_tags` also defaults to the active thread.
+To list every tagged thread in a room from inside an active thread, pass `room_id` without `thread_id`.
+The predefined `blocked` payload accepts `data.blocked_by` as a list of non-empty strings.
+The predefined `waiting` payload accepts `data.waiting_on` as one non-empty string.
+The predefined `priority` payload accepts `data.level` as `high`, `medium`, or `low`.
+The predefined `due` payload accepts `data.deadline` as an ISO-8601 timestamp.
+All predefined payloads are normalized before they are persisted, and malformed persisted tag payloads are ignored on read.
+
 ## Project Management
 
 | Icon | Tool | Description | Config Required |

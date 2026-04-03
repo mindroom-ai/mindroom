@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -21,34 +22,18 @@ MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
 _TAG_NAME_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
 
-# ARCHITECTURE DECISION: Single State Event Per Thread
+# ARCHITECTURE DECISION: One State Event Per Thread Tag
 #
-# All tags for one thread live in a single Matrix state event
-# (`com.mindroom.thread.tags`) keyed by the canonical thread root event ID.
-# Set/remove operations therefore do read-merge-write on the full tag map.
+# Each `(thread_root_id, tag)` pair is stored as its own
+# `com.mindroom.thread.tags` state event.
+# The state key is a JSON array `[thread_root_id, tag]`.
 #
-# CONCURRENCY:
-# Concurrent writes to different tags on the same thread can theoretically race
-# because Matrix state is last-writer-wins at the event level.
-# We accept that tradeoff and mitigate it with verify-after-write plus up to
-# `MAX_THREAD_TAG_WRITE_ATTEMPTS` retries.
+# This avoids sibling-tag clobbering under Matrix's last-writer-wins state
+# semantics because updating `resolved` no longer rewrites `blocked`,
+# `priority`, or any other sibling tag state keys.
 #
-# This is accepted by design because:
-# 1. The race window is only the few milliseconds between the merge read and the
-#    verification read, so two writers have to hit the same thread at nearly
-#    the exact same time.
-# 2. Human- and agent-driven tagging is low-frequency enough that the practical
-#    collision rate is negligible; this only becomes interesting for bulk
-#    automation at far higher write rates.
-# 3. The verify-and-retry loop recovers from the common collision cases without
-#    introducing a more complex storage shape.
-# 4. The main alternative, one state event per tag, would increase room-state
-#    volume, add merge-on-read behavior everywhere, and complicate Cinny/UI
-#    integration.
-#
-# If this becomes a real scaling problem, migrate to a one-event-per-tag design.
-# See ISSUE-041 for the design discussion that intentionally chose the simpler
-# single-event model.
+# Reads still understand the earlier single-event-per-thread payload so rooms
+# that already contain legacy state remain visible during the migration.
 
 
 class ThreadTagsError(RuntimeError):
@@ -341,14 +326,109 @@ def _parse_thread_tags_state(
     )
 
 
-def _thread_tags_content(tags: Mapping[str, ThreadTagRecord]) -> dict[str, object]:
-    """Build the canonical thread-tags event content."""
-    if not tags:
-        return {}
+def _thread_tag_state_key(thread_root_id: str, tag: str) -> str:
+    """Build one canonical per-tag state key."""
+    return json.dumps([thread_root_id, tag], separators=(",", ":"))
 
-    return {
-        "tags": {tag: record.model_dump(mode="json", exclude_none=True) for tag, record in tags.items()},
-    }
+
+def _parse_thread_tag_state_key(state_key: object) -> tuple[str, str] | None:
+    """Parse one per-tag state key into its thread root and tag name."""
+    if not isinstance(state_key, str):
+        return None
+
+    try:
+        parsed = json.loads(state_key)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    if not isinstance(parsed, list) or len(parsed) != 2:
+        return None
+
+    thread_root_id = _normalize_non_empty_string(parsed[0])
+    if thread_root_id is None:
+        return None
+
+    try:
+        tag = normalize_tag_name(parsed[1])
+    except ThreadTagsError:
+        return None
+    return thread_root_id, tag
+
+
+def _thread_tags_state_from_tags(
+    room_id: str,
+    thread_root_id: str,
+    tags: Mapping[str, ThreadTagRecord],
+) -> ThreadTagsState | None:
+    """Build one parsed state result when at least one tag survives."""
+    if not tags:
+        return None
+    return ThreadTagsState(
+        room_id=room_id,
+        thread_root_id=thread_root_id,
+        tags=dict(sorted(tags.items())),
+    )
+
+
+def _collect_thread_tag_room_state_event(
+    room_id: str,
+    event: Mapping[str, object],
+    *,
+    legacy_tags_by_thread: dict[str, dict[str, ThreadTagRecord]],
+    per_tag_records_by_thread: dict[str, dict[str, ThreadTagRecord | None]],
+) -> None:
+    """Parse one room-state event into either legacy or per-tag storage."""
+    if event.get("type") != THREAD_TAGS_EVENT_TYPE:
+        return
+
+    state_key = event.get("state_key")
+    content = event.get("content")
+    if not isinstance(content, Mapping):
+        return
+    typed_content = cast("Mapping[str, object]", content)
+
+    parsed_state_key = _parse_thread_tag_state_key(state_key)
+    if parsed_state_key is not None:
+        thread_root_id, tag = parsed_state_key
+        per_tag_records_by_thread.setdefault(thread_root_id, {})[tag] = _parse_thread_tag_record(
+            tag,
+            typed_content,
+        )
+        return
+
+    if not isinstance(state_key, str):
+        return
+
+    legacy_state = _parse_thread_tags_state(room_id, state_key, typed_content)
+    if legacy_state is None:
+        return
+    legacy_tags_by_thread[legacy_state.thread_root_id] = dict(legacy_state.tags)
+
+
+def _merge_thread_tag_room_state(
+    room_id: str,
+    *,
+    legacy_tags_by_thread: Mapping[str, Mapping[str, ThreadTagRecord]],
+    per_tag_records_by_thread: Mapping[str, Mapping[str, ThreadTagRecord | None]],
+) -> dict[str, ThreadTagsState]:
+    """Merge legacy thread payloads with per-tag overrides for one room."""
+    merged_states: dict[str, ThreadTagsState] = {}
+    for thread_root_id in sorted(set(legacy_tags_by_thread) | set(per_tag_records_by_thread)):
+        merged_tags = dict(legacy_tags_by_thread.get(thread_root_id, {}))
+        for tag, record in per_tag_records_by_thread.get(thread_root_id, {}).items():
+            if record is None:
+                merged_tags.pop(tag, None)
+            else:
+                merged_tags[tag] = record
+
+        state = _thread_tags_state_from_tags(
+            room_id,
+            thread_root_id,
+            merged_tags,
+        )
+        if state is not None:
+            merged_states[thread_root_id] = state
+    return merged_states
 
 
 def _thread_tag_record_content(record: ThreadTagRecord) -> dict[str, object]:
@@ -366,32 +446,24 @@ def _thread_tag_records_match(
     return _thread_tag_record_content(expected_record) == _thread_tag_record_content(actual_record)
 
 
-def _verified_state_preserves_expected_tags(
+def _verified_state_contains_expected_tag(
     verified_state: ThreadTagsState | None,
     *,
-    expected_tags: Mapping[str, ThreadTagRecord],
+    tag: str,
+    expected_record: ThreadTagRecord,
 ) -> bool:
-    """Require the verification read to preserve each expected tag payload exactly."""
+    """Require the verification read to preserve one exact tag payload."""
     if verified_state is None:
-        return not expected_tags
-    for tag, expected_record in expected_tags.items():
-        if not _thread_tag_records_match(expected_record, verified_state.tags.get(tag)):
-            return False
-    return True
+        return False
+    return _thread_tag_records_match(expected_record, verified_state.tags.get(tag))
 
 
 def _verified_remove_state_matches(
     verified_state: ThreadTagsState | None,
     *,
     removed_tag: str,
-    expected_siblings: Mapping[str, ThreadTagRecord],
 ) -> bool:
-    """Require a remove verification read to preserve sibling content exactly."""
-    if not _verified_state_preserves_expected_tags(
-        verified_state,
-        expected_tags=expected_siblings,
-    ):
-        return False
+    """Require a remove verification read to keep the removed tag absent."""
     if verified_state is None:
         return True
     return removed_tag not in verified_state.tags
@@ -406,25 +478,26 @@ def _empty_thread_tags_state(room_id: str, thread_root_id: str) -> ThreadTagsSta
     )
 
 
-async def _put_thread_tags_state(
+async def _put_thread_tag_state(
     client: nio.AsyncClient,
     room_id: str,
     thread_root_id: str,
-    tags: Mapping[str, ThreadTagRecord],
+    tag: str,
+    record: ThreadTagRecord | None,
     *,
     error_prefix: str,
 ) -> None:
-    """Write the current thread-tags payload and fail on Matrix errors."""
+    """Write one tag state event and fail on Matrix errors."""
     response = await client.room_put_state(
         room_id=room_id,
         event_type=THREAD_TAGS_EVENT_TYPE,
-        content=_thread_tags_content(tags),
-        state_key=thread_root_id,
+        content=_thread_tag_record_content(record) if record is not None else {},
+        state_key=_thread_tag_state_key(thread_root_id, tag),
     )
     if isinstance(response, nio.RoomPutStateResponse):
         return
 
-    msg = f"{error_prefix} for {thread_root_id} in {room_id}: {response}"
+    msg = f"{error_prefix} for {thread_root_id} tag {tag!r} in {room_id}: {response}"
     raise ThreadTagsError(msg)
 
 
@@ -529,28 +602,31 @@ def _assert_user_can_write_thread_tags(
     )
 
 
-async def _get_thread_tags_state_content(
+async def _get_room_thread_tags_states(
     client: nio.AsyncClient,
     room_id: str,
-    thread_root_id: str,
-) -> dict[str, object] | None:
-    """Fetch one raw thread-tags payload."""
-    response = await client.room_get_state_event(
-        room_id=room_id,
-        event_type=THREAD_TAGS_EVENT_TYPE,
-        state_key=thread_root_id,
+) -> dict[str, ThreadTagsState]:
+    """Fetch and merge all current thread-tag state for one room."""
+    response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        msg = f"Failed to fetch room state for thread tags in {room_id}: {response}"
+        raise ThreadTagsError(msg)
+
+    legacy_tags_by_thread: dict[str, dict[str, ThreadTagRecord]] = {}
+    per_tag_records_by_thread: dict[str, dict[str, ThreadTagRecord | None]] = {}
+    for event in response.events:
+        _collect_thread_tag_room_state_event(
+            room_id,
+            event,
+            legacy_tags_by_thread=legacy_tags_by_thread,
+            per_tag_records_by_thread=per_tag_records_by_thread,
+        )
+
+    return _merge_thread_tag_room_state(
+        room_id,
+        legacy_tags_by_thread=legacy_tags_by_thread,
+        per_tag_records_by_thread=per_tag_records_by_thread,
     )
-    if isinstance(response, nio.RoomGetStateEventError):
-        if response.status_code == "M_NOT_FOUND":
-            return None
-        msg = f"Failed to fetch thread tags state for {thread_root_id} in {room_id}: {response}"
-        raise ThreadTagsError(msg)
-    if not isinstance(response, nio.RoomGetStateEventResponse):
-        msg = f"Failed to fetch thread tags state for {thread_root_id} in {room_id}: {response}"
-        raise ThreadTagsError(msg)
-    if not isinstance(response.content, dict):
-        return None
-    return response.content
 
 
 async def _assert_thread_tags_write_allowed(
@@ -629,14 +705,11 @@ async def get_thread_tags(
     if normalized_thread_root_id is None:
         return None
 
-    content = await _get_thread_tags_state_content(
+    states = await _get_room_thread_tags_states(
         client,
         room_id,
-        normalized_thread_root_id,
     )
-    if content is None:
-        return None
-    return _parse_thread_tags_state(room_id, normalized_thread_root_id, content)
+    return states.get(normalized_thread_root_id)
 
 
 async def set_thread_tag(
@@ -675,25 +748,19 @@ async def set_thread_tag(
     )
 
     for _ in range(MAX_THREAD_TAG_WRITE_ATTEMPTS):
-        existing_state = await get_thread_tags(
-            client,
-            room_id,
-            normalized_thread_root_id,
-        )
-        next_tags = dict(existing_state.tags) if existing_state else {}
         expected_record = ThreadTagRecord(
             set_by=normalized_set_by,
             set_at=datetime.now(UTC),
             note=normalized_note,
             data=normalized_data,
         )
-        next_tags[normalized_tag] = expected_record
 
-        await _put_thread_tags_state(
+        await _put_thread_tag_state(
             client,
             room_id,
             normalized_thread_root_id,
-            next_tags,
+            normalized_tag,
+            expected_record,
             error_prefix="Failed to write thread tags state",
         )
 
@@ -702,9 +769,10 @@ async def set_thread_tag(
             room_id,
             normalized_thread_root_id,
         )
-        if _verified_state_preserves_expected_tags(
+        if _verified_state_contains_expected_tag(
             verified_state,
-            expected_tags=next_tags,
+            tag=normalized_tag,
+            expected_record=expected_record,
         ):
             assert verified_state is not None
             return verified_state
@@ -755,21 +823,16 @@ async def remove_thread_tag(
             msg = f"Thread tag {normalized_tag!r} is not set for {normalized_thread_root_id} in {room_id}."
             raise ThreadTagsError(msg)
 
-        next_tags = dict(existing_state.tags)
-        del next_tags[normalized_tag]
-
-        await _put_thread_tags_state(
+        await _put_thread_tag_state(
             client,
             room_id,
             normalized_thread_root_id,
-            next_tags,
+            normalized_tag,
+            None,
             error_prefix="Failed to update thread tags state",
         )
         remove_written = True
 
-        # See the module-level ARCHITECTURE DECISION note: verify-after-write
-        # plus retry is the intentional concurrency strategy for this state
-        # event shape.
         verified_state = await get_thread_tags(
             client,
             room_id,
@@ -778,7 +841,6 @@ async def remove_thread_tag(
         if _verified_remove_state_matches(
             verified_state,
             removed_tag=normalized_tag,
-            expected_siblings=next_tags,
         ):
             if verified_state is None:
                 return _empty_thread_tags_state(room_id, normalized_thread_root_id)
@@ -800,26 +862,8 @@ async def list_tagged_threads(
     """Return all currently tagged thread markers for a room."""
     normalized_tag = normalize_tag_name(tag) if tag is not None else None
 
-    response = await client.room_get_state(room_id)
-    if not isinstance(response, nio.RoomGetStateResponse):
-        msg = f"Failed to fetch room state for thread tags in {room_id}: {response}"
-        raise ThreadTagsError(msg)
+    tagged_threads = await _get_room_thread_tags_states(client, room_id)
+    if normalized_tag is None:
+        return tagged_threads
 
-    tagged_threads: dict[str, ThreadTagsState] = {}
-    for event in response.events:
-        if event.get("type") != THREAD_TAGS_EVENT_TYPE:
-            continue
-
-        state_key = event.get("state_key")
-        content = event.get("content")
-        if not isinstance(state_key, str) or not isinstance(content, dict):
-            continue
-
-        state = _parse_thread_tags_state(room_id, state_key, content)
-        if state is None:
-            continue
-        if normalized_tag is not None and normalized_tag not in state.tags:
-            continue
-        tagged_threads[state_key] = state
-
-    return tagged_threads
+    return {thread_root_id: state for thread_root_id, state in tagged_threads.items() if normalized_tag in state.tags}

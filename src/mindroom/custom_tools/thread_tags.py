@@ -104,7 +104,6 @@ class ThreadTagsTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
-            allow_context_fallback=room_id is None,
         )
         if effective_thread_id is None:
             return self._payload(
@@ -194,7 +193,6 @@ class ThreadTagsTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
-            allow_context_fallback=room_id is None,
         )
         if effective_thread_id is None:
             return self._payload(
