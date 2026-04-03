@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import io
 import json
 import os
+import pickle
 import secrets
 import subprocess
 import sys
@@ -21,16 +23,15 @@ from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants
 from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
-from mindroom.api.config_lifecycle import load_runtime_config
 from mindroom.config.main import Config, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.metadata import (
+    TOOL_METADATA,
     ToolConfigOverrideError,
     ToolInitOverrideError,
     ensure_tool_registry_loaded,
     get_tool_by_name,
-    resolved_tool_metadata_for_runtime,
     sanitize_tool_init_overrides,
     validate_authored_overrides,
 )
@@ -103,14 +104,6 @@ def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
     return Config.validate_with_runtime({}, runtime_paths)
 
 
-def _request_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
-    """Return the active runtime config for one API request or raise the shared HTTP error."""
-    if runtime_paths.config_path.exists():
-        config, _ = load_runtime_config(runtime_paths)
-        return config
-    return Config.validate_with_runtime({}, runtime_paths)
-
-
 def _load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
     """Read the sandbox runner runtime context from explicit startup payload."""
     runtime_paths = _startup_runtime_paths_from_env()
@@ -121,11 +114,16 @@ def initialize_sandbox_runner_app(
     api_app: FastAPI,
     runtime_paths: RuntimePaths,
     *,
+    config: Config | None = None,
     runner_token: str | None = None,
 ) -> None:
     """Attach one explicit runtime context to a sandbox-runner app instance."""
+    committed_config = config or _runtime_config_or_empty(runtime_paths)
+    ensure_registry_loaded_with_config(runtime_paths, committed_config)
     api_app.state.sandbox_runner_context = _SandboxRunnerContext(
         runtime_paths=runtime_paths,
+        config=committed_config,
+        tool_metadata=TOOL_METADATA.copy(),
         runner_token=runner_token or sandbox_proxy.sandbox_proxy_config(runtime_paths).proxy_token,
     )
 
@@ -264,6 +262,8 @@ class SandboxWorkerCleanupResponse(BaseModel):
 @dataclass(frozen=True)
 class _SandboxRunnerContext:
     runtime_paths: RuntimePaths
+    config: Config
+    tool_metadata: dict[str, Any]
     runner_token: str | None
 
 
@@ -279,6 +279,14 @@ def _app_runtime_paths(app: FastAPI) -> RuntimePaths:
     return _app_context(app).runtime_paths
 
 
+def _app_runtime_config(app: FastAPI) -> Config:
+    return _app_context(app).config
+
+
+def _app_tool_metadata(app: FastAPI) -> dict[str, Any]:
+    return _app_context(app).tool_metadata
+
+
 def _app_runner_token(app: FastAPI) -> str | None:
     runner_token = _app_context(app).runner_token
     if runner_token is None:
@@ -292,6 +300,16 @@ def _app_runner_token(app: FastAPI) -> str | None:
 def sandbox_runner_runtime_paths(request: Request) -> RuntimePaths:
     """Return the committed runtime paths for one sandbox runner request."""
     return _app_runtime_paths(request.app)
+
+
+def sandbox_runner_runtime_config(request: Request) -> Config:
+    """Return the committed validated config for one sandbox runner request."""
+    return _app_runtime_config(request.app)
+
+
+def sandbox_runner_tool_metadata(request: Request) -> dict[str, Any]:
+    """Return the committed tool metadata snapshot for one sandbox runner request."""
+    return _app_tool_metadata(request.app)
 
 
 async def _validate_runner_token(
@@ -413,14 +431,10 @@ async def _execute_request_inprocess(
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
-    effective_config = config
-    if effective_runtime_paths is not runtime_paths:
-        effective_config = _request_runtime_config_or_empty(effective_runtime_paths)
-
     with tool_execution_identity(execution_identity):
         toolkit, entrypoint = _resolve_entrypoint(
             runtime_paths=effective_runtime_paths,
-            config=effective_config,
+            config=config,
             tool_name=request.tool_name,
             function_name=request.function_name,
             execution_identity=execution_identity,
@@ -490,6 +504,7 @@ def _parse_subprocess_response(
 def _execute_request_subprocess_sync(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
+    config: Config,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
@@ -514,6 +529,7 @@ def _execute_request_subprocess_sync(
     envelope = sandbox_protocol.serialize_subprocess_envelope(
         request=request.model_dump(mode="json"),
         runtime_paths=constants.serialize_runtime_paths(runtime_paths),
+        committed_config=base64.b64encode(pickle.dumps(config)).decode("ascii"),
     )
 
     try:
@@ -538,6 +554,7 @@ def _execute_request_subprocess_sync(
 async def _execute_request_subprocess(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
+    config: Config,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
@@ -546,6 +563,7 @@ async def _execute_request_subprocess(
         _execute_request_subprocess_sync,
         request,
         runtime_paths,
+        config,
         prepared_worker,
         runner_token=runner_token,
     )
@@ -581,7 +599,12 @@ def _run_subprocess_worker() -> int:
         return 1
     runtime_paths = constants.deserialize_runtime_paths(envelope.runtime_paths)
     request.worker_key = sandbox_worker_prep.normalize_request_worker_key(request.worker_key, runtime_paths)
-    config = _runtime_config_or_empty(runtime_paths)
+    # The sandbox subprocess only accepts envelopes serialized by the parent
+    # runner process, so this deserializes a trusted in-process payload.
+    config = pickle.loads(base64.b64decode(envelope.committed_config.encode("ascii")))  # noqa: S301
+    if not isinstance(config, Config):
+        msg = "Sandbox subprocess payload contained an invalid committed config."
+        raise TypeError(msg)
 
     # Redirect stdout/stderr during tool execution so tool output doesn't
     # interfere with the protocol marker we write to stderr afterwards.
@@ -688,10 +711,8 @@ async def execute_tool_call(
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
     runtime_paths = sandbox_runner_runtime_paths(request)
-    execution_env = sandbox_exec.request_execution_env(payload.tool_name, payload.execution_env, runtime_paths)
-    effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(runtime_paths, execution_env)
-    config = _request_runtime_config_or_empty(effective_runtime_paths)
-    tool_metadata = resolved_tool_metadata_for_runtime(effective_runtime_paths, config)
+    config = sandbox_runner_runtime_config(request)
+    tool_metadata = sandbox_runner_tool_metadata(request)
     runner_token = _app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
     _validate_execute_request_payload(payload, tool_metadata=tool_metadata)
@@ -723,6 +744,7 @@ async def execute_tool_call(
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
+            config,
             prepared_worker,
             runner_token=runner_token,
         )
@@ -734,6 +756,7 @@ async def execute_tool_call(
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
+            config,
             prepared_worker,
             runner_token=runner_token,
         )
@@ -744,10 +767,17 @@ async def execute_tool_call(
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
+            config,
             prepared_worker,
             runner_token=runner_token,
         )
-    return await _execute_request_inprocess(payload, runtime_paths, config, prepared_worker, runner_token=runner_token)
+    return await _execute_request_inprocess(
+        payload,
+        runtime_paths,
+        config,
+        prepared_worker,
+        runner_token=runner_token,
+    )
 
 
 if __name__ == "__main__":

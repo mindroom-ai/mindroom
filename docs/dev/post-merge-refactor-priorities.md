@@ -30,6 +30,8 @@ Outcome:
 
 - Runtime swaps now publish one coherent snapshot instead of mutating multiple fields in place.
 - Late loads and writes now become generation mismatches instead of stale partial commits.
+- Auth-protected dashboard routes now bind one request snapshot and stay on that snapshot for protected reads and writes.
+- Runtime refresh operations now reject stale requests before mutating the losing runtime.
 - Focused tests now cover read-during-swap, write-during-swap, stale load completion, and stale write attempts after failure publication.
 
 ### 2. Plugin Validation Isolation From Live Registry State
@@ -91,7 +93,7 @@ The fixes are now materially better than `origin/main`.
 
 The remaining work should focus on reducing the number of legal ways to bypass those good patterns.
 
-## Priority 1: Centralize Request Snapshot Consumption
+## Priority 1: Consolidate Request Snapshot Helpers
 
 Files:
 
@@ -104,26 +106,26 @@ Files:
 
 Current state:
 
-- The helper layer now has a coherent snapshot model, and the highest-risk routes now bind committed config and runtime coherently.
-- The remaining risk is no longer the old sibling route bugs in `/api/tools`, Matrix, or the OpenAI-compatible routes.
-- The remaining risk is that auth-protected dashboard routes still rely on conventions instead of one obvious request-scoped auth-plus-snapshot path.
+- The helper layer now has a coherent snapshot model, and protected dashboard routes bind one auth-bearing request snapshot before reading or writing committed state.
+- The old auth-under-one-snapshot and execute-under-another bug class is now covered directly in request-level tests.
+- The remaining work here is cleanup, not correctness: there are still multiple similarly named app-scoped and request-scoped helpers across `main.py` and `config_lifecycle.py`.
 
 Why this is next:
 
-- The remaining bug class is still "authenticate under one snapshot, then execute under another".
-- One explicit request-scoped auth-and-snapshot dependency would make that bypass much harder to reintroduce.
+- The current model is correct, but the helper surface is still easy to misuse.
+- Future route work is safer if request code has one obvious helper family and app-scoped variants are harder to call by accident.
 
 Refactor target:
 
-- Add one obvious dependency/helper path for auth-protected dashboard routes that need authenticated user plus committed runtime/config state together.
-- Prefer passing that bound request snapshot through the route body instead of re-reading auth or runtime state later in the handler.
+- Keep one obvious request-scoped helper path for route code that needs authenticated user plus committed runtime/config state together.
+- Reduce or clearly internalize app-scoped helper variants that should not be used from request handlers.
 - Keep request-time tool metadata resolution non-mutating and runtime-scoped.
 
 Acceptance criteria:
 
-- Protected routes do not authenticate under one snapshot and execute under another.
+- Request handlers use one obvious request-scoped helper family for committed config and runtime reads/writes.
+- App-scoped helpers are only used from app wiring, background tasks, or explicit non-request code paths.
 - Request-time helpers do not re-read runtime or auth state when a bound request snapshot is already available.
-- New dashboard routes have one obvious helper path to stay auth- and snapshot-safe.
 
 ## Priority 2: Simplify Plugin Tool Loading
 

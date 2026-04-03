@@ -794,6 +794,7 @@ async def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild
         response = sandbox_runner_module._execute_request_subprocess_sync(
             sandbox_runner_module.SandboxRunnerExecuteRequest.model_validate(payload),
             runtime_paths,
+            sandbox_runner_module._runtime_config_or_empty(runtime_paths),
             runner_token=_TEST_AUTH_TOKEN,
         )
         return response.model_dump(mode="json")
@@ -854,6 +855,7 @@ async def test_proxy_shell_path_prepend_survives_sandbox_runner_rebuild(
         response = sandbox_runner_module._execute_request_subprocess_sync(
             sandbox_runner_module.SandboxRunnerExecuteRequest.model_validate(payload),
             runtime_paths,
+            sandbox_runner_module._runtime_config_or_empty(runtime_paths),
             runner_token=_TEST_AUTH_TOKEN,
         )
         return response.model_dump(mode="json")

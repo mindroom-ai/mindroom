@@ -10,7 +10,6 @@ from mindroom.api.sandbox_runner import (
     _load_config_from_startup_runtime,
     _runtime_config_or_empty,
     _startup_runner_token_from_env,
-    ensure_registry_loaded_with_config,
     initialize_sandbox_runner_app,
 )
 from mindroom.api.sandbox_runner import router as sandbox_runner_router
@@ -22,10 +21,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime_paths = _app_runtime_paths(app)
     except TypeError:
         runtime_paths, config = _load_config_from_startup_runtime()
-        initialize_sandbox_runner_app(app, runtime_paths, runner_token=_startup_runner_token_from_env())
+        runner_token = _startup_runner_token_from_env()
     else:
         config = _runtime_config_or_empty(runtime_paths)
-    ensure_registry_loaded_with_config(runtime_paths, config)
+        runner_token = None
+    initialize_sandbox_runner_app(
+        app,
+        runtime_paths,
+        config=config,
+        runner_token=runner_token,
+    )
     yield
 
 
