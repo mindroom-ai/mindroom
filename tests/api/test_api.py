@@ -3,11 +3,13 @@
 import asyncio
 import json
 import os
+import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, NoReturn
+from types import TracebackType
+from typing import Any, NoReturn, cast
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -17,7 +19,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
-from mindroom.api import main
+from mindroom.api import config_lifecycle, main
 from mindroom.api import workers as workers_api
 from mindroom.config.main import Config
 from mindroom.matrix.health import (
@@ -57,6 +59,50 @@ def _config_with_worker_scope(worker_scope: str | None) -> Config:
     )
     config.agents["general"].worker_scope = worker_scope
     return config
+
+
+def _authored_config_payload(agent_name: str) -> dict[str, Any]:
+    return {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {
+            agent_name: {
+                "display_name": agent_name.title(),
+                "role": "valid",
+                "rooms": [],
+            },
+        },
+    }
+
+
+def _validated_authored_payload(
+    runtime_paths: constants.RuntimePaths,
+    agent_name: str,
+) -> dict[str, Any]:
+    return Config.validate_with_runtime(
+        _authored_config_payload(agent_name),
+        runtime_paths,
+    ).authored_model_dump()
+
+
+class _ContextSwapLock:
+    def __init__(self, on_enter: Callable[[], None] | None = None) -> None:
+        self.on_enter = on_enter
+
+    def __enter__(self) -> object:
+        if self.on_enter is not None:
+            on_enter = self.on_enter
+            self.on_enter = None
+            on_enter()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
+        return None
 
 
 def test_init_supabase_auth_returns_none_without_credentials(tmp_path: Path) -> None:
@@ -353,6 +399,201 @@ def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: P
     main.initialize_api_app(fresh_app, runtime_two)
 
     assert main._app_config_data(fresh_app) == {}
+
+
+def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path: Path) -> None:
+    """A late load result from an old runtime must not poison the current app cache."""
+    fresh_app = FastAPI()
+    first_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        process_env={},
+    )
+    second_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        process_env={},
+    )
+    started = threading.Event()
+    allow_finish = threading.Event()
+    original_loader = config_lifecycle.load_runtime_config_model
+
+    def _fake_loader(runtime_paths: constants.RuntimePaths) -> Config:
+        if runtime_paths == first_runtime:
+            started.set()
+            allow_finish.wait(timeout=1)
+            message = "invalid old config"
+            raise yaml.YAMLError(message)
+        if runtime_paths == second_runtime:
+            return Config.validate_with_runtime(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "router": {"model": "default"},
+                    "agents": {
+                        "second": {
+                            "display_name": "Second",
+                            "role": "valid",
+                            "rooms": [],
+                        },
+                    },
+                },
+                second_runtime,
+            )
+        return original_loader(runtime_paths)
+
+    with patch.object(config_lifecycle, "load_runtime_config_model", side_effect=_fake_loader):
+        main.initialize_api_app(fresh_app, first_runtime)
+
+        stale_thread = threading.Thread(
+            target=config_lifecycle.load_config_into_app,
+            args=(first_runtime, fresh_app),
+        )
+        stale_thread.start()
+        assert started.wait(timeout=1)
+
+        main.initialize_api_app(fresh_app, second_runtime)
+        assert config_lifecycle.load_config_into_app(second_runtime, fresh_app) is True
+        allow_finish.set()
+        stale_thread.join(timeout=1)
+
+    context = main._app_context(fresh_app)
+    assert context.runtime_paths == second_runtime
+    assert context.config_load_result == main.ConfigLoadResult(success=True)
+    assert set(context.config_data["agents"]) == {"second"}
+
+
+def test_load_config_from_file_ignores_runtime_mismatches_after_api_runtime_swap(tmp_path: Path) -> None:
+    """Loading one old runtime after a swap must not overwrite the current app context."""
+    fresh_app = FastAPI()
+    first_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        process_env={},
+    )
+    second_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        process_env={},
+    )
+    first_runtime.config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"first": {"display_name": "First", "role": "old", "rooms": []}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    second_runtime.config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"second": {"display_name": "Second", "role": "new", "rooms": []}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    main.initialize_api_app(fresh_app, first_runtime)
+    assert main._load_config_from_file(first_runtime, fresh_app) is True
+    assert set(main._app_config_data(fresh_app)["agents"]) == {"first"}
+
+    main.initialize_api_app(fresh_app, second_runtime)
+    assert main._load_config_from_file(second_runtime, fresh_app) is True
+    assert set(main._app_config_data(fresh_app)["agents"]) == {"second"}
+
+    assert main._load_config_from_file(first_runtime, fresh_app) is False
+    assert set(main._app_config_data(fresh_app)["agents"]) == {"second"}
+    assert main._app_context(fresh_app).config_load_result == main.ConfigLoadResult(success=True)
+
+
+def test_read_app_committed_config_uses_current_context_after_runtime_swap(tmp_path: Path) -> None:
+    """Read helpers should use the runtime context that is current after locking."""
+    fresh_app = FastAPI()
+    first_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        process_env={},
+    )
+    second_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        process_env={},
+    )
+    swap_lock = _ContextSwapLock()
+    first_context = main._ApiContext(
+        runtime_paths=first_runtime,
+        config_data=_validated_authored_payload(first_runtime, "old"),
+        config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
+        config_load_result=main.ConfigLoadResult(success=True),
+    )
+    second_context = main._ApiContext(
+        runtime_paths=second_runtime,
+        config_data=_validated_authored_payload(second_runtime, "new"),
+        config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
+        config_load_result=main.ConfigLoadResult(success=True),
+    )
+    fresh_app.state.api_context = first_context
+    swap_lock.on_enter = lambda: setattr(fresh_app.state, "api_context", second_context)
+
+    loaded_agents = config_lifecycle.read_app_committed_config(
+        fresh_app,
+        lambda config_data: list(config_data["agents"]),
+    )
+
+    assert loaded_agents == ["new"]
+
+
+def test_write_app_committed_config_uses_current_context_after_runtime_swap(tmp_path: Path) -> None:
+    """Write helpers should mutate the runtime context that is current after locking."""
+    fresh_app = FastAPI()
+    first_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        process_env={},
+    )
+    second_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        process_env={},
+    )
+    first_runtime.config_path.write_text(
+        yaml.safe_dump(_authored_config_payload("old")),
+        encoding="utf-8",
+    )
+    second_runtime.config_path.write_text(
+        yaml.safe_dump(_authored_config_payload("new")),
+        encoding="utf-8",
+    )
+    swap_lock = _ContextSwapLock()
+    first_context = main._ApiContext(
+        runtime_paths=first_runtime,
+        config_data=_validated_authored_payload(first_runtime, "old"),
+        config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
+        config_load_result=main.ConfigLoadResult(success=True),
+    )
+    second_context = main._ApiContext(
+        runtime_paths=second_runtime,
+        config_data=_validated_authored_payload(second_runtime, "new"),
+        config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
+        config_load_result=main.ConfigLoadResult(success=True),
+    )
+    fresh_app.state.api_context = first_context
+    swap_lock.on_enter = lambda: setattr(fresh_app.state, "api_context", second_context)
+
+    def _mutate(config_data: dict[str, Any]) -> None:
+        config_data["agents"]["written"] = {
+            "display_name": "Written",
+            "role": "updated",
+            "rooms": [],
+        }
+
+    config_lifecycle.write_app_committed_config(
+        fresh_app,
+        _mutate,
+        error_prefix="Failed to update configuration",
+    )
+
+    assert set(main._app_context(fresh_app).config_data["agents"]) == {"new", "written"}
+    assert set(yaml.safe_load(first_runtime.config_path.read_text(encoding="utf-8"))["agents"]) == {"old"}
+    assert set(yaml.safe_load(second_runtime.config_path.read_text(encoding="utf-8"))["agents"]) == {
+        "new",
+        "written",
+    }
 
 
 def test_api_lifespan_loads_config_from_injected_runtime(
@@ -1992,6 +2233,87 @@ def test_run_config_write_returns_422_for_invalid_plugin_manifest_name(tmp_path:
     assert exc_info.value.detail[0]["loc"] == ("config",)
     assert "Invalid plugin name" in str(exc_info.value.detail[0]["msg"])
     assert exc_info.value.detail[0]["type"] == "value_error"
+
+
+def test_run_config_write_checks_current_config_load_result_after_acquiring_lock(tmp_path: Path) -> None:
+    """Config writes should see a reload failure published while they are waiting on the lock."""
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={},
+    )
+    main.initialize_api_app(main.app, runtime_paths)
+    context = main._app_context(main.app)
+    original_config = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+    }
+    context.config_data = yaml.safe_load(yaml.safe_dump(original_config))
+    context.config_load_result = main.ConfigLoadResult(success=True)
+
+    class _SignalingLock:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self.blocked = threading.Event()
+            self.allow_waiter = threading.Event()
+
+        def __enter__(self) -> "_SignalingLock":
+            if self._lock.acquire(blocking=False):
+                return self
+            self.blocked.set()
+            self.allow_waiter.wait(timeout=1)
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            self._lock.release()
+            return False
+
+    signaling_lock = _SignalingLock()
+    original_lock = context.config_lock
+    context.config_lock = signaling_lock
+    error_detail = [{"loc": ("config",), "msg": "current config is invalid", "type": "value_error"}]
+    captured_exception: list[HTTPException] = []
+
+    def _run_write() -> None:
+        try:
+            main._run_config_write(
+                main.app,
+                lambda candidate_config: candidate_config["agents"].update(
+                    {
+                        "new_agent": {
+                            "display_name": "New Agent",
+                            "role": "test",
+                            "rooms": [],
+                        },
+                    },
+                ),
+                error_prefix="Failed to save configuration",
+            )
+        except HTTPException as exc:
+            captured_exception.append(exc)
+
+    try:
+        with signaling_lock:
+            writer_thread = threading.Thread(target=_run_write)
+            writer_thread.start()
+            assert signaling_lock.blocked.wait(timeout=1)
+            context.config_load_result = main.ConfigLoadResult(
+                success=False,
+                error_status_code=422,
+                error_detail=error_detail,
+            )
+            signaling_lock.allow_waiter.set()
+
+        writer_thread.join(timeout=1)
+    finally:
+        context.config_lock = original_lock
+
+    assert not writer_thread.is_alive()
+    assert len(captured_exception) == 1
+    assert captured_exception[0].status_code == 422
+    assert captured_exception[0].detail == error_detail
+    assert context.config_data == original_config
 
 
 def test_api_config_load_returns_422_for_runtime_validation_error(temp_config_file: Path) -> None:

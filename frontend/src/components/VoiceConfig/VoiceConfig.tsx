@@ -55,7 +55,7 @@ function normalizeHost(host?: string): string {
 }
 
 export function VoiceConfig() {
-  const { config, saveConfig, markDirty } = useConfigStore();
+  const { config, saveConfig, updateVoiceConfig } = useConfigStore();
   const { toast } = useToast();
 
   // Initialize local state with default values if voice config doesn't exist
@@ -72,11 +72,7 @@ export function VoiceConfig() {
     const newConfig = { ...voiceConfig, ...updates };
     setVoiceConfig(newConfig);
 
-    // Update the store
-    if (config) {
-      config.voice = newConfig;
-      markDirty();
-    }
+    updateVoiceConfig(newConfig);
   };
 
   const handleSTTChange = (updates: Partial<VoiceConfigType['stt']>) => {
@@ -104,23 +100,30 @@ export function VoiceConfig() {
   const providerLabel = 'OpenAI';
 
   const handleSave = async () => {
-    try {
-      if (config?.voice?.stt) {
-        config.voice.stt.provider = 'openai';
-        config.voice.stt.host = normalizeHost(config.voice.stt.host);
-      }
-      await saveConfig();
-      toast({
-        title: 'Voice Configuration Saved',
-        description: 'Your voice settings have been updated successfully.',
-      });
-    } catch (error) {
+    updateVoiceConfig({
+      ...voiceConfig,
+      stt: {
+        ...voiceConfig.stt,
+        provider: 'openai',
+        host: normalizeHost(voiceConfig.stt.host),
+      },
+    });
+    await saveConfig();
+    const state = useConfigStore.getState();
+    const saveSucceeded = state.syncStatus === 'synced' && !state.isDirty;
+    if (!saveSucceeded) {
+      const globalDiagnostic = state.diagnostics.find(diagnostic => diagnostic.kind === 'global');
       toast({
         title: 'Save Failed',
-        description: 'Failed to save voice configuration.',
+        description: globalDiagnostic?.message ?? 'Failed to save voice configuration.',
         variant: 'destructive',
       });
+      return;
     }
+    toast({
+      title: 'Voice Configuration Saved',
+      description: 'Your voice settings have been updated successfully.',
+    });
   };
 
   return (

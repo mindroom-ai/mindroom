@@ -24,7 +24,7 @@ describe('shouldShowBlockingDiagnosticOverlay', () => {
           message: 'Authentication required. Please log in to access this instance.',
           blocking: true,
         },
-        { hasLoadedConfig: false, hasValidationIssues: false }
+        { hasLoadedConfig: false }
       )
     ).toBe(true);
   });
@@ -37,7 +37,7 @@ describe('shouldShowBlockingDiagnosticOverlay', () => {
           message: 'Network error',
           blocking: true,
         },
-        { hasLoadedConfig: true, hasValidationIssues: false }
+        { hasLoadedConfig: true }
       )
     ).toBe(false);
     expect(
@@ -47,7 +47,7 @@ describe('shouldShowBlockingDiagnosticOverlay', () => {
           message: 'Configuration validation failed',
           blocking: true,
         },
-        { hasLoadedConfig: false, hasValidationIssues: true }
+        { hasLoadedConfig: true }
       )
     ).toBe(false);
   });
@@ -60,7 +60,17 @@ describe('shouldShowBlockingDiagnosticOverlay', () => {
           message: 'Server error. Please try again later or contact support.',
           blocking: true,
         },
-        { hasLoadedConfig: false, hasValidationIssues: false }
+        { hasLoadedConfig: false }
+      )
+    ).toBe(true);
+    expect(
+      shouldShowBlockingDiagnosticOverlay(
+        {
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: true,
+        },
+        { hasLoadedConfig: false }
       )
     ).toBe(true);
   });

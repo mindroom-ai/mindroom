@@ -1399,6 +1399,87 @@ describe('configStore', () => {
       expect(state.syncStatus).toBe('synced');
     });
 
+    it('preserves newer voice edits when an older save finishes later', async () => {
+      const pendingSaveResponse = deferred<{
+        ok: boolean;
+        json: () => Promise<{ success: true }>;
+      }>();
+      const config: Config = {
+        models: {
+          default: { provider: 'test', id: 'test-model' },
+        },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-ada-002',
+            },
+          },
+        },
+        agents: {},
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+        voice: {
+          enabled: false,
+          visible_router_echo: false,
+          stt: {
+            provider: 'openai',
+            model: 'whisper-1',
+          },
+          intelligence: {
+            model: 'default',
+          },
+        },
+      };
+      useConfigStore.setState({
+        config,
+        agents: [],
+        isDirty: true,
+      });
+
+      (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
+
+      const savePromise = useConfigStore.getState().saveConfig();
+      useConfigStore.getState().updateVoiceConfig({
+        enabled: true,
+        visible_router_echo: true,
+        stt: {
+          provider: 'openai',
+          model: 'whisper-1',
+          host: 'http://localhost:8080',
+        },
+        intelligence: {
+          model: 'default',
+        },
+      });
+
+      pendingSaveResponse.resolve({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+      await savePromise;
+
+      const state = useConfigStore.getState();
+      expect(state.config?.voice).toEqual({
+        enabled: true,
+        visible_router_echo: true,
+        stt: {
+          provider: 'openai',
+          model: 'whisper-1',
+          host: 'http://localhost:8080',
+        },
+        intelligence: {
+          model: 'default',
+        },
+      });
+      expect(state.isDirty).toBe(true);
+      expect(state.syncStatus).toBe('synced');
+    });
+
     it('refreshes agent policies after a successful save when preview state is stale', async () => {
       const mockConfig: Config = {
         agents: {

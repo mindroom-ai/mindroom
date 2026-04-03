@@ -102,19 +102,22 @@ Current state:
 
 - The store now guards `loadConfig()`, `refreshAgentPolicies()`, and `saveConfig()` against stale overlapping responses.
 - The sequencing pattern is still duplicated across multiple async actions.
-- Invalid-config recovery diagnostics are now visible, but the dashboard still lacks a true raw-config recovery editor for cases the structured UI cannot represent.
+- Invalid current configs now stay in a read-only error state with detailed validation issues instead of silently falling back to stale data.
+- The invalid-config and validation-diagnostic retention logic still live directly inside `configStore.ts`.
 
 Why this is next:
 
 - This exact stale-state class has already recurred more than once.
 - Duplicated async sequencing logic is easy to copy incorrectly.
+- Recovery-mode behavior is now correct, but it is still hand-built inside the main store rather than being one explicit sub-state.
 
 Refactor target:
 
 - Extract one small internal request-version helper or store utility for async actions that replace committed state.
 - Keep the distinction between validation-failure clears, generic-load-error preservation, and save-result sequencing.
 - Keep diagnostics behavior explicit.
-- Decide explicitly whether dashboard invalid-config recovery should stay structured-only or gain a raw full-config editor.
+- Decide explicitly whether dashboard invalid-config recovery should remain read-only or gain a raw full-config editor.
+- Make invalid-load state one explicit mode instead of implicit coupling between `config`, `diagnostics`, and `syncStatus`.
 
 Acceptance criteria:
 
@@ -133,16 +136,19 @@ Current state:
 
 - The config watcher and worker cleanup loop now read current runtime state instead of closing over startup `RuntimePaths`.
 - The lifecycle policy still lives in `api.main`.
+- Config cache commits are now serialized and runtime-mismatch loads are discarded, but the sequencing still spans multiple helpers in `config_lifecycle.py`.
 
 Why this is next:
 
 - The rebinding bug showed that long-lived API tasks and request-time runtime state need one owner.
 - Keeping the lifecycle policy in `main.py` makes it easier for future runtime-refresh changes to miss a sibling background task.
+- The config lifecycle code now has the right locking semantics, but the atomic commit model is still not obvious at a glance.
 
 Refactor target:
 
 - Move app-bound config watching and runtime-bound background loop helpers into a small lifecycle module next to `config_lifecycle.py`.
 - Keep `main.py` focused on route assembly and app wiring.
+- Collapse config-load staging and commit into one clearly named helper so late results cannot drift back into ad hoc state writes.
 
 Acceptance criteria:
 

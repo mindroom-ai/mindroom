@@ -109,10 +109,8 @@ export function shouldShowBlockingDiagnosticOverlay(
   blockingDiagnostic: GlobalConfigDiagnostic | null,
   {
     hasLoadedConfig,
-    hasValidationIssues,
   }: {
     hasLoadedConfig: boolean;
-    hasValidationIssues: boolean;
   }
 ): boolean {
   if (blockingDiagnostic == null) {
@@ -121,7 +119,7 @@ export function shouldShowBlockingDiagnosticOverlay(
   if (isAuthDiagnosticMessage(blockingDiagnostic.message)) {
     return true;
   }
-  return !hasLoadedConfig && !hasValidationIssues;
+  return !hasLoadedConfig;
 }
 
 function AppContent() {
@@ -151,7 +149,6 @@ function AppContent() {
   const blockingDiagnostic = globalDiagnostics.find(diagnostic => diagnostic.blocking) ?? null;
   const showBlockingDiagnosticOverlay = shouldShowBlockingDiagnosticOverlay(blockingDiagnostic, {
     hasLoadedConfig: config != null,
-    hasValidationIssues: validationIssues.length > 0,
   });
   const visibleGlobalDiagnostics = showBlockingDiagnosticOverlay
     ? globalDiagnostics.filter(diagnostic => !diagnostic.blocking)
@@ -244,6 +241,25 @@ function AppContent() {
             </h2>
           </div>
           <p className="text-gray-600 dark:text-gray-300 mb-6">{error}</p>
+
+          {!isAuthError && validationIssues.length > 0 && (
+            <div className="mb-6 rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+              <p className="font-medium">Current configuration is invalid.</p>
+              <p className="mt-1 text-destructive/80">
+                Fix the reported issues in <code>config.yaml</code> or the referenced plugin
+                manifests, then retry loading the dashboard.
+              </p>
+              <ul className="mt-3 list-disc space-y-1 pl-5">
+                {validationIssues.map((issue, index) => (
+                  <li key={`${issue.loc.join('.')}-${issue.msg}-${index}`}>
+                    <span className="font-medium">{issue.loc.join(' → ') || 'config'}</span>
+                    {': '}
+                    {issue.msg}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {isAuthError && (
             <div className="space-y-3">
@@ -364,13 +380,13 @@ function AppContent() {
           </div>
         ))}
 
-        {config == null && validationIssues.length > 0 && (
+        {config != null && validationIssues.length > 0 && (
           <div className="border-b border-destructive/20 bg-destructive/5 px-3 py-4 text-sm text-destructive sm:px-6">
             <div className="space-y-2">
-              <p className="font-medium">Current configuration is invalid.</p>
+              <p className="font-medium">This draft still has configuration validation issues.</p>
               <p className="text-destructive/80">
-                Fix the reported issues in <code>config.yaml</code> or the referenced plugin
-                manifests, then retry loading the dashboard.
+                Resolve the reported issues in the draft below, then save to replace{' '}
+                <code>config.yaml</code>.
               </p>
               <ul className="list-disc space-y-1 pl-5">
                 {validationIssues.map((issue, index) => (

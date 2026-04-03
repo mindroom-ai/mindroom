@@ -221,27 +221,33 @@ def _app_config_lock(api_app: FastAPI) -> ApiConfigLock:
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Initialize one API app instance with explicit runtime-bound state."""
     previous_context = getattr(api_app.state, "api_context", None)
-    config_lock: ApiConfigLock
-    auth_state: _ApiAuthState | None = None
-    if isinstance(previous_context, _ApiContext):
-        config_lock = previous_context.config_lock
-        config_data = previous_context.config_data if previous_context.runtime_paths == runtime_paths else {}
-        config_load_result = (
-            previous_context.config_load_result if previous_context.runtime_paths == runtime_paths else None
+    if not isinstance(previous_context, _ApiContext):
+        api_app.state.api_context = _ApiContext(
+            runtime_paths=runtime_paths,
+            config_data={},
+            config_lock=cast("ApiConfigLock", threading.Lock()),
+            auth_state=None,
+            config_load_result=None,
         )
-        if previous_context.runtime_paths == runtime_paths:
-            auth_state = previous_context.auth_state
-    else:
-        config_data = {}
-        config_lock = cast("ApiConfigLock", threading.Lock())
-        config_load_result = None
-    api_app.state.api_context = _ApiContext(
-        runtime_paths=runtime_paths,
-        config_data=config_data,
-        config_lock=config_lock,
-        auth_state=auth_state,
-        config_load_result=config_load_result,
-    )
+        return
+
+    config_lock = previous_context.config_lock
+    with config_lock:
+        current_context = getattr(api_app.state, "api_context", previous_context)
+        if not isinstance(current_context, _ApiContext):
+            current_context = previous_context
+        auth_state = current_context.auth_state if current_context.runtime_paths == runtime_paths else None
+        config_data = current_context.config_data if current_context.runtime_paths == runtime_paths else {}
+        config_load_result = (
+            current_context.config_load_result if current_context.runtime_paths == runtime_paths else None
+        )
+        api_app.state.api_context = _ApiContext(
+            runtime_paths=runtime_paths,
+            config_data=config_data,
+            config_lock=config_lock,
+            auth_state=auth_state,
+            config_load_result=config_load_result,
+        )
 
 
 def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSettings:
@@ -303,6 +309,15 @@ async def _watch_config(
             pass
 
         try:
+            runtime_paths = _app_runtime_paths(api_app)
+            config_path = runtime_paths.config_path
+            if config_path != watched_config_path:
+                watched_config_path = config_path
+                try:
+                    last_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
+                except (OSError, PermissionError):
+                    last_mtime = 0.0
+
             current_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
             if current_mtime != last_mtime:
                 last_mtime = current_mtime
