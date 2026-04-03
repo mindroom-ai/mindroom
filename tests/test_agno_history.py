@@ -24,6 +24,7 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 from agno.team import Team
+from agno.team._tools import _determine_tools_for_model as determine_team_tools_for_model
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
@@ -1300,7 +1301,8 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
         get_member_information_tool=True,
     )
 
-    prepared_tools = team._determine_tools_for_model(
+    prepared_tools = determine_team_tools_for_model(
+        team,
         model=team.model,
         run_response=TeamRunOutput(
             run_id="history-budget",
@@ -1391,7 +1393,8 @@ def test_estimate_preparation_static_tokens_for_team_includes_agentic_state_tool
     )
     budget_session_id = "history-budget"
     session = TeamSession(session_id=budget_session_id, team_id=team.id)
-    prepared_tools = team._determine_tools_for_model(
+    prepared_tools = determine_team_tools_for_model(
+        team,
         model=team.model,
         run_response=TeamRunOutput(
             run_id=budget_session_id,

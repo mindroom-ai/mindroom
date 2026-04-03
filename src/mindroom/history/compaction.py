@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from html import escape
 from typing import TYPE_CHECKING, TypeGuard, cast
 
+from agno.agent._tools import determine_tools_for_model
 from agno.models.message import Message
 from agno.run import RunContext
 from agno.run.agent import RunOutput
@@ -496,9 +497,9 @@ def _prepare_agent_prompt_inputs_for_estimation(
 
     Agno exposes `Agent.get_system_message()` publicly, but the prepared tool
     payload and `_tool_instructions` that feed that prompt are only finalized by
-    the internal `_determine_tools_for_model()` path. Using that single internal
-    entrypoint keeps MindRoom aligned with `agno==2.4.7` without re-implementing
-    several private agent helpers.
+    the shared `agno.agent._tools.determine_tools_for_model()` path. Using that
+    single internal entrypoint keeps MindRoom aligned with Agno without
+    re-implementing several private agent helpers.
     """
     budget_session_id = "history-budget"
     budget_user_id = "history-budget-user"
@@ -529,7 +530,8 @@ def _prepare_agent_prompt_inputs_for_estimation(
         session=session,
         user_id=budget_user_id,
     )
-    prepared_tools = agent._determine_tools_for_model(
+    prepared_tools = determine_tools_for_model(
+        agent=agent,
         model=model,
         processed_tools=processed_tools,
         run_response=run_response,

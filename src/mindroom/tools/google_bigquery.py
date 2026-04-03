@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.google_bigquery import GoogleBigQueryTools
+    from agno.tools.google.bigquery import GoogleBigQueryTools
 
 
 @register_tool_with_metadata(
@@ -74,6 +74,27 @@ if TYPE_CHECKING:
             default=True,
         ),
         ConfigField(
+            name="list_tables",
+            label="List Tables",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="describe_table",
+            label="Describe Table",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="run_sql_query",
+            label="Run SQL Query",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
             name="all",
             label="All",
             type="boolean",
@@ -87,6 +108,6 @@ if TYPE_CHECKING:
 )
 def google_bigquery_tools() -> type[GoogleBigQueryTools]:
     """Return Google BigQuery tools for data analytics."""
-    from agno.tools.google_bigquery import GoogleBigQueryTools
+    from agno.tools.google.bigquery import GoogleBigQueryTools
 
     return GoogleBigQueryTools

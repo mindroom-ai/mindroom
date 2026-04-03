@@ -10,6 +10,10 @@ import mindroom.tools  # noqa: F401
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA
 
 SKIP_CUSTOM = {"homeassistant", "gmail", "google_calendar", "google_sheets", "openclaw_compat"}
+IGNORED_AGNO_PARAMS = {
+    # Agno accepts an SSLContext for Slack, but MindRoom has no safe serialized UI/config path for it.
+    "slack": {"ssl"},
+}
 
 
 @pytest.mark.parametrize("tool_name", list(_TOOL_REGISTRY.keys()))
@@ -55,6 +59,9 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
         agno_params[name] = {
             "type": param.annotation if param.annotation != inspect.Parameter.empty else None,
         }
+
+    ignored_param_names = IGNORED_AGNO_PARAMS.get(tool_name, set())
+    agno_params = {name: param_info for name, param_info in agno_params.items() if name not in ignored_param_names}
 
     # Get our ConfigFields for the tool
     tool_metadata = TOOL_METADATA[tool_name]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.tool_system.metadata import (
     ConfigField,
@@ -75,6 +75,20 @@ if TYPE_CHECKING:
             required=False,
             default=True,
         ),
+        ConfigField(
+            name="timelimit",
+            label="Time Limit",
+            type="text",
+            required=False,
+            default=None,
+        ),
+        ConfigField(
+            name="region",
+            label="Region",
+            type="text",
+            required=False,
+            default=None,
+        ),
     ],
     dependencies=["ddgs"],
     docs_url="https://docs.agno.com/tools/toolkits/search/websearch",
@@ -95,6 +109,8 @@ def googlesearch_tools() -> type[WebSearchTools]:
             proxy: str | None = None,
             timeout: int | None = 10,
             verify_ssl: bool = True,
+            timelimit: Literal["d", "w", "m", "y"] | None = None,
+            region: str | None = None,
             **kwargs: object,
         ) -> None:
             super().__init__(
@@ -106,6 +122,8 @@ def googlesearch_tools() -> type[WebSearchTools]:
                 proxy=proxy,
                 timeout=timeout,
                 verify_ssl=verify_ssl,
+                timelimit=timelimit,
+                region=region,
                 **kwargs,
             )
 

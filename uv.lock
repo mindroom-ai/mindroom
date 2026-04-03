@@ -29,7 +29,7 @@ wheels = [
 
 [[package]]
 name = "agno"
-version = "2.4.7"
+version = "2.5.13"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "docstring-parser" },
@@ -46,9 +46,9 @@ dependencies = [
     { name = "typer" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3d/57/ab92337e3287bcae8fee269eda4af61b21d959cec70d5c573310a4d311f5/agno-2.4.7.tar.gz", hash = "sha256:07959ec1928e3d7d487adc763350603fa4bd2243c25315d02416e0007bfecefe", size = 1528085, upload-time = "2026-01-28T23:53:07.506Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/71/00/9af194faecbc5a4443cf05c490671c50d11e6dbeaac2ecf491e519797004/agno-2.5.13.tar.gz", hash = "sha256:166ca92d760ae43902862a239e6d64ab85bc625562e49937b37d1d920c68e009", size = 1829242, upload-time = "2026-04-01T01:30:50.329Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9e/26/0222aa74f955bad4520e20774b131f09996906ebd59d635de075355a506c/agno-2.4.7-py3-none-any.whl", hash = "sha256:cf39e805e34387925575dfede75a7b5345b559e0bf3f4af04dc76e25e04b2f98", size = 1832840, upload-time = "2026-01-28T23:53:04.432Z" },
+    { url = "https://files.pythonhosted.org/packages/58/65/0af18e9c8c47c6e20945828b1d41c36b9dc50e17b69acaec42f99882f87e/agno-2.5.13-py3-none-any.whl", hash = "sha256:d2c3ff3f97783dd40bf1f5dbf62418bfc8020f45d5714125e419dba6157c4f38", size = 2177916, upload-time = "2026-04-01T01:30:48.077Z" },
 ]
 
 [package.optional-dependencies]
@@ -3573,7 +3573,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agentql", marker = "extra == 'agentql'" },
-    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = "==2.4.7" },
+    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = "==2.5.13" },
     { name = "anthropic", specifier = ">=0.70" },
     { name = "apify-client", marker = "platform_machine != 'aarch64' and extra == 'apify'", specifier = ">=1.12.2" },
     { name = "arxiv", marker = "extra == 'arxiv'" },
