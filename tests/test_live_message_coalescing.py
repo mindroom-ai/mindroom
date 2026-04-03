@@ -183,19 +183,20 @@ def _prepared_dispatch(
         mentioned_agents=[],
         has_non_agent_mentions=False,
     )
+    target = MessageTarget.resolve(
+        room_id="!room:localhost",
+        thread_id=thread_id,
+        reply_to_event_id=event_id,
+    )
     return _PreparedDispatch(
         requester_user_id=requester_user_id,
         context=context,
+        target=target,
         correlation_id=event_id,
         envelope=MessageEnvelope(
             source_event_id=event_id,
             room_id="!room:localhost",
-            target=MessageTarget.resolve(
-                room_id="!room:localhost",
-                thread_id=thread_id,
-                reply_to_event_id=event_id,
-                room_mode=thread_id is None,
-            ),
+            target=target,
             requester_id=requester_user_id,
             sender_id=requester_user_id,
             body=body,

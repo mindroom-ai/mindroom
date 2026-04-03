@@ -102,12 +102,12 @@ def build_prompt_with_thread_history(
     context_lines: list[str] = []
     for msg in messages:
         body = msg.body
-        if not isinstance(body, str) or not body:
+        if not body:
             continue
         if max_message_length is not None and len(body) >= max_message_length:
             continue
         sender = msg.sender
-        if not isinstance(sender, str) or not sender:
+        if not sender:
             if missing_sender_label is None:
                 continue
             sender = missing_sender_label
@@ -137,9 +137,7 @@ def _classify_partial_reply(
             return _PartialReplyKind.IN_PROGRESS if event_id in active_event_ids else _PartialReplyKind.INTERRUPTED
         partial_kind = _PartialReplyKind.IN_PROGRESS
     else:
-        body = msg.body or ""
-        if not isinstance(body, str):
-            return None
+        body = msg.body
         if is_interrupted_partial_reply(body):
             partial_kind = _PartialReplyKind.INTERRUPTED
 
@@ -171,8 +169,6 @@ def _get_unseen_event_ids_for_metadata(
     event_ids: list[str] = []
     for msg in unseen_messages:
         event_id = msg.event_id
-        if not isinstance(event_id, str):
-            continue
         if event_id in in_progress_event_ids:
             continue
         event_ids.append(event_id)
@@ -208,10 +204,7 @@ def _get_unseen_messages_for_sender(
             )
             if partial_kind is None:
                 continue
-            body = msg.body
-            if not isinstance(body, str):
-                continue
-            cleaned_body = _clean_partial_reply_body(body)
+            cleaned_body = _clean_partial_reply_body(msg.body)
             if not cleaned_body:
                 continue
             partial_reply_kinds.add(partial_kind)

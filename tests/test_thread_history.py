@@ -13,14 +13,16 @@ from nio.api import RelationshipType
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
 from mindroom.matrix.client import (
+    ResolvedVisibleMessage,
     RoomThreadsPageError,
+    ThreadHistoryResult,
     _fetch_thread_history_via_room_messages,
     _latest_thread_event_id,
-    build_threaded_edit_content,
+    _ThreadHistoryFastPathUnavailableError,
     fetch_thread_history,
+    fetch_thread_snapshot,
     get_room_threads_page,
 )
-from tests.conftest import make_visible_message
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -129,7 +131,7 @@ class TestThreadHistory:
     async def test_fetch_thread_history_delegates_to_room_scan_fallback_helper(self) -> None:
         """Preserve the legacy room-scan path behind an explicit helper."""
         client = AsyncMock()
-        expected_history = [make_visible_message(event_id="$thread_root", body="root")]
+        expected_history = [{"event_id": "$thread_root", "body": "root"}]
 
         with patch(
             "mindroom.matrix.client._fetch_thread_history_via_room_messages",
@@ -311,56 +313,6 @@ class TestThreadHistory:
         assert history[1].stream_status == "completed"
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_history_relations_path_ignores_mixed_edit_events_as_children(self) -> None:
-        """Mixed thread-child and edit events in one relations page should resolve one visible reply."""
-        root_event = self._make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="Root message",
-            server_timestamp=1000,
-            source_content={"body": "Root message"},
-        )
-        thread_event = self._make_text_event(
-            event_id="$reply",
-            sender="@agent:localhost",
-            body="Draft answer",
-            server_timestamp=2000,
-            source_content={
-                "body": "Draft answer",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
-        mixed_edit_event = self._make_text_event(
-            event_id="$reply_edit",
-            sender="@agent:localhost",
-            body="* Final answer",
-            server_timestamp=3000,
-            source_content={
-                "body": "* Final answer",
-                "m.new_content": {
-                    "body": "Final answer",
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-                },
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
-            },
-        )
-        client = self._make_relations_client(
-            root_event=root_event,
-            relations={
-                self._relation_key("$thread_root", RelationshipType.thread): [thread_event, mixed_edit_event],
-                self._relation_key("$thread_root", RelationshipType.replacement): [],
-                self._relation_key("$reply", RelationshipType.replacement): [],
-            },
-        )
-
-        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
-
-        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
-        assert history[1].body == "Final answer"
-        assert history[1].visible_event_id == "$reply_edit"
-        client.room_messages.assert_not_awaited()
-
-    @pytest.mark.asyncio
     async def test_fetch_thread_history_relations_path_includes_notice_reply(self) -> None:
         """Relations-first fetch should keep notice messages in thread history."""
         root_event = self._make_text_event(
@@ -391,9 +343,9 @@ class TestThreadHistory:
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
         assert [message.event_id for message in history] == ["$thread_root", "$notice_reply"]
-        assert history[0].to_dict()["msgtype"] == "m.text"
+        assert "msgtype" not in history[0].to_dict()
         assert history[1].body == "Compacted 12 messages"
-        assert history[1].content["msgtype"] == "m.notice"
+        assert history[1].to_dict()["msgtype"] == "m.notice"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_relations_path_includes_notice_root(self) -> None:
@@ -426,7 +378,7 @@ class TestThreadHistory:
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
-        assert history[0].content["msgtype"] == "m.notice"
+        assert history[0].to_dict()["msgtype"] == "m.notice"
         assert history[0].body == "Compacted summary"
 
     @pytest.mark.asyncio
@@ -445,7 +397,7 @@ class TestThreadHistory:
                 self._relation_key("$thread_root", RelationshipType.thread): RuntimeError("unsupported"),
             },
         )
-        fallback_history = [make_visible_message(event_id="$thread_root", body="fallback")]
+        fallback_history = [{"event_id": "$thread_root", "body": "fallback"}]
 
         with patch(
             "mindroom.matrix.client._fetch_thread_history_via_room_messages",
@@ -457,8 +409,79 @@ class TestThreadHistory:
         mock_fallback.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_snapshot_marks_room_scan_fallback_as_full_history(self) -> None:
+        """Snapshot fallback should go straight to the room-scan helper."""
+        fallback_history = [{"event_id": "$thread_root", "body": "fallback"}]
+        client = AsyncMock()
+
+        with (
+            patch(
+                "mindroom.matrix.client._fetch_thread_context_via_relations",
+                new=AsyncMock(side_effect=_ThreadHistoryFastPathUnavailableError("unsupported")),
+            ),
+            patch(
+                "mindroom.matrix.client._fetch_thread_history_via_room_messages",
+                new=AsyncMock(return_value=fallback_history),
+            ) as mock_room_scan,
+            patch(
+                "mindroom.matrix.client.fetch_thread_history",
+                new=AsyncMock(side_effect=AssertionError("should skip fetch_thread_history")),
+            ) as mock_fetch_history,
+        ):
+            snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
+
+        assert snapshot == fallback_history
+        assert isinstance(snapshot, ThreadHistoryResult)
+        assert snapshot.is_full_history is True
+        mock_room_scan.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
+        mock_fetch_history.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_snapshot_relations_fast_path_uses_typed_sorting(self) -> None:
+        """Snapshot fast path should sort typed visible messages without dict indexing."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        later_reply = self._make_text_event(
+            event_id="$reply_b",
+            sender="@agent:localhost",
+            body="Later reply",
+            server_timestamp=3000,
+            source_content={
+                "body": "Later reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        earlier_reply = self._make_text_event(
+            event_id="$reply_a",
+            sender="@agent:localhost",
+            body="Earlier reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Earlier reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        client = self._make_relations_client(
+            root_event=root_event,
+            relations={
+                self._relation_key("$thread_root", RelationshipType.thread): [later_reply, earlier_reply],
+            },
+        )
+
+        snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
+
+        assert isinstance(snapshot, ThreadHistoryResult)
+        assert snapshot.is_full_history is False
+        assert [message.event_id for message in snapshot] == ["$thread_root", "$reply_a", "$reply_b"]
+
+    @pytest.mark.asyncio
     async def test_latest_thread_event_id_uses_relations_fast_path(self) -> None:
-        """The latest-thread lookup should reuse the relations-backed visible history."""
+        """The latest-thread lookup should use one reverse relations request."""
         root_event = self._make_text_event(
             event_id="$thread_root",
             sender="@user:localhost",
@@ -479,179 +502,67 @@ class TestThreadHistory:
         client = self._make_relations_client(
             root_event=root_event,
             relations={
-                self._relation_key("$thread_root", RelationshipType.thread): [newest_thread_event],
+                self._relation_key(
+                    "$thread_root",
+                    RelationshipType.thread,
+                    direction=nio.MessageDirection.back,
+                    limit=1,
+                ): [newest_thread_event],
             },
         )
 
         event_id = await _latest_thread_event_id(client, "!room:localhost", "$thread_root")
 
         assert event_id == "$reply_latest"
+        client.room_get_event_relations.assert_called_once_with(
+            "!room:localhost",
+            "$thread_root",
+            rel_type=RelationshipType.thread,
+            event_type="m.room.message",
+            direction=nio.MessageDirection.back,
+            limit=1,
+        )
         client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_latest_thread_event_id_returns_later_edit_of_older_child(self) -> None:
-        """Later edits of older replies should still become the visible thread tail."""
-        root_event = self._make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="Root message",
-            server_timestamp=1000,
-            source_content={"body": "Root message"},
-        )
-        older_thread_event = self._make_text_event(
-            event_id="$reply_old",
-            sender="@agent:localhost",
-            body="Older reply",
-            server_timestamp=1100,
-            source_content={
-                "body": "Older reply",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
+    async def test_latest_thread_event_id_stops_after_first_relation_event(self) -> None:
+        """The latest-thread lookup should stop iterating relations after one event."""
         newest_thread_event = self._make_text_event(
-            event_id="$reply_new",
+            event_id="$reply_latest",
             sender="@agent:localhost",
             body="Newest reply",
-            server_timestamp=2000,
+            server_timestamp=3000,
             source_content={
                 "body": "Newest reply",
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        later_edit_of_older_reply = self._make_text_event(
-            event_id="$reply_old_edit",
-            sender="@agent:localhost",
-            body="* Older reply, finalized",
-            server_timestamp=3000,
-            source_content={
-                "body": "* Older reply, finalized",
-                "m.new_content": {"body": "Older reply, finalized"},
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply_old"},
-            },
-        )
-        client = self._make_relations_client(
-            root_event=root_event,
-            relations={
-                self._relation_key("$thread_root", RelationshipType.thread): [
-                    newest_thread_event,
-                    older_thread_event,
-                ],
-                self._relation_key("$reply_old", RelationshipType.replacement): [later_edit_of_older_reply],
-            },
-        )
+        client = MagicMock()
+        client.room_messages = AsyncMock()
+        second_event_requested = False
+
+        async def room_get_event_relations() -> object:
+            nonlocal second_event_requested
+            yield newest_thread_event
+            second_event_requested = True
+            msg = "should not request more than one relation event"
+            raise AssertionError(msg)
+
+        client.room_get_event_relations = MagicMock(return_value=room_get_event_relations())
 
         event_id = await _latest_thread_event_id(client, "!room:localhost", "$thread_root")
 
-        assert event_id == "$reply_old_edit"
+        assert event_id == "$reply_latest"
+        assert second_event_requested is False
+        client.room_get_event_relations.assert_called_once_with(
+            "!room:localhost",
+            "$thread_root",
+            rel_type=RelationshipType.thread,
+            event_type="m.room.message",
+            direction=nio.MessageDirection.back,
+            limit=1,
+        )
         client.room_messages.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_latest_thread_event_id_returns_latest_edit_of_newest_child(self) -> None:
-        """The fast path should return the newest visible edit event when present."""
-        root_event = self._make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="Root message",
-            server_timestamp=1000,
-            source_content={"body": "Root message"},
-        )
-        newest_thread_event = self._make_text_event(
-            event_id="$reply_latest",
-            sender="@agent:localhost",
-            body="Draft reply",
-            server_timestamp=3000,
-            source_content={
-                "body": "Draft reply",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
-        newest_edit = self._make_text_event(
-            event_id="$edit_latest",
-            sender="@agent:localhost",
-            body="* Final reply",
-            server_timestamp=3100,
-            source_content={
-                "body": "* Final reply",
-                "m.new_content": {"body": "Final reply"},
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply_latest"},
-            },
-        )
-        client = self._make_relations_client(
-            root_event=root_event,
-            relations={
-                self._relation_key("$thread_root", RelationshipType.thread): [newest_thread_event],
-                self._relation_key("$reply_latest", RelationshipType.replacement): [newest_edit],
-            },
-        )
-
-        event_id = await _latest_thread_event_id(client, "!room:localhost", "$thread_root")
-
-        assert event_id == "$edit_latest"
-        client.room_messages.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_latest_thread_event_id_returns_edit_relation_when_latest_relation_is_edit(self) -> None:
-        """The fast path should treat an edit relation as the latest visible thread event."""
-        root_event = self._make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="Root message",
-            server_timestamp=1000,
-            source_content={"body": "Root message"},
-        )
-        latest_edit = self._make_text_event(
-            event_id="$edit_latest",
-            sender="@agent:localhost",
-            body="* Edited reply",
-            server_timestamp=3100,
-            source_content={
-                "body": "* Edited reply",
-                "m.new_content": {
-                    "body": "Edited reply",
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-                },
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply_latest"},
-            },
-        )
-        client = self._make_relations_client(
-            root_event=root_event,
-            relations={
-                self._relation_key("$thread_root", RelationshipType.thread): [latest_edit],
-            },
-        )
-
-        event_id = await _latest_thread_event_id(client, "!room:localhost", "$thread_root")
-
-        assert event_id == "$edit_latest"
-
-    @pytest.mark.asyncio
-    async def test_build_threaded_edit_content_uses_latest_thread_event_id_for_fallback(self) -> None:
-        """Threaded edits should preserve MSC3440 fallback semantics through the latest visible event."""
-        client = AsyncMock()
-
-        with (
-            patch(
-                "mindroom.matrix.client._latest_thread_event_id",
-                new=AsyncMock(return_value="$latest"),
-            ) as mock_latest,
-            patch(
-                "mindroom.matrix.client.format_message_with_mentions",
-                return_value={"body": "edited"},
-            ) as mock_format,
-        ):
-            content = await build_threaded_edit_content(
-                client,
-                room_id="!room:localhost",
-                new_text="edited",
-                thread_id="$thread_root",
-                config=MagicMock(),
-                runtime_paths=MagicMock(),
-                sender_domain="localhost",
-            )
-
-        assert content == {"body": "edited"}
-        mock_latest.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
-        assert mock_format.call_args.kwargs["latest_thread_event_id"] == "$latest"
 
     @pytest.mark.asyncio
     async def test_latest_thread_event_id_returns_root_when_thread_has_no_children(self) -> None:
@@ -665,63 +576,58 @@ class TestThreadHistory:
         )
         client = self._make_relations_client(
             root_event=root_event,
-            relations={},
+            relations={
+                self._relation_key(
+                    "$thread_root",
+                    RelationshipType.thread,
+                    direction=nio.MessageDirection.back,
+                    limit=1,
+                ): [],
+            },
         )
-        room_messages_response = MagicMock(spec=nio.RoomMessagesResponse)
-        room_messages_response.chunk = [root_event]
-        room_messages_response.end = None
-        client.room_messages.return_value = room_messages_response
 
         event_id = await _latest_thread_event_id(client, "!room:localhost", "$thread_root")
 
         assert event_id == "$thread_root"
 
     @pytest.mark.asyncio
-    async def test_latest_thread_event_id_returns_latest_root_edit_when_no_children(self) -> None:
-        """A root edit should become the latest visible event when there are no children."""
+    async def test_latest_thread_event_id_falls_back_to_history_on_relations_error(self) -> None:
+        """Latest-thread lookup should only materialize history when relations lookup fails."""
         root_event = self._make_text_event(
             event_id="$thread_root",
             sender="@user:localhost",
-            body="Original root",
+            body="Root message",
             server_timestamp=1000,
-            source_content={"body": "Original root"},
-        )
-        root_edit = self._make_text_event(
-            event_id="$root_edit",
-            sender="@user:localhost",
-            body="* Edited root",
-            server_timestamp=1100,
-            source_content={
-                "body": "* Edited root",
-                "m.new_content": {"body": "Edited root"},
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread_root"},
-            },
+            source_content={"body": "Root message"},
         )
         client = self._make_relations_client(
             root_event=root_event,
-            relations={self._relation_key("$thread_root", RelationshipType.replacement): [root_edit]},
+            relations={
+                self._relation_key(
+                    "$thread_root",
+                    RelationshipType.thread,
+                    direction=nio.MessageDirection.back,
+                    limit=1,
+                ): RuntimeError("unsupported"),
+            },
         )
-        room_messages_response = MagicMock(spec=nio.RoomMessagesResponse)
-        room_messages_response.chunk = [root_edit, root_event]
-        room_messages_response.end = None
-        client.room_messages.return_value = room_messages_response
-
-        event_id = await _latest_thread_event_id(client, "!room:localhost", "$thread_root")
-
-        assert event_id == "$root_edit"
-
-    @pytest.mark.asyncio
-    async def test_latest_thread_event_id_returns_thread_root_on_history_failure(self) -> None:
-        """The helper should degrade to the thread root when visible-history lookup fails."""
-        client = AsyncMock()
 
         with patch(
             "mindroom.matrix.client.fetch_thread_history",
-            new=AsyncMock(side_effect=RuntimeError("boom")),
+            new=AsyncMock(
+                return_value=[
+                    ResolvedVisibleMessage.synthetic(
+                        sender="@agent:localhost",
+                        body="Newest reply",
+                        event_id="$reply_latest",
+                        thread_id="$thread_root",
+                    ),
+                ],
+            ),
         ) as mock_fetch_history:
             event_id = await _latest_thread_event_id(client, "!room:localhost", "$thread_root")
 
-        assert event_id == "$thread_root"
+        assert event_id == "$reply_latest"
         mock_fetch_history.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
 
     @pytest.mark.asyncio
@@ -963,7 +869,7 @@ class TestThreadHistory:
                         "version": 2,
                         "encoding": "matrix_event_content_json",
                     },
-                    "url": "mxc://server/edit-sidecar",
+                    "url": "mxc://server/thread-history-edit-sidecar",
                 },
                 "m.relates_to": {
                     "rel_type": "m.replace",
@@ -1105,9 +1011,10 @@ class TestThreadHistory:
         client.room_messages.return_value = response
 
         history = await _fetch_thread_history_via_room_messages(client, "!room:localhost", "$thread_root")
+        serialized = [message.to_dict() for message in history]
 
-        assert [msg.event_id for msg in history] == ["$thread_root", "$notice_reply"]
-        assert history[1].content["msgtype"] == "m.notice"
+        assert [msg["event_id"] for msg in serialized] == ["$thread_root", "$notice_reply"]
+        assert serialized[1]["msgtype"] == "m.notice"
 
     @pytest.mark.asyncio
     async def test_notice_edit_event_sets_effective_msgtype_from_new_content(self) -> None:
@@ -1155,10 +1062,12 @@ class TestThreadHistory:
         client.room_messages.return_value = response
 
         history = await _fetch_thread_history_via_room_messages(client, "!room:localhost", "$thread_root")
+        serialized = [message.to_dict() for message in history]
 
-        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
-        assert history[1].body == "Compacted 12 messages"
-        assert history[1].content["msgtype"] == "m.notice"
+        assert [msg["event_id"] for msg in serialized] == ["$thread_root", "$agent_msg"]
+        assert serialized[1]["body"] == "Compacted 12 messages"
+        assert serialized[1]["content"]["msgtype"] == "m.notice"
+        assert serialized[1]["msgtype"] == "m.notice"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_multiple_edits_keeps_latest(self) -> None:

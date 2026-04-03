@@ -37,6 +37,7 @@ from mindroom.hooks import (
 from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -957,9 +958,7 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
         return {"echo": kwargs["path"]}
 
     runtime_context = bot._build_tool_runtime_context(
-        room_id="!room:localhost",
-        thread_id="$thread",
-        reply_to_event_id=None,
+        MessageTarget.resolve("!room:localhost", "$thread", None),
         user_id="@user:localhost",
     )
     assert runtime_context is not None
@@ -1284,19 +1283,17 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
         with (
             patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
         ):
-            tool_context = bot._build_tool_runtime_context(
+            target = MessageTarget.resolve(
                 room_id="!room:localhost",
                 thread_id="$thread",
                 reply_to_event_id=None,
-                user_id="@user:localhost",
             )
+            tool_context = bot._build_tool_runtime_context(target, user_id="@user:localhost")
             assert tool_context is not None
             assert tool_context.hook_registry.has_hooks(custom_event_name)
 
             execution_identity = bot._build_tool_execution_identity(
-                room_id="!room:localhost",
-                thread_id="$thread",
-                reply_to_event_id=None,
+                target=target,
                 user_id="@user:localhost",
                 session_id="session-1",
             )

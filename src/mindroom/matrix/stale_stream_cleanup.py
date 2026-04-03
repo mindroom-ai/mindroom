@@ -90,7 +90,6 @@ class _MessageState:
     latest_event_id: str = ""
     latest_content: dict[str, Any] | None = None
     thread_id: str | None = None
-    thread_tail_event_id: str | None = None
     stream_status: str | None = None
     requester_user_id: str | None = None
     stop_reaction_event_ids: set[str] = field(default_factory=set)
@@ -327,7 +326,6 @@ async def _repair_restart_marked_message_metadata(
             new_text=state.latest_body,
             preserved_content=_terminal_stream_content(state.latest_content),
             thread_id=state.thread_id,
-            thread_tail_event_id=state.thread_tail_event_id,
             sender_domain=sender_domain,
             config=config,
             runtime_paths=runtime_paths,
@@ -363,7 +361,6 @@ async def _cleanup_one_stale_message(
         new_text=build_restart_interrupted_body(state.latest_body),
         preserved_content=_terminal_stream_content(state.latest_content),
         thread_id=state.thread_id,
-        thread_tail_event_id=state.thread_tail_event_id,
         sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
@@ -447,7 +444,6 @@ async def _scan_room_message_states(
         now_ms=now_ms,
     )
 
-    thread_tail_event_ids = _scanned_thread_tail_event_ids(message_events)
     resolved_messages = await resolve_latest_visible_messages(message_events, client, sender=bot_user_id)
     scanned_message_data_by_event_id = _scanned_message_data_by_event_id(message_events)
     requester_ids_by_event_id = await _derive_requester_ids_for_bot_messages(
@@ -464,7 +460,6 @@ async def _scan_room_message_states(
         resolved_messages,
         bot_user_id=bot_user_id,
         requester_ids_by_event_id=requester_ids_by_event_id,
-        thread_tail_event_ids=thread_tail_event_ids,
     )
 
     return message_states
@@ -534,7 +529,6 @@ def _merge_bot_resolved_message_states(
     *,
     bot_user_id: str,
     requester_ids_by_event_id: dict[str, str],
-    thread_tail_event_ids: dict[str, str],
 ) -> None:
     """Merge resolved bot-authored messages into cleanup state."""
     for target_event_id, message in resolved_messages.items():
@@ -546,9 +540,6 @@ def _merge_bot_resolved_message_states(
             target_event_id=target_event_id,
             message=message,
             requester_user_id=requester_user_id,
-            thread_tail_event_id=thread_tail_event_ids.get(message.thread_id)
-            if message.thread_id is not None
-            else None,
         )
 
 
@@ -558,7 +549,6 @@ def _merge_resolved_message_state(
     target_event_id: str,
     message: ResolvedVisibleMessage,
     requester_user_id: str | None,
-    thread_tail_event_id: str | None,
 ) -> None:
     """Store one resolved message if it has the fields cleanup needs."""
     normalized_latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
@@ -568,83 +558,8 @@ def _merge_resolved_message_state(
     state.latest_event_id = message.visible_event_id
     state.latest_content = normalized_latest_content
     state.thread_id = message.thread_id
-    state.thread_tail_event_id = thread_tail_event_id
     state.stream_status = message.stream_status
     state.requester_user_id = requester_user_id
-
-
-def _scanned_thread_tail_event_ids(message_events: list[nio.RoomMessageText]) -> dict[str, str]:
-    """Return latest visible event IDs by thread root from scanned room history."""
-    original_thread_ids = _scanned_original_thread_ids(message_events)
-    latest_visible_by_original_event_id: dict[str, tuple[int, str, str]] = {}
-
-    for event in message_events:
-        scanned_event = _scanned_visible_thread_event(event, original_thread_ids)
-        if scanned_event is None:
-            continue
-        original_id, timestamp, visible_event_id, thread_id = scanned_event
-        current = latest_visible_by_original_event_id.get(original_id)
-        if current is not None and (timestamp, visible_event_id) <= (current[0], current[1]):
-            continue
-        latest_visible_by_original_event_id[original_id] = (timestamp, visible_event_id, thread_id)
-
-    latest_thread_events: dict[str, tuple[int, str]] = {}
-    for timestamp, visible_event_id, thread_id in latest_visible_by_original_event_id.values():
-        current = latest_thread_events.get(thread_id)
-        if current is not None and (timestamp, visible_event_id) <= current:
-            continue
-        latest_thread_events[thread_id] = (timestamp, visible_event_id)
-
-    return {thread_id: visible_event_id for thread_id, (_, visible_event_id) in latest_thread_events.items()}
-
-
-def _scanned_original_thread_ids(message_events: list[nio.RoomMessageText]) -> dict[str, str]:
-    """Return known thread roots by original event ID from scanned room history."""
-    original_thread_ids: dict[str, str] = {}
-    for event in message_events:
-        event_id = event.event_id
-        if not isinstance(event_id, str):
-            continue
-        event_info = EventInfo.from_event(event.source)
-        if event_info.is_edit:
-            original_event_id = event_info.original_event_id
-            if isinstance(original_event_id, str) and isinstance(event_info.thread_id_from_edit, str):
-                original_thread_ids[original_event_id] = event_info.thread_id_from_edit
-            continue
-        if isinstance(event_info.thread_id, str):
-            original_thread_ids[event_id] = event_info.thread_id
-    return original_thread_ids
-
-
-def _scanned_visible_thread_event(
-    event: nio.RoomMessageText,
-    original_thread_ids: dict[str, str],
-) -> tuple[str, int, str, str] | None:
-    """Return one scanned visible event tuple for thread-tail tracking."""
-    event_id = event.event_id
-    if not isinstance(event_id, str):
-        return None
-
-    event_info = EventInfo.from_event(event.source)
-    if event_info.is_edit:
-        original_event_id = event_info.original_event_id
-        if not isinstance(original_event_id, str):
-            return None
-        if isinstance(event_info.thread_id_from_edit, str):
-            original_thread_ids[original_event_id] = event_info.thread_id_from_edit
-        thread_id = original_thread_ids.get(original_event_id)
-        if thread_id is None:
-            return None
-        original_id = original_event_id
-    else:
-        thread_id = event_info.thread_id
-        if thread_id is None:
-            return None
-        original_id = event_id
-        original_thread_ids[original_id] = thread_id
-
-    timestamp = event.server_timestamp if isinstance(event.server_timestamp, int) else 0
-    return original_id, timestamp, event_id, thread_id
 
 
 def _scanned_message_data_by_event_id(message_events: list[nio.RoomMessageText]) -> dict[str, ResolvedVisibleMessage]:
@@ -1059,7 +974,6 @@ async def _edit_stale_message(
     new_text: str,
     preserved_content: dict[str, Any] | None,
     thread_id: str | None,
-    thread_tail_event_id: str | None,
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -1069,13 +983,13 @@ async def _edit_stale_message(
     content = await build_threaded_edit_content(
         client,
         room_id=room_id,
+        event_id=target_event_id,
         new_text=new_text,
         thread_id=thread_id,
         config=config,
         runtime_paths=runtime_paths,
         sender_domain=sender_domain,
         extra_content=extra_content,
-        latest_thread_event_id=thread_tail_event_id,
     )
 
     response_event_id = await edit_message(

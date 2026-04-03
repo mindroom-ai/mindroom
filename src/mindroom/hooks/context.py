@@ -131,27 +131,6 @@ class MessageEnvelope:
     hook_source: str | None = None
     message_received_depth: int = 0
 
-    def __post_init__(self) -> None:
-        """Validate the embedded target against the envelope room."""
-        if self.target.room_id != self.room_id:
-            msg = "MessageEnvelope target room does not match envelope room_id"
-            raise ValueError(msg)
-
-    @property
-    def thread_id(self) -> str | None:
-        """Return the raw inbound thread ID, if any."""
-        return self.target.thread_id
-
-    @property
-    def resolved_thread_id(self) -> str | None:
-        """Return the canonical resolved thread root."""
-        return self.target.resolved_thread_id
-
-    @property
-    def session_id(self) -> str:
-        """Return the canonical persisted session ID for this envelope."""
-        return self.target.session_id
-
 
 @dataclass(slots=True)
 class ResponseDraft:
