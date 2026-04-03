@@ -994,6 +994,35 @@ async def test_get_thread_tags_drops_malformed_tags_and_preserves_valid_siblings
 
 
 @pytest.mark.asyncio
+async def test_get_thread_tags_ignores_malformed_per_tag_overlay_and_keeps_legacy_tag() -> None:
+    """A malformed per-tag overlay must not hide a valid legacy tag during migration."""
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _legacy_thread_tags_event(
+            "$thread-root:localhost",
+            content=_thread_tags_content(
+                resolved=_tag_record_content(note="legacy tag"),
+            ),
+        ),
+        _thread_tag_state_event(
+            "$thread-root:localhost",
+            "resolved",
+            content={"set_by": "@user:localhost", "set_at": "bad", "data": {}},
+        ),
+    )
+
+    state = await get_thread_tags(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+    )
+
+    assert state is not None
+    assert list(state.tags) == ["resolved"]
+    assert state.tags["resolved"].note == "legacy tag"
+
+
+@pytest.mark.asyncio
 async def test_list_tagged_threads_filters_non_matching_events_and_supports_tag_filter() -> None:
     """Room-wide listing should keep only valid tag state and support tag filtering."""
     client = AsyncMock()

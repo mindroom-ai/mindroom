@@ -375,7 +375,8 @@ def _collect_thread_tag_room_state_event(
     event: Mapping[str, object],
     *,
     legacy_tags_by_thread: dict[str, dict[str, ThreadTagRecord]],
-    per_tag_records_by_thread: dict[str, dict[str, ThreadTagRecord | None]],
+    per_tag_records_by_thread: dict[str, dict[str, ThreadTagRecord]],
+    per_tag_tombstones_by_thread: dict[str, set[str]],
 ) -> None:
     """Parse one room-state event into either legacy or per-tag storage."""
     if event.get("type") != THREAD_TAGS_EVENT_TYPE:
@@ -388,38 +389,41 @@ def _collect_thread_tag_room_state_event(
     typed_content = cast("Mapping[str, object]", content)
 
     parsed_state_key = _parse_thread_tag_state_key(state_key)
-    if parsed_state_key is not None:
-        thread_root_id, tag = parsed_state_key
-        per_tag_records_by_thread.setdefault(thread_root_id, {})[tag] = _parse_thread_tag_record(
-            tag,
-            typed_content,
-        )
+    if parsed_state_key is None:
+        if not isinstance(state_key, str):
+            return
+
+        legacy_state = _parse_thread_tags_state(room_id, state_key, typed_content)
+        if legacy_state is not None:
+            legacy_tags_by_thread[legacy_state.thread_root_id] = dict(legacy_state.tags)
         return
 
-    if not isinstance(state_key, str):
+    thread_root_id, tag = parsed_state_key
+    if not typed_content:
+        per_tag_tombstones_by_thread.setdefault(thread_root_id, set()).add(tag)
         return
 
-    legacy_state = _parse_thread_tags_state(room_id, state_key, typed_content)
-    if legacy_state is None:
-        return
-    legacy_tags_by_thread[legacy_state.thread_root_id] = dict(legacy_state.tags)
+    record = _parse_thread_tag_record(tag, typed_content)
+    if record is not None:
+        per_tag_records_by_thread.setdefault(thread_root_id, {})[tag] = record
 
 
 def _merge_thread_tag_room_state(
     room_id: str,
     *,
     legacy_tags_by_thread: Mapping[str, Mapping[str, ThreadTagRecord]],
-    per_tag_records_by_thread: Mapping[str, Mapping[str, ThreadTagRecord | None]],
+    per_tag_records_by_thread: Mapping[str, Mapping[str, ThreadTagRecord]],
+    per_tag_tombstones_by_thread: Mapping[str, set[str]],
 ) -> dict[str, ThreadTagsState]:
     """Merge legacy thread payloads with per-tag overrides for one room."""
     merged_states: dict[str, ThreadTagsState] = {}
-    for thread_root_id in sorted(set(legacy_tags_by_thread) | set(per_tag_records_by_thread)):
+    for thread_root_id in sorted(
+        set(legacy_tags_by_thread) | set(per_tag_records_by_thread) | set(per_tag_tombstones_by_thread),
+    ):
         merged_tags = dict(legacy_tags_by_thread.get(thread_root_id, {}))
-        for tag, record in per_tag_records_by_thread.get(thread_root_id, {}).items():
-            if record is None:
-                merged_tags.pop(tag, None)
-            else:
-                merged_tags[tag] = record
+        for tag in per_tag_tombstones_by_thread.get(thread_root_id, set()):
+            merged_tags.pop(tag, None)
+        merged_tags.update(per_tag_records_by_thread.get(thread_root_id, {}))
 
         state = _thread_tags_state_from_tags(
             room_id,
@@ -613,19 +617,22 @@ async def _get_room_thread_tags_states(
         raise ThreadTagsError(msg)
 
     legacy_tags_by_thread: dict[str, dict[str, ThreadTagRecord]] = {}
-    per_tag_records_by_thread: dict[str, dict[str, ThreadTagRecord | None]] = {}
+    per_tag_records_by_thread: dict[str, dict[str, ThreadTagRecord]] = {}
+    per_tag_tombstones_by_thread: dict[str, set[str]] = {}
     for event in response.events:
         _collect_thread_tag_room_state_event(
             room_id,
             event,
             legacy_tags_by_thread=legacy_tags_by_thread,
             per_tag_records_by_thread=per_tag_records_by_thread,
+            per_tag_tombstones_by_thread=per_tag_tombstones_by_thread,
         )
 
     return _merge_thread_tag_room_state(
         room_id,
         legacy_tags_by_thread=legacy_tags_by_thread,
         per_tag_records_by_thread=per_tag_records_by_thread,
+        per_tag_tombstones_by_thread=per_tag_tombstones_by_thread,
     )
 
 
