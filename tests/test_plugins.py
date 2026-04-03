@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 from pathlib import Path
 
 import pytest
@@ -101,8 +100,8 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
         set_plugin_skill_roots(original_plugin_roots)
 
 
-def test_loaded_tool_registry_for_validation_serializes_runtime_plugin_loads(tmp_path: Path) -> None:
-    """Validation should not interleave with a concurrent runtime plugin load."""
+def test_resolved_tool_metadata_for_runtime_does_not_mutate_live_registry(tmp_path: Path) -> None:
+    """Validation should resolve plugin metadata without touching the live registry state."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -131,37 +130,23 @@ def test_loaded_tool_registry_for_validation_serializes_runtime_plugin_loads(tmp
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     config_with_plugin = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
-    config_without_plugins = _bind_runtime_paths(Config(plugins=[]), config_path)
 
     original_registry = _TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_roots = _get_plugin_skill_roots()
-    load_finished = threading.Event()
-    failure: list[BaseException] = []
-
-    def _load_plugins_in_thread() -> None:
-        try:
-            load_plugins(config_with_plugin, runtime_paths_for(config_with_plugin))
-        except BaseException as exc:  # pragma: no cover - failure is asserted below
-            failure.append(exc)
-        finally:
-            load_finished.set()
 
     try:
-        with metadata_module.loaded_tool_registry_for_validation(
-            runtime_paths_for(config_without_plugins),
-            config_without_plugins,
-        ):
-            loader_thread = threading.Thread(target=_load_plugins_in_thread)
-            loader_thread.start()
-            assert not load_finished.wait(0.1)
-
-        loader_thread.join(timeout=1)
-        assert load_finished.is_set()
-        assert failure == []
-        assert "demo_plugin" in TOOL_METADATA
+        resolved_metadata = metadata_module.resolved_tool_metadata_for_runtime(
+            runtime_paths_for(config_with_plugin),
+            config_with_plugin,
+        )
+        assert "demo_plugin" in resolved_metadata
+        assert "demo_plugin" not in TOOL_METADATA
+        assert original_registry == _TOOL_REGISTRY
+        assert original_metadata == TOOL_METADATA
+        assert original_module_cache == plugin_module._MODULE_IMPORT_CACHE
     finally:
         _TOOL_REGISTRY.clear()
         _TOOL_REGISTRY.update(original_registry)
@@ -513,6 +498,75 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
         )
         with pytest.raises(ValueError, match="Unknown tool 'leaked_plugin_tool'"):
             _bind_runtime_paths(follow_up_config, config_path)
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+
+
+def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp_path: Path) -> None:
+    """Successful runtime validation should not publish plugin tools into the live registry."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='validated_plugin_tool',\n"
+        "    display_name='Validated Plugin Tool',\n"
+        "    description='Should stay out of the live registry during validation',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    authored_config = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "test",
+                "tools": ["validated_plugin_tool"],
+            },
+        },
+        "plugins": ["./plugins/demo"],
+    }
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+
+    try:
+        validated = Config.validate_with_runtime(authored_config, runtime_paths)
+        assert validated.get_agent("assistant").tool_names == ["validated_plugin_tool"]
+        assert "validated_plugin_tool" not in _TOOL_REGISTRY
+        assert "validated_plugin_tool" not in TOOL_METADATA
+        assert original_module_cache == plugin_module._MODULE_IMPORT_CACHE
     finally:
         _TOOL_REGISTRY.clear()
         _TOOL_REGISTRY.update(original_registry)

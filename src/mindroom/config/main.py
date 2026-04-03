@@ -1101,11 +1101,12 @@ class Config(BaseModel):
         entry: ToolConfigEntry,
         *,
         config_path_prefix: str,
+        tool_metadata: dict[str, Any],
     ) -> None:
         """Validate one authored tool entry against the loaded tool metadata."""
-        from mindroom.tool_system.metadata import TOOL_METADATA, validate_authored_overrides  # noqa: PLC0415
+        from mindroom.tool_system.metadata import validate_authored_overrides  # noqa: PLC0415
 
-        if entry.name not in TOOL_METADATA and not self.is_tool_preset(entry.name):
+        if entry.name not in tool_metadata and not self.is_tool_preset(entry.name):
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
             raise ValueError(msg)
 
@@ -1113,21 +1114,27 @@ class Config(BaseModel):
             entry.name,
             entry.overrides,
             config_path_prefix=config_path_prefix,
+            tool_metadata=tool_metadata,
         )
 
     def _validate_authored_tool_entries(self, runtime_paths: RuntimePaths) -> None:
         """Validate defaults and per-agent authored tool overrides with runtime metadata loaded."""
-        from mindroom.tool_system.metadata import loaded_tool_registry_for_validation  # noqa: PLC0415
+        from mindroom.tool_system.metadata import resolved_tool_metadata_for_runtime  # noqa: PLC0415
 
-        with loaded_tool_registry_for_validation(runtime_paths, self):
-            for index, entry in enumerate(self.defaults.tools):
-                self._validate_authored_tool_entry(entry, config_path_prefix=f"defaults.tools[{index}]")
-            for agent_name, agent_config in self.agents.items():
-                for index, entry in enumerate(agent_config.tools):
-                    self._validate_authored_tool_entry(
-                        entry,
-                        config_path_prefix=f"agents.{agent_name}.tools[{index}]",
-                    )
+        tool_metadata = resolved_tool_metadata_for_runtime(runtime_paths, self)
+        for index, entry in enumerate(self.defaults.tools):
+            self._validate_authored_tool_entry(
+                entry,
+                config_path_prefix=f"defaults.tools[{index}]",
+                tool_metadata=tool_metadata,
+            )
+        for agent_name, agent_config in self.agents.items():
+            for index, entry in enumerate(agent_config.tools):
+                self._validate_authored_tool_entry(
+                    entry,
+                    config_path_prefix=f"agents.{agent_name}.tools[{index}]",
+                    tool_metadata=tool_metadata,
+                )
 
     def get_agent_tool_configs(self, agent_name: str) -> list[ResolvedToolConfig]:
         """Return effective authored tool config entries for one agent."""

@@ -10,6 +10,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
+from importlib import util as importlib_util
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -45,6 +46,8 @@ _TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "text", "url"})
 AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
 _PLUGIN_MODULE_PREFIX = "mindroom_plugin_"
 _TOOL_REGISTRY_STATE_LOCK = threading.RLock()
+_VALIDATION_PLUGIN_MODULE_SUFFIX = "__validation__"
+_PLUGIN_REGISTRATION_SCOPE = threading.local()
 
 
 class ToolInitOverrideError(ValueError):
@@ -90,6 +93,31 @@ def restore_plugin_tool_registrations(module_name: str, registrations: dict[str,
 
 
 @contextmanager
+def _scoped_plugin_registration_store(
+    registrations_by_module: dict[str, dict[str, ToolMetadata]],
+) -> Iterator[None]:
+    """Route plugin registration decorators into one temporary module->metadata store."""
+    sentinel = object()
+    previous = getattr(_PLUGIN_REGISTRATION_SCOPE, "registrations_by_module", sentinel)
+    _PLUGIN_REGISTRATION_SCOPE.registrations_by_module = registrations_by_module
+    try:
+        yield
+    finally:
+        if previous is sentinel:
+            delattr(_PLUGIN_REGISTRATION_SCOPE, "registrations_by_module")
+        else:
+            _PLUGIN_REGISTRATION_SCOPE.registrations_by_module = previous
+
+
+def _plugin_registration_store() -> dict[str, dict[str, ToolMetadata]]:
+    """Return the active plugin registration sink for this thread."""
+    registrations = getattr(_PLUGIN_REGISTRATION_SCOPE, "registrations_by_module", None)
+    if registrations is None:
+        return _PLUGIN_TOOL_METADATA_BY_MODULE
+    return registrations
+
+
+@contextmanager
 def locked_tool_registry_state() -> Iterator[None]:
     """Serialize mutations of the process-global tool and plugin registries."""
     with _TOOL_REGISTRY_STATE_LOCK:
@@ -98,12 +126,27 @@ def locked_tool_registry_state() -> Iterator[None]:
 
 def synchronize_plugin_tools(active_plugins: list[tuple[str, str]]) -> None:
     """Rebuild the active plugin tool overlay from cached per-module registrations."""
+    desired_registry, desired_metadata = _resolved_tool_state(
+        active_plugins,
+        _PLUGIN_TOOL_METADATA_BY_MODULE,
+    )
+    _TOOL_REGISTRY.clear()
+    _TOOL_REGISTRY.update(desired_registry)
+    TOOL_METADATA.clear()
+    TOOL_METADATA.update(desired_metadata)
+
+
+def _resolved_tool_state(
+    active_plugins: list[tuple[str, str]],
+    plugin_metadata_by_module: dict[str, dict[str, ToolMetadata]],
+) -> tuple[dict[str, Callable[[], type[Toolkit]]], dict[str, ToolMetadata]]:
+    """Build one complete tool registry state from built-ins plus active plugin overlays."""
     desired_metadata = _BUILTIN_TOOL_METADATA.copy()
     desired_registry = _BUILTIN_TOOL_REGISTRY.copy()
     plugin_owner_by_tool_name: dict[str, str] = {}
 
     for plugin_name, module_name in active_plugins:
-        for tool_name, plugin_metadata in _PLUGIN_TOOL_METADATA_BY_MODULE.get(module_name, {}).items():
+        for tool_name, plugin_metadata in plugin_metadata_by_module.get(module_name, {}).items():
             existing_owner = plugin_owner_by_tool_name.get(tool_name)
             if existing_owner is not None and existing_owner != plugin_name:
                 msg = f"Plugin tool '{tool_name}' conflicts between plugins '{existing_owner}' and '{plugin_name}'."
@@ -116,10 +159,7 @@ def synchronize_plugin_tools(active_plugins: list[tuple[str, str]]) -> None:
             else:
                 desired_registry[tool_name] = factory
 
-    _TOOL_REGISTRY.clear()
-    _TOOL_REGISTRY.update(desired_registry)
-    TOOL_METADATA.clear()
-    TOOL_METADATA.update(desired_metadata)
+    return desired_registry, desired_metadata
 
 
 def _reject_plugin_builtin_tool_collision(tool_name: str) -> None:
@@ -145,7 +185,7 @@ def register_builtin_tool_metadata(metadata: ToolMetadata) -> None:
 def _register_plugin_tool_metadata(module_name: str, metadata: ToolMetadata) -> None:
     """Store one plugin tool in the per-module overlay cache."""
     _reject_plugin_builtin_tool_collision(metadata.name)
-    module_registrations = _PLUGIN_TOOL_METADATA_BY_MODULE.setdefault(module_name, {})
+    module_registrations = _plugin_registration_store().setdefault(module_name, {})
     if metadata.name in module_registrations:
         msg = f"Plugin tool '{metadata.name}' is registered multiple times in plugin module '{module_name}'."
         raise ValueError(msg)
@@ -206,9 +246,15 @@ def _override_path(
     return f"{tool_name}.{field_name}"
 
 
-def _agent_override_field(tool_name: str, field_name: str) -> ConfigField | None:
+def _agent_override_field(
+    tool_name: str,
+    field_name: str,
+    *,
+    tool_metadata: dict[str, ToolMetadata] | None = None,
+) -> ConfigField | None:
     """Return one tool's agent override field metadata when it exists."""
-    metadata = TOOL_METADATA.get(tool_name)
+    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
+    metadata = metadata_by_name.get(tool_name)
     if metadata is None or not metadata.agent_override_fields:
         return None
     return next((candidate for candidate in metadata.agent_override_fields if candidate.name == field_name), None)
@@ -220,9 +266,10 @@ def _validate_text_authored_override_value(
     value: object,
     *,
     full_path: str,
+    tool_metadata: dict[str, ToolMetadata] | None = None,
 ) -> object:
     """Validate one authored override for a text-like config field."""
-    agent_override_field = _agent_override_field(tool_name, field.name)
+    agent_override_field = _agent_override_field(tool_name, field.name, tool_metadata=tool_metadata)
     if agent_override_field is not None and agent_override_field.type == "string[]":
         try:
             normalized = _normalize_string_array_override(value)
@@ -245,6 +292,7 @@ def _validate_authored_override_value(
     value: object,
     *,
     full_path: str,
+    tool_metadata: dict[str, ToolMetadata] | None = None,
 ) -> object:
     """Validate one authored override value against its declared config field type."""
     if is_authored_override_inherit(value):
@@ -257,7 +305,13 @@ def _validate_authored_override_value(
         return None
 
     if field.type in _TEXT_CONFIG_FIELD_TYPES:
-        return _validate_text_authored_override_value(tool_name, field, value, full_path=full_path)
+        return _validate_text_authored_override_value(
+            tool_name,
+            field,
+            value,
+            full_path=full_path,
+            tool_metadata=tool_metadata,
+        )
 
     if field.type == "boolean":
         if not isinstance(value, bool):
@@ -279,12 +333,14 @@ def validate_authored_overrides(
     overrides: dict[str, object] | None,
     *,
     config_path_prefix: str | None = None,
+    tool_metadata: dict[str, ToolMetadata] | None = None,
 ) -> dict[str, object]:
     """Validate authored YAML overrides against one tool's declared config fields."""
     if not overrides:
         return {}
 
-    metadata = TOOL_METADATA.get(tool_name)
+    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
+    metadata = metadata_by_name.get(tool_name)
     if metadata is None:
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
@@ -313,6 +369,7 @@ def validate_authored_overrides(
             field,
             value,
             full_path=full_path,
+            tool_metadata=tool_metadata,
         )
     return validated
 
@@ -793,19 +850,35 @@ def _restore_tool_registry_snapshot(snapshot: _ToolRegistrySnapshot) -> None:
     sys.modules.update(snapshot.plugin_modules)
 
 
-@contextmanager
-def loaded_tool_registry_for_validation(
-    runtime_paths: RuntimePaths,
-    config: Config,
-) -> Iterator[None]:
-    """Temporarily load plugin tools for validation without leaking global registry state."""
-    with locked_tool_registry_state():
-        snapshot = _capture_tool_registry_snapshot()
-        try:
-            ensure_tool_registry_loaded(runtime_paths, config)
-            yield
-        finally:
-            _restore_tool_registry_snapshot(snapshot)
+def _load_validation_plugin_tools_module(
+    plugin_name: str,
+    module_path: Path,
+    registrations_by_module: dict[str, dict[str, ToolMetadata]],
+) -> tuple[str, str]:
+    """Execute one plugin tools module into a temporary registration sink."""
+    runtime_module_name = plugin_module._module_name(plugin_name, module_path)
+    validation_module_name = f"{runtime_module_name}{_VALIDATION_PLUGIN_MODULE_SUFFIX}{id(registrations_by_module)}"
+    spec = importlib_util.spec_from_file_location(validation_module_name, module_path)
+    if spec is None or spec.loader is None:
+        msg = f"Failed to load plugin tools module: {module_path}"
+        raise ValueError(msg)
+
+    previous_module = sys.modules.get(validation_module_name)
+    module = importlib_util.module_from_spec(spec)
+    sys.modules[validation_module_name] = module
+    try:
+        with _scoped_plugin_registration_store(registrations_by_module):
+            spec.loader.exec_module(module)
+    except Exception as exc:
+        msg = f"Plugin tools module execution failed for {module_path}: {exc}"
+        raise ValueError(msg) from exc
+    finally:
+        if previous_module is None:
+            sys.modules.pop(validation_module_name, None)
+        else:
+            sys.modules[validation_module_name] = previous_module
+
+    return plugin_name, validation_module_name
 
 
 def resolved_tool_metadata_for_runtime(
@@ -813,8 +886,37 @@ def resolved_tool_metadata_for_runtime(
     config: Config,
 ) -> dict[str, ToolMetadata]:
     """Return tool metadata visible for one runtime config without mutating global state."""
-    with loaded_tool_registry_for_validation(runtime_paths, config):
-        return TOOL_METADATA.copy()
+    import mindroom.tools  # noqa: F401, PLC0415
+
+    plugin_entries = config.plugins
+    if not plugin_entries:
+        return _BUILTIN_TOOL_METADATA.copy()
+
+    plugin_bases: list[tuple[plugin_module._PluginBase, Any, int]] = []
+    for plugin_order, plugin_entry in enumerate(plugin_entries):
+        if not plugin_entry.enabled:
+            continue
+        root = plugin_module._resolve_plugin_root(plugin_entry.path, runtime_paths)
+        plugin_base = plugin_module._load_plugin_base(root)
+        plugin_bases.append((plugin_base, plugin_entry, plugin_order))
+
+    plugin_module._reject_duplicate_plugin_manifest_names(plugin_bases)
+
+    validation_registrations: dict[str, dict[str, ToolMetadata]] = {}
+    active_plugins: list[tuple[str, str]] = []
+    for plugin_base, _, _ in plugin_bases:
+        if plugin_base.tools_module_path is None:
+            continue
+        active_plugins.append(
+            _load_validation_plugin_tools_module(
+                plugin_base.name,
+                plugin_base.tools_module_path,
+                validation_registrations,
+            ),
+        )
+
+    _, desired_metadata = _resolved_tool_state(active_plugins, validation_registrations)
+    return desired_metadata
 
 
 def default_worker_routed_tools(tool_names: list[str]) -> list[str]:
