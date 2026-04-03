@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants
 from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
+from mindroom.api.config_lifecycle import load_runtime_config
 from mindroom.config.main import Config, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.tool_system import sandbox_proxy
@@ -99,6 +100,14 @@ def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
     """Return the active runtime config, or an explicit empty config if none exists."""
     if runtime_paths.config_path.exists():
         return load_config(runtime_paths)
+    return Config.validate_with_runtime({}, runtime_paths)
+
+
+def _request_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
+    """Return the active runtime config for one API request or raise the shared HTTP error."""
+    if runtime_paths.config_path.exists():
+        config, _ = load_runtime_config(runtime_paths)
+        return config
     return Config.validate_with_runtime({}, runtime_paths)
 
 
@@ -406,7 +415,7 @@ async def _execute_request_inprocess(
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
     effective_config = config
     if effective_runtime_paths is not runtime_paths:
-        effective_config = _runtime_config_or_empty(effective_runtime_paths)
+        effective_config = _request_runtime_config_or_empty(effective_runtime_paths)
 
     with tool_execution_identity(execution_identity):
         toolkit, entrypoint = _resolve_entrypoint(
@@ -669,7 +678,7 @@ async def execute_tool_call(
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
     runtime_paths = sandbox_runner_runtime_paths(request)
-    config = _runtime_config_or_empty(runtime_paths)
+    config = _request_runtime_config_or_empty(runtime_paths)
     runner_token = _app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
     _validate_execute_request_payload(payload)

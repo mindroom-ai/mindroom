@@ -262,7 +262,8 @@ interface ConfigState {
 }
 
 function clearedLoadedConfigState(
-  diagnostics: ConfigDiagnostic[]
+  diagnostics: ConfigDiagnostic[],
+  agentPoliciesRequestId: number
 ): Pick<
   ConfigState,
   | 'config'
@@ -272,6 +273,7 @@ function clearedLoadedConfigState(
   | 'rooms'
   | 'agentPoliciesByAgent'
   | 'agentPoliciesStale'
+  | 'agentPoliciesRequestId'
   | 'selectedAgentId'
   | 'selectedTeamId'
   | 'selectedCultureId'
@@ -290,6 +292,7 @@ function clearedLoadedConfigState(
     rooms: [],
     agentPoliciesByAgent: {},
     agentPoliciesStale: false,
+    agentPoliciesRequestId,
     selectedAgentId: null,
     selectedTeamId: null,
     selectedCultureId: null,
@@ -392,6 +395,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         diagnostics = [agentPoliciesDiagnostic(false)];
         agentPoliciesStale = true;
       }
+      const nextAgentPoliciesRequestId = get().agentPoliciesRequestId + 1;
 
       set({
         config: normalizedConfig,
@@ -401,6 +405,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         rooms,
         agentPoliciesByAgent,
         agentPoliciesStale,
+        agentPoliciesRequestId: nextAgentPoliciesRequestId,
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
@@ -408,30 +413,37 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         privateWorkerScopeBackups: {},
       });
     } catch (error) {
+      const nextAgentPoliciesRequestId = get().agentPoliciesRequestId + 1;
       if (error instanceof configService.ConfigValidationError) {
         set(
-          clearedLoadedConfigState([
-            {
-              kind: 'global',
-              message: 'Configuration validation failed',
-              blocking: true,
-            },
-            ...error.issues.map(issue => ({
-              kind: 'validation' as const,
-              issue,
-            })),
-          ])
+          clearedLoadedConfigState(
+            [
+              {
+                kind: 'global',
+                message: 'Configuration validation failed',
+                blocking: true,
+              },
+              ...error.issues.map(issue => ({
+                kind: 'validation' as const,
+                issue,
+              })),
+            ],
+            nextAgentPoliciesRequestId
+          )
         );
         return;
       }
       set(
-        clearedLoadedConfigState([
-          {
-            kind: 'global',
-            message: error instanceof Error ? error.message : 'Failed to load config',
-            blocking: true,
-          },
-        ])
+        clearedLoadedConfigState(
+          [
+            {
+              kind: 'global',
+              message: error instanceof Error ? error.message : 'Failed to load config',
+              blocking: true,
+            },
+          ],
+          nextAgentPoliciesRequestId
+        )
       );
     }
   },

@@ -114,7 +114,7 @@ def runner_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[T
             timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
             extensions: dict[str, object] | None = None,
         ) -> httpx.Response:
-            _refresh_runner_app_from_env()
+            _initialize_runner_app_from_env()
             return super().request(
                 method,
                 url,
@@ -131,7 +131,7 @@ def runner_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[T
                 extensions=extensions,
             )
 
-    _refresh_runner_app_from_env()
+    _initialize_runner_app_from_env()
     with _RuntimeRefreshingTestClient(sandbox_runner_app) as client:
         yield client
 
@@ -147,6 +147,28 @@ def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config]:
     sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runtime_paths)
     sandbox_runner_module.ensure_registry_loaded_with_config(runtime_paths, config)
     return runtime_paths, config
+
+
+def _initialize_runner_app_from_env() -> RuntimePaths:
+    runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
+    sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runtime_paths)
+    return runtime_paths
+
+
+def _invalid_plugin_config_path(tmp_path: Path) -> Path:
+    """Write one config whose plugin manifest fails runtime validation."""
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\nplugins:\n  - ./plugins/bad-name\n",
+        encoding="utf-8",
+    )
+    return config_path
 
 
 def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
@@ -629,6 +651,43 @@ def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatc
     assert '"result": 3' in data["result"]
 
 
+def test_sandbox_runner_execute_returns_422_for_invalid_runtime_config(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sandbox runner should surface invalid runtime config through the shared 422 path."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(_invalid_plugin_config_path(tmp_path)))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "calculator",
+            "function_name": "add",
+            "args": [1, 2],
+            "kwargs": {},
+        },
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail == [
+        {
+            "loc": ["config"],
+            "msg": (
+                "Invalid plugin name: 'BadName'. Plugin names must use lowercase ASCII letters, digits, "
+                "hyphens, or underscores. ("
+                + str((tmp_path / "plugins" / "bad-name" / "mindroom.plugin.json").resolve())
+                + ")"
+            ),
+            "type": "value_error",
+        },
+    ]
+
+
 def test_sandbox_runner_applies_tool_init_overrides(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -709,6 +768,8 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     stored_value = "value123"
     original_registry = metadata_module._TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
+    original_builtin_registry = metadata_module._BUILTIN_TOOL_REGISTRY.copy()
+    original_builtin_metadata = metadata_module._BUILTIN_TOOL_METADATA.copy()
     original_manager = credentials_module._credentials_manager
     original_signature = credentials_module._credentials_manager_signature
     shared_storage = tmp_path / "shared-storage"
@@ -719,15 +780,17 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     )
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(shared_storage))
-    metadata_module._TOOL_REGISTRY[tool_name] = lambda: DummyTool
-    TOOL_METADATA[tool_name] = ToolMetadata(
-        name=tool_name,
-        display_name="Dummy",
-        description="Dummy",
-        category=ToolCategory.DEVELOPMENT,
-        status=ToolStatus.REQUIRES_CONFIG,
-        setup_type=SetupType.API_KEY,
-        config_fields=[ConfigField(name="token", label="Token", type="password", required=False)],
+    metadata_module.register_builtin_tool_metadata(
+        ToolMetadata(
+            name=tool_name,
+            display_name="Dummy",
+            description="Dummy",
+            category=ToolCategory.DEVELOPMENT,
+            status=ToolStatus.REQUIRES_CONFIG,
+            setup_type=SetupType.API_KEY,
+            config_fields=[ConfigField(name="token", label="Token", type="password", required=False)],
+            factory=lambda: DummyTool,
+        ),
     )
 
     try:
@@ -750,8 +813,12 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     finally:
         metadata_module._TOOL_REGISTRY.clear()
         metadata_module._TOOL_REGISTRY.update(original_registry)
+        metadata_module._BUILTIN_TOOL_REGISTRY.clear()
+        metadata_module._BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
+        metadata_module._BUILTIN_TOOL_METADATA.clear()
+        metadata_module._BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
         credentials_module._credentials_manager = original_manager
         credentials_module._credentials_manager_signature = original_signature
 
@@ -774,19 +841,23 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
     stored_value = "value123"
     original_registry = metadata_module._TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
+    original_builtin_registry = metadata_module._BUILTIN_TOOL_REGISTRY.copy()
+    original_builtin_metadata = metadata_module._BUILTIN_TOOL_METADATA.copy()
     original_manager = credentials_module._credentials_manager
     original_signature = credentials_module._credentials_manager_signature
     storage_root = tmp_path / "runtime-storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
-    metadata_module._TOOL_REGISTRY[tool_name] = lambda: DummyTool
-    TOOL_METADATA[tool_name] = ToolMetadata(
-        name=tool_name,
-        display_name="Dummy",
-        description="Dummy",
-        category=ToolCategory.DEVELOPMENT,
-        status=ToolStatus.REQUIRES_CONFIG,
-        setup_type=SetupType.API_KEY,
-        config_fields=[ConfigField(name="token", label="Token", type="password", required=False)],
+    metadata_module.register_builtin_tool_metadata(
+        ToolMetadata(
+            name=tool_name,
+            display_name="Dummy",
+            description="Dummy",
+            category=ToolCategory.DEVELOPMENT,
+            status=ToolStatus.REQUIRES_CONFIG,
+            setup_type=SetupType.API_KEY,
+            config_fields=[ConfigField(name="token", label="Token", type="password", required=False)],
+            factory=lambda: DummyTool,
+        ),
     )
 
     try:
@@ -807,8 +878,12 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
     finally:
         metadata_module._TOOL_REGISTRY.clear()
         metadata_module._TOOL_REGISTRY.update(original_registry)
+        metadata_module._BUILTIN_TOOL_REGISTRY.clear()
+        metadata_module._BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
+        metadata_module._BUILTIN_TOOL_METADATA.clear()
+        metadata_module._BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
         credentials_module._credentials_manager = original_manager
         credentials_module._credentials_manager_signature = original_signature
 

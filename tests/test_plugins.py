@@ -789,6 +789,56 @@ def test_load_plugins_rejects_plugin_tool_name_collisions(tmp_path: Path) -> Non
         _bind_runtime_paths(Config(plugins=["./plugins/first", "./plugins/second"]), config_path)
 
 
+def test_load_plugins_rejects_duplicate_tool_names_within_one_plugin(tmp_path: Path) -> None:
+    """One plugin module must not register the same tool name twice."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class FirstTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='first', tools=[])\n"
+        "\n"
+        "class SecondTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='second', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='dup_tool',\n"
+        "    display_name='First Duplicate',\n"
+        "    description='Should fail',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def first_plugin_tool():\n"
+        "    return FirstTool\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='dup_tool',\n"
+        "    display_name='Second Duplicate',\n"
+        "    description='Should also fail',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def second_plugin_tool():\n"
+        "    return SecondTool\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match="Plugin tool 'dup_tool' is registered multiple times",
+    ):
+        _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+
+
 def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path) -> None:
     """Changing only the manifest plugin name should force a logical module reload."""
     plugin_root = tmp_path / "plugins" / "demo"

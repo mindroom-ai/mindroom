@@ -136,7 +136,11 @@ def register_builtin_tool_metadata(metadata: ToolMetadata) -> None:
 def _register_plugin_tool_metadata(module_name: str, metadata: ToolMetadata) -> None:
     """Store one plugin tool in the per-module overlay cache."""
     _reject_plugin_builtin_tool_collision(metadata.name)
-    _PLUGIN_TOOL_METADATA_BY_MODULE.setdefault(module_name, {})[metadata.name] = metadata
+    module_registrations = _PLUGIN_TOOL_METADATA_BY_MODULE.setdefault(module_name, {})
+    if metadata.name in module_registrations:
+        msg = f"Plugin tool '{metadata.name}' is registered multiple times in plugin module '{module_name}'."
+        raise ValueError(msg)
+    module_registrations[metadata.name] = metadata
 
 
 def apply_authored_overrides(

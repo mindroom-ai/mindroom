@@ -408,6 +408,101 @@ describe('configStore', () => {
       ]);
     });
 
+    it('invalidates in-flight policy refreshes when load returns 422', async () => {
+      const pendingPolicyResponse = deferred<{
+        ok: boolean;
+        json: () => Promise<{ agent_policies: AgentPoliciesByAgent }>;
+      }>();
+
+      useConfigStore.setState({
+        config: {
+          memory: {
+            backend: 'mem0',
+            embedder: {
+              provider: 'openai',
+              config: { model: 'text-embedding-3-small' },
+            },
+          },
+          models: {
+            default: { provider: 'ollama', id: 'test-model' },
+          },
+          agents: {},
+          defaults: { markdown: true },
+          router: { model: 'default' },
+        },
+        agentPoliciesByAgent: {
+          assistant: makeAgentPolicy('assistant'),
+        },
+      });
+
+      (global.fetch as any).mockReturnValueOnce(pendingPolicyResponse.promise);
+      const refreshPromise = useConfigStore.getState().refreshAgentPolicies([
+        {
+          id: 'assistant',
+          display_name: 'Assistant',
+          role: 'Helpful',
+          tools: [],
+          skills: [],
+          instructions: [],
+          rooms: [],
+        },
+      ]);
+
+      expect(useConfigStore.getState().agentPoliciesRequestId).toBe(1);
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: [
+            {
+              loc: ['plugins', 0],
+              msg: 'Plugin tools_module must be a string',
+              type: 'value_error',
+            },
+          ],
+        }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+
+      let state = useConfigStore.getState();
+      expect(state.agentPoliciesRequestId).toBe(2);
+      expect(state.config).toBeNull();
+      expect(state.agentPoliciesByAgent).toEqual({});
+
+      pendingPolicyResponse.resolve({
+        ok: true,
+        json: async () => ({
+          agent_policies: {
+            assistant: makeAgentPolicy('assistant'),
+          },
+        }),
+      });
+
+      await refreshPromise;
+
+      state = useConfigStore.getState();
+      expect(state.agentPoliciesRequestId).toBe(2);
+      expect(state.config).toBeNull();
+      expect(state.agentPoliciesByAgent).toEqual({});
+      expect(state.diagnostics).toEqual([
+        {
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: true,
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['plugins', 0],
+            msg: 'Plugin tools_module must be a string',
+            type: 'value_error',
+          },
+        },
+      ]);
+    });
+
     it('loads config and records a non-blocking diagnostic when agent policy derivation fails during reload', async () => {
       const existingConfig = {
         memory: {
