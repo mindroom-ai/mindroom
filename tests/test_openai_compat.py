@@ -161,6 +161,46 @@ def test_load_config_requires_runtime_paths() -> None:
         openai_compat._load_config(request)
 
 
+def test_list_models_returns_runtime_validation_errors(tmp_path: Path) -> None:
+    """OpenAI-compatible routes should surface invalid runtime config as 422."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "router:\n"
+        "  model: default\n"
+        "agents: {}\n"
+        "plugins:\n"
+        "  - ./plugins/bad-name\n",
+        encoding="utf-8",
+    )
+    app = FastAPI()
+    app.include_router(router)
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+    )
+    initialize_api_app(app, runtime_paths)
+
+    with TestClient(app) as client:
+        response = client.get("/v1/models")
+
+    assert response.status_code == 422
+    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+
+
 def test_openai_incompatible_agents_is_order_independent_for_cycles() -> None:
     """Cyclic delegation should not change which /v1 agents are rejected."""
     config = Config(

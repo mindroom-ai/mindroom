@@ -1314,11 +1314,11 @@ def test_google_runtime_refresh_keeps_config_cache_live(
     assert "test_agent" in after_reset.json()["agents"]
 
 
-def test_google_configure_reports_reload_failures_without_clearing_cached_config(
+def test_google_configure_surfaces_runtime_validation_failures(
     api_key_client: TestClient,
     temp_config_file: Path,
 ) -> None:
-    """Google configure should fail closed when the refreshed runtime cannot reload config."""
+    """Google configure should surface runtime config failures as 422 user errors."""
     before_response = api_key_client.post(
         "/api/config/load",
         headers={"Authorization": "Bearer test-key"},
@@ -1347,15 +1347,15 @@ def test_google_configure_reports_reload_failures_without_clearing_cached_config
         },
     )
 
-    assert configure_response.status_code == 500
-    assert "Failed to save credentials" in configure_response.json()["detail"]
+    assert configure_response.status_code == 422
+    assert "mindroom_user.username" in str(configure_response.json()["detail"])
 
     after_response = api_key_client.post(
         "/api/config/load",
         headers={"Authorization": "Bearer test-key"},
     )
-    assert after_response.status_code == 200
-    assert "test_agent" in after_response.json()["agents"]
+    assert after_response.status_code == 422
+    assert "mindroom_user.username" in str(after_response.json()["detail"])
 
 
 def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:
@@ -1891,6 +1891,84 @@ def test_api_config_load_does_not_serve_stale_cache_after_invalid_reload(temp_co
     assert response.status_code == 422
     assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
     assert "test_agent" in main._app_context(main.app).config_data["agents"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/config/agents",
+        "/api/config/teams",
+        "/api/config/models",
+        "/api/config/room-models",
+        "/api/rooms",
+    ],
+)
+def test_api_cached_read_endpoints_refuse_stale_config_after_invalid_reload(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+    path: str,
+) -> None:
+    """Config-backed API reads should return the current validation error instead of stale cache."""
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+
+    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    temp_config_file.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": ["./plugins/bad-name"],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    response = api_key_client.get(path, headers={"Authorization": "Bearer test-key"})
+
+    assert response.status_code == 422
+    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+
+
+def test_api_cached_write_endpoints_refuse_stale_config_after_invalid_reload(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Config writes should not mutate from stale cache after the current file becomes invalid."""
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+
+    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    invalid_payload = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+        "plugins": ["./plugins/bad-name"],
+    }
+    temp_config_file.write_text(yaml.safe_dump(invalid_payload), encoding="utf-8")
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    response = api_key_client.put(
+        "/api/config/models/default",
+        headers={"Authorization": "Bearer test-key"},
+        json={"provider": "openai", "id": "gpt-5.4"},
+    )
+
+    assert response.status_code == 422
+    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+    assert yaml.safe_load(temp_config_file.read_text(encoding="utf-8")) == invalid_payload
 
 
 def test_load_config_from_file_omits_legacy_null_optional_sections(tmp_path: Path) -> None:

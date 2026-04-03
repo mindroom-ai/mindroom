@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mindroom.agents import create_agent
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
-from mindroom.config.main import Config, load_config
+from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.execution_preparation import (
     build_prompt_with_thread_history,
@@ -70,6 +70,8 @@ if TYPE_CHECKING:
     from agno.run.team import TeamRunOutputEvent
     from agno.team import Team
 
+    from mindroom.config.main import Config
+
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
@@ -86,15 +88,11 @@ class _ToolStreamState:
 
 
 def _load_config(request: Request) -> tuple[Config, RuntimePaths]:
-    """Load the current runtime config and return it with its path.
-
-    Loads directly from Config.from_yaml rather than sharing with main.py's
-    loader to avoid circular imports (main.py imports this router).
-    """
+    """Load the current runtime config and return it with its path."""
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
     runtime_paths = api_runtime_paths(request)
-    return load_config(runtime_paths), runtime_paths
+    return config_lifecycle.load_runtime_config(runtime_paths)
 
 
 def _openai_compatible_agent_names(config: Config) -> list[str]:

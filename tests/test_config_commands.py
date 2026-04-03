@@ -18,6 +18,7 @@ from mindroom.commands.config_commands import (
     _parse_config_args,
     _parse_value,
     _set_nested_value,
+    apply_config_change,
     handle_config_command,
 )
 from mindroom.commands.handler import handle_command
@@ -415,6 +416,38 @@ async def test_handle_config_command_set_returns_malformed_plugin_manifest_error
     assert change_info is None
     assert "Invalid configuration" in response
     assert "Plugin tools_module must be a string" in response
+
+
+@pytest.mark.asyncio
+async def test_apply_config_change_returns_invalid_plugin_manifest_error(tmp_path: Path) -> None:
+    """Confirmed config apply should keep runtime validation in the invalid-config channel."""
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": ["./plugins/bad-name"],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response = await apply_config_change(
+        "defaults.markdown",
+        False,
+        _runtime_paths_for_config(config_path),
+    )
+
+    assert "Invalid configuration" in response
+    assert "Invalid plugin name" in response
 
 
 @pytest.mark.asyncio

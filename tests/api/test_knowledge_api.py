@@ -69,7 +69,7 @@ def test_knowledge_bases_list_initializes_managers_with_full_reindex(
     runtime_paths = main._app_runtime_paths(test_client.app)
 
     with (
-        patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)),
         patch(
             "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
@@ -122,7 +122,7 @@ def test_knowledge_files_list_uses_manager_filters_when_available(
     runtime_paths = main._app_runtime_paths(test_client.app)
 
     with (
-        patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)),
         patch(
             "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
@@ -161,7 +161,7 @@ def test_knowledge_upload_rolls_back_on_oversized_file(
     ]
     runtime_paths = main._app_runtime_paths(test_client.app)
 
-    with patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)):
+    with patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)):
         response = test_client.post("/api/knowledge/bases/research/upload", files=files)
 
     assert response.status_code == 413
@@ -180,7 +180,7 @@ def test_knowledge_upload_initializes_manager_with_full_reindex(
     runtime_paths = main._app_runtime_paths(test_client.app)
 
     with (
-        patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)),
         patch(
             "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
@@ -211,7 +211,7 @@ def test_knowledge_delete_initializes_manager_with_full_reindex(
     runtime_paths = main._app_runtime_paths(test_client.app)
 
     with (
-        patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)),
         patch(
             "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
@@ -231,7 +231,7 @@ def test_knowledge_delete_rejects_path_traversal(test_client: TestClient, tmp_pa
     config = _knowledge_config(tmp_path)
     runtime_paths = main._app_runtime_paths(test_client.app)
 
-    with patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)):
+    with patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)):
         response = test_client.delete("/api/knowledge/bases/research/files/..%2Fsecret.txt")
 
     assert response.status_code == 400
@@ -243,7 +243,7 @@ def test_unknown_knowledge_base_returns_404(test_client: TestClient, tmp_path: P
     config = _knowledge_config(tmp_path, base_id="legal")
     runtime_paths = main._app_runtime_paths(test_client.app)
 
-    with patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)):
+    with patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)):
         response = test_client.get("/api/knowledge/bases/research/status")
 
     assert response.status_code == 404
@@ -269,7 +269,7 @@ def test_reindex_syncs_git_before_reindex_for_git_bases(test_client: TestClient,
     manager.reindex_all = AsyncMock(side_effect=_reindex)
 
     with (
-        patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.knowledge.config_lifecycle.load_runtime_config", return_value=(config, runtime_paths)),
         patch(
             "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
@@ -281,6 +281,36 @@ def test_reindex_syncs_git_before_reindex_for_git_bases(test_client: TestClient,
     assert call_order == ["sync", "reindex"]
     manager.sync_git_repository.assert_awaited_once()
     manager.reindex_all.assert_awaited_once()
+
+
+def test_knowledge_routes_return_runtime_validation_errors(test_client: TestClient, tmp_path: Path) -> None:
+    """Knowledge routes should surface invalid runtime config as 422, not generic 500s."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "BadName", "tools_module": null, "skills": []}',
+        encoding="utf-8",
+    )
+    runtime_paths.config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "router:\n"
+            "  model: default\n"
+            "agents: {}\n"
+            "plugins:\n"
+            "  - ./plugins/bad-name\n"
+        ),
+        encoding="utf-8",
+    )
+
+    response = test_client.get("/api/knowledge/bases")
+
+    assert response.status_code == 422
+    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
 
 
 def test_ensure_manager_reloads_when_knowledge_base_path_changes(tmp_path: Path) -> None:

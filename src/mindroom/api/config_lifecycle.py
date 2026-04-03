@@ -60,9 +60,31 @@ class _WatchFile(Protocol):
     ) -> None: ...
 
 
-def load_runtime_config(runtime_paths: constants.RuntimePaths) -> tuple[Config, Path]:
-    """Load the current runtime config and return it with its path."""
-    return load_runtime_config_model(runtime_paths), runtime_paths.config_path
+def load_runtime_config(runtime_paths: constants.RuntimePaths) -> tuple[Config, constants.RuntimePaths]:
+    """Load the current runtime config and raise HTTPException on user-facing failures."""
+    try:
+        return load_runtime_config_model(runtime_paths), runtime_paths
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
+    except ConfigRuntimeValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load configuration: {exc!s}") from exc
+
+
+def raise_for_config_load_result(result: ConfigLoadResult | None) -> None:
+    """Raise HTTPException when the cached config state reflects a failed load."""
+    if result is None or result.success:
+        return
+    raise HTTPException(
+        status_code=result.error_status_code or 500,
+        detail=result.error_detail or "Failed to load configuration",
+    )
+
+
+def _raise_missing_loaded_config() -> None:
+    """Raise the shared missing-config HTTP error used by cached API reads and writes."""
+    raise HTTPException(status_code=500, detail="Failed to load configuration")
 
 
 def _save_config_to_file(
@@ -99,10 +121,14 @@ def run_config_write[T](
     mutate: Callable[[dict[str, Any]], T],
     *,
     error_prefix: str,
+    config_load_result: ConfigLoadResult | None = None,
 ) -> T:
     """Validate, save, and swap config under lock."""
     with config_lock:
         try:
+            raise_for_config_load_result(config_load_result)
+            if not config_data:
+                _raise_missing_loaded_config()
             candidate_config = deepcopy(config_data)
             result = mutate(candidate_config)
             validated_payload = _validated_config_payload(candidate_config, runtime_paths)

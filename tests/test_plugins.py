@@ -349,6 +349,34 @@ def test_validate_with_runtime_does_not_mutate_plugin_skill_roots(tmp_path: Path
         set_plugin_skill_roots(original_plugin_roots)
 
 
+def test_load_plugins_revalidates_skill_dirs_when_manifest_cache_is_warm(tmp_path: Path) -> None:
+    """Warm manifest cache entries must not preserve deleted skill directories."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo-plugin", "tools_module": None, "skills": ["skills"]}),
+        encoding="utf-8",
+    )
+    skill_dir = plugin_root / "skills"
+    skill_dir.mkdir()
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    try:
+        assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo-plugin"]
+        skill_dir.rmdir()
+        with pytest.raises(ValueError, match="Plugin skill path is not a directory"):
+            load_plugins(config, runtime_paths_for(config))
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
 def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path: Path) -> None:
     """Runtime validation should roll back plugin tool registration when validation fails later."""
     plugin_root = tmp_path / "plugins" / "demo"

@@ -314,7 +314,10 @@ async def apply_config_change(
 
     try:
         # Load the current configuration
-        config = load_config(runtime_paths)
+        try:
+            config = load_config(runtime_paths)
+        except (ValidationError, ConfigRuntimeValidationError) as exc:
+            return _format_invalid_config_response(exc)
         config_dict = config.model_dump()
 
         # Apply the specific change

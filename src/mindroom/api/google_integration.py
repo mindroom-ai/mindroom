@@ -19,7 +19,6 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom import constants
-from mindroom.api import config_lifecycle
 from mindroom.api.credentials import (
     RequestCredentialsTarget,
     consume_pending_oauth_request,
@@ -417,7 +416,6 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
             detail="client_id and client_secret are required",
         )
 
-    config_reloaded = False
     try:
         # Save to environment
         runtime_paths = _save_env_credentials(
@@ -426,15 +424,13 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
             api_runtime_paths(request),
             project_id,
         )
-        from mindroom.api.main import _load_config_from_file, initialize_api_app  # noqa: PLC0415
+        from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
 
-        config_lifecycle.load_runtime_config(runtime_paths)
-        initialize_api_app(request.app, runtime_paths)
-        config_reloaded = _load_config_from_file(runtime_paths, request.app)
+        _reload_api_runtime_config(request.app, runtime_paths)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save credentials: {e!s}") from e
-    if not config_reloaded:
-        raise HTTPException(status_code=500, detail="Failed to reload configuration after updating Google credentials.")
     return {"success": True, "message": "Google OAuth credentials configured successfully"}
 
 
@@ -444,7 +440,6 @@ async def reset(request: Request) -> dict[str, Any]:
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
     runtime_paths = api_runtime_paths(request)
-    config_reloaded = False
     try:
         # Remove credentials using the manager
         get_runtime_credentials_manager(runtime_paths).delete_credentials("google")
@@ -467,16 +462,11 @@ async def reset(request: Request) -> dict[str, Any]:
             with env_path.open("w", encoding="utf-8") as f:
                 f.writelines(filtered_lines)
         refreshed_runtime_paths = _refresh_runtime_paths(runtime_paths)
-        from mindroom.api.main import _load_config_from_file, initialize_api_app  # noqa: PLC0415
+        from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
 
-        config_lifecycle.load_runtime_config(refreshed_runtime_paths)
-        initialize_api_app(request.app, refreshed_runtime_paths)
-        config_reloaded = _load_config_from_file(refreshed_runtime_paths, request.app)
+        _reload_api_runtime_config(request.app, refreshed_runtime_paths)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset: {e!s}") from e
-    if not config_reloaded:
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to reload configuration after resetting Google integration.",
-        )
     return {"success": True, "message": "Google integration reset successfully"}

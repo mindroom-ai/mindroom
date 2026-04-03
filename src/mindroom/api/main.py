@@ -21,6 +21,7 @@ from mindroom import constants
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.api.config_lifecycle import ApiConfigLock, ConfigLoadResult
 from mindroom.api.config_lifecycle import load_config_from_file as load_api_config_from_file
+from mindroom.api.config_lifecycle import raise_for_config_load_result as raise_api_config_load_result
 from mindroom.api.config_lifecycle import run_config_write as run_api_config_write
 from mindroom.api.config_lifecycle import watch_config as watch_api_config
 
@@ -357,9 +358,30 @@ def _run_config_write[T](
         context.config_lock,
         mutate,
         error_prefix=error_prefix,
+        config_load_result=context.config_load_result,
     )
     context.config_load_result = ConfigLoadResult(success=True)
     return result
+
+
+def _read_committed_config[T](
+    api_app: FastAPI,
+    reader: Callable[[dict[str, Any]], T],
+) -> T:
+    """Read the committed API config only when the current on-disk config is valid."""
+    context = _app_context(api_app)
+    with context.config_lock:
+        raise_api_config_load_result(context.config_load_result)
+        if not context.config_data:
+            raise HTTPException(status_code=500, detail="Failed to load configuration")
+        return reader(context.config_data)
+
+
+def _reload_api_runtime_config(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
+    """Rebind the API app to one runtime and surface structured config reload failures."""
+    initialize_api_app(api_app, runtime_paths)
+    _load_config_from_file(runtime_paths, api_app)
+    raise_api_config_load_result(_app_context(api_app).config_load_result)
 
 
 def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
@@ -803,16 +825,7 @@ async def standalone_login(request: Request, next: str = "/") -> Response:  # no
 @app.post("/api/config/load")
 async def load_config(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Load configuration from file."""
-    context = _app_context(request.app)
-    if context.config_load_result is not None and not context.config_load_result.success:
-        raise HTTPException(
-            status_code=context.config_load_result.error_status_code or 500,
-            detail=context.config_load_result.error_detail or "Failed to load configuration",
-        )
-    with context.config_lock:
-        if not context.config_data:
-            raise HTTPException(status_code=500, detail="Failed to load configuration")
-        return context.config_data
+    return _read_committed_config(request.app, lambda config_data: dict(config_data))
 
 
 @app.put("/api/config/save")
@@ -859,15 +872,17 @@ async def get_agent_policies(
 @app.get("/api/config/agents")
 async def get_agents(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all agents."""
-    context = _app_context(request.app)
-    with context.config_lock:
-        agents = context.config_data.get("agents", {})
+
+    def read_agents(config_data: dict[str, Any]) -> list[dict[str, Any]]:
+        agents = config_data.get("agents", {})
         # Convert to list format with IDs
         agent_list = []
         for agent_id, agent_data in agents.items():
             agent = {"id": agent_id, **agent_data}
             agent_list.append(agent)
         return agent_list
+
+    return _read_committed_config(request.app, read_agents)
 
 
 @app.put("/api/config/agents/{agent_id}")
@@ -940,15 +955,17 @@ async def delete_agent(
 @app.get("/api/config/teams")
 async def get_teams(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all teams."""
-    context = _app_context(request.app)
-    with context.config_lock:
-        teams = context.config_data.get("teams", {})
+
+    def read_teams(config_data: dict[str, Any]) -> list[dict[str, Any]]:
+        teams = config_data.get("teams", {})
         # Convert to list format with IDs
         team_list = []
         for team_id, team_data in teams.items():
             team = {"id": team_id, **team_data}
             team_list.append(team)
         return team_list
+
+    return _read_committed_config(request.app, read_teams)
 
 
 @app.put("/api/config/teams/{team_id}")
@@ -1021,10 +1038,10 @@ async def delete_team(
 @app.get("/api/config/models")
 async def get_models(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get all model configurations."""
-    context = _app_context(request.app)
-    with context.config_lock:
-        models = context.config_data.get("models", {})
-        return dict(models) if models else {}
+    return _read_committed_config(
+        request.app,
+        lambda config_data: dict(config_data.get("models", {})) if config_data.get("models") else {},
+    )
 
 
 @app.put("/api/config/models/{model_id}")
@@ -1052,10 +1069,10 @@ async def update_model(
 @app.get("/api/config/room-models")
 async def get_room_models(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get room-specific model overrides."""
-    context = _app_context(request.app)
-    with context.config_lock:
-        room_models = context.config_data.get("room_models", {})
-        return dict(room_models) if room_models else {}
+    return _read_committed_config(
+        request.app,
+        lambda config_data: dict(config_data.get("room_models", {})) if config_data.get("room_models") else {},
+    )
 
 
 @app.put("/api/config/room-models")
@@ -1080,15 +1097,15 @@ async def update_room_models(
 @app.get("/api/rooms")
 async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[str]:
     """Get list of available rooms."""
-    # Extract unique rooms from all agents
-    rooms = set()
-    context = _app_context(request.app)
-    with context.config_lock:
-        for agent_data in context.config_data.get("agents", {}).values():
+
+    def read_rooms(config_data: dict[str, Any]) -> list[str]:
+        rooms: set[str] = set()
+        for agent_data in config_data.get("agents", {}).values():
             agent_rooms = agent_data.get("rooms", [])
             rooms.update(agent_rooms)
+        return sorted(rooms)
 
-    return sorted(rooms)
+    return _read_committed_config(request.app, read_rooms)
 
 
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)

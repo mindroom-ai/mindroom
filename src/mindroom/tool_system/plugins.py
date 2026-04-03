@@ -53,7 +53,7 @@ class _PluginBase:
 @dataclass
 class _PluginCacheEntry:
     manifest_mtime: float
-    plugin: _PluginBase
+    manifest: _PluginManifest
 
 
 @dataclass(frozen=True)
@@ -242,15 +242,16 @@ def _load_plugin_base(root: Path) -> _PluginBase:
 
     cached = _PLUGIN_CACHE.get(manifest_path)
     if cached and cached.manifest_mtime == manifest_mtime:
-        return cached.plugin
-
-    manifest = _parse_manifest(manifest_path)
+        manifest = cached.manifest
+    else:
+        manifest = _parse_manifest(manifest_path)
+        _PLUGIN_CACHE[manifest_path] = _PluginCacheEntry(manifest_mtime=manifest_mtime, manifest=manifest)
 
     tools_module_path = _resolve_module_path(root, manifest.tools_module, kind="tools")
     hooks_module_path = _resolve_module_path(root, manifest.hooks_module, kind="hooks")
     skill_dirs = _resolve_skill_dirs(root, manifest.skills)
 
-    plugin = _PluginBase(
+    return _PluginBase(
         name=manifest.name,
         root=root,
         manifest_path=manifest_path,
@@ -258,9 +259,6 @@ def _load_plugin_base(root: Path) -> _PluginBase:
         hooks_module_path=hooks_module_path,
         skill_dirs=skill_dirs,
     )
-
-    _PLUGIN_CACHE[manifest_path] = _PluginCacheEntry(manifest_mtime=manifest_mtime, plugin=plugin)
-    return plugin
 
 
 def _materialize_plugin(
