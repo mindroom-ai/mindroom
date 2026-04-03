@@ -431,7 +431,7 @@ async def create_room(
 
 
 def _with_thread_tags_power_level(power_levels_content: dict[str, Any]) -> dict[str, Any]:
-    """Return power-level content with the thread-resolution override applied."""
+    """Return power-level content with the thread-tags override applied."""
     next_content = dict(power_levels_content)
     existing_events = power_levels_content.get("events")
     next_events = dict(existing_events) if isinstance(existing_events, dict) else {}
@@ -444,11 +444,11 @@ async def ensure_thread_tags_power_level(
     client: nio.AsyncClient,
     room_id: str,
 ) -> bool:
-    """Ensure managed rooms allow PL0 users to send the thread-resolution state event."""
+    """Ensure managed rooms allow PL0 users to send the thread-tags state event."""
     current_response = await client.room_get_state_event(room_id, _POWER_LEVELS_EVENT_TYPE)
     if not isinstance(current_response, nio.RoomGetStateEventResponse):
         logger.error(
-            "Failed to read room power levels for thread resolution reconciliation",
+            "Failed to read room power levels for thread tags reconciliation",
             room_id=room_id,
             error=_describe_matrix_response_error(current_response),
         )
@@ -464,7 +464,7 @@ async def ensure_thread_tags_power_level(
     desired_content = _with_thread_tags_power_level(current_response.content)
     if desired_content == current_response.content:
         logger.debug(
-            "Thread resolution power level already configured",
+            "Thread tags power level already configured",
             room_id=room_id,
             event_type=THREAD_TAGS_EVENT_TYPE,
             power_level=_THREAD_TAGS_POWER_LEVEL,
@@ -478,7 +478,7 @@ async def ensure_thread_tags_power_level(
     )
     if isinstance(response, nio.RoomPutStateResponse):
         logger.info(
-            "Updated room power levels for thread resolution",
+            "Updated room power levels for thread tags",
             room_id=room_id,
             event_type=THREAD_TAGS_EVENT_TYPE,
             power_level=_THREAD_TAGS_POWER_LEVEL,
@@ -486,7 +486,7 @@ async def ensure_thread_tags_power_level(
         return True
 
     logger.error(
-        "Failed to update room power levels for thread resolution",
+        "Failed to update room power levels for thread tags",
         room_id=room_id,
         error=_describe_matrix_response_error(response),
         hint="Ensure the service account is joined and can update m.room.power_levels.",

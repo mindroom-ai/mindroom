@@ -200,8 +200,25 @@ def _normalize_object_mapping(
         if not isinstance(key, str):
             msg = "data must be an object."
             raise error_type(msg)
-        normalized_data[key] = item
+        normalized_data[key] = _normalize_json_compatible_value(item, error_type=error_type)
     return normalized_data
+
+
+def _normalize_json_compatible_value(
+    value: object,
+    *,
+    error_type: type[Exception],
+) -> object:
+    """Validate one JSON-compatible nested value."""
+    if value is None or isinstance(value, str | bool | int | float):
+        return value
+    if isinstance(value, list):
+        return [_normalize_json_compatible_value(item, error_type=error_type) for item in value]
+    if isinstance(value, Mapping):
+        return _normalize_object_mapping(value, error_type=error_type)
+
+    msg = "data values must be JSON-compatible."
+    raise error_type(msg)
 
 
 def _normalize_blocked_tag_data(normalized_data: dict[str, Any]) -> None:
@@ -289,7 +306,7 @@ def _parse_thread_tag_record(
     try:
         record = ThreadTagRecord.model_validate(value)
         normalized_data = _normalize_tag_data(normalized_tag, record.data)
-    except (ThreadTagsError, ValidationError):
+    except (ThreadTagsError, ValidationError, TypeError, ValueError):
         return None
 
     return record.model_copy(update={"data": normalized_data})
@@ -349,6 +366,20 @@ def _thread_tag_records_match(
     return _thread_tag_record_content(expected_record) == _thread_tag_record_content(actual_record)
 
 
+def _verified_state_preserves_expected_tags(
+    verified_state: ThreadTagsState | None,
+    *,
+    expected_tags: Mapping[str, ThreadTagRecord],
+) -> bool:
+    """Require the verification read to preserve each expected tag payload exactly."""
+    if verified_state is None:
+        return not expected_tags
+    for tag, expected_record in expected_tags.items():
+        if not _thread_tag_records_match(expected_record, verified_state.tags.get(tag)):
+            return False
+    return True
+
+
 def _verified_remove_state_matches(
     verified_state: ThreadTagsState | None,
     *,
@@ -356,14 +387,14 @@ def _verified_remove_state_matches(
     expected_siblings: Mapping[str, ThreadTagRecord],
 ) -> bool:
     """Require a remove verification read to preserve sibling content exactly."""
-    if verified_state is None:
-        return not expected_siblings
-    if removed_tag in verified_state.tags:
+    if not _verified_state_preserves_expected_tags(
+        verified_state,
+        expected_tags=expected_siblings,
+    ):
         return False
-    for sibling_tag, expected_record in expected_siblings.items():
-        if not _thread_tag_records_match(expected_record, verified_state.tags.get(sibling_tag)):
-            return False
-    return True
+    if verified_state is None:
+        return True
+    return removed_tag not in verified_state.tags
 
 
 def _empty_thread_tags_state(room_id: str, thread_root_id: str) -> ThreadTagsState:
@@ -671,10 +702,11 @@ async def set_thread_tag(
             room_id,
             normalized_thread_root_id,
         )
-        if verified_state is not None and _thread_tag_records_match(
-            expected_record,
-            verified_state.tags.get(normalized_tag),
+        if _verified_state_preserves_expected_tags(
+            verified_state,
+            expected_tags=next_tags,
         ):
+            assert verified_state is not None
             return verified_state
 
     msg = (

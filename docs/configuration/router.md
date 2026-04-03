@@ -68,7 +68,7 @@ The router creates and manages rooms:
 - Creates configured rooms that don't exist yet
 - Invites agents and users to their configured rooms
 - Applies `matrix_room_access` policy for managed rooms (when enabled)
-- Reconciles managed room power levels so the custom thread-resolution state event can be written at PL0
+- Reconciles managed room power levels so the custom thread-tags state event can be written at PL0
 - Generates AI-powered room topics based on configured agents
 - Has admin privileges to manage room membership
 - Cleans up orphaned bots on startup

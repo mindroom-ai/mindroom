@@ -29,12 +29,14 @@ def _resolve_target_thread_reference(
     *,
     room_id: str,
     thread_id: str | None,
+    allow_context_fallback: bool = True,
 ) -> str | None:
     """Resolve thread targeting in the order requested by the issue."""
     return resolve_context_thread_id(
         context,
         room_id=room_id,
         thread_id=thread_id,
+        allow_context_fallback=allow_context_fallback,
         room_timeline_fallback_event_id=context.reply_to_event_id,
     )
 
@@ -102,6 +104,7 @@ class ThreadTagsTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
+            allow_context_fallback=room_id is None,
         )
         if effective_thread_id is None:
             return self._payload(
@@ -191,6 +194,7 @@ class ThreadTagsTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
+            allow_context_fallback=room_id is None,
         )
         if effective_thread_id is None:
             return self._payload(
@@ -280,6 +284,7 @@ class ThreadTagsTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
+            allow_context_fallback=room_id is None,
         )
         if effective_thread_id is None:
             try:

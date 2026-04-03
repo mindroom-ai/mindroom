@@ -528,6 +528,48 @@ async def test_list_thread_tags_lists_room_wide_when_no_thread_is_available() ->
 
 
 @pytest.mark.asyncio
+async def test_list_thread_tags_explicit_same_room_target_can_list_room_wide_from_thread_context() -> None:
+    """An explicit same-room target should disable thread fallback and allow room-wide listing."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.normalize_thread_root_event_id",
+            new=AsyncMock(),
+        ) as mock_normalize,
+        patch(
+            "mindroom.custom_tools.thread_tags.get_thread_tags",
+            new=AsyncMock(),
+        ) as mock_get,
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(
+                return_value={
+                    "$thread-two:localhost": _state(
+                        "$thread-two:localhost",
+                        blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                    ),
+                },
+            ),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.list_thread_tags(room_id=context.room_id, tag="blocked"))
+
+    assert payload["status"] == "ok"
+    assert payload["room_wide"] is True
+    assert list(payload["threads"]) == ["$thread-two:localhost"]
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag="blocked",
+    )
+    mock_normalize.assert_not_awaited()
+    mock_get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_list_thread_tags_room_wide_returns_error_on_room_state_failure() -> None:
     """Room-wide listing should surface helper read failures as tool errors."""
     tool = ThreadTagsTools()

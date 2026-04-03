@@ -224,6 +224,17 @@ async def test_set_thread_tag_merges_existing_valid_tags_and_drops_malformed_sib
         **{
             "bad tag!": _tag_record_content(),
             "waiting": _tag_record_content(data={"waiting_on": 42}),
+            "review": {
+                "set_by": "@user:localhost",
+                "set_at": "2026-03-21T19:02:03+00:00",
+                "note": 42,
+                "data": {},
+            },
+            "custom": {
+                "set_by": "@user:localhost",
+                "set_at": "2026-03-21T19:02:03+00:00",
+                "data": [],
+            },
         },
     )
 
@@ -435,6 +446,87 @@ async def test_set_thread_tag_retries_when_verification_detects_same_tag_payload
     assert final_kwargs["content"]["tags"]["resolved"]["set_by"] == "@alice:localhost"
     assert final_kwargs["content"]["tags"]["resolved"]["note"] == "from alice"
     assert final_kwargs["content"]["tags"]["resolved"]["data"] == {"source": "alice"}
+
+
+@pytest.mark.asyncio
+async def test_set_thread_tag_retries_when_verification_detects_lost_sibling_tag() -> None:
+    """A verification read that drops one sibling should force another merge attempt."""
+    client = AsyncMock()
+    client.user_id = "@mindroom_general:localhost"
+    client.joined_members.return_value = _joined_members_response(
+        "@mindroom_general:localhost",
+        "@alice:localhost",
+    )
+
+    current_content: dict[str, object] | None = None
+    thread_reads = 0
+
+    async def room_get_state_event(**kwargs: object) -> object:
+        nonlocal thread_reads
+
+        event_type = kwargs["event_type"]
+        if event_type == "m.room.power_levels":
+            return _power_levels_response(
+                users={
+                    "@mindroom_general:localhost": 50,
+                    "@alice:localhost": 50,
+                },
+            )
+
+        thread_reads += 1
+        if thread_reads == 1:
+            return _thread_tags_state_response(
+                "$thread-root:localhost",
+                content=_thread_tags_content(
+                    blocked=_tag_record_content(note="original sibling"),
+                ),
+            )
+        if thread_reads == 2:
+            assert current_content is not None
+            return _thread_tags_state_response(
+                "$thread-root:localhost",
+                content=_thread_tags_content(
+                    resolved=current_content["tags"]["resolved"],
+                ),
+            )
+        if thread_reads == 3:
+            return _thread_tags_state_response(
+                "$thread-root:localhost",
+                content=_thread_tags_content(
+                    blocked=_tag_record_content(note="original sibling"),
+                ),
+            )
+        return _thread_tags_state_response(
+            "$thread-root:localhost",
+            content=current_content,
+        )
+
+    write_attempts = 0
+
+    async def room_put_state(**kwargs: object) -> object:
+        nonlocal current_content, write_attempts
+
+        write_attempts += 1
+        current_content = kwargs["content"]
+        return nio.RoomPutStateResponse.from_dict(
+            {"event_id": f"$state-{write_attempts}"},
+            room_id="!room:localhost",
+        )
+
+    client.room_get_state_event.side_effect = room_get_state_event
+    client.room_put_state.side_effect = room_put_state
+
+    state = await set_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "resolved",
+        set_by="@alice:localhost",
+    )
+
+    assert write_attempts == 2
+    assert set(state.tags) == {"blocked", "resolved"}
+    assert state.tags["blocked"].note == "original sibling"
 
 
 @pytest.mark.asyncio
@@ -835,6 +927,17 @@ async def test_get_thread_tags_drops_malformed_tags_and_preserves_valid_siblings
             resolved=_tag_record_content(),
             blocked=_tag_record_content(data={"blocked_by": "$not-a-list"}),
             due=_tag_record_content(data={"deadline": "not-a-date"}),
+            review={
+                "set_by": "@user:localhost",
+                "set_at": "2026-03-21T19:02:03+00:00",
+                "note": 42,
+                "data": {},
+            },
+            custom={
+                "set_by": "@user:localhost",
+                "set_at": "2026-03-21T19:02:03+00:00",
+                "data": [],
+            },
         ),
     )
 
@@ -873,6 +976,33 @@ async def test_list_tagged_threads_filters_non_matching_events_and_supports_tag_
                 "type": THREAD_TAGS_EVENT_TYPE,
                 "state_key": "$thread-four:localhost",
                 "content": {},
+            },
+            {
+                "type": THREAD_TAGS_EVENT_TYPE,
+                "state_key": "$thread-six:localhost",
+                "content": {
+                    "tags": {
+                        "custom": {
+                            "set_by": "@user:localhost",
+                            "set_at": "2026-03-21T19:02:03+00:00",
+                            "data": [],
+                        },
+                    },
+                },
+            },
+            {
+                "type": THREAD_TAGS_EVENT_TYPE,
+                "state_key": "$thread-seven:localhost",
+                "content": {
+                    "tags": {
+                        "review": {
+                            "set_by": "@user:localhost",
+                            "set_at": "2026-03-21T19:02:03+00:00",
+                            "note": 42,
+                            "data": {},
+                        },
+                    },
+                },
             },
             {
                 "type": "com.mindroom.other",
@@ -995,6 +1125,24 @@ async def test_set_thread_tag_rejects_invalid_predefined_payloads(
             tag,
             set_by="@alice:localhost",
             data=data,
+        )
+
+    client.room_get_state_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_thread_tag_rejects_non_json_compatible_custom_data() -> None:
+    """Custom tag data should fail fast when nested values are not JSON-compatible."""
+    client = AsyncMock()
+
+    with pytest.raises(ThreadTagsError, match="JSON-compatible"):
+        await set_thread_tag(
+            client,
+            "!room:localhost",
+            "$thread-root:localhost",
+            "custom",
+            set_by="@alice:localhost",
+            data={"bad": object()},
         )
 
     client.room_get_state_event.assert_not_awaited()
