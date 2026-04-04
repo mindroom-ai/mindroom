@@ -2162,12 +2162,14 @@ def test_config_rejects_removed_top_level_mcp_servers_field() -> None:
     with pytest.raises(
         ValidationError,
         match=re.escape(
-            "Top-level field 'mcp_servers' was removed. MCP server configuration is no longer supported."
+            "Top-level field 'mcp_servers' was removed. MCP server configuration is no longer supported.",
         ),
     ):
-        Config(
-            mcp_servers={"demo": {"transport": "stdio"}},
-            agents={"calculator": {"display_name": "CalculatorAgent"}},
+        Config.model_validate(
+            {
+                "mcp_servers": {"demo": {"transport": "stdio"}},
+                "agents": {"calculator": {"display_name": "CalculatorAgent"}},
+            },
         )
 
 

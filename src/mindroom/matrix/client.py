@@ -5,7 +5,7 @@ import io
 import json
 import mimetypes
 import ssl as ssl_module
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -1198,7 +1198,7 @@ async def _apply_latest_edits_to_messages(
 
 
 async def resolve_latest_visible_messages(
-    events: list[nio.RoomMessageText | nio.RoomMessageNotice],
+    events: Sequence[nio.RoomMessageText | nio.RoomMessageNotice],
     client: nio.AsyncClient,
     *,
     sender: str | None = None,
