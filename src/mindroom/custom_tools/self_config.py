@@ -204,7 +204,7 @@ class SelfConfigTools(Toolkit):
 
         config.agents[self.agent_name] = validated_agent
         try:
-            _save_runtime_validated_config(config, self.runtime_paths, self.config_path)
+            _save_runtime_validated_config(config, self.runtime_paths)
         except (ValidationError, ConfigRuntimeValidationError) as exc:
             return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
         except Exception as e:

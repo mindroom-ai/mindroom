@@ -274,6 +274,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
                 auth_state=None,
             ),
         )
+        config_lifecycle.register_api_app(api_app)
         return
 
     config_lock = previous_state.config_lock
@@ -297,6 +298,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             config_load_result=config_load_result,
         )
         api_app.state.api_state = current_state
+    config_lifecycle.register_api_app(api_app)
 
 
 def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSettings:

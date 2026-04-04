@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 from pydantic import ValidationError
 
+from mindroom.api import config_lifecycle
 from mindroom.config.main import (
     Config,
     ConfigRuntimeValidationError,
@@ -325,8 +326,8 @@ async def apply_config_change(
         except (ValidationError, ConfigRuntimeValidationError) as ve:
             return format_invalid_config_message(ve, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
 
-        # Save to file
-        new_config.save_to_yaml(path)
+        # Save to file and advance any in-process API snapshot immediately.
+        config_lifecycle.persist_runtime_validated_config(new_config, runtime_paths)
         return (  # noqa: TRY300
             f"✅ **Configuration updated successfully!**\n\n"
             f"Changes saved to {path} and will affect new agent interactions."

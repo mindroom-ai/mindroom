@@ -1062,6 +1062,9 @@ describe('configStore', () => {
       (global.fetch as any)
         .mockResolvedValueOnce({
           ok: true,
+          headers: {
+            get: (name: string) => (name === 'x-mindroom-config-generation' ? '7' : null),
+          },
           json: async () => ({ success: true }),
         })
         .mockResolvedValueOnce({
@@ -1086,6 +1089,7 @@ describe('configStore', () => {
         ],
       });
       expect(useConfigStore.getState()).toMatchObject({
+        committedGeneration: 7,
         recoveryConfigSource: 'agents:\n  helper:\n    role: Fixed\n',
         recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
         isDirty: true,
@@ -3276,6 +3280,139 @@ describe('configStore', () => {
       expect(state.cultures[0].agents).toEqual(['agent2']);
       expect(state.teams[0].agents).toEqual(['agent2']);
       expect(state.isDirty).toBe(true);
+      expect(state.dirtyRoots).toEqual(expect.arrayContaining(['agents', 'teams', 'cultures']));
+    });
+
+    it('serializes dependent team and culture removals after deleteAgent', async () => {
+      const mockConfig = {
+        agents: {
+          agent1: {
+            display_name: 'Agent 1',
+            role: 'Role 1',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+          agent2: {
+            display_name: 'Agent 2',
+            role: 'Role 2',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        teams: {
+          team1: {
+            display_name: 'Team 1',
+            role: 'Test team',
+            agents: ['agent1', 'agent2'],
+            rooms: [],
+            mode: 'coordinate',
+          },
+        },
+        cultures: {
+          engineering: {
+            description: 'Engineering standards',
+            agents: ['agent1', 'agent2'],
+            mode: 'automatic',
+          },
+        },
+        models: {
+          default: {
+            provider: 'ollama',
+            id: 'test-model',
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+      };
+
+      useConfigStore.setState({
+        loadedConfig: mockConfig as Config,
+        config: mockConfig as Config,
+        agents: [
+          {
+            id: 'agent1',
+            display_name: 'Agent 1',
+            role: 'Role 1',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+          {
+            id: 'agent2',
+            display_name: 'Agent 2',
+            role: 'Role 2',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        ],
+        teams: [
+          {
+            id: 'team1',
+            display_name: 'Team 1',
+            role: 'Test team',
+            agents: ['agent1', 'agent2'],
+            rooms: [],
+            mode: 'coordinate',
+          },
+        ],
+        cultures: [
+          {
+            id: 'engineering',
+            description: 'Engineering standards',
+            agents: ['agent1', 'agent2'],
+            mode: 'automatic',
+          },
+        ],
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: { agent2: makeAgentPolicy('agent2') } }),
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => '1' },
+        json: async () => ({}),
+      });
+
+      useConfigStore.getState().deleteAgent('agent1');
+      await waitFor(() => {
+        expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
+          agent2: makeAgentPolicy('agent2'),
+        });
+      });
+      await useConfigStore.getState().saveConfig();
+
+      const saveCall = (global.fetch as any).mock.calls[1];
+      expect(saveCall[0]).toBe('/api/config/save');
+      expect(JSON.parse(saveCall[1].body)).toMatchObject({
+        agents: {
+          agent2: mockConfig.agents.agent2,
+        },
+        teams: {
+          team1: {
+            ...mockConfig.teams.team1,
+            agents: ['agent2'],
+          },
+        },
+        cultures: {
+          engineering: {
+            ...mockConfig.cultures.engineering,
+            agents: ['agent2'],
+          },
+        },
+      });
     });
 
     it('refreshes agent policies when deleting an unrelated shared agent', async () => {

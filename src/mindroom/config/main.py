@@ -44,6 +44,8 @@ from mindroom.matrix.identity import (
     managed_space_alias_localpart,
 )
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
+from mindroom.tool_system.metadata import ToolConfigOverrideError, ToolMetadataValidationError
+from mindroom.tool_system.plugins import PluginValidationError
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
@@ -821,7 +823,7 @@ class Config(BaseModel):
         config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
         try:
             config._validate_authored_tool_entries(runtime_paths)
-        except (TypeError, ValueError) as exc:
+        except (PluginValidationError, ToolConfigOverrideError, ToolMetadataValidationError) as exc:
             raise ConfigRuntimeValidationError(str(exc)) from exc
         return config
 
@@ -1119,7 +1121,7 @@ class Config(BaseModel):
 
         if entry.name not in tool_metadata and not self.is_tool_preset(entry.name):
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
-            raise ValueError(msg)
+            raise ToolConfigOverrideError(msg)
 
         validate_authored_overrides(
             entry.name,

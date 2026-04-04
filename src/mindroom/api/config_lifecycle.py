@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import weakref
+from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -32,6 +35,8 @@ logger = get_logger(__name__)
 _UNSET = object()
 _REQUEST_SNAPSHOT_SCOPE_KEY = "api_snapshot"
 CONFIG_GENERATION_HEADER = "x-mindroom-config-generation"
+_REGISTERED_API_APPS: weakref.WeakSet[FastAPI] = weakref.WeakSet()
+_REGISTERED_API_APPS_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -184,6 +189,38 @@ def _save_raw_config_source_to_file(
     constants.safe_replace(tmp_path, config_path)
 
 
+def persist_runtime_validated_config(
+    runtime_config: Config,
+    runtime_paths: constants.RuntimePaths,
+) -> None:
+    """Persist one validated config and immediately publish matching committed API snapshots."""
+    validated_payload = runtime_config.authored_model_dump()
+    matching_states = [
+        state for state in _registered_api_states() if state.snapshot.runtime_paths == runtime_paths
+    ]
+    if not matching_states:
+        _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        return
+
+    with ExitStack() as stack:
+        locked_snapshots: list[tuple[ApiState, ApiSnapshot]] = []
+        for state in sorted(matching_states, key=id):
+            stack.enter_context(state.config_lock)
+            snapshot = state.snapshot
+            if snapshot.runtime_paths != runtime_paths:
+                continue
+            locked_snapshots.append((state, snapshot))
+
+        _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        for state, snapshot in locked_snapshots:
+            state.snapshot = _published_snapshot(
+                snapshot,
+                config_data=deepcopy(validated_payload),
+                runtime_config=runtime_config,
+                config_load_result=ConfigLoadResult(success=True),
+            )
+
+
 def _validated_config_payload(
     raw_config: dict[str, Any],
     runtime_paths: constants.RuntimePaths,
@@ -200,6 +237,25 @@ def _app_config_state(api_app: FastAPI) -> ApiState:
         msg = "API context is not initialized"
         raise TypeError(msg)
     return cast("ApiState", state)
+
+
+def register_api_app(api_app: FastAPI) -> None:
+    """Register one live API app so external config writers can advance its snapshot."""
+    with _REGISTERED_API_APPS_LOCK:
+        _REGISTERED_API_APPS.add(api_app)
+
+
+def _registered_api_states() -> list[ApiState]:
+    """Return all live API states that still expose config state."""
+    with _REGISTERED_API_APPS_LOCK:
+        apps = list(_REGISTERED_API_APPS)
+    states: list[ApiState] = []
+    for api_app in apps:
+        try:
+            states.append(_app_config_state(api_app))
+        except TypeError:
+            continue
+    return states
 
 
 def request_snapshot(request: Request) -> ApiSnapshot | None:

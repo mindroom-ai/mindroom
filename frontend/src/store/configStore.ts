@@ -1019,7 +1019,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
 
     try {
-      await configService.saveRawConfigSource(recoveryConfigSource, committedGeneration);
+      const { generation } = await configService.saveRawConfigSource(
+        recoveryConfigSource,
+        committedGeneration
+      );
+      set(state => ({
+        committedGeneration:
+          state.committedGeneration == null
+            ? generation
+            : Math.max(state.committedGeneration, generation),
+      }));
       if (get().saveConfigRequestId != saveConfigRequestId) {
         return { status: 'stale' };
       }
@@ -1234,7 +1243,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       agentPoliciesByAgent: nextAgentPoliciesByAgent,
       privateWorkerScopeBackups: remainingBackups,
       selectedAgentId: state.selectedAgentId === agentId ? null : state.selectedAgentId,
-      ...markDraftDirty(state, {}, [['agents']]),
+      ...markDraftDirty(state, {}, [['agents'], ['teams'], ['cultures']]),
     });
     if (get().config != null && deletedAgent != null) {
       void get().refreshAgentPolicies(nextAgents);

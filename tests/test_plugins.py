@@ -32,6 +32,65 @@ def _bind_runtime_paths(config: Config, config_path: Path) -> Config:
     return bind_runtime_paths(config, runtime_paths)
 
 
+def _minimal_runtime_paths(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    return resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+
+
+def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_type_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unexpected internal type errors should not be rewritten into config validation failures."""
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+
+    def _raise_type_error(_self: Config, _runtime_paths: object) -> None:
+        raise TypeError("unexpected backend type error")
+
+    monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_type_error)
+
+    with pytest.raises(TypeError, match="unexpected backend type error"):
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            },
+            runtime_paths,
+        )
+
+
+def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_value_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unexpected internal value errors should escape instead of becoming 422-style config errors."""
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+
+    def _raise_value_error(_self: Config, _runtime_paths: object) -> None:
+        raise ValueError("unexpected backend value error")
+
+    monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_value_error)
+
+    with pytest.raises(ValueError, match="unexpected backend value error"):
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            },
+            runtime_paths,
+        )
+
+
 def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     """Load a plugin that registers a tool and provides a skills directory."""
     plugin_root = tmp_path / "plugins" / "demo"

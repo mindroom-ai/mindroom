@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from mindroom.api import config_lifecycle, main
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -206,6 +207,26 @@ class TestUpdateOwnConfig:
             # Verify persisted
             reloaded = Config.from_yaml(config_path)
             assert reloaded.agents["coder"].role == "New role"
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_own_config_advances_registered_api_snapshot_generation(self) -> None:
+        """Tool-side self-config writes should advance the in-process API generation immediately."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Old role")},
+        )
+        try:
+            runtime_paths = resolve_runtime_paths(config_path=config_path)
+            main.initialize_api_app(main.app, runtime_paths)
+            assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is True
+            initial_generation = main._app_context(main.app).generation
+
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(role="New role")
+
+            assert "Successfully" in result
+            assert main._app_context(main.app).generation > initial_generation
+            assert main._app_context(main.app).config_data["agents"]["coder"]["role"] == "New role"
         finally:
             config_path.unlink(missing_ok=True)
 

@@ -29,6 +29,10 @@ _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+class PluginValidationError(ValueError):
+    """Raised when plugin config or plugin runtime validation fails for authored config."""
+
+
 @dataclass(frozen=True)
 class _PluginManifest:
     """Validated plugin manifest data."""
@@ -171,7 +175,7 @@ def _reject_duplicate_plugin_manifest_names(
     )
     logger.error("Duplicate plugin manifest names configured", duplicates=duplicates)
     msg = f"Duplicate plugin manifest names configured: {duplicate_descriptions}"
-    raise ValueError(msg)
+    raise PluginValidationError(msg)
 
 
 def _resolve_plugin_root(plugin_path: str, runtime_paths: RuntimePaths) -> Path:
@@ -181,7 +185,7 @@ def _resolve_plugin_root(plugin_path: str, runtime_paths: RuntimePaths) -> Path:
         if module_root is not None:
             return module_root
         msg = f"Configured plugin module could not be resolved: {plugin_path}"
-        raise ValueError(msg)
+        raise PluginValidationError(msg)
 
     relative = resolve_config_relative_path(plugin_path, runtime_paths)
     if relative.exists():
@@ -251,13 +255,13 @@ def _load_plugin_base(root: Path) -> _PluginBase:
     if not root.exists() or not root.is_dir():
         msg = f"Configured plugin path does not exist: {root}"
         logger.error("Plugin path does not exist", path=str(root))
-        raise ValueError(msg)
+        raise PluginValidationError(msg)
 
     manifest_path = root / _PLUGIN_MANIFEST
     if not manifest_path.exists():
         msg = f"Plugin manifest missing: {manifest_path}"
         logger.error("Plugin manifest missing", path=str(manifest_path))
-        raise ValueError(msg)
+        raise PluginValidationError(msg)
 
     if not root.is_relative_to(_REPO_ROOT):
         logger.warning("Loading non-bundled plugin", path=str(root))
@@ -267,7 +271,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
     except OSError as exc:
         msg = f"Failed to stat plugin manifest {manifest_path}: {exc}"
         logger.exception("Failed to stat plugin manifest", path=str(manifest_path), error=str(exc))
-        raise ValueError(msg) from exc
+        raise PluginValidationError(msg) from exc
 
     cached = _PLUGIN_CACHE.get(manifest_path)
     if cached and cached.manifest_mtime == manifest_mtime:
@@ -326,36 +330,36 @@ def _parse_manifest(path: Path) -> _PluginManifest:
     except (OSError, json.JSONDecodeError) as exc:
         msg = f"Failed to parse plugin manifest {path}: {exc}"
         logger.exception("Failed to parse plugin manifest", path=str(path), error=str(exc))
-        raise ValueError(msg) from exc
+        raise PluginValidationError(msg) from exc
 
     if not isinstance(data, dict):
         msg = f"Plugin manifest must be a JSON object: {path}"
         logger.error("Plugin manifest must be a JSON object", path=str(path))
-        raise TypeError(msg)
+        raise PluginValidationError(msg)
 
     name = data.get("name")
     if not isinstance(name, str):
         msg = f"Plugin manifest missing valid string name ({path})"
         logger.error("Plugin manifest missing valid string name", path=str(path))
-        raise ValueError(msg)  # noqa: TRY004 - keep plugin manifest validation in the config error channel
+        raise PluginValidationError(msg)  # noqa: TRY004 - keep plugin manifest validation in the config error channel
     try:
         normalized_name = validate_plugin_name(name)
     except ValueError as exc:
         logger.error("Invalid plugin manifest name", path=str(path), plugin_name=name, error=str(exc))  # noqa: TRY400
         msg = f"{exc} ({path})"
-        raise ValueError(msg) from exc
+        raise PluginValidationError(msg) from exc
 
     tools_module = data.get("tools_module")
     if tools_module is not None and not isinstance(tools_module, str):
         msg = f"Plugin tools_module must be a string: {path}"
         logger.error("Plugin tools_module must be a string", path=str(path))
-        raise ValueError(msg)
+        raise PluginValidationError(msg)
 
     hooks_module = data.get("hooks_module")
     if hooks_module is not None and not isinstance(hooks_module, str):
         msg = f"Plugin hooks_module must be a string: {path}"
         logger.error("Plugin hooks_module must be a string", path=str(path))
-        raise ValueError(msg)
+        raise PluginValidationError(msg)
 
     raw_skills = data.get("skills", [])
     if raw_skills is None:
@@ -363,7 +367,7 @@ def _parse_manifest(path: Path) -> _PluginManifest:
     if not isinstance(raw_skills, list) or any(not isinstance(item, str) for item in raw_skills):
         msg = f"Plugin skills must be a list of strings: {path}"
         logger.error("Plugin skills must be a list of strings", path=str(path))
-        raise ValueError(msg)
+        raise PluginValidationError(msg)
 
     return _PluginManifest(
         name=normalized_name,
@@ -380,7 +384,7 @@ def _resolve_module_path(root: Path, module_path: str | None, *, kind: str) -> P
     if not resolved_path.exists() or not resolved_path.is_file():
         msg = f"Plugin {kind} module not found: {resolved_path}"
         logger.error("Plugin module not found", kind=kind, path=str(resolved_path))
-        raise ValueError(msg)
+        raise PluginValidationError(msg)
     return resolved_path
 
 
@@ -391,7 +395,7 @@ def _resolve_skill_dirs(root: Path, skills: list[str]) -> list[Path]:
         if not path.exists() or not path.is_dir():
             msg = f"Plugin skill path is not a directory: {path}"
             logger.error("Plugin skill path is not a directory", path=str(path))
-            raise ValueError(msg)
+            raise PluginValidationError(msg)
         skill_dirs.append(path)
     return skill_dirs
 
@@ -449,7 +453,7 @@ def _load_plugin_module(
     except OSError as exc:
         msg = f"Failed to stat plugin {kind} module {module_path}: {exc}"
         logger.exception("Failed to stat plugin module", path=str(module_path), kind=kind, error=str(exc))
-        raise ValueError(msg) from exc
+        raise PluginValidationError(msg) from exc
 
     module_name = _module_name(plugin_name, module_path)
     cached = _MODULE_IMPORT_CACHE.get(module_path)
@@ -467,7 +471,7 @@ def _load_plugin_module(
     if spec is None or spec.loader is None:
         msg = f"Failed to load plugin {kind} module: {module_path}"
         logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
-        raise ValueError(msg)
+        raise PluginValidationError(msg)
 
     module = util.module_from_spec(spec)
     sys.modules[module_name] = module
@@ -496,7 +500,7 @@ def _load_plugin_module(
                 _MODULE_IMPORT_CACHE.pop(module_path, None)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
         logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
-        raise ValueError(msg) from exc
+        raise PluginValidationError(msg) from exc
 
     _MODULE_IMPORT_CACHE[module_path] = _ModuleCacheEntry(mtime=mtime, module_name=module_name, module=module)
     return module

@@ -58,6 +58,10 @@ class ToolConfigOverrideError(ValueError):
     """Raised when authored tool config overrides are invalid."""
 
 
+class ToolMetadataValidationError(ValueError):
+    """Raised when runtime tool metadata derived from authored config is invalid."""
+
+
 @dataclass(frozen=True)
 class _ToolRegistrySnapshot:
     registry: dict[str, Callable[[], type[Toolkit]]]
@@ -165,7 +169,7 @@ def _resolved_tool_state(
             existing_owner = plugin_owner_by_tool_name.get(tool_name)
             if existing_owner is not None and existing_owner != plugin_name:
                 msg = f"Plugin tool '{tool_name}' conflicts between plugins '{existing_owner}' and '{plugin_name}'."
-                raise ValueError(msg)
+                raise ToolMetadataValidationError(msg)
             plugin_owner_by_tool_name[tool_name] = plugin_name
             desired_metadata[tool_name] = plugin_metadata
             factory = cast("Callable[[], type[Toolkit]] | None", plugin_metadata.factory)
@@ -181,7 +185,7 @@ def _reject_plugin_builtin_tool_collision(tool_name: str) -> None:
     """Fail plugin registration when it reuses a built-in tool name."""
     if tool_name in _BUILTIN_TOOL_METADATA:
         msg = f"Plugin tool '{tool_name}' conflicts with built-in tool '{tool_name}'."
-        raise ValueError(msg)
+        raise ToolMetadataValidationError(msg)
 
 
 def register_builtin_tool_metadata(metadata: ToolMetadata) -> None:
@@ -203,7 +207,7 @@ def _register_plugin_tool_metadata(module_name: str, metadata: ToolMetadata) -> 
     module_registrations = _plugin_registration_store().setdefault(module_name, {})
     if metadata.name in module_registrations:
         msg = f"Plugin tool '{metadata.name}' is registered multiple times in plugin module '{module_name}'."
-        raise ValueError(msg)
+        raise ToolMetadataValidationError(msg)
     module_registrations[metadata.name] = metadata
 
 
@@ -516,7 +520,7 @@ def _build_tool_instance(
             agent_name=routing_agent_name,
             subject="Tool",
         )
-        raise ValueError(msg)
+        raise ToolMetadataValidationError(msg)
 
     metadata = TOOL_METADATA[tool_name]
     tool_class = _TOOL_REGISTRY[tool_name]()
@@ -595,7 +599,7 @@ def get_tool_by_name(
     if tool_name not in _TOOL_REGISTRY:
         available = ", ".join(sorted(_TOOL_REGISTRY.keys()))
         msg = f"Unknown tool: {tool_name}. Available tools: {available}"
-        raise ValueError(msg)
+        raise ToolMetadataValidationError(msg)
 
     build = functools.partial(
         _build_tool_instance,
@@ -903,7 +907,7 @@ def _execute_validation_plugin_module(
     spec = importlib_util.spec_from_file_location(validation_module_name, module_path)
     if spec is None or spec.loader is None:
         msg = f"Failed to load plugin validation module: {module_path}"
-        raise ValueError(msg)
+        raise ToolMetadataValidationError(msg)
 
     previous_module = sys.modules.get(validation_module_name)
     previous_modules_within_root = {
@@ -921,7 +925,7 @@ def _execute_validation_plugin_module(
             spec.loader.exec_module(module)
     except Exception as exc:
         msg = f"Plugin validation module execution failed for {module_path}: {exc}"
-        raise ValueError(msg) from exc
+        raise ToolMetadataValidationError(msg) from exc
     finally:
         for loaded_module_name, loaded_module in list(sys.modules.items()):
             if loaded_module_name not in previous_modules_within_root and _module_origin_within_root(

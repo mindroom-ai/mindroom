@@ -37,3 +37,23 @@ Targeted frontend tests passed with `87 passed` across `src/store/configStore.te
 - `bun run test:unit src/store/configStore.test.ts src/components/VoiceConfig/VoiceConfig.test.tsx`
 - `nix-shell --run 'uv run pytest tests/test_openai_compat.py tests/test_plugins.py tests/test_hook_sender.py tests/test_config_commands.py tests/api/test_api.py -x -n 0 --no-cov -v'`
 - `nix-shell --run 'uv run pytest tests/ -x -n 0 --no-cov -v'`
+
+# Round 2 Report
+
+Status: complete.
+Full backend suite passed with `3479 passed, 19 skipped` in `250.77s`.
+Full frontend suite passed with `411 passed, 1 skipped`.
+
+## Triage
+
+- `H-R2-1` FIX: Added `config_lifecycle.persist_runtime_validated_config()` plus live app registration so first-party config writers publish a new committed API snapshot/generation immediately instead of waiting for the watcher, and routed `config_manager`, `self_config`, and `!config set` through it.
+- `H-R2-2` FIX: Updated `deleteAgent()` to mark `teams` and `cultures` dirty alongside `agents`, and added save-path coverage to prove dependent references are serialized out of the payload.
+- `H-R2-3` FIX: `saveRecoveryConfigSource()` now stores the generation returned by `/api/config/raw` immediately, before reload, so a failed reload does not strand the UI on an obsolete generation token.
+- `C-R2-1` FIX: Replaced the blanket `TypeError`/`ValueError` catch in `Config.validate_with_runtime()` with dedicated plugin/tool validation exception types so expected config errors stay in the 422 path while unexpected internal errors escape normally.
+
+## Tests Run
+
+- `export NIX_PATH="nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"; nix-shell --run 'uv run pytest tests/api/test_api.py tests/test_self_config.py tests/test_plugins.py tests/test_config_commands.py -x -n 0 --no-cov -v'`
+- `cd frontend && npx vitest run src/store/configStore.test.ts`
+- `export NIX_PATH="nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"; nix-shell --run 'uv run pytest tests/ -x -n 0 --no-cov -v'`
+- `cd frontend && npx vitest run`

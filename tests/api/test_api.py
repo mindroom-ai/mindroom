@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from mindroom import constants, frontend_assets
 from mindroom.api import config_lifecycle, google_integration, main
 from mindroom.api import workers as workers_api
+from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
 from mindroom.matrix.health import (
     mark_matrix_sync_loop_started,
@@ -2541,6 +2542,33 @@ def test_config_generation_headers_protect_full_and_raw_save_endpoints(
         json={"source": replacement_source},
     )
     assert stale_raw_save_response.status_code == 409
+
+
+def test_first_party_config_writers_advance_generation_before_watcher_reload(
+    test_client: TestClient,
+) -> None:
+    """Command-side config writes should publish a newer generation before the file watcher runs."""
+    initial_load = test_client.post("/api/config/load")
+    assert initial_load.status_code == 200
+    initial_generation = int(initial_load.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+
+    response = asyncio.run(
+        apply_config_change(
+            "defaults.markdown",
+            False,
+            main._app_context(main.app).runtime_paths,
+        )
+    )
+
+    assert "Configuration updated successfully" in response
+
+    stale_save_response = test_client.put(
+        "/api/config/save",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(initial_generation)},
+        json=_authored_config_payload("stale"),
+    )
+
+    assert stale_save_response.status_code == 409
 
 
 def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path) -> None:
