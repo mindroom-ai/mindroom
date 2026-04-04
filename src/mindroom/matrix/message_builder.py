@@ -4,7 +4,11 @@ import re
 from html import escape
 from typing import Any
 
-import markdown
+from markdown_it import MarkdownIt
+from pygments import highlight as _pygments_highlight
+from pygments.formatters.html import HtmlFormatter
+from pygments.lexers import get_lexer_by_name
+from pygments.util import ClassNotFound
 
 _HTML_TAG_PATTERN = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)(?:\s+[^<>]*)?\s*/?>")
 
@@ -72,32 +76,37 @@ def _escape_unsupported_html_tags(html_text: str) -> str:
     return _HTML_TAG_PATTERN.sub(_replace_tag, html_text)
 
 
+_HIGHLIGHT_FORMATTER = HtmlFormatter(noclasses=True, nowrap=True)
+
+
+def _highlight(code: str, lang: str, _attrs: str) -> str:
+    """Pygments syntax-highlight callback for markdown-it-py."""
+    if not lang:
+        return ""
+    try:
+        lexer = get_lexer_by_name(lang)
+    except ClassNotFound:
+        return ""
+    return _pygments_highlight(code, lexer, _HIGHLIGHT_FORMATTER)
+
+
 def markdown_to_html(text: str) -> str:
     """Convert markdown text to HTML for Matrix formatted messages.
 
-    Args:
-        text: The markdown text to convert
-
-    Returns:
-        HTML formatted text
-
+    Uses markdown-it-py with ``breaks=True`` (replaces ``nl2br`` — newlines
+    become ``<br>`` inside paragraphs) and GFM table + strikethrough rules.
+    Unlike the old ``markdown`` library, tables parse correctly even without a
+    blank line before them.
     """
-    # Configure markdown with common extensions
-    md = markdown.Markdown(
-        extensions=[
-            "markdown.extensions.fenced_code",
-            "markdown.extensions.codehilite",
-            "markdown.extensions.tables",
-            "markdown.extensions.nl2br",
-        ],
-        extension_configs={
-            "markdown.extensions.codehilite": {
-                "use_pygments": True,  # Use Pygments for syntax highlighting.
-                "noclasses": True,  # Use inline styles instead of CSS classes
-            },
-        },
-    )
-    html_text: str = md.convert(text)
+    md = MarkdownIt("commonmark", {"breaks": True, "highlight": _highlight})
+    md.enable("table")
+    md.enable("strikethrough")
+    # Disable html_block so that block-level HTML tags (e.g. <div>, <search>)
+    # don't swallow subsequent markdown on the next line.  Inline HTML tags
+    # still pass through via the html_inline rule and are post-processed by
+    # _escape_unsupported_html_tags.
+    md.disable("html_block")
+    html_text: str = md.render(text)
     return _escape_unsupported_html_tags(html_text)
 
 
