@@ -495,20 +495,37 @@ class MatrixMessageTools(Toolkit):
 
     @staticmethod
     def _bundled_replacement_body(event_source: dict[str, object]) -> str | None:
-        unsigned = event_source.get("unsigned", {})
-        if not isinstance(unsigned, dict):
-            return None
-        relations = unsigned.get("m.relations", {})
-        if not isinstance(relations, dict):
-            return None
-        replacement = relations.get("m.replace", {})
-        if not isinstance(replacement, dict):
-            return None
-        content = replacement.get("content", {})
-        if not isinstance(content, dict):
-            return None
-        body = content.get("body")
-        return body if isinstance(body, str) else None
+        for container in (
+            event_source.get("unsigned"),
+            event_source,
+        ):
+            if not isinstance(container, dict):
+                continue
+            relations = container.get("m.relations", {})
+            if not isinstance(relations, dict):
+                continue
+            replacement = relations.get("m.replace", {})
+            if not isinstance(replacement, dict):
+                continue
+            for candidate in (
+                replacement,
+                replacement.get("event"),
+                replacement.get("latest_event"),
+            ):
+                if not isinstance(candidate, dict):
+                    continue
+                content = candidate.get("content", {})
+                if not isinstance(content, dict):
+                    continue
+                new_content = content.get("m.new_content", {})
+                if isinstance(new_content, dict):
+                    body = new_content.get("body")
+                    if isinstance(body, str):
+                        return body
+                body = content.get("body")
+                if isinstance(body, str):
+                    return body
+        return None
 
     async def _serialize_thread_root(
         self,
@@ -539,13 +556,9 @@ class MatrixMessageTools(Toolkit):
             replacement_body = self._bundled_replacement_body(source)
             if replacement_body is not None:
                 body_preview = self._message_preview(replacement_body)
-            elif isinstance(event, nio.RoomMessageText):
+            else:
                 resolved_message = await extract_and_resolve_message(event, context.client)
                 body_preview = self._message_preview(resolved_message.get("body"))
-            else:
-                content = source.get("content", {})
-                body = content.get("body") if isinstance(content, dict) else None
-                body_preview = self._message_preview(body)
         else:
             content = source.get("content", {})
             body = content.get("body") if isinstance(content, dict) else None

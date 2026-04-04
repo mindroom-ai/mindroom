@@ -109,6 +109,36 @@ def _make_room_thread_root(
     return event
 
 
+def _make_bundled_replacement(
+    *,
+    event_id: str,
+    body: str,
+    msgtype: str,
+    bundle_key: str | None = None,
+) -> dict[str, object]:
+    replacement_event = {
+        "type": "m.room.message",
+        "event_id": f"{event_id}-edit",
+        "sender": "@editor:localhost",
+        "origin_server_ts": 9999,
+        "content": {
+            "body": f"* {body}",
+            "msgtype": msgtype,
+            "m.new_content": {
+                "body": body,
+                "msgtype": msgtype,
+            },
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": event_id,
+            },
+        },
+    }
+    if bundle_key is None:
+        return replacement_event
+    return {bundle_key: replacement_event}
+
+
 def test_matrix_message_tool_registered_and_instantiates() -> None:
     """Matrix message tool should be available from metadata registry."""
     config = bind_runtime_paths(
@@ -884,12 +914,11 @@ async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_
     thread_root.source["unsigned"] = {
         "m.relations": {
             "m.thread": {"count": 4},
-            "m.replace": {
-                "content": {
-                    "body": "Final root message",
-                    "msgtype": "m.text",
-                },
-            },
+            "m.replace": _make_bundled_replacement(
+                event_id="$thread-root",
+                body="Final root message",
+                msgtype="m.text",
+            ),
         },
     }
 
@@ -926,8 +955,11 @@ async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_notice_root() -> None:
-    """room-threads should prefer bundled replacement bodies for notice roots."""
+@pytest.mark.parametrize("bundle_key", ["event", "latest_event"])
+async def test_matrix_message_room_threads_uses_nested_bundled_replacement_preview_for_notice_root(
+    bundle_key: str,
+) -> None:
+    """room-threads should read notice previews from nested bundled replacement events."""
     tool = MatrixMessageTools()
     ctx = _make_context()
     thread_root = nio.RoomMessageNotice.from_dict(
@@ -941,12 +973,12 @@ async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_
     thread_root.source["unsigned"] = {
         "m.relations": {
             "m.thread": {"count": 2},
-            "m.replace": {
-                "content": {
-                    "body": "Compacted 12 messages",
-                    "msgtype": "m.notice",
-                },
-            },
+            "m.replace": _make_bundled_replacement(
+                event_id="$thread-notice",
+                body="Compacted 12 messages",
+                msgtype="m.notice",
+                bundle_key=bundle_key,
+            ),
         },
     }
 
@@ -955,6 +987,10 @@ async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_
             "mindroom.custom_tools.matrix_message.get_room_threads_page",
             new=AsyncMock(return_value=([thread_root], None)),
         ) as mock_get_page,
+        patch(
+            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            new=AsyncMock(),
+        ) as mock_extract,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
@@ -975,6 +1011,52 @@ async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_
         limit=1,
         page_token=None,
     )
+    mock_extract.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_room_threads_resolves_notice_root_without_replacement() -> None:
+    """room-threads should resolve notice roots through the canonical message path."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    thread_root = nio.RoomMessageNotice.from_dict(
+        {
+            "event_id": "$thread-notice",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1234,
+            "content": {"msgtype": "m.notice", "body": "Thinking..."},
+        },
+    )
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ) as mock_get_page,
+        patch(
+            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            new=AsyncMock(return_value={"body": "Resolved notice body"}),
+        ) as mock_extract,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"] == [
+        {
+            "thread_id": "$thread-notice",
+            "sender": "@alice:localhost",
+            "timestamp": 1234,
+            "body_preview": "Resolved notice body",
+            "reply_count": 0,
+        },
+    ]
+    mock_get_page.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        limit=1,
+        page_token=None,
+    )
+    mock_extract.assert_awaited_once_with(thread_root, ctx.client)
 
 
 @pytest.mark.asyncio
