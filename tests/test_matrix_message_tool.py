@@ -29,6 +29,14 @@ def _reset_matrix_message_rate_limit() -> None:
     MatrixMessageTools._recent_actions.clear()
 
 
+def _empty_async_iterator() -> object:
+    async def iterator() -> object:
+        if False:
+            yield None
+
+    return iterator()
+
+
 def _make_context(
     *,
     room_id: str = "!room:localhost",
@@ -45,6 +53,7 @@ def _make_context(
     client = AsyncMock()
     client.room_send = AsyncMock()
     client.room_messages = AsyncMock()
+    client.room_get_event_relations = MagicMock(side_effect=lambda *args, **kwargs: _empty_async_iterator())
     return ToolRuntimeContext(
         agent_name="general",
         room_id=room_id,
@@ -861,8 +870,64 @@ async def test_matrix_message_room_threads_returns_paginated_thread_roots() -> N
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_room_threads_uses_notice_body_preview() -> None:
-    """room-threads should derive body previews from notice root bodies."""
+async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_text_root() -> None:
+    """room-threads should prefer bundled replacement bodies for text roots."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    thread_root = _make_room_thread_root(
+        event_id="$thread-root",
+        sender="@alice:localhost",
+        timestamp=1234,
+        body="Thinking...",
+        reply_count=4,
+    )
+    thread_root.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 4},
+            "m.replace": {
+                "content": {
+                    "body": "Final root message",
+                    "msgtype": "m.text",
+                },
+            },
+        },
+    }
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ) as mock_get_page,
+        patch(
+            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            new=AsyncMock(),
+        ) as mock_extract,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"] == [
+        {
+            "thread_id": "$thread-root",
+            "sender": "@alice:localhost",
+            "timestamp": 1234,
+            "body_preview": "Final root message",
+            "reply_count": 4,
+        },
+    ]
+    mock_get_page.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        limit=1,
+        page_token=None,
+    )
+    mock_extract.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_notice_root() -> None:
+    """room-threads should prefer bundled replacement bodies for notice roots."""
     tool = MatrixMessageTools()
     ctx = _make_context()
     thread_root = nio.RoomMessageNotice.from_dict(
@@ -870,10 +935,20 @@ async def test_matrix_message_room_threads_uses_notice_body_preview() -> None:
             "event_id": "$thread-notice",
             "sender": "@alice:localhost",
             "origin_server_ts": 1234,
-            "content": {"msgtype": "m.notice", "body": "Compacted 12 messages"},
+            "content": {"msgtype": "m.notice", "body": "Thinking..."},
         },
     )
-    thread_root.source["unsigned"] = {"m.relations": {"m.thread": {"count": 2}}}
+    thread_root.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 2},
+            "m.replace": {
+                "content": {
+                    "body": "Compacted 12 messages",
+                    "msgtype": "m.notice",
+                },
+            },
+        },
+    }
 
     with (
         patch(

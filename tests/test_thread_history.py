@@ -1362,6 +1362,23 @@ async def test_get_room_threads_page_uses_single_threads_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_room_threads_page_requires_access_token() -> None:
+    """get_room_threads_page should fail early when the client has no access token."""
+    client = AsyncMock()
+    client.access_token = None
+
+    with pytest.raises(RoomThreadsPageError) as exc_info:
+        await get_room_threads_page(
+            client,
+            "!room:localhost",
+            limit=20,
+        )
+
+    assert exc_info.value.response == "Matrix client access token is required for room thread pagination."
+    client._send.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_get_room_threads_page_raises_for_matrix_error() -> None:
     """get_room_threads_page should preserve Matrix error details for invalid tokens."""
     client = AsyncMock()
