@@ -268,7 +268,10 @@ class _SandboxRunnerContext:
 
 
 def _app_context(app: FastAPI) -> _SandboxRunnerContext:
-    context = getattr(app.state, "sandbox_runner_context", None)
+    try:
+        context = app.state.sandbox_runner_context
+    except AttributeError:
+        context = None
     if not isinstance(context, _SandboxRunnerContext):
         msg = "Sandbox runner context is not initialized"
         raise TypeError(msg)

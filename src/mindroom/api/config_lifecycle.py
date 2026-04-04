@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import threading
 import weakref
+from collections.abc import Awaitable, Callable
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import Any, cast
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request
@@ -26,17 +28,17 @@ from mindroom.config.main import load_config as load_runtime_config_model
 from mindroom.file_watcher import watch_file
 from mindroom.logging_config import get_logger
 
-if TYPE_CHECKING:
-    import asyncio
-    from collections.abc import Awaitable, Callable
-    from types import TracebackType
-
 logger = get_logger(__name__)
 _UNSET = object()
 _REQUEST_SNAPSHOT_SCOPE_KEY = "api_snapshot"
 CONFIG_GENERATION_HEADER = "x-mindroom-config-generation"
 _REGISTERED_API_APPS: weakref.WeakSet[FastAPI] = weakref.WeakSet()
 _REGISTERED_API_APPS_LOCK = threading.Lock()
+
+type WatchFileFn = Callable[
+    [Path | str, Callable[[], Awaitable[None]], asyncio.Event | None],
+    Awaitable[None],
+]
 
 
 @dataclass(frozen=True)
@@ -46,23 +48,6 @@ class ConfigLoadResult:
     success: bool
     error_status_code: int | None = None
     error_detail: object | None = None
-
-
-class ApiConfigLock(Protocol):
-    """Lock protocol used to guard API config cache updates."""
-
-    def __enter__(self) -> object:
-        """Acquire the lock."""
-        ...
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> bool | None:
-        """Release the lock."""
-        ...
 
 
 @dataclass
@@ -81,17 +66,8 @@ class ApiSnapshot:
 class ApiState:
     """Stable holder for the current API runtime snapshot."""
 
-    config_lock: ApiConfigLock
+    config_lock: threading.Lock
     snapshot: ApiSnapshot
-
-
-class _WatchFile(Protocol):
-    async def __call__(
-        self,
-        file_path: Path | str,
-        callback: Callable[[], Awaitable[None]],
-        stop_event: asyncio.Event | None = None,
-    ) -> None: ...
 
 
 def _config_error_detail(
@@ -195,9 +171,7 @@ def persist_runtime_validated_config(
 ) -> None:
     """Persist one validated config and immediately publish matching committed API snapshots."""
     validated_payload = runtime_config.authored_model_dump()
-    matching_states = [
-        state for state in _registered_api_states() if state.snapshot.runtime_paths == runtime_paths
-    ]
+    matching_states = [state for state in _registered_api_states() if state.snapshot.runtime_paths == runtime_paths]
     if not matching_states:
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
         return
@@ -232,11 +206,14 @@ def _validated_config_payload(
 
 def _app_config_state(api_app: FastAPI) -> ApiState:
     """Return the app-bound API config state."""
-    state = getattr(api_app.state, "api_state", None)
-    if state is None:
+    try:
+        state = api_app.state.api_state
+    except AttributeError:
+        state = None
+    if not isinstance(state, ApiState):
         msg = "API context is not initialized"
         raise TypeError(msg)
-    return cast("ApiState", state)
+    return state
 
 
 def register_api_app(api_app: FastAPI) -> None:
@@ -578,7 +555,7 @@ def load_config_from_file(
     runtime_paths: constants.RuntimePaths,
     *,
     config_data: dict[str, Any],
-    config_lock: ApiConfigLock,
+    config_lock: threading.Lock,
 ) -> ConfigLoadResult:
     """Load config from the runtime config file into the shared cache."""
     result, validated_payload, _runtime_config = _load_config_result(runtime_paths)
@@ -780,7 +757,7 @@ async def watch_config(
     runtime_paths: constants.RuntimePaths,
     on_config_change: Callable[[], bool],
     *,
-    watch_file_impl: _WatchFile = watch_file,
+    watch_file_impl: WatchFileFn = watch_file,
 ) -> None:
     """Watch the runtime config file and reload the in-memory cache when it changes."""
 
@@ -788,4 +765,4 @@ async def watch_config(
         logger.info("Config file changed", path=str(runtime_paths.config_path))
         on_config_change()
 
-    await watch_file_impl(runtime_paths.config_path, _handle_config_change, stop_event=stop_event)
+    await watch_file_impl(runtime_paths.config_path, _handle_config_change, stop_event)

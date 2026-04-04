@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom import constants
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.api import config_lifecycle
-from mindroom.api.config_lifecycle import ApiConfigLock, ApiSnapshot, ApiState, ConfigLoadResult
+from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult
 from mindroom.api.config_lifecycle import api_runtime_paths as api_request_runtime_paths
 from mindroom.api.config_lifecycle import load_config_into_app as load_api_config_into_app
 from mindroom.api.config_lifecycle import raise_for_config_load_result as raise_api_config_load_result
@@ -202,7 +202,10 @@ def api_runtime_paths(request: Request) -> constants.RuntimePaths:
 
 def _app_state(api_app: FastAPI) -> ApiState:
     """Return the committed API state holder for one app instance."""
-    state = getattr(api_app.state, "api_state", None)
+    try:
+        state = api_app.state.api_state
+    except AttributeError:
+        state = None
     if not isinstance(state, ApiState):
         msg = "API context is not initialized"
         raise TypeError(msg)
@@ -254,17 +257,20 @@ def _app_config_data(api_app: FastAPI) -> dict[str, Any]:
     return _app_context(api_app).config_data
 
 
-def _app_config_lock(api_app: FastAPI) -> ApiConfigLock:
+def _app_config_lock(api_app: FastAPI) -> threading.Lock:
     """Return the config lock for one app instance."""
     return _app_state(api_app).config_lock
 
 
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Initialize one API app instance with explicit runtime-bound state."""
-    previous_state = getattr(api_app.state, "api_state", None)
+    try:
+        previous_state = api_app.state.api_state
+    except AttributeError:
+        previous_state = None
     if not isinstance(previous_state, ApiState):
         api_app.state.api_state = ApiState(
-            config_lock=cast("ApiConfigLock", threading.Lock()),
+            config_lock=threading.Lock(),
             snapshot=ApiSnapshot(
                 generation=0,
                 runtime_paths=runtime_paths,
@@ -279,7 +285,10 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
 
     config_lock = previous_state.config_lock
     with config_lock:
-        current_state = getattr(api_app.state, "api_state", previous_state)
+        try:
+            current_state = api_app.state.api_state
+        except AttributeError:
+            current_state = previous_state
         if not isinstance(current_state, ApiState):
             current_state = previous_state
         current_snapshot = current_state.snapshot
