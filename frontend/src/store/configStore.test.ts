@@ -3325,6 +3325,14 @@ describe('configStore', () => {
             id: 'test-model',
           },
         },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'test',
+            },
+          },
+        },
         defaults: {
           markdown: true,
         },
