@@ -341,7 +341,7 @@ def _parse_manifest(path: Path) -> _PluginManifest:
     if not isinstance(name, str):
         msg = f"Plugin manifest missing valid string name ({path})"
         logger.error("Plugin manifest missing valid string name", path=str(path))
-        raise PluginValidationError(msg)  # noqa: TRY004 - keep plugin manifest validation in the config error channel
+        raise PluginValidationError(msg)
     try:
         normalized_name = validate_plugin_name(name)
     except ValueError as exc:

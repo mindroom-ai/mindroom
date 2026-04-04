@@ -2557,7 +2557,7 @@ def test_first_party_config_writers_advance_generation_before_watcher_reload(
             "defaults.markdown",
             False,
             main._app_context(main.app).runtime_paths,
-        )
+        ),
     )
 
     assert "Configuration updated successfully" in response
@@ -2979,9 +2979,7 @@ def test_api_key_raw_endpoints_recover_from_invalid_reload(
         "/api/config/raw",
         headers={
             "Authorization": "Bearer test-key",
-            config_lifecycle.CONFIG_GENERATION_HEADER: raw_response.headers[
-                config_lifecycle.CONFIG_GENERATION_HEADER
-            ],
+            config_lifecycle.CONFIG_GENERATION_HEADER: raw_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER],
         },
         json={"source": valid_source},
     )

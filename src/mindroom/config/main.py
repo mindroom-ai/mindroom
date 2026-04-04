@@ -43,9 +43,9 @@ from mindroom.matrix.identity import (
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
-from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.tool_system.metadata import ToolConfigOverrideError, ToolMetadataValidationError
 from mindroom.tool_system.plugins import PluginValidationError
+from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:

@@ -315,7 +315,10 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
     with (
         patch("mindroom.api.openai_compat._authenticate_request", side_effect=_authenticate_and_swap),
         patch("mindroom.api.openai_compat._load_config", side_effect=_capture_load_config),
-        patch("mindroom.api.openai_compat._non_stream_completion", new=AsyncMock(return_value=JSONResponse({"ok": True}))),
+        patch(
+            "mindroom.api.openai_compat._non_stream_completion",
+            new=AsyncMock(return_value=JSONResponse({"ok": True})),
+        ),
         TestClient(app) as client,
     ):
         response = client.post(

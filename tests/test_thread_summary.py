@@ -16,8 +16,8 @@ from mindroom.thread_summary import (
     _last_summary_counts,
     _next_threshold,
     _recover_last_summary_count,
-    _summary_locks,
     _send_summary_event,
+    _summary_locks,
     maybe_generate_thread_summary,
 )
 

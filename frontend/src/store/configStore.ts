@@ -746,7 +746,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       };
     }
     if (committedGeneration == null) {
-      const generationDiagnostics = globalDiagnostics('Missing committed configuration generation.', false);
+      const generationDiagnostics = globalDiagnostics(
+        'Missing committed configuration generation.',
+        false
+      );
       set({
         diagnostics: generationDiagnostics,
         isLoading: false,
@@ -996,7 +999,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       };
     }
     if (committedGeneration == null) {
-      const generationDiagnostics = globalDiagnostics('Missing committed configuration generation.', true);
+      const generationDiagnostics = globalDiagnostics(
+        'Missing committed configuration generation.',
+        true
+      );
       set({
         diagnostics: generationDiagnostics,
         isLoading: false,

@@ -45,7 +45,9 @@ export class ConfigValidationError extends Error {
 }
 
 export class ConfigStaleError extends Error {
-  constructor(message = 'Configuration changed while request was in progress. Retry the operation.') {
+  constructor(
+    message = 'Configuration changed while request was in progress. Retry the operation.'
+  ) {
     super(message);
     this.name = 'ConfigStaleError';
   }
@@ -62,9 +64,13 @@ async function responseDetail(response: Response): Promise<unknown> {
 
 function responseGeneration(response: Response, fallbackGeneration: number): number {
   const headerValue =
-    typeof response.headers?.get === 'function' ? response.headers.get(CONFIG_GENERATION_HEADER) : null;
+    typeof response.headers?.get === 'function'
+      ? response.headers.get(CONFIG_GENERATION_HEADER)
+      : null;
   const parsed =
-    headerValue == null || headerValue.trim() === '' ? Number.NaN : Number.parseInt(headerValue, 10);
+    headerValue == null || headerValue.trim() === ''
+      ? Number.NaN
+      : Number.parseInt(headerValue, 10);
   return Number.isFinite(parsed) ? parsed : fallbackGeneration;
 }
 
@@ -144,7 +150,9 @@ export async function saveConfig(
   if (!response.ok) {
     const detail = await responseDetail(response);
     if (response.status === 409) {
-      throw new ConfigStaleError(typeof detail === 'string' && detail.length > 0 ? detail : undefined);
+      throw new ConfigStaleError(
+        typeof detail === 'string' && detail.length > 0 ? detail : undefined
+      );
     }
     if (response.status === 422 && isConfigValidationIssueList(detail)) {
       throw new ConfigValidationError(detail);
@@ -192,7 +200,9 @@ export async function saveRawConfigSource(
   if (!response.ok) {
     const detail = await responseDetail(response);
     if (response.status === 409) {
-      throw new ConfigStaleError(typeof detail === 'string' && detail.length > 0 ? detail : undefined);
+      throw new ConfigStaleError(
+        typeof detail === 'string' && detail.length > 0 ? detail : undefined
+      );
     }
     if (response.status === 422 && isConfigValidationIssueList(detail)) {
       throw new ConfigValidationError(detail);

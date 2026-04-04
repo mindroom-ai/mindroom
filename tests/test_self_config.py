@@ -7,8 +7,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from mindroom.api import config_lifecycle, main
 from mindroom.agents import create_agent
+from mindroom.api import config_lifecycle, main
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
