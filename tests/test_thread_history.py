@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import nio
 import pytest
 from nio.api import RelationshipType
@@ -1439,5 +1440,33 @@ async def test_get_room_threads_page_wraps_transport_timeout() -> None:
         )
 
     assert exc_info.value.response == "TimeoutError: request timed out"
+    assert exc_info.value.errcode is None
+    assert exc_info.value.retry_after_ms is None
+
+
+@pytest.mark.asyncio
+async def test_get_room_threads_page_wraps_aiohttp_client_errors() -> None:
+    """get_room_threads_page should convert aiohttp transport errors into structured errors."""
+    client = AsyncMock()
+    auth_value = "secret"
+    page_marker = "page_1"
+    client.access_token = auth_value
+    client._send = AsyncMock(side_effect=aiohttp.ClientPayloadError("payload error"))
+
+    with (
+        patch(
+            "mindroom.matrix.client.nio.Api.room_get_threads",
+            return_value=("GET", "/_matrix/client/v1/rooms/%21room%3Alocalhost/threads"),
+        ),
+        pytest.raises(RoomThreadsPageError) as exc_info,
+    ):
+        await get_room_threads_page(
+            client,
+            "!room:localhost",
+            limit=20,
+            page_token=page_marker,
+        )
+
+    assert exc_info.value.response == "ClientPayloadError: payload error"
     assert exc_info.value.errcode is None
     assert exc_info.value.retry_after_ms is None

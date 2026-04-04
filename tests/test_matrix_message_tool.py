@@ -771,14 +771,14 @@ async def test_matrix_message_thread_list_preserves_notice_messages() -> None:
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id=None)
     thread_messages = [
-        {"event_id": "$one", "timestamp": 1, "sender": "@alice:localhost", "body": "first"},
-        {
-            "event_id": "$notice",
-            "timestamp": 2,
-            "sender": "@mindroom_general:localhost",
-            "body": "Compacted 12 messages",
-            "msgtype": "m.notice",
-        },
+        make_visible_message(event_id="$one", timestamp=1, sender="@alice:localhost", body="first"),
+        make_visible_message(
+            event_id="$notice",
+            timestamp=2,
+            sender="@mindroom_general:localhost",
+            body="Compacted 12 messages",
+            content={"body": "Compacted 12 messages", "msgtype": "m.notice"},
+        ),
     ]
 
     with (
@@ -797,7 +797,7 @@ async def test_matrix_message_thread_list_preserves_notice_messages() -> None:
         )
 
     assert payload["status"] == "ok"
-    assert payload["messages"] == thread_messages
+    assert payload["messages"] == [message.to_dict() for message in thread_messages]
     assert payload["messages"][1]["msgtype"] == "m.notice"
     mock_fetch.assert_awaited_once_with(ctx.client, ctx.room_id, "$thread-other:localhost")
 
@@ -858,6 +858,93 @@ async def test_matrix_message_room_threads_returns_paginated_thread_roots() -> N
         page_token=page_marker,
     )
     mock_extract.assert_awaited_once_with(thread_root, ctx.client)
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_room_threads_uses_notice_body_preview() -> None:
+    """room-threads should derive body previews from notice root bodies."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    thread_root = nio.RoomMessageNotice.from_dict(
+        {
+            "event_id": "$thread-notice",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1234,
+            "content": {"msgtype": "m.notice", "body": "Compacted 12 messages"},
+        },
+    )
+    thread_root.source["unsigned"] = {"m.relations": {"m.thread": {"count": 2}}}
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ) as mock_get_page,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"] == [
+        {
+            "thread_id": "$thread-notice",
+            "sender": "@alice:localhost",
+            "timestamp": 1234,
+            "body_preview": "Compacted 12 messages",
+            "reply_count": 2,
+        },
+    ]
+    mock_get_page.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        limit=1,
+        page_token=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_room_threads_skips_malformed_roots() -> None:
+    """room-threads should skip malformed roots instead of crashing the whole action."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    thread_root = _make_room_thread_root(
+        event_id="$thread-root",
+        sender="@alice:localhost",
+        timestamp=1234,
+        body="Root message body",
+        reply_count=4,
+    )
+
+    class MalformedThreadRoot:
+        source = {"type": "m.room.message", "content": {"msgtype": "m.text", "body": "broken"}}
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            new=AsyncMock(return_value=([MalformedThreadRoot(), thread_root], None)),
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            new=AsyncMock(return_value={"body": "Resolved root message body"}),
+        ) as mock_extract,
+        patch("mindroom.custom_tools.matrix_message.logger.warning") as mock_warning,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="room-threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["count"] == 1
+    assert payload["threads"] == [
+        {
+            "thread_id": "$thread-root",
+            "sender": "@alice:localhost",
+            "timestamp": 1234,
+            "body_preview": "Resolved root message body",
+            "reply_count": 4,
+        },
+    ]
+    mock_extract.assert_awaited_once_with(thread_root, ctx.client)
+    mock_warning.assert_called_once()
 
 
 @pytest.mark.asyncio

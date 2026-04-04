@@ -36,10 +36,13 @@ from mindroom.matrix.client import (
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
+from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+logger = get_logger(__name__)
 
 
 class MatrixMessageTools(Toolkit):
@@ -495,8 +498,24 @@ class MatrixMessageTools(Toolkit):
         context: ToolRuntimeContext,
         *,
         event: nio.Event,
-    ) -> dict[str, object]:
-        source = event.source
+    ) -> dict[str, object] | None:
+        event_id = getattr(event, "event_id", None)
+        sender = getattr(event, "sender", None)
+        timestamp = getattr(event, "server_timestamp", None)
+        source = getattr(event, "source", None)
+        if (
+            not isinstance(event_id, str)
+            or not isinstance(sender, str)
+            or not isinstance(timestamp, int)
+            or isinstance(timestamp, bool)
+            or not isinstance(source, dict)
+        ):
+            logger.warning(
+                "Skipping malformed room thread root",
+                room_id=context.room_id,
+                event_type=type(event).__name__,
+            )
+            return None
         if source.get("type") == "m.room.encrypted":
             body_preview = "[encrypted]"
         elif isinstance(event, nio.RoomMessageText):
@@ -508,9 +527,9 @@ class MatrixMessageTools(Toolkit):
             body_preview = self._message_preview(body)
 
         return {
-            "thread_id": event.event_id,
-            "sender": event.sender,
-            "timestamp": event.server_timestamp,
+            "thread_id": event_id,
+            "sender": sender,
+            "timestamp": timestamp,
             "body_preview": body_preview,
             "reply_count": self._thread_reply_count(event),
         }
@@ -542,7 +561,11 @@ class MatrixMessageTools(Toolkit):
                 error_payload["retry_after_ms"] = exc.retry_after_ms
             return self._payload("error", **error_payload)
 
-        threads = [await self._serialize_thread_root(context, event=event) for event in thread_roots]
+        threads: list[dict[str, object]] = []
+        for event in thread_roots:
+            thread = await self._serialize_thread_root(context, event=event)
+            if thread is not None:
+                threads.append(thread)
         return self._payload(
             "ok",
             action="room-threads",
@@ -856,16 +879,16 @@ class MatrixMessageTools(Toolkit):
         - A send or reply call may include text, attachments, or both, but not neither.
 
         Args:
-            action (str): Supported actions are `send`, `reply`, `thread-reply`, `react`, `read`, `thread-list`, `edit`, and `context`; they send text or attachments, react to an event, read messages, list a thread, edit a prior event, or return targeting metadata.
-            message (str | None): Text body for `send`, `reply`, `thread-reply`, and `edit`; reaction emoji for `react` with a thumbs-up default when empty; use `None` for `read` and `context`.
+            action (str): Supported actions are `send`, `reply`, `thread-reply`, `react`, `read`, `room-threads`, `thread-list`, `edit`, and `context`; they send text or attachments, react to an event, read messages, list room thread roots or thread messages, edit a prior event, or return targeting metadata.
+            message (str | None): Text body for `send`, `reply`, `thread-reply`, and `edit`; reaction emoji for `react` with a thumbs-up default when empty; use `None` for `read`, `room-threads`, `thread-list`, and `context`.
             attachment_ids (list[str] | None): Context-scoped `att_*` attachment IDs; only valid for `send`, `reply`, and `thread-reply`, and the combined total with `attachment_file_paths` cannot exceed 5.
             attachment_file_paths (list[str] | None): Local file paths to register and send in the current context; only valid for `send`, `reply`, and `thread-reply`, and the combined total with `attachment_ids` cannot exceed 5.
             room_id (str | None): Optional target room ID or alias; defaults to the current room context when omitted.
             target (str | None): Event ID to react to for `react` or to edit for `edit`.
             thread_id (str | None): Optional explicit thread target; `thread_id="room"` forces room-level scope instead of inheriting the current thread.
             ignore_mentions (bool): Text-send safety flag for `send`, `reply`, and `thread-reply`; default `True` writes `com.mindroom.skip_mentions=True` to suppress mention-triggered agent dispatch, while `False` keeps mentions active and also writes `com.mindroom.original_sender=<human requester id>` when the requester is not the sending bot.
-            limit (int | None): Maximum messages returned for `read` or `thread-list`; defaults to 20 and is capped at 50.
-            page_token (str | None): Pagination token returned by `room-threads` for fetching the next page of thread roots.
+            limit (int | None): Maximum messages returned for `read` or `thread-list`, or thread roots returned for `room-threads`; defaults to 20 and is capped at 50.
+            page_token (str | None): Pagination token for `room-threads`, returned by a previous `room-threads` call to fetch the next page of thread roots.
 
         """
         context = get_tool_runtime_context()

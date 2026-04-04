@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import nio
-from aiohttp import ClientConnectionError
+from aiohttp import ClientError
 from nio import crypto
 from nio.api import RelationshipType
 from nio.responses import RoomThreadsResponse
@@ -1633,7 +1633,7 @@ async def get_room_threads_page(
             path,
             response_data=(room_id,),
         )
-    except (ClientConnectionError, TimeoutError) as exc:
+    except (ClientError, TimeoutError) as exc:
         raise _room_threads_page_error_from_exception(exc) from exc
     if not isinstance(response, RoomThreadsResponse):
         raise _room_threads_page_error_from_response(response)
