@@ -900,6 +900,56 @@ async def test_matrix_message_room_threads_returns_paginated_thread_roots() -> N
 
 
 @pytest.mark.asyncio
+async def test_matrix_message_room_threads_includes_latest_activity_ts() -> None:
+    """room-threads should expose latest activity separately from root creation time."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    thread_root = _make_room_thread_root(
+        event_id="$thread-root",
+        sender="@alice:localhost",
+        timestamp=1234,
+        body="Root message body",
+        reply_count=4,
+    )
+    thread_root.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {
+                "count": 4,
+                "latest_event": {
+                    "event_id": "$thread-reply",
+                    "origin_server_ts": 5678,
+                },
+            },
+        },
+    }
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            new=AsyncMock(return_value={"body": "Resolved root message body"}),
+        ),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"] == [
+        {
+            "thread_id": "$thread-root",
+            "sender": "@alice:localhost",
+            "timestamp": 1234,
+            "latest_activity_ts": 5678,
+            "body_preview": "Resolved root message body",
+            "reply_count": 4,
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_text_root() -> None:
     """room-threads should prefer bundled replacement bodies for text roots."""
     tool = MatrixMessageTools()

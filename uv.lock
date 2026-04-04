@@ -3644,7 +3644,7 @@ requires-dist = [
     { name = "lxml-html-clean", marker = "extra == 'newspaper'" },
     { name = "markdown", specifier = ">=3.7" },
     { name = "matplotlib", marker = "extra == 'visualization'" },
-    { name = "matrix-nio", specifier = ">=0.24" },
+    { name = "matrix-nio", specifier = ">=0.25.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.12.4" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },

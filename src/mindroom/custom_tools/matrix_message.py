@@ -517,15 +517,38 @@ class MatrixMessageTools(Toolkit):
                 content = candidate.get("content", {})
                 if not isinstance(content, dict):
                     continue
+                # This bundled replacement is attached by the homeserver for this root event,
+                # so revalidating m.relates_to.event_id here is redundant defensive code.
                 new_content = content.get("m.new_content", {})
                 if isinstance(new_content, dict):
                     body = new_content.get("body")
                     if isinstance(body, str):
+                        # Previews intentionally use the inline bundled body only. Hydrating
+                        # io.mindroom.long_text sidecars here would add async I/O to a sync preview path.
                         return body
                 body = content.get("body")
                 if isinstance(body, str):
                     return body
         return None
+
+    @staticmethod
+    def _thread_latest_activity_ts(event: nio.Event) -> int | None:
+        unsigned = event.source.get("unsigned", {})
+        if not isinstance(unsigned, dict):
+            return None
+        relations = unsigned.get("m.relations", {})
+        if not isinstance(relations, dict):
+            return None
+        thread_metadata = relations.get("m.thread", {})
+        if not isinstance(thread_metadata, dict):
+            return None
+        latest_event = thread_metadata.get("latest_event")
+        if not isinstance(latest_event, dict):
+            return None
+        latest_activity_ts = latest_event.get("origin_server_ts")
+        if not isinstance(latest_activity_ts, int) or isinstance(latest_activity_ts, bool):
+            return None
+        return latest_activity_ts
 
     async def _serialize_thread_root(
         self,
@@ -564,13 +587,17 @@ class MatrixMessageTools(Toolkit):
             body = content.get("body") if isinstance(content, dict) else None
             body_preview = self._message_preview(body)
 
-        return {
+        payload = {
             "thread_id": event_id,
             "sender": sender,
             "timestamp": timestamp,
             "body_preview": body_preview,
             "reply_count": self._thread_reply_count(event),
         }
+        latest_activity_ts = self._thread_latest_activity_ts(event)
+        if latest_activity_ts is not None:
+            payload["latest_activity_ts"] = latest_activity_ts
+        return payload
 
     async def _room_threads(
         self,
