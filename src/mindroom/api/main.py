@@ -745,6 +745,11 @@ def _sanitize_next_path(next_path: str | None) -> str:
     return next_path
 
 
+def _set_config_generation_header(response: Response, generation: int) -> None:
+    """Attach the committed config generation to one API response."""
+    response.headers[config_lifecycle.CONFIG_GENERATION_HEADER] = str(generation)
+
+
 def _render_standalone_login_page(
     next_path: str,
     runtime_paths: constants.RuntimePaths,
@@ -1002,47 +1007,66 @@ async def standalone_login(request: Request, next: str = "/") -> Response:  # no
 
 
 @app.post("/api/config/load")
-async def load_config(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def load_config(
+    request: Request,
+    response: Response,
+    _user: Annotated[dict, Depends(verify_user)],
+) -> dict[str, Any]:
     """Load configuration from file."""
-    return read_api_committed_config(request, lambda config_data: dict(config_data))
+    generation = config_lifecycle.committed_generation(request)
+    payload = read_api_committed_config(request, lambda config_data: dict(config_data))
+    _set_config_generation_header(response, generation)
+    return payload
 
 
 @app.put("/api/config/save")
 async def save_config(
     request: Request,
+    response: Response,
     new_config: dict[str, Any],
     _user: Annotated[dict, Depends(verify_user)],
+    x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Save configuration to file."""
-    replace_api_committed_config(
+    generation = replace_api_committed_config(
         request,
         new_config,
         error_prefix="Failed to save configuration",
+        expected_generation=x_mindroom_config_generation,
     )
+    _set_config_generation_header(response, generation)
     return {"success": True}
 
 
 @app.get("/api/config/raw")
 async def get_raw_config_source(
     request: Request,
+    response: Response,
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, str]:
     """Return the raw config source text for recovery editing."""
-    return {"source": read_api_raw_config_source(request)}
+    generation = config_lifecycle.committed_generation(request)
+    payload = {"source": read_api_raw_config_source(request)}
+    _set_config_generation_header(response, generation)
+    return payload
 
 
 @app.put("/api/config/raw")
 async def save_raw_config_source(
     request: Request,
+    response: Response,
     payload: RawConfigSourceRequest,
     _user: Annotated[dict, Depends(verify_user)],
+    x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Replace the raw config source text after validating it against the active runtime."""
-    replace_api_raw_config_source(
+    generation = replace_api_raw_config_source(
         request,
         payload.source,
         error_prefix="Failed to save raw configuration",
+        expected_generation=x_mindroom_config_generation,
     )
+    _set_config_generation_header(response, generation)
     return {"success": True}
 
 

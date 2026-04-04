@@ -352,6 +352,7 @@ async def test_handle_config_command_show_returns_invalid_plugin_manifest_error(
     assert change_info is None
     assert "Invalid configuration" in response
     assert "Invalid plugin name" in response
+    assert "Changes were NOT applied." not in response
 
 
 @pytest.mark.asyncio
@@ -365,6 +366,7 @@ async def test_handle_config_command_show_returns_malformed_yaml_error(tmp_path:
     assert change_info is None
     assert "Invalid configuration" in response
     assert "Could not parse configuration YAML" in response
+    assert "Changes were NOT applied." not in response
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from mindroom.agent_policy import (
     build_agent_policy_seeds,
@@ -313,6 +313,8 @@ def _router_agents_for_room(
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
+    model_config = ConfigDict(extra="forbid")
+
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
         "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
@@ -376,6 +378,15 @@ class Config(BaseModel):
                 continue
             normalized_plugins.append(plugin_entry)
         return normalized_plugins
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_root_fields(cls, data: object) -> object:
+        """Reject removed top-level config fields to prevent silent upgrades."""
+        if isinstance(data, dict) and "mcp_servers" in data:
+            msg = "Top-level field 'mcp_servers' was removed. MCP server configuration is no longer supported."
+            raise ValueError(msg)
+        return data
 
     @model_validator(mode="after")
     def validate_entity_names(self) -> Config:

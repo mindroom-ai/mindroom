@@ -287,6 +287,12 @@ def register_interactive_question(
     logger.info("Registered interactive question", event_id=event_id, options=len(option_map))
 
 
+def clear_interactive_question(event_id: str) -> None:
+    """Remove one tracked interactive question when its message is edited away."""
+    with suppress(KeyError):
+        del _active_questions[event_id]
+
+
 async def add_reaction_buttons(
     client: nio.AsyncClient,
     room_id: str,

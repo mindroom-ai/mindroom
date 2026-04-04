@@ -8,9 +8,15 @@ import type { SaveConfigResult } from '@/store/configStore';
 
 vi.mock('@/store/configStore');
 
-const mockToast = vi.fn();
+const { mockToast, mockToaster } = vi.hoisted(() => ({
+  mockToast: vi.fn(),
+  mockToaster: vi.fn(),
+}));
 vi.mock('@/components/ui/use-toast', () => ({
   useToast: () => ({ toast: mockToast }),
+}));
+vi.mock('@/components/ui/toaster', () => ({
+  toast: mockToaster,
 }));
 
 describe('VoiceConfig', () => {
@@ -21,6 +27,7 @@ describe('VoiceConfig', () => {
     diagnostics: ConfigDiagnostic[];
     syncStatus: 'synced' | 'syncing' | 'error' | 'disconnected';
     isDirty: boolean;
+    isLoading: boolean;
     saveConfig: () => Promise<SaveConfigResult>;
     updateVoiceConfig: typeof mockUpdateVoiceConfig;
   };
@@ -58,6 +65,7 @@ describe('VoiceConfig', () => {
       diagnostics: [],
       syncStatus: 'synced',
       isDirty: false,
+      isLoading: false,
       saveConfig: mockSaveConfig,
       updateVoiceConfig: mockUpdateVoiceConfig,
     };
@@ -181,12 +189,31 @@ describe('VoiceConfig', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save Voice Configuration' }));
 
     await waitFor(() => {
-      expect(mockToast).toHaveBeenCalledWith({
+      expect(mockToaster).toHaveBeenCalledWith({
         title: 'Save Failed',
         description: 'Configuration validation failed',
         variant: 'destructive',
       });
     });
+  });
+
+  it('shows a stale-save toast when a newer voice draft supersedes the request', async () => {
+    mockSaveConfig.mockResolvedValueOnce({ status: 'stale' });
+
+    render(<VoiceConfig />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Voice Configuration' }));
+
+    await waitFor(() => {
+      expect(mockToaster).toHaveBeenCalledWith({
+        title: 'Save Failed',
+        description: 'Save was superseded by newer voice configuration edits.',
+        variant: 'destructive',
+      });
+    });
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Voice Configuration Saved' })
+    );
   });
 
   it('shows save button even when voice is disabled', async () => {
@@ -234,5 +261,15 @@ describe('VoiceConfig', () => {
       expect(screen.getByText('Visible Router Echo:')).toBeInTheDocument();
       expect(visibleRouterEchoToggle).toBeChecked();
     });
+  });
+
+  it('disables save while a save is already in progress', () => {
+    const config = createConfig();
+    setMockStore(config);
+    mockStoreState.isLoading = true;
+
+    render(<VoiceConfig />);
+
+    expect(screen.getByRole('button', { name: 'Save Voice Configuration' })).toBeDisabled();
   });
 });

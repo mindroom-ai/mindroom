@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
+import { showSaveFailureToastIfNeeded } from '@/components/shared';
 import { useConfigStore } from '@/store/configStore';
 import { VoiceConfig as VoiceConfigType } from '@/types/config';
 
@@ -55,7 +56,7 @@ function normalizeHost(host?: string): string {
 }
 
 export function VoiceConfig() {
-  const { config, saveConfig, updateVoiceConfig } = useConfigStore();
+  const { config, isLoading, saveConfig, updateVoiceConfig } = useConfigStore();
   const { toast } = useToast();
 
   // Initialize local state with default values if voice config doesn't exist
@@ -109,16 +110,12 @@ export function VoiceConfig() {
       },
     });
     const result = await saveConfig();
-    if (result.status !== 'saved') {
-      const globalDiagnostic =
-        result.status === 'error'
-          ? result.diagnostics.find(diagnostic => diagnostic.kind === 'global')
-          : null;
-      toast({
-        title: 'Save Failed',
-        description: globalDiagnostic?.message ?? 'Failed to save voice configuration.',
-        variant: 'destructive',
-      });
+    if (
+      showSaveFailureToastIfNeeded(result, {
+        staleMessage: 'Save was superseded by newer voice configuration edits.',
+        fallbackMessage: 'Failed to save voice configuration.',
+      })
+    ) {
       return;
     }
     toast({
@@ -313,7 +310,9 @@ export function VoiceConfig() {
 
           {/* Save Button */}
           <div className="flex justify-end">
-            <Button onClick={handleSave}>Save Voice Configuration</Button>
+            <Button onClick={handleSave} disabled={isLoading}>
+              Save Voice Configuration
+            </Button>
           </div>
         </CardContent>
       </Card>

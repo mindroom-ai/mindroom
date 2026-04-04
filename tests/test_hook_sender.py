@@ -1234,6 +1234,198 @@ async def test_first_hop_plain_hook_from_non_message_hook_still_dispatches(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_but_dispatches(
+    tmp_path: Path,
+) -> None:
+    """First-hop sidecar previews should skip interactive consumption and still dispatch."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    sidecar_event = nio.Event.parse_event(
+        {
+            "event_id": "$sidecar-hook-dispatch",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.file",
+                "body": "1 [Message continues in attached file]",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/inbound-sidecar",
+            },
+        },
+    )
+    prepared_text_event = _PreparedTextEvent(
+        sender="@mindroom_router:localhost",
+        event_id="$sidecar-hook-dispatch",
+        body="1",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "1",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:bot:ready",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
+            },
+        },
+        is_synthetic=True,
+    )
+    bot._prepare_file_sidecar_text_event = AsyncMock(return_value=prepared_text_event)
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._dispatch_text_message = AsyncMock()
+    interactive._active_questions.clear()
+    interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
+        room_id=room.room_id,
+        thread_id=None,
+        options={"1": "first"},
+        creator_agent=bot.agent_name,
+    )
+
+    try:
+        with patch.object(interactive, "handle_text_response", new=AsyncMock()) as mock_handle_text_response:
+            assert isinstance(sidecar_event, nio.RoomMessageFile)
+            handled = await bot._dispatch_file_sidecar_text_preview(
+                room,
+                _PrecheckedEvent(
+                    event=sidecar_event,
+                    requester_user_id="@mindroom_router:localhost",
+                ),
+            )
+
+        assert handled is True
+        assert "$question123" in interactive._active_questions
+        mock_handle_text_response.assert_not_awaited()
+        bot._dispatch_text_message.assert_awaited_once()
+    finally:
+        interactive._active_questions.clear()
+
+
+@pytest.mark.asyncio
+async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_dispatch(tmp_path: Path) -> None:
+    """Deep sidecar previews should stop before interactive handling or text dispatch."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    sidecar_event = nio.Event.parse_event(
+        {
+            "event_id": "$sidecar-deep-hook-dispatch",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.file",
+                "body": "follow-up [Message continues in attached file]",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/inbound-sidecar",
+            },
+        },
+    )
+    prepared_text_event = _PreparedTextEvent(
+        sender="@mindroom_router:localhost",
+        event_id="$sidecar-deep-hook-dispatch",
+        body="follow-up",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "follow-up",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:message:before_response",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
+            },
+        },
+        is_synthetic=True,
+    )
+    bot._prepare_file_sidecar_text_event = AsyncMock(return_value=prepared_text_event)
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._dispatch_text_message = AsyncMock()
+
+    with patch.object(interactive, "handle_text_response", new=AsyncMock()) as mock_handle_text_response:
+        assert isinstance(sidecar_event, nio.RoomMessageFile)
+        handled = await bot._dispatch_file_sidecar_text_preview(
+            room,
+            _PrecheckedEvent(
+                event=sidecar_event,
+                requester_user_id="@mindroom_router:localhost",
+            ),
+        )
+
+    assert handled is True
+    mock_handle_text_response.assert_not_awaited()
+    bot._dispatch_text_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_path: Path) -> None:
+    """Prepared synthetic text should keep first-hop hook dispatch behavior."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = _PreparedTextEvent(
+        sender="@mindroom_router:localhost",
+        event_id="$prepared-hook-dispatch",
+        body="@mindroom_code:localhost follow up",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "@mindroom_code:localhost follow up",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:bot:ready",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
+            },
+        },
+        is_synthetic=True,
+    )
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._resolve_dispatch_action = AsyncMock(return_value=None)
+
+    await bot._dispatch_text_message(
+        room,
+        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+    )
+
+    bot._resolve_dispatch_action.assert_awaited_once()
+    dispatch = bot._resolve_dispatch_action.await_args.args[2]
+    assert dispatch.envelope.source_kind == "hook_dispatch"
+    assert dispatch.envelope.message_received_depth == 1
+
+
+@pytest.mark.asyncio
+async def test_deep_prepared_text_hook_dispatch_stops_before_dispatch(tmp_path: Path) -> None:
+    """Prepared synthetic text should stop at the same deep-relay boundary as raw text."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = _PreparedTextEvent(
+        sender="@mindroom_router:localhost",
+        event_id="$prepared-deep-hook-dispatch",
+        body="follow-up automation",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "follow-up automation",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:message:before_response",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
+            },
+        },
+        is_synthetic=True,
+    )
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._resolve_dispatch_action = AsyncMock()
+
+    await bot._dispatch_text_message(
+        room,
+        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+    )
+
+    bot._resolve_dispatch_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_hook_dispatch_skill_command_preserves_source_envelope_in_runtime(tmp_path: Path) -> None:
     """Skill-command responses should inherit hook provenance and synthetic depth."""
     bot = _hook_bot(tmp_path)

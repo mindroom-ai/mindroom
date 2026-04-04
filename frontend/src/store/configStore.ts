@@ -377,6 +377,7 @@ function normalizeConfigToolEntries(rawConfig: configService.RawConfig): {
 
 interface ConfigState {
   // State
+  committedGeneration: number | null;
   loadedConfig: Config | null;
   config: Config | null;
   recoveryConfigSource: string | null;
@@ -450,9 +451,11 @@ function clearedLoadedConfigState(
   diagnostics: ConfigDiagnostic[],
   agentPoliciesRequestId: number,
   draftVersion: number,
-  recoveryConfigSource: string | null = null
+  recoveryConfigSource: string | null = null,
+  committedGeneration: number | null = null
 ): Pick<
   ConfigState,
+  | 'committedGeneration'
   | 'loadedConfig'
   | 'config'
   | 'recoveryConfigSource'
@@ -477,6 +480,7 @@ function clearedLoadedConfigState(
   | 'privateWorkerScopeBackups'
 > {
   return {
+    committedGeneration,
     loadedConfig: null,
     config: null,
     recoveryConfigSource,
@@ -504,6 +508,7 @@ function clearedLoadedConfigState(
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
   // Initial state
+  committedGeneration: null,
   loadedConfig: null,
   config: null,
   recoveryConfigSource: null,
@@ -540,7 +545,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       loadConfigRequestId,
     });
     try {
-      const rawConfig = await configService.loadConfig();
+      const { config: rawConfig, generation } = await configService.loadConfig();
       const {
         normalizedConfig: loadedConfig,
         rawEntriesByAgent,
@@ -574,6 +579,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         !shouldReplaceDirtyRecoveryDraft
       ) {
         set({
+          committedGeneration: generation,
           loadedConfig: normalizedConfig,
           isLoading: false,
           syncStatus: latestState.syncStatus,
@@ -585,6 +591,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const nextDraft = nextDraftVersion(latestState.draftVersion);
 
       set({
+        committedGeneration: generation,
         loadedConfig: normalizedConfig,
         config: normalizedConfig,
         recoveryConfigSource: null,
@@ -611,9 +618,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const nextAgentPoliciesRequestId = get().agentPoliciesRequestId + 1;
       if (error instanceof configService.ConfigValidationError) {
         let recoveryConfigSource: string | null = null;
+        let recoveryGeneration: number | null = null;
         let recoveryConfigSourceError: unknown = null;
         try {
-          recoveryConfigSource = await configService.loadRawConfigSource();
+          const recovery = await configService.loadRawConfigSource();
+          recoveryConfigSource = recovery.source;
+          recoveryGeneration = recovery.generation;
         } catch (recoveryError) {
           recoveryConfigSourceError = recoveryError;
         }
@@ -656,7 +666,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             validationDiagnostics(error.issues, { blocking: true }),
             nextAgentPoliciesRequestId,
             nextDraft,
-            recoveryConfigSource
+            recoveryConfigSource,
+            recoveryGeneration
           )
         );
         return;
@@ -720,6 +731,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       teams,
       cultures,
       rooms,
+      committedGeneration,
       agentPoliciesStale,
       loadedConfig,
       draftVersion,
@@ -731,6 +743,19 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         status: 'error',
         message: 'No configuration draft is available to save.',
         diagnostics,
+      };
+    }
+    if (committedGeneration == null) {
+      const generationDiagnostics = globalDiagnostics('Missing committed configuration generation.', false);
+      set({
+        diagnostics: generationDiagnostics,
+        isLoading: false,
+        syncStatus: 'error',
+      });
+      return {
+        status: 'error',
+        message: 'Missing committed configuration generation.',
+        diagnostics: generationDiagnostics,
       };
     }
     const saveConfigRequestId = get().saveConfigRequestId + 1;
@@ -838,7 +863,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         },
       };
 
-      await configService.saveConfig(payload);
+      const { generation } = await configService.saveConfig(payload, committedGeneration);
       if (get().saveConfigRequestId != saveConfigRequestId) {
         return { status: 'stale' };
       }
@@ -863,6 +888,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       rememberRawToolEntries(updatedConfig, updatedRawEntriesByAgent, updatedRawDefaultToolEntries);
       if (draftChangedSinceSaveStarted) {
         set({
+          committedGeneration: generation,
           loadedConfig: updatedConfig,
           isLoading: false,
           syncStatus: draftSyncStatus(currentState),
@@ -874,6 +900,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
       const syncedCollections = deriveConfigCollections(updatedConfig);
       set({
+        committedGeneration: generation,
         loadedConfig: updatedConfig,
         config: updatedConfig,
         agents: syncedCollections.agents,
@@ -898,6 +925,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const currentState = get();
       const draftChangedSinceSaveStarted = currentState.draftVersion !== savedDraftVersion;
       if (draftChangedSinceSaveStarted) {
+        set({
+          isLoading: false,
+          syncStatus: draftSyncStatus(currentState),
+        });
+        return { status: 'stale' };
+      }
+      if (error instanceof configService.ConfigStaleError) {
         set({
           isLoading: false,
           syncStatus: draftSyncStatus(currentState),
@@ -953,12 +987,25 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   },
 
   saveRecoveryConfigSource: async () => {
-    const { recoveryConfigSource, diagnostics, draftVersion } = get();
+    const { recoveryConfigSource, diagnostics, draftVersion, committedGeneration } = get();
     if (recoveryConfigSource == null) {
       return {
         status: 'error',
         message: 'No recovery configuration is available to save.',
         diagnostics,
+      };
+    }
+    if (committedGeneration == null) {
+      const generationDiagnostics = globalDiagnostics('Missing committed configuration generation.', true);
+      set({
+        diagnostics: generationDiagnostics,
+        isLoading: false,
+        syncStatus: 'error',
+      });
+      return {
+        status: 'error',
+        message: 'Missing committed configuration generation.',
+        diagnostics: generationDiagnostics,
       };
     }
 
@@ -972,7 +1019,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
 
     try {
-      await configService.saveRawConfigSource(recoveryConfigSource);
+      await configService.saveRawConfigSource(recoveryConfigSource, committedGeneration);
       if (get().saveConfigRequestId != saveConfigRequestId) {
         return { status: 'stale' };
       }
@@ -1006,6 +1053,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const currentState = get();
       const draftChangedSinceSaveStarted = currentState.draftVersion !== savedDraftVersion;
       if (draftChangedSinceSaveStarted) {
+        set({
+          isLoading: false,
+          syncStatus: draftSyncStatus(currentState),
+        });
+        return { status: 'stale' };
+      }
+      if (error instanceof configService.ConfigStaleError) {
         set({
           isLoading: false,
           syncStatus: draftSyncStatus(currentState),

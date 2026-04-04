@@ -169,6 +169,35 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     assert sandbox_runner_module._app_runner_token(sandbox_runner_app) == "from-env"
 
 
+def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_config(tmp_path: Path) -> None:
+    """Existing sandbox-runner state should survive lifespan startup without reparsing config.yaml."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_NAMESPACE": "alpha1234"},
+    )
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        sandbox_runner_app,
+        runtime_paths,
+        config=config,
+        runner_token="preserved-token",
+    )
+    config_path.write_text("agents:\n  broken: [\n", encoding="utf-8")
+
+    with TestClient(sandbox_runner_app) as client:
+        response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert sandbox_runner_module._app_runner_token(sandbox_runner_app) == "preserved-token"
+    assert sandbox_runner_module._app_runtime_config(sandbox_runner_app) == config
+
+
 def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

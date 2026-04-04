@@ -2157,6 +2157,70 @@ def test_config_rejects_legacy_defaults_sandbox_tools_field() -> None:
         )
 
 
+def test_config_rejects_removed_top_level_mcp_servers_field() -> None:
+    """Removed root MCP config should fail fast instead of being dropped silently."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "Top-level field 'mcp_servers' was removed. MCP server configuration is no longer supported."
+        ),
+    ):
+        Config(
+            mcp_servers={"demo": {"transport": "stdio"}},
+            agents={"calculator": {"display_name": "CalculatorAgent"}},
+        )
+
+
+def test_config_rejects_legacy_agent_toolkit_fields() -> None:
+    """Removed agent toolkit knobs should fail fast instead of disappearing."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape("Agent field 'allowed_toolkits' was removed. Use 'tools' instead."),
+    ):
+        Config(
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
+                    "allowed_toolkits": ["shell"],
+                },
+            },
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match=re.escape("Agent field 'initial_toolkits' was removed. Use 'tools' instead."),
+    ):
+        Config(
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
+                    "initial_toolkits": ["shell"],
+                },
+            },
+        )
+
+
+def test_config_rejects_legacy_defaults_toolkit_fields() -> None:
+    """Removed defaults toolkit knobs should fail fast instead of disappearing."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape("defaults.allowed_toolkits was removed. Use defaults.tools instead."),
+    ):
+        Config(
+            defaults={"allowed_toolkits": ["shell"]},
+            agents={"calculator": {"display_name": "CalculatorAgent"}},
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match=re.escape("defaults.initial_toolkits was removed. Use defaults.tools instead."),
+    ):
+        Config(
+            defaults={"initial_toolkits": ["shell"]},
+            agents={"calculator": {"display_name": "CalculatorAgent"}},
+        )
+
+
 def test_config_rejects_duplicate_agent_knowledge_base_assignment() -> None:
     """Each agent knowledge base assignment should be unique."""
     with pytest.raises(ValidationError, match="Duplicate knowledge bases are not allowed: research"):

@@ -257,17 +257,40 @@ def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: C
     assert captured_runtime_paths == [runtime_a]
 
 
-def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap() -> None:
+def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path: Path) -> None:
     """Chat completions should parse against the same runtime that authenticated the request."""
     from fastapi import FastAPI  # noqa: PLC0415
 
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "router:\n"
+        "  model: default\n"
+        "agents:\n"
+        "  general:\n"
+        "    display_name: General\n"
+        "    role: helper\n"
+        "    rooms: []\n",
+        encoding="utf-8",
+    )
     app = FastAPI()
     app.include_router(router)
-    runtime_a = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "old-key"})
-    runtime_b = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "new-key"})
+    runtime_a = resolve_runtime_paths(
+        config_path=config_path,
+        process_env={"OPENAI_COMPAT_API_KEYS": "old-key"},
+    )
+    runtime_b = resolve_runtime_paths(
+        config_path=tmp_path / "other-config.yaml",
+        process_env={"OPENAI_COMPAT_API_KEYS": "new-key"},
+    )
+    runtime_b.config_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
     initialize_api_app(app, runtime_a)
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_a, app) is True
     captured_runtime_paths: list[RuntimePaths | None] = []
 
     def _authenticate_and_swap(
@@ -279,19 +302,20 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap() -> None
         initialize_api_app(app, runtime_b)
         return None
 
-    def _capture_parse_request(
-        _request: Request,
-        body: bytes,
+    real_load_config = openai_compat._load_config
+
+    def _capture_load_config(
+        request: Request,
         *,
         runtime_paths: RuntimePaths | None = None,
-    ) -> JSONResponse:
+    ) -> tuple[Config, RuntimePaths]:
         captured_runtime_paths.append(runtime_paths)
-        assert json.loads(body) == {"model": "general", "messages": [{"role": "user", "content": "hi"}]}
-        return JSONResponse(status_code=400, content={"detail": "stop"})
+        return real_load_config(request, runtime_paths=runtime_paths)
 
     with (
         patch("mindroom.api.openai_compat._authenticate_request", side_effect=_authenticate_and_swap),
-        patch("mindroom.api.openai_compat._parse_chat_request", side_effect=_capture_parse_request),
+        patch("mindroom.api.openai_compat._load_config", side_effect=_capture_load_config),
+        patch("mindroom.api.openai_compat._non_stream_completion", new=AsyncMock(return_value=JSONResponse({"ok": True}))),
         TestClient(app) as client,
     ):
         response = client.post(
@@ -300,8 +324,8 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap() -> None
             json={"model": "general", "messages": [{"role": "user", "content": "hi"}]},
         )
 
-    assert response.status_code == 400
-    assert response.json() == {"detail": "stop"}
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
     assert captured_runtime_paths == [runtime_a]
 
 
@@ -365,6 +389,81 @@ def test_list_models_returns_malformed_yaml_errors(tmp_path: Path) -> None:
 
     with TestClient(app) as client:
         response = client.get("/v1/models")
+
+    assert response.status_code == 422
+    assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
+
+
+def test_chat_completions_returns_runtime_validation_errors(tmp_path: Path) -> None:
+    """Chat completions should surface invalid runtime config as 422."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "router:\n"
+        "  model: default\n"
+        "agents:\n"
+        "  general:\n"
+        "    display_name: General\n"
+        "    role: helper\n"
+        "    rooms: []\n"
+        "plugins:\n"
+        "  - ./plugins/bad-name\n",
+        encoding="utf-8",
+    )
+    app = FastAPI()
+    app.include_router(router)
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+    )
+    initialize_api_app(app, runtime_paths)
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is False
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "general", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+    assert response.status_code == 422
+    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+
+
+def test_chat_completions_returns_malformed_yaml_errors(tmp_path: Path) -> None:
+    """Chat completions should surface malformed YAML as 422."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
+    app = FastAPI()
+    app.include_router(router)
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+    )
+    initialize_api_app(app, runtime_paths)
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is False
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "general", "messages": [{"role": "user", "content": "hi"}]},
+        )
 
     assert response.status_code == 422
     assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]

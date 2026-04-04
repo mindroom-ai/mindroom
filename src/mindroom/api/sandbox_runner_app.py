@@ -6,9 +6,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from mindroom.api.sandbox_runner import (
+    _app_runner_token,
+    _app_runtime_config,
     _app_runtime_paths,
     _load_config_from_startup_runtime,
-    _runtime_config_or_empty,
     _startup_runner_token_from_env,
     initialize_sandbox_runner_app,
 )
@@ -23,8 +24,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime_paths, config = _load_config_from_startup_runtime()
         runner_token = _startup_runner_token_from_env()
     else:
-        config = _runtime_config_or_empty(runtime_paths)
-        runner_token = None
+        config = _app_runtime_config(app)
+        runner_token = _app_runner_token(app)
     initialize_sandbox_runner_app(
         app,
         runtime_paths,

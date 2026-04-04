@@ -39,6 +39,7 @@ describe('configStore', () => {
   beforeEach(() => {
     // Reset store state
     useConfigStore.setState({
+      committedGeneration: 0,
       loadedConfig: null,
       config: null,
       recoveryConfigSource: null,
@@ -1504,7 +1505,10 @@ describe('configStore', () => {
       expect(global.fetch).toHaveBeenCalledTimes(1);
       expect(global.fetch).toHaveBeenNthCalledWith(1, '/api/config/save', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-mindroom-config-generation': '0',
+        },
         body: JSON.stringify({
           ...mockConfig,
           agents: { test: agentWithoutId },
@@ -1565,7 +1569,10 @@ describe('configStore', () => {
       expect(saveCall[0]).toBe('/api/config/save');
       expect(saveCall[1]).toMatchObject({
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-mindroom-config-generation': '0',
+        },
       });
       expect(JSON.parse(saveCall[1].body)).toMatchObject({
         defaults: {
@@ -4020,7 +4027,10 @@ describe('configStore', () => {
       expect(global.fetch).toHaveBeenCalledTimes(1);
       expect(global.fetch).toHaveBeenNthCalledWith(1, '/api/config/save', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-mindroom-config-generation': '0',
+        },
         body: JSON.stringify(mockConfig),
       });
 
@@ -4148,7 +4158,10 @@ describe('configStore', () => {
       expect(saveCall[0]).toBe('/api/config/save');
       expect(saveCall[1]).toMatchObject({
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-mindroom-config-generation': '0',
+        },
       });
       expect(JSON.parse(saveCall[1].body)).toMatchObject({
         agents: {
@@ -4308,7 +4321,10 @@ describe('configStore', () => {
       expect(saveCall[0]).toBe('/api/config/save');
       expect(saveCall[1]).toMatchObject({
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-mindroom-config-generation': '0',
+        },
       });
       expect(JSON.parse(saveCall[1].body)).toMatchObject({
         agents: {

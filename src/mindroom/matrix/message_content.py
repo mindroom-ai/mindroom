@@ -172,7 +172,7 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
 
 
 async def extract_and_resolve_message(
-    event: nio.RoomMessageText,
+    event: nio.RoomMessageText | nio.RoomMessageNotice,
     client: nio.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Extract message data and resolve large message content if needed.
@@ -193,13 +193,17 @@ async def extract_and_resolve_message(
     # Extract basic message data
     preview_content = _normalized_content_dict(event.source.get("content", {}))
     resolved_content = await _resolve_canonical_content(preview_content, client)
-    return {
+    message_data = {
         "sender": event.sender,
         "body": _content_body(resolved_content, event.body),
         "timestamp": event.server_timestamp,
         "event_id": event.event_id,
         "content": resolved_content,
     }
+    msgtype = resolved_content.get("msgtype")
+    if isinstance(msgtype, str):
+        message_data["msgtype"] = msgtype
+    return message_data
 
 
 async def extract_edit_body(

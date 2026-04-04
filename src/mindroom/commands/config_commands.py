@@ -182,9 +182,10 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     """
     operation, args = _parse_config_args(args_text)
     path = runtime_paths.config_path
+    load_error_footer = _CONFIG_CHANGE_REJECTED_MESSAGE if operation == "set" else None
 
     # Load current config
-    config, load_error = load_config_or_user_error(runtime_paths, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+    config, load_error = load_config_or_user_error(runtime_paths, footer=load_error_footer)
     if load_error:
         return load_error, None
     assert config is not None

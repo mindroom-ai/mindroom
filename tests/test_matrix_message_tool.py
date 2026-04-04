@@ -473,8 +473,8 @@ async def test_matrix_message_react_skips_interactive_processing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_edit_skips_interactive_processing() -> None:
-    """Edit action should not touch interactive-question helpers."""
+async def test_matrix_message_edit_replaces_interactive_state_when_new_content_is_plain_text() -> None:
+    """Plain-text edits should clear any stale interactive state for the target message."""
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id="$ctx-thread:localhost")
     thread_messages = [
@@ -490,8 +490,7 @@ async def test_matrix_message_edit_skips_interactive_processing() -> None:
             "mindroom.custom_tools.matrix_message.edit_message",
             new=AsyncMock(return_value="$edit_evt"),
         ),
-        patch("mindroom.custom_tools.matrix_message.should_create_interactive_question") as mock_should_create,
-        patch("mindroom.custom_tools.matrix_message.parse_and_format_interactive") as mock_parse,
+        patch("mindroom.custom_tools.matrix_message.clear_interactive_question") as mock_clear,
         patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
         patch(
             "mindroom.custom_tools.matrix_message.add_reaction_buttons",
@@ -502,10 +501,119 @@ async def test_matrix_message_edit_skips_interactive_processing() -> None:
         payload = json.loads(await tool.matrix_message(action="edit", message="updated text", target="$target"))
 
     assert payload["status"] == "ok"
-    mock_should_create.assert_not_called()
-    mock_parse.assert_not_called()
+    mock_clear.assert_called_once_with("$target")
     mock_register.assert_not_called()
     mock_add_reactions.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_edit_re_registers_interactive_question() -> None:
+    """Interactive edits should reformat the message and replace the question mapping."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id="$ctx-thread:localhost")
+    thread_messages = [
+        make_visible_message(event_id="$latest", timestamp=1, sender="@alice:localhost", body="latest"),
+    ]
+    interactive_message = """Please choose.
+
+```interactive
+{
+  "question": "Which option?",
+  "options": [
+    {"emoji": "✅", "label": "Approve", "value": "approve"},
+    {"emoji": "❌", "label": "Reject", "value": "reject"}
+  ]
+}
+```"""
+    formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.fetch_thread_history",
+            new=AsyncMock(return_value=thread_messages),
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_message.edit_message",
+            new=AsyncMock(return_value="$edit_evt"),
+        ) as mock_edit,
+        patch("mindroom.custom_tools.matrix_message.clear_interactive_question") as mock_clear,
+        patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
+        patch(
+            "mindroom.custom_tools.matrix_message.add_reaction_buttons",
+            new_callable=AsyncMock,
+        ) as mock_add_reactions,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="edit", message=interactive_message, target="$target"))
+
+    assert payload["status"] == "ok"
+    mock_clear.assert_called_once_with("$target")
+    assert mock_edit.await_args.args[4] == formatted_text
+    mock_register.assert_called_once_with(
+        "$target",
+        ctx.room_id,
+        ctx.thread_id,
+        {
+            "✅": "approve",
+            "1": "approve",
+            "❌": "reject",
+            "2": "reject",
+        },
+        ctx.agent_name,
+    )
+    mock_add_reactions.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$target",
+        [
+            {"emoji": "✅", "label": "Approve", "value": "approve"},
+            {"emoji": "❌", "label": "Reject", "value": "reject"},
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_includes_notice_messages() -> None:
+    """Room reads should include both m.text and m.notice events."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None)
+    notice_event = nio.RoomMessageNotice.from_dict(
+        {
+            "event_id": "$notice",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1,
+            "content": {"msgtype": "m.notice", "body": "notice"},
+        },
+    )
+    text_event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$text",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 2,
+            "content": {"msgtype": "m.text", "body": "text"},
+        },
+    )
+    response = MagicMock(spec=nio.RoomMessagesResponse)
+    response.chunk = [notice_event, text_event]
+    ctx.client.room_messages.return_value = response
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_message(action="read", limit=2))
+
+    assert payload["status"] == "ok"
+    assert [message["event_id"] for message in payload["messages"]] == ["$text", "$notice"]
+    assert [message["msgtype"] for message in payload["messages"]] == ["m.text", "m.notice"]
+
+
+def test_resolved_visible_message_to_dict_includes_msgtype() -> None:
+    """Thread-list serialization should preserve the visible Matrix msgtype."""
+    message = make_visible_message(
+        event_id="$notice",
+        body="notice",
+        content={"body": "notice", "msgtype": "m.notice"},
+    )
+
+    assert message.to_dict()["msgtype"] == "m.notice"
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -28,6 +29,7 @@ logger = get_logger(__name__)
 # In-memory tracking of last summarized message count per thread.
 # Key: "{room_id}:{thread_id}", value: message count at last summary.
 _last_summary_counts: dict[str, int] = {}
+_summary_locks: dict[str, asyncio.Lock] = {}
 
 _FIRST_THRESHOLD = 5
 _SUBSEQUENT_INTERVAL = 10
@@ -205,39 +207,41 @@ async def maybe_generate_thread_summary(
     runtime_paths: RuntimePaths,
 ) -> None:
     """Generate and send a thread summary if the message count crosses a threshold."""
-    thread_history = await fetch_thread_history(client, room_id, thread_id)
-    message_count = len(thread_history)
-
     key = f"{room_id}:{thread_id}"
+    lock = _summary_locks.setdefault(key, asyncio.Lock())
 
-    # Recover from existing summary events on cache miss (e.g., after restart)
-    if key not in _last_summary_counts:
-        recovered = await _recover_last_summary_count(client, room_id, thread_id)
-        if recovered > 0:
-            _last_summary_counts[key] = recovered
+    async with lock:
+        thread_history = await fetch_thread_history(client, room_id, thread_id)
+        message_count = len(thread_history)
 
-    last_count = _last_summary_counts.get(key, 0)
-    threshold = _next_threshold(last_count)
+        # Recover from existing summary events on cache miss (e.g., after restart)
+        if key not in _last_summary_counts:
+            recovered = await _recover_last_summary_count(client, room_id, thread_id)
+            if recovered > 0:
+                _last_summary_counts[key] = recovered
 
-    if message_count < threshold:
-        return
+        last_count = _last_summary_counts.get(key, 0)
+        threshold = _next_threshold(last_count)
 
-    try:
-        summary = await _generate_summary(thread_history, config, runtime_paths)
-    except Exception:
-        logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
-        # Record current count to prevent retry storms until next threshold
+        if message_count < threshold:
+            return
+
+        try:
+            summary = await _generate_summary(thread_history, config, runtime_paths)
+        except Exception:
+            logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
+            # Record current count to prevent retry storms until next threshold
+            _last_summary_counts[key] = message_count
+            return
+
+        if summary is None:
+            logger.warning("Thread summary generation returned None", room_id=room_id, thread_id=thread_id)
+            # Record current count to prevent retry storms until next threshold
+            _last_summary_counts[key] = message_count
+            return
+
+        model_name = config.defaults.thread_summary_model or "default"
+        # Record count before sending — the LLM cost is already incurred, so don't
+        # retry on Matrix send failure (avoids cost amplification loop).
         _last_summary_counts[key] = message_count
-        return
-
-    if summary is None:
-        logger.warning("Thread summary generation returned None", room_id=room_id, thread_id=thread_id)
-        # Record current count to prevent retry storms until next threshold
-        _last_summary_counts[key] = message_count
-        return
-
-    model_name = config.defaults.thread_summary_model or "default"
-    # Record count before sending — the LLM cost is already incurred, so don't
-    # retry on Matrix send failure (avoids cost amplification loop).
-    _last_summary_counts[key] = message_count
-    await _send_summary_event(client, room_id, thread_id, summary, message_count, model_name)
+        await _send_summary_event(client, room_id, thread_id, summary, message_count, model_name)

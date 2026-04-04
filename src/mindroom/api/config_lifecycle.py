@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _UNSET = object()
 _REQUEST_SNAPSHOT_SCOPE_KEY = "api_snapshot"
+CONFIG_GENERATION_HEADER = "x-mindroom-config-generation"
 
 
 @dataclass(frozen=True)
@@ -270,6 +271,19 @@ def api_runtime_paths(request: Request) -> constants.RuntimePaths:
     return _request_or_current_snapshot(request).runtime_paths
 
 
+def committed_generation(request: Request) -> int:
+    """Return the committed snapshot generation visible to one request."""
+    return _request_or_current_snapshot(request).generation
+
+
+def _raise_if_generation_mismatch(snapshot: ApiSnapshot, expected_generation: int | None) -> None:
+    """Reject writes authored against a stale client-side snapshot."""
+    if expected_generation is None:
+        return
+    if snapshot.generation != expected_generation:
+        raise _stale_snapshot_error()
+
+
 def _build_mutated_config[T](
     snapshot: ApiSnapshot,
     mutate: Callable[[dict[str, Any]], T],
@@ -351,7 +365,7 @@ def _commit_replaced_snapshot(
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
     validated_config: Config,
-) -> None:
+) -> int:
     """Commit one previously validated replacement payload if the snapshot is still current."""
     with initial_state.config_lock:
         current_state = _app_config_state(api_app)
@@ -365,6 +379,7 @@ def _commit_replaced_snapshot(
             runtime_config=validated_config,
             config_load_result=ConfigLoadResult(success=True),
         )
+        return current_state.snapshot.generation
 
 
 def _commit_raw_replaced_snapshot(
@@ -376,7 +391,7 @@ def _commit_raw_replaced_snapshot(
     validated_payload: dict[str, Any],
     validated_config: Config,
     source: str,
-) -> None:
+) -> int:
     """Commit one raw replacement payload if the targeted snapshot is still current."""
     with initial_state.config_lock:
         current_state = _app_config_state(api_app)
@@ -390,6 +405,7 @@ def _commit_raw_replaced_snapshot(
             runtime_config=validated_config,
             config_load_result=ConfigLoadResult(success=True),
         )
+        return current_state.snapshot.generation
 
 
 def _build_and_commit_mutation[T](
@@ -437,7 +453,8 @@ def _build_and_commit_replacement(
     *,
     error_prefix: str,
     initial_snapshot: ApiSnapshot | None = None,
-) -> None:
+    expected_generation: int | None = None,
+) -> int:
     """Build one replacement payload off-lock and commit it only if still current."""
     initial_state = _app_config_state(api_app)
     if initial_snapshot is None:
@@ -446,8 +463,9 @@ def _build_and_commit_replacement(
     else:
         snapshot = initial_snapshot
     try:
+        _raise_if_generation_mismatch(snapshot, expected_generation)
         validated_config, validated_payload = _validate_replacement_payload(new_config, snapshot.runtime_paths)
-        _commit_replaced_snapshot(
+        return _commit_replaced_snapshot(
             api_app,
             initial_state,
             expected_generation=snapshot.generation,
@@ -471,7 +489,8 @@ def _build_and_commit_raw_replacement(
     *,
     error_prefix: str,
     initial_snapshot: ApiSnapshot | None = None,
-) -> None:
+    expected_generation: int | None = None,
+) -> int:
     """Build one raw replacement payload off-lock and commit it only if still current."""
     initial_state = _app_config_state(api_app)
     if initial_snapshot is None:
@@ -480,8 +499,9 @@ def _build_and_commit_raw_replacement(
     else:
         snapshot = initial_snapshot
     try:
+        _raise_if_generation_mismatch(snapshot, expected_generation)
         validated_config, validated_payload = _validate_raw_config_source(source, snapshot.runtime_paths)
-        _commit_raw_replaced_snapshot(
+        return _commit_raw_replaced_snapshot(
             api_app,
             initial_state,
             expected_generation=snapshot.generation,
@@ -649,13 +669,15 @@ def replace_committed_config(
     new_config: dict[str, Any],
     *,
     error_prefix: str,
-) -> None:
+    expected_generation: int | None = None,
+) -> int:
     """Replace the entire committed API config with one freshly validated payload."""
-    _build_and_commit_replacement(
+    return _build_and_commit_replacement(
         request.app,
         new_config,
         error_prefix=error_prefix,
         initial_snapshot=request_snapshot(request),
+        expected_generation=expected_generation,
     )
 
 
@@ -664,9 +686,9 @@ def replace_app_committed_config(
     new_config: dict[str, Any],
     *,
     error_prefix: str,
-) -> None:
+) -> int:
     """Replace the entire committed API config with one freshly validated payload."""
-    _build_and_commit_replacement(api_app, new_config, error_prefix=error_prefix)
+    return _build_and_commit_replacement(api_app, new_config, error_prefix=error_prefix)
 
 
 def read_raw_config_source(request: Request) -> str:
@@ -685,13 +707,15 @@ def replace_raw_config_source(
     source: str,
     *,
     error_prefix: str,
-) -> None:
+    expected_generation: int | None = None,
+) -> int:
     """Replace the raw config source with one freshly validated payload."""
-    _build_and_commit_raw_replacement(
+    return _build_and_commit_raw_replacement(
         request.app,
         source,
         error_prefix=error_prefix,
         initial_snapshot=request_snapshot(request),
+        expected_generation=expected_generation,
     )
 
 

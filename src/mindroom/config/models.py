@@ -226,7 +226,7 @@ class CompactionConfig(BaseModel):
 class DefaultsConfig(BaseModel):
     """Default configuration values for agents."""
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     tools: list[ToolConfigEntry] = Field(
         default_factory=lambda: [ToolConfigEntry(name=name) for name in _DEFAULT_DEFAULT_TOOLS],
@@ -301,9 +301,16 @@ class DefaultsConfig(BaseModel):
     @classmethod
     def reject_legacy_defaults_fields(cls, data: object) -> object:
         """Reject removed legacy fields to prevent silent misconfiguration."""
-        if isinstance(data, dict) and "sandbox_tools" in data:
-            msg = "defaults.sandbox_tools was removed. Use defaults.worker_tools instead."
-            raise ValueError(msg)
+        if isinstance(data, dict):
+            if "sandbox_tools" in data:
+                msg = "defaults.sandbox_tools was removed. Use defaults.worker_tools instead."
+                raise ValueError(msg)
+            if "allowed_toolkits" in data:
+                msg = "defaults.allowed_toolkits was removed. Use defaults.tools instead."
+                raise ValueError(msg)
+            if "initial_toolkits" in data:
+                msg = "defaults.initial_toolkits was removed. Use defaults.tools instead."
+                raise ValueError(msg)
         return data
 
     @model_validator(mode="after")

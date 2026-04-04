@@ -2495,6 +2495,54 @@ def test_save_raw_config_source_can_recover_from_invalid_reload(
     assert load_response.json()["agents"]["recovered_agent"]["display_name"] == "Recovered Agent"
 
 
+def test_config_generation_headers_protect_full_and_raw_save_endpoints(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Config load/raw endpoints should expose generations and reject stale full/raw saves."""
+    initial_load = test_client.post("/api/config/load")
+    assert initial_load.status_code == 200
+    initial_generation = int(initial_load.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+
+    initial_raw = test_client.get("/api/config/raw")
+    assert initial_raw.status_code == 200
+    assert int(initial_raw.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) == initial_generation
+
+    save_response = test_client.put(
+        "/api/config/save",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(initial_generation)},
+        json=_authored_config_payload("updated"),
+    )
+    assert save_response.status_code == 200
+    updated_generation = int(save_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+    assert updated_generation > initial_generation
+
+    stale_save_response = test_client.put(
+        "/api/config/save",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(initial_generation)},
+        json=_authored_config_payload("stale"),
+    )
+    assert stale_save_response.status_code == 409
+
+    replacement_source = yaml.safe_dump(_authored_config_payload("raw_updated"), sort_keys=True)
+    raw_save_response = test_client.put(
+        "/api/config/raw",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(updated_generation)},
+        json={"source": replacement_source},
+    )
+    assert raw_save_response.status_code == 200
+    raw_generation = int(raw_save_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+    assert raw_generation > updated_generation
+    assert temp_config_file.read_text(encoding="utf-8") == replacement_source
+
+    stale_raw_save_response = test_client.put(
+        "/api/config/raw",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(updated_generation)},
+        json={"source": replacement_source},
+    )
+    assert stale_raw_save_response.status_code == 409
+
+
 def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path) -> None:
     """Concurrent raw validation should not let one request read another request's temp file."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -2878,6 +2926,45 @@ def test_api_cached_write_endpoints_refuse_stale_config_after_invalid_reload(
     assert response.status_code == 422
     assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
     assert yaml.safe_load(temp_config_file.read_text(encoding="utf-8")) == invalid_payload
+
+
+def test_api_key_raw_endpoints_recover_from_invalid_reload(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Protected raw config endpoints should stay usable after the structured cache becomes invalid."""
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    invalid_source = "agents:\n  broken: [\n"
+    temp_config_file.write_text(invalid_source, encoding="utf-8")
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    raw_response = api_key_client.get(
+        "/api/config/raw",
+        headers={"Authorization": "Bearer test-key"},
+    )
+    assert raw_response.status_code == 200
+    assert raw_response.json() == {"source": invalid_source}
+
+    valid_source = yaml.safe_dump(_authored_config_payload("recovered"), sort_keys=True)
+    save_response = api_key_client.put(
+        "/api/config/raw",
+        headers={
+            "Authorization": "Bearer test-key",
+            config_lifecycle.CONFIG_GENERATION_HEADER: raw_response.headers[
+                config_lifecycle.CONFIG_GENERATION_HEADER
+            ],
+        },
+        json={"source": valid_source},
+    )
+    assert save_response.status_code == 200
+
+    load_response = api_key_client.post(
+        "/api/config/load",
+        headers={"Authorization": "Bearer test-key"},
+    )
+    assert load_response.status_code == 200
+    assert load_response.json()["agents"]["recovered"]["display_name"] == "Recovered"
 
 
 def test_load_config_from_file_omits_legacy_null_optional_sections(tmp_path: Path) -> None:
@@ -3504,9 +3591,15 @@ def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None
         new_config: dict[str, Any],
         *,
         error_prefix: str,
-    ) -> None:
+        expected_generation: int | None = None,
+    ) -> int:
         _publish_committed_runtime_config(main.app, runtime_b, payload_b)
-        return original_replace(request, new_config, error_prefix=error_prefix)
+        return original_replace(
+            request,
+            new_config,
+            error_prefix=error_prefix,
+            expected_generation=expected_generation,
+        )
 
     with (
         patch.object(main, "replace_api_committed_config", side_effect=_swap_then_replace),
@@ -3522,6 +3615,92 @@ def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None
     assert response.status_code == 409
     assert Config.validate_with_runtime(yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8")), runtime_b)
     assert yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8"))["agents"] == payload_b["agents"]
+
+
+def test_protected_raw_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Path) -> None:
+    """Protected raw reads should stay on the auth-time snapshot after a runtime swap."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = _authored_config_payload("old")
+    payload_b = _authored_config_payload("new")
+    source_a = yaml.safe_dump(payload_a, sort_keys=True)
+    source_b = yaml.safe_dump(payload_b, sort_keys=True)
+    runtime_a.config_path.write_text(source_a, encoding="utf-8")
+    runtime_b.config_path.write_text(source_b, encoding="utf-8")
+    original_read = main.read_api_raw_config_source
+
+    def _swap_then_read(request: Request) -> str:
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return original_read(request)
+
+    with (
+        patch.object(main, "read_api_raw_config_source", side_effect=_swap_then_read),
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.get(
+            "/api/config/raw",
+            headers={"Authorization": "Bearer key-a"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"source": source_a}
+
+
+def test_protected_raw_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:
+    """Protected raw writes should fail stale instead of writing to a newer runtime."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = _authored_config_payload("old")
+    payload_b = _authored_config_payload("new")
+    source_b = yaml.safe_dump(payload_b, sort_keys=True)
+    runtime_b.config_path.write_text(source_b, encoding="utf-8")
+    original_replace = main.replace_api_raw_config_source
+
+    def _swap_then_replace(
+        request: Request,
+        source: str,
+        *,
+        error_prefix: str,
+        expected_generation: int | None = None,
+    ) -> int:
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return original_replace(
+            request,
+            source,
+            error_prefix=error_prefix,
+            expected_generation=expected_generation,
+        )
+
+    with (
+        patch.object(main, "replace_api_raw_config_source", side_effect=_swap_then_replace),
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.put(
+            "/api/config/raw",
+            headers={"Authorization": "Bearer key-a"},
+            json={"source": yaml.safe_dump(_authored_config_payload("written"), sort_keys=True)},
+        )
+
+    assert response.status_code == 409
+    assert runtime_b.config_path.read_text(encoding="utf-8") == source_b
 
 
 def test_protected_crud_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:

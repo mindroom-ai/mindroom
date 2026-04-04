@@ -232,6 +232,59 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
         set_plugin_skill_roots(original_plugin_roots)
 
 
+def test_load_plugins_from_explicit_python_package_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit python: specs should resolve importable plugin packages."""
+    site_packages = tmp_path / "site-packages"
+    plugin_root = site_packages / "demo_pkg"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo-pkg", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(site_packages))
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["python:demo_pkg"]), config_path)
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+
+    try:
+        plugins = load_plugins(config, runtime_paths_for(config))
+        assert [plugin.name for plugin in plugins] == ["demo-pkg"]
+        assert plugins[0].root == plugin_root.resolve()
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_explicit_python_plugin_spec_requires_importable_module(tmp_path: Path) -> None:
+    """Explicit python: specs should fail closed when the module cannot be resolved."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+
+    try:
+        with pytest.raises(
+            ConfigRuntimeValidationError,
+            match="Configured plugin module could not be resolved",
+        ):
+            _bind_runtime_paths(Config(plugins=["python:missing_demo_pkg"]), config_path)
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
 def test_resolve_plugin_root_relative_to_config_dir_not_cwd(tmp_path: Path) -> None:
     """Relative plugin paths should resolve from the config directory."""
     config_dir = tmp_path / "cfg"
