@@ -2338,6 +2338,44 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     assert "mindroom_user" not in saved_config
 
 
+def test_save_config_rejects_plugin_with_invalid_dedicated_hooks_module(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """API save should reject plugin configs whose dedicated hooks module cannot load."""
+    plugin_root = temp_config_file.parent / "plugins" / "broken-hooks"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "broken-hooks",
+                "tools_module": "tools.py",
+                "hooks_module": "hooks.py",
+                "skills": [],
+            },
+        ),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text("TOOLS_IMPORTED = True\n", encoding="utf-8")
+    (plugin_root / "hooks.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+
+    response = test_client.put(
+        "/api/config/save",
+        json={
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+            "plugins": ["./plugins/broken-hooks"],
+        },
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail[0]["loc"] == ["config"]
+    assert "hooks.py" in detail[0]["msg"]
+    assert detail[0]["type"] == "value_error"
+
+
 def test_save_config_can_recover_from_invalid_reload(
     test_client: TestClient,
     temp_config_file: Path,

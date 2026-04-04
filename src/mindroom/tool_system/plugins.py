@@ -472,7 +472,13 @@ def _load_plugin_module(
     module = util.module_from_spec(spec)
     sys.modules[module_name] = module
     try:
-        spec.loader.exec_module(module)
+        if kind == "tools":
+            from mindroom.tool_system.metadata import _scoped_plugin_registration_owner  # noqa: PLC0415
+
+            with _scoped_plugin_registration_owner(module_name):
+                spec.loader.exec_module(module)
+        else:
+            spec.loader.exec_module(module)
     except Exception as exc:
         if kind == "tools":
             _restore_failed_plugin_tool_module_reload(

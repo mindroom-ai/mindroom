@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ModelConfig } from './ModelConfig';
 import { useConfigStore } from '@/store/configStore';
@@ -570,13 +571,15 @@ describe('ModelConfig', () => {
 
   it('shows a toast when Save All Changes is superseded by newer draft edits', async () => {
     mockStore.saveConfig.mockResolvedValueOnce({ status: 'stale' });
+    const user = userEvent.setup();
 
     render(<ModelConfig />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save All Changes' }));
+    await user.click(screen.getByRole('button', { name: 'Save All Changes' }));
 
     const { toast } = await import('@/components/ui/toaster');
     await waitFor(() => {
+      expect(mockStore.saveConfig).toHaveBeenCalledTimes(1);
       expect(toast).toHaveBeenCalledWith({
         title: 'Save Failed',
         description: 'Save was superseded by newer draft edits.',

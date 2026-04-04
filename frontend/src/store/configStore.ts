@@ -99,21 +99,106 @@ function retainedDraftDiagnostics(
   return filteredDiagnostics.filter(diagnostic => diagnostic.kind === 'validation');
 }
 
+function mergeDirtyRoots(
+  existingDirtyRoots: string[],
+  touchedPaths: ConfigDiagnosticPath[]
+): string[] {
+  if (touchedPaths.length === 0) {
+    return existingDirtyRoots;
+  }
+  const dirtyRoots = new Set(existingDirtyRoots);
+  for (const [root] of touchedPaths) {
+    if (typeof root === 'string') {
+      dirtyRoots.add(root);
+    }
+  }
+  return Array.from(dirtyRoots);
+}
+
+function globalDiagnostics(message: string, blocking: boolean): ConfigDiagnostic[] {
+  return [
+    {
+      kind: 'global',
+      message,
+      blocking,
+    },
+  ];
+}
+
+function firstGlobalDiagnosticMessage(
+  diagnostics: ConfigDiagnostic[],
+  fallbackMessage: string
+): string {
+  return diagnostics.find(diagnostic => diagnostic.kind === 'global')?.message ?? fallbackMessage;
+}
+
 function nextDraftVersion(draftVersion: number): number {
   return draftVersion + 1;
 }
 
 function markDraftDirty<T extends object>(
-  state: Pick<ConfigState, 'draftVersion' | 'diagnostics'>,
+  state: Pick<ConfigState, 'draftVersion' | 'diagnostics' | 'dirtyRoots'>,
   changes: T,
   touchedPaths: ConfigDiagnosticPath[] = []
-): T & Pick<ConfigState, 'isDirty' | 'diagnostics' | 'draftVersion'> {
+): T & Pick<ConfigState, 'isDirty' | 'diagnostics' | 'draftVersion' | 'dirtyRoots'> {
   return {
     ...changes,
     isDirty: true,
     diagnostics: retainedDraftDiagnostics(state.diagnostics, touchedPaths),
     draftVersion: nextDraftVersion(state.draftVersion),
+    dirtyRoots: mergeDirtyRoots(state.dirtyRoots, touchedPaths),
   };
+}
+
+function deriveConfigCollections(
+  config: Config
+): Pick<ConfigState, 'agents' | 'teams' | 'cultures' | 'rooms'> {
+  const defaultLearning = config.defaults?.learning ?? true;
+  const defaultLearningMode = config.defaults?.learning_mode ?? 'always';
+  const agents = Object.entries(config.agents).map(([id, agent]) => ({
+    id,
+    ...agent,
+    skills: agent.skills ?? [],
+    knowledge_bases: agent.knowledge_bases || [],
+    delegate_to: agent.delegate_to || [],
+    context_files: agent.context_files ?? [],
+    learning: agent.learning ?? defaultLearning,
+    learning_mode: agent.learning_mode ?? defaultLearningMode,
+  }));
+  const teams = config.teams
+    ? Object.entries(config.teams).map(([id, team]) => ({
+        id,
+        ...team,
+      }))
+    : [];
+  const cultures = config.cultures
+    ? Object.entries(config.cultures).map(([id, culture]) => ({
+        id,
+        ...culture,
+        agents: culture.agents ?? [],
+        mode: culture.mode ?? 'automatic',
+        description: culture.description ?? '',
+      }))
+    : [];
+
+  const roomIds = new Set<string>();
+  agents.forEach(agent => {
+    agent.rooms.forEach(room => roomIds.add(room));
+  });
+
+  const rooms: Room[] = Array.from(roomIds).map(roomId => {
+    const agentsInRoom = agents.filter(agent => agent.rooms.includes(roomId)).map(a => a.id);
+    const roomModel = config.room_models?.[roomId];
+    return {
+      id: roomId,
+      display_name: roomId.charAt(0).toUpperCase() + roomId.slice(1),
+      description: '',
+      agents: agentsInRoom,
+      model: roomModel,
+    };
+  });
+
+  return { agents, teams, cultures, rooms };
 }
 
 function unassignAgentsFromOtherCultures(
@@ -311,6 +396,7 @@ interface ConfigState {
   selectedCultureId: string | null;
   selectedRoomId: string | null;
   isDirty: boolean;
+  dirtyRoots: string[];
   isLoading: boolean;
   diagnostics: ConfigDiagnostic[];
   syncStatus: 'synced' | 'syncing' | 'error' | 'disconnected';
@@ -384,6 +470,7 @@ function clearedLoadedConfigState(
   | 'selectedCultureId'
   | 'selectedRoomId'
   | 'isDirty'
+  | 'dirtyRoots'
   | 'isLoading'
   | 'diagnostics'
   | 'syncStatus'
@@ -407,6 +494,7 @@ function clearedLoadedConfigState(
     selectedCultureId: null,
     selectedRoomId: null,
     isDirty: false,
+    dirtyRoots: [],
     isLoading: false,
     diagnostics,
     syncStatus: 'error',
@@ -435,6 +523,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   selectedCultureId: null,
   selectedRoomId: null,
   isDirty: false,
+  dirtyRoots: [],
   isLoading: false,
   diagnostics: [],
   syncStatus: 'disconnected',
@@ -463,51 +552,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         cultures: loadedConfig.cultures || {},
       };
       rememberRawToolEntries(normalizedConfig, rawEntriesByAgent, rawDefaultToolEntries);
-      const defaultLearning = normalizedConfig.defaults?.learning ?? true;
-      const defaultLearningMode = normalizedConfig.defaults?.learning_mode ?? 'always';
-      const agents = Object.entries(normalizedConfig.agents).map(([id, agent]) => ({
-        id,
-        ...agent,
-        skills: agent.skills ?? [],
-        knowledge_bases: agent.knowledge_bases || [],
-        delegate_to: agent.delegate_to || [],
-        context_files: agent.context_files ?? [],
-        learning: agent.learning ?? defaultLearning,
-        learning_mode: agent.learning_mode ?? defaultLearningMode,
-      }));
-      const teams = normalizedConfig.teams
-        ? Object.entries(normalizedConfig.teams).map(([id, team]) => ({
-            id,
-            ...team,
-          }))
-        : [];
-      const cultures = normalizedConfig.cultures
-        ? Object.entries(normalizedConfig.cultures).map(([id, culture]) => ({
-            id,
-            ...culture,
-            agents: culture.agents ?? [],
-            mode: culture.mode ?? 'automatic',
-            description: culture.description ?? '',
-          }))
-        : [];
-
-      // Extract unique rooms from agents and create Room objects
-      const roomIds = new Set<string>();
-      agents.forEach(agent => {
-        agent.rooms.forEach(room => roomIds.add(room));
-      });
-
-      const rooms: Room[] = Array.from(roomIds).map(roomId => {
-        const agentsInRoom = agents.filter(agent => agent.rooms.includes(roomId)).map(a => a.id);
-        const roomModel = normalizedConfig.room_models?.[roomId];
-        return {
-          id: roomId,
-          display_name: roomId.charAt(0).toUpperCase() + roomId.slice(1),
-          description: '',
-          agents: agentsInRoom,
-          model: roomModel,
-        };
-      });
+      const { agents, teams, cultures, rooms } = deriveConfigCollections(normalizedConfig);
       let agentPoliciesByAgent: AgentPoliciesByAgent = {};
       let diagnostics: ConfigDiagnostic[] = [];
       let agentPoliciesStale = false;
@@ -521,7 +566,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       if (latestState.loadConfigRequestId != loadConfigRequestId) {
         return;
       }
-      if (latestState.isDirty || latestState.draftVersion != draftVersionAtStart) {
+      const shouldReplaceDirtyRecoveryDraft =
+        (latestState.config == null || latestState.recoveryConfigSource != null) &&
+        (latestState.isDirty || latestState.draftVersion != draftVersionAtStart);
+      if (
+        (latestState.isDirty || latestState.draftVersion != draftVersionAtStart) &&
+        !shouldReplaceDirtyRecoveryDraft
+      ) {
         set({
           loadedConfig: normalizedConfig,
           isLoading: false,
@@ -549,6 +600,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
+        dirtyRoots: [],
         diagnostics,
         privateWorkerScopeBackups: {},
       });
@@ -559,13 +611,33 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const nextAgentPoliciesRequestId = get().agentPoliciesRequestId + 1;
       if (error instanceof configService.ConfigValidationError) {
         let recoveryConfigSource: string | null = null;
+        let recoveryConfigSourceError: unknown = null;
         try {
           recoveryConfigSource = await configService.loadRawConfigSource();
-        } catch {
-          recoveryConfigSource = null;
+        } catch (recoveryError) {
+          recoveryConfigSourceError = recoveryError;
         }
         const latestState = get();
         if (latestState.loadConfigRequestId != loadConfigRequestId) {
+          return;
+        }
+        if (recoveryConfigSourceError != null) {
+          const recoveryDiagnostics = globalDiagnostics(
+            recoveryConfigSourceError instanceof Error
+              ? recoveryConfigSourceError.message
+              : 'Failed to load raw configuration',
+            true
+          );
+          if (latestState.isDirty || latestState.draftVersion != draftVersionAtStart) {
+            set({
+              isLoading: false,
+              syncStatus: 'error',
+              diagnostics: recoveryDiagnostics,
+            });
+            return;
+          }
+          const nextDraft = nextDraftVersion(get().draftVersion);
+          set(clearedLoadedConfigState(recoveryDiagnostics, nextAgentPoliciesRequestId, nextDraft));
           return;
         }
         if (latestState.isDirty || latestState.draftVersion != draftVersionAtStart) {
@@ -649,8 +721,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       cultures,
       rooms,
       agentPoliciesStale,
+      loadedConfig,
       draftVersion,
       diagnostics,
+      dirtyRoots,
     } = get();
     if (!config) {
       return {
@@ -664,21 +738,24 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
     set({
       isLoading: true,
-      diagnostics: [],
+      diagnostics: retainedDraftDiagnostics(diagnostics),
       syncStatus: 'syncing',
       saveConfigRequestId,
     });
     try {
-      const rawEntriesByAgent = new Map(
+      const currentRawEntriesByAgent = new Map(
         agents.map(agent => [
           agent.id,
           rebuildToolEntries(agent.tools, getRememberedRawToolEntries(config, agent.id)),
         ])
       );
-      const rawDefaultToolEntries = getRememberedRawDefaultToolEntries(config);
+      const currentRawDefaultToolEntries = getRememberedRawDefaultToolEntries(config);
+      const dirtyRootSet = new Set(dirtyRoots);
+      const baseConfig = loadedConfig ?? config;
+      const baseCollections = deriveConfigCollections(baseConfig);
+      const baseRawDefaultToolEntries = getRememberedRawDefaultToolEntries(baseConfig);
 
-      // Convert agents array back to object format
-      const normalizedAgentsObject = agents.reduce(
+      const currentAgentsObject = agents.reduce(
         (acc, agent) => {
           const { id, ...rest } = agent;
           acc[id] = rest;
@@ -686,10 +763,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         },
         {} as Record<string, Omit<Agent, 'id'>>
       );
-      const payloadAgentsObject = agents.reduce(
+      const payloadAgentsObjectFromAgents = agents.reduce(
         (acc, agent) => {
           const { id, ...rest } = agent;
-          const rawToolEntries = rawEntriesByAgent.get(id);
+          const rawToolEntries = currentRawEntriesByAgent.get(id);
           acc[id] = {
             ...rest,
             tools: rawToolEntries ?? rest.tools,
@@ -699,7 +776,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         {} as configService.ConfigSavePayload['agents']
       );
 
-      const culturesObject = cultures.reduce(
+      const currentTeamsObject = teams.reduce(
+        (acc, team) => {
+          const { id, ...rest } = team;
+          acc[id] = rest;
+          return acc;
+        },
+        {} as Record<string, Omit<Team, 'id'>>
+      );
+      const currentCulturesObject = cultures.reduce(
         (acc, culture) => {
           const { id, ...rest } = culture;
           acc[id] = rest;
@@ -708,7 +793,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         {} as Record<string, Omit<Culture, 'id'>>
       );
 
-      // Extract room_models from rooms that have a model set
       const roomModels: Record<string, string> = {};
       rooms.forEach(room => {
         if (room.model) {
@@ -717,25 +801,40 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       });
 
       const updatedConfig: Config = {
-        ...config,
-        agents: normalizedAgentsObject,
-        teams: teams.reduce(
-          (acc, team) => {
-            const { id, ...rest } = team;
-            acc[id] = rest;
-            return acc;
-          },
-          {} as Record<string, Omit<Team, 'id'>>
-        ),
-        cultures: culturesObject,
-        room_models: Object.keys(roomModels).length > 0 ? roomModels : undefined,
+        ...baseConfig,
+        ...(dirtyRootSet.has('defaults') ? { defaults: config.defaults } : {}),
+        ...(dirtyRootSet.has('memory') ? { memory: config.memory } : {}),
+        ...(dirtyRootSet.has('knowledge_bases') ? { knowledge_bases: config.knowledge_bases } : {}),
+        ...(dirtyRootSet.has('models') ? { models: config.models } : {}),
+        ...(dirtyRootSet.has('tools') ? { tools: config.tools } : {}),
+        ...(dirtyRootSet.has('voice') ? { voice: config.voice } : {}),
+        ...(dirtyRootSet.has('agents') ? { agents: currentAgentsObject } : {}),
+        ...(dirtyRootSet.has('teams') ? { teams: currentTeamsObject } : {}),
+        ...(dirtyRootSet.has('cultures') ? { cultures: currentCulturesObject } : {}),
+        ...(dirtyRootSet.has('room_models')
+          ? { room_models: Object.keys(roomModels).length > 0 ? roomModels : undefined }
+          : {}),
       };
+      const payloadAgentsObject = dirtyRootSet.has('agents')
+        ? payloadAgentsObjectFromAgents
+        : Object.fromEntries(
+            Object.entries(baseConfig.agents).map(([agentId, agentConfig]) => [
+              agentId,
+              {
+                ...agentConfig,
+                tools: getRememberedRawToolEntries(baseConfig, agentId) ?? agentConfig.tools,
+              },
+            ])
+          );
+      const payloadDefaultTools = dirtyRootSet.has('defaults')
+        ? currentRawDefaultToolEntries ?? updatedConfig.defaults.tools
+        : baseRawDefaultToolEntries ?? updatedConfig.defaults.tools;
       const payload: configService.ConfigSavePayload = {
         ...updatedConfig,
         agents: payloadAgentsObject,
         defaults: {
           ...updatedConfig.defaults,
-          tools: rawDefaultToolEntries ?? updatedConfig.defaults.tools,
+          tools: payloadDefaultTools,
         },
       };
 
@@ -745,7 +844,23 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
       const currentState = get();
       const draftChangedSinceSaveStarted = currentState.draftVersion !== savedDraftVersion;
-      rememberRawToolEntries(updatedConfig, rawEntriesByAgent, rawDefaultToolEntries);
+      const updatedRawEntriesByAgent = dirtyRootSet.has('agents')
+        ? currentRawEntriesByAgent
+        : new Map(
+            Object.keys(baseConfig.agents).map(agentId => [
+              agentId,
+              rebuildToolEntries(
+                baseCollections.agents.find(agent => agent.id === agentId)?.tools ??
+                  updatedConfig.agents[agentId]?.tools ??
+                  [],
+                getRememberedRawToolEntries(baseConfig, agentId)
+              ),
+            ])
+          );
+      const updatedRawDefaultToolEntries = dirtyRootSet.has('defaults')
+        ? currentRawDefaultToolEntries
+        : baseRawDefaultToolEntries;
+      rememberRawToolEntries(updatedConfig, updatedRawEntriesByAgent, updatedRawDefaultToolEntries);
       if (draftChangedSinceSaveStarted) {
         set({
           loadedConfig: updatedConfig,
@@ -757,17 +872,23 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         }
         return { status: 'stale' };
       }
+      const syncedCollections = deriveConfigCollections(updatedConfig);
       set({
         loadedConfig: updatedConfig,
         config: updatedConfig,
+        agents: syncedCollections.agents,
+        teams: syncedCollections.teams,
+        cultures: syncedCollections.cultures,
+        rooms: syncedCollections.rooms,
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
+        dirtyRoots: [],
         diagnostics: [],
         privateWorkerScopeBackups: {},
       });
       if (agentPoliciesStale) {
-        void get().refreshAgentPolicies(agents);
+        void get().refreshAgentPolicies(syncedCollections.agents);
       }
       return { status: 'saved' };
     } catch (error) {
@@ -845,6 +966,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const savedDraftVersion = draftVersion;
     set({
       isLoading: true,
+      diagnostics: retainedDraftDiagnostics(diagnostics),
       syncStatus: 'syncing',
       saveConfigRequestId,
     });
@@ -864,12 +986,19 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         return { status: 'stale' };
       }
 
-      set({
-        recoveryConfigSourceOriginal: recoveryConfigSource,
-        isDirty: false,
-      });
       await get().loadConfig();
-      return { status: 'saved' };
+      const latestState = get();
+      if (latestState.config != null && latestState.recoveryConfigSource == null) {
+        return { status: 'saved' };
+      }
+      return {
+        status: 'error',
+        message: firstGlobalDiagnosticMessage(
+          latestState.diagnostics,
+          'Saved replacement configuration, but failed to reload the structured config.'
+        ),
+        diagnostics: latestState.diagnostics,
+      };
     } catch (error) {
       if (get().saveConfigRequestId != saveConfigRequestId) {
         return { status: 'stale' };

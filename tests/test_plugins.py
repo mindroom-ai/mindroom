@@ -576,6 +576,128 @@ def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
 
 
+def test_validate_with_runtime_rejects_invalid_dedicated_hooks_module(tmp_path: Path) -> None:
+    """Runtime validation should fail when a dedicated hooks module cannot be imported."""
+    plugin_root = tmp_path / "plugins" / "broken-hooks"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "broken-hooks",
+                "tools_module": "tools.py",
+                "hooks_module": "hooks.py",
+                "skills": [],
+            },
+        ),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text("TOOLS_IMPORTED = True\n", encoding="utf-8")
+    (plugin_root / "hooks.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+
+    with pytest.raises(ConfigRuntimeValidationError, match="hooks.py"):
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": ["./plugins/broken-hooks"],
+            },
+            runtime_paths,
+        )
+
+
+def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_imports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validation should keep helper-module plugin tools out of the live registry."""
+    site_packages = tmp_path / "site-packages"
+    plugin_root = site_packages / "demo_pkg"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo-pkg", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "helpers.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class HelperTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='helper_toolkit', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='helper_tool',\n"
+        "    display_name='Helper Tool',\n"
+        "    description='Defined in an imported helper module',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def helper_tools():\n"
+        "    return HelperTool\n",
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text("from demo_pkg.helpers import helper_tools\n", encoding="utf-8")
+
+    monkeypatch.syspath_prepend(str(site_packages))
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+
+    try:
+        validated = Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {
+                    "assistant": {
+                        "display_name": "Assistant",
+                        "role": "test",
+                        "tools": ["helper_tool"],
+                    },
+                },
+                "plugins": ["demo_pkg"],
+            },
+            runtime_paths,
+        )
+        assert validated.get_agent("assistant").tool_names == ["helper_tool"]
+        assert "helper_tool" not in _TOOL_REGISTRY
+        assert "helper_tool" not in TOOL_METADATA
+        assert original_registry == _TOOL_REGISTRY
+        assert original_metadata == TOOL_METADATA
+        assert original_module_cache == plugin_module._MODULE_IMPORT_CACHE
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+
+
 def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: Path) -> None:
     """Removing a previously loaded plugin should also remove its tool registrations."""
     plugin_root = tmp_path / "plugins" / "demo"

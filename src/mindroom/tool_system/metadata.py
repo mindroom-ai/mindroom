@@ -109,6 +109,21 @@ def _scoped_plugin_registration_store(
             _PLUGIN_REGISTRATION_SCOPE.registrations_by_module = previous
 
 
+@contextmanager
+def _scoped_plugin_registration_owner(module_name: str) -> Iterator[None]:
+    """Attribute scoped validation registrations to one synthetic plugin module."""
+    sentinel = object()
+    previous = getattr(_PLUGIN_REGISTRATION_SCOPE, "owner_module_name", sentinel)
+    _PLUGIN_REGISTRATION_SCOPE.owner_module_name = module_name
+    try:
+        yield
+    finally:
+        if previous is sentinel:
+            delattr(_PLUGIN_REGISTRATION_SCOPE, "owner_module_name")
+        else:
+            _PLUGIN_REGISTRATION_SCOPE.owner_module_name = previous
+
+
 def _plugin_registration_store() -> dict[str, dict[str, ToolMetadata]]:
     """Return the active plugin registration sink for this thread."""
     registrations = getattr(_PLUGIN_REGISTRATION_SCOPE, "registrations_by_module", None)
@@ -788,6 +803,15 @@ def register_tool_with_metadata(
             factory=func,
         )
 
+        validation_owner_module_name = getattr(
+            _PLUGIN_REGISTRATION_SCOPE,
+            "owner_module_name",
+            None,
+        )
+        if validation_owner_module_name is not None:
+            _register_plugin_tool_metadata(validation_owner_module_name, metadata)
+            return func
+
         if func.__module__.startswith(_PLUGIN_MODULE_PREFIX):
             _register_plugin_tool_metadata(func.__module__, metadata)
             return func
@@ -856,35 +880,63 @@ def _restore_tool_registry_snapshot(snapshot: _ToolRegistrySnapshot) -> None:
     sys.modules.update(snapshot.plugin_modules)
 
 
-def _load_validation_plugin_tools_module(
+def _module_origin_within_root(module: ModuleType, root: Path) -> bool:
+    """Return whether one loaded module originates from within one plugin root."""
+    module_file = getattr(module, "__file__", None)
+    if not isinstance(module_file, str):
+        return False
+    try:
+        return Path(module_file).resolve().is_relative_to(root)
+    except OSError:
+        return False
+
+
+def _execute_validation_plugin_module(
     plugin_name: str,
+    plugin_root: Path,
     module_path: Path,
     registrations_by_module: dict[str, dict[str, ToolMetadata]],
-) -> tuple[str, str]:
-    """Execute one plugin tools module into a temporary registration sink."""
+) -> str:
+    """Execute one plugin module into a temporary validation import context."""
     runtime_module_name = plugin_module._module_name(plugin_name, module_path)
     validation_module_name = f"{runtime_module_name}{_VALIDATION_PLUGIN_MODULE_SUFFIX}{id(registrations_by_module)}"
     spec = importlib_util.spec_from_file_location(validation_module_name, module_path)
     if spec is None or spec.loader is None:
-        msg = f"Failed to load plugin tools module: {module_path}"
+        msg = f"Failed to load plugin validation module: {module_path}"
         raise ValueError(msg)
 
     previous_module = sys.modules.get(validation_module_name)
+    previous_modules_within_root = {
+        module_name: loaded_module
+        for module_name, loaded_module in sys.modules.items()
+        if _module_origin_within_root(loaded_module, plugin_root)
+    }
     module = importlib_util.module_from_spec(spec)
     sys.modules[validation_module_name] = module
     try:
-        with _scoped_plugin_registration_store(registrations_by_module):
+        with (
+            _scoped_plugin_registration_store(registrations_by_module),
+            _scoped_plugin_registration_owner(validation_module_name),
+        ):
             spec.loader.exec_module(module)
     except Exception as exc:
-        msg = f"Plugin tools module execution failed for {module_path}: {exc}"
+        msg = f"Plugin validation module execution failed for {module_path}: {exc}"
         raise ValueError(msg) from exc
     finally:
+        for loaded_module_name, loaded_module in list(sys.modules.items()):
+            if loaded_module_name not in previous_modules_within_root and _module_origin_within_root(
+                loaded_module,
+                plugin_root,
+            ):
+                sys.modules.pop(loaded_module_name, None)
+        for loaded_module_name, loaded_module in previous_modules_within_root.items():
+            sys.modules[loaded_module_name] = loaded_module
         if previous_module is None:
             sys.modules.pop(validation_module_name, None)
         else:
             sys.modules[validation_module_name] = previous_module
 
-    return plugin_name, validation_module_name
+    return validation_module_name
 
 
 def resolved_tool_metadata_for_runtime(
@@ -912,14 +964,32 @@ def resolved_tool_metadata_for_runtime(
     active_plugins: list[tuple[str, str]] = []
     for plugin_base, _, _ in plugin_bases:
         if plugin_base.tools_module_path is None:
+            if plugin_base.hooks_module_path is not None:
+                _execute_validation_plugin_module(
+                    plugin_base.name,
+                    plugin_base.root,
+                    plugin_base.hooks_module_path,
+                    validation_registrations,
+                )
             continue
         active_plugins.append(
-            _load_validation_plugin_tools_module(
+            (
                 plugin_base.name,
-                plugin_base.tools_module_path,
-                validation_registrations,
+                _execute_validation_plugin_module(
+                    plugin_base.name,
+                    plugin_base.root,
+                    plugin_base.tools_module_path,
+                    validation_registrations,
+                ),
             ),
         )
+        if plugin_base.hooks_module_path is not None and plugin_base.hooks_module_path != plugin_base.tools_module_path:
+            _execute_validation_plugin_module(
+                plugin_base.name,
+                plugin_base.root,
+                plugin_base.hooks_module_path,
+                validation_registrations,
+            )
 
     _, desired_metadata = _resolved_tool_state(active_plugins, validation_registrations)
     return desired_metadata

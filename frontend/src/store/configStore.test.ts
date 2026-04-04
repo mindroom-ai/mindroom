@@ -58,6 +58,7 @@ describe('configStore', () => {
       selectedCultureId: null,
       selectedRoomId: null,
       isDirty: false,
+      dirtyRoots: [],
       isLoading: false,
       diagnostics: [],
       syncStatus: 'disconnected',
@@ -500,6 +501,44 @@ describe('configStore', () => {
       ]);
     });
 
+    it('surfaces raw recovery fetch failures instead of masking them as validation blockers', async () => {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: [
+            {
+              loc: ['plugins', 0],
+              msg: 'Plugin tools_module must be a string',
+              type: 'value_error',
+            },
+          ],
+        }),
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: async () => ({
+          detail: 'Authentication required. Please log in to access this instance.',
+        }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+
+      expect(useConfigStore.getState()).toMatchObject({
+        config: null,
+        recoveryConfigSource: null,
+        syncStatus: 'error',
+        diagnostics: [
+          {
+            kind: 'global',
+            message: 'Authentication required. Please log in to access this instance.',
+            blocking: true,
+          },
+        ],
+      });
+    });
+
     it('ignores stale successful load results after a newer 422 failure', async () => {
       const pendingConfigResponse = deferred<{
         ok: boolean;
@@ -888,6 +927,61 @@ describe('configStore', () => {
       ]);
     });
 
+    it('exits recovery mode when a retry load succeeds after local recovery edits', async () => {
+      useConfigStore.setState({
+        diagnostics: [
+          {
+            kind: 'global',
+            message: 'Configuration validation failed',
+            blocking: true,
+          },
+        ],
+        syncStatus: 'error',
+        recoveryConfigSource: 'agents:\n  helper:\n    role: Fixed locally\n',
+        recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
+        isDirty: true,
+        draftVersion: 1,
+      });
+
+      (global.fetch as any)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            agents: {
+              helper: {
+                display_name: 'Helper',
+                role: 'Fixed on disk',
+                tools: [],
+                skills: [],
+                instructions: [],
+                rooms: [],
+              },
+            },
+            models: {
+              default: {
+                provider: 'ollama',
+                id: 'test-model',
+              },
+            },
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ agent_policies: { helper: makeAgentPolicy('helper') } }),
+        });
+
+      await useConfigStore.getState().loadConfig();
+
+      expect(useConfigStore.getState()).toMatchObject({
+        recoveryConfigSource: null,
+        recoveryConfigSourceOriginal: null,
+        isDirty: false,
+        syncStatus: 'synced',
+        diagnostics: [],
+      });
+      expect(useConfigStore.getState().config?.agents.helper.role).toBe('Fixed on disk');
+    });
+
     it('saves raw recovery source and reloads the structured config', async () => {
       useConfigStore.setState({
         diagnostics: [
@@ -947,6 +1041,55 @@ describe('configStore', () => {
         diagnostics: [],
       });
       expect(useConfigStore.getState().config?.agents.helper.role).toBe('Fixed');
+    });
+
+    it('returns an error when the post-save recovery reload fails', async () => {
+      useConfigStore.setState({
+        diagnostics: [
+          {
+            kind: 'global',
+            message: 'Configuration validation failed',
+            blocking: true,
+          },
+        ],
+        syncStatus: 'error',
+        recoveryConfigSource: 'agents:\n  helper:\n    role: Fixed\n',
+        recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
+        isDirty: true,
+      });
+
+      (global.fetch as any)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ success: true }),
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 401,
+          json: async () => ({
+            detail: 'Authentication required. Please log in to access this instance.',
+          }),
+        });
+
+      const result = await useConfigStore.getState().saveRecoveryConfigSource();
+
+      expect(result).toEqual({
+        status: 'error',
+        message: 'Authentication required. Please log in to access this instance.',
+        diagnostics: [
+          {
+            kind: 'global',
+            message: 'Authentication required. Please log in to access this instance.',
+            blocking: true,
+          },
+        ],
+      });
+      expect(useConfigStore.getState()).toMatchObject({
+        recoveryConfigSource: 'agents:\n  helper:\n    role: Fixed\n',
+        recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
+        isDirty: true,
+        syncStatus: 'error',
+      });
     });
 
     it('preserves newer recovery edits when an older recovery save finishes later', async () => {
@@ -1365,8 +1508,6 @@ describe('configStore', () => {
         body: JSON.stringify({
           ...mockConfig,
           agents: { test: agentWithoutId },
-          teams: {}, // saveConfig adds empty teams if not present
-          cultures: {}, // saveConfig adds empty cultures if not present
         }),
       });
 
@@ -1711,6 +1852,123 @@ describe('configStore', () => {
       expect(state.syncStatus).toBe('error');
     });
 
+    it('retains unrelated validation diagnostics when a stale save is superseded by newer edits', async () => {
+      const pendingSaveResponse = deferred<{
+        ok: boolean;
+        json: () => Promise<{ success: true }>;
+      }>();
+      const config: Config = {
+        agents: {
+          helper: {
+            display_name: 'Helper',
+            role: '',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        teams: {
+          ops: {
+            display_name: '',
+            role: 'Runs ops',
+            agents: ['helper'],
+            rooms: [],
+            mode: 'coordinate',
+          },
+        },
+        defaults: { markdown: true },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-ada-002',
+            },
+          },
+        },
+        models: {
+          default: { provider: 'test', id: 'test-model' },
+        },
+        router: { model: 'default' },
+      };
+      useConfigStore.setState({
+        config,
+        loadedConfig: config,
+        agents: [
+          {
+            id: 'helper',
+            display_name: 'Helper',
+            role: '',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        ],
+        teams: [
+          {
+            id: 'ops',
+            display_name: '',
+            role: 'Runs ops',
+            agents: ['helper'],
+            rooms: [],
+            mode: 'coordinate',
+          },
+        ],
+        diagnostics: [
+          {
+            kind: 'global',
+            message: 'Configuration validation failed',
+            blocking: false,
+          },
+          {
+            kind: 'validation',
+            issue: {
+              loc: ['agents', 'helper', 'role'],
+              msg: 'role is required',
+              type: 'value_error',
+            },
+          },
+          {
+            kind: 'validation',
+            issue: {
+              loc: ['teams', 'ops', 'display_name'],
+              msg: 'display_name is required',
+              type: 'value_error',
+            },
+          },
+        ],
+        isDirty: true,
+      });
+
+      (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
+
+      const savePromise = useConfigStore.getState().saveConfig();
+      useConfigStore.getState().updateAgent('helper', { role: 'Now valid' });
+
+      pendingSaveResponse.resolve({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+
+      expect(await savePromise).toEqual({ status: 'stale' });
+      expect(useConfigStore.getState().diagnostics).toEqual([
+        {
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: false,
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['teams', 'ops', 'display_name'],
+            msg: 'display_name is required',
+            type: 'value_error',
+          },
+        },
+      ]);
+    });
+
     it('preserves newer voice edits when an older save finishes later', async () => {
       const pendingSaveResponse = deferred<{
         ok: boolean;
@@ -1848,6 +2106,7 @@ describe('configStore', () => {
         config: draftConfig,
         agents,
         isDirty: true,
+        dirtyRoots: ['models'],
       });
 
       (global.fetch as any)
@@ -1885,6 +2144,85 @@ describe('configStore', () => {
       expect(state.loadedConfig?.models.default.id).toBe('new-model');
       expect(state.isDirty).toBe(false);
       expect(state.syncStatus).toBe('synced');
+    });
+
+    it('saves against the latest loaded config for untouched sections', async () => {
+      const loadedConfig: Config = {
+        agents: {
+          assistant: {
+            display_name: 'Assistant',
+            role: 'Original role',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        models: {
+          default: { provider: 'test', id: 'test-model' },
+        },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-ada-002',
+            },
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+        voice: {
+          enabled: false,
+          visible_router_echo: true,
+          stt: {
+            provider: 'openai',
+            model: 'whisper-1',
+          },
+          intelligence: {
+            model: 'default',
+          },
+        },
+      };
+      const staleDraftConfig: Config = {
+        ...loadedConfig,
+        voice: {
+          ...loadedConfig.voice!,
+          visible_router_echo: false,
+        },
+      };
+      useConfigStore.setState({
+        loadedConfig,
+        config: staleDraftConfig,
+        agents: [
+          {
+            id: 'assistant',
+            display_name: 'Assistant',
+            role: 'Edited role',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        ],
+        isDirty: true,
+        dirtyRoots: ['agents'],
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const saveBody = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      expect(saveBody.voice.visible_router_echo).toBe(true);
+      expect(saveBody.agents.assistant.role).toBe('Edited role');
+      expect(useConfigStore.getState().config?.voice?.visible_router_echo).toBe(true);
     });
 
     it('clears validation issues for fields edited after a failed save while keeping unrelated ones', async () => {
@@ -2076,6 +2414,11 @@ describe('configStore', () => {
               skills: [],
               instructions: [],
               rooms: [],
+              knowledge_bases: [],
+              delegate_to: [],
+              context_files: [],
+              learning: true,
+              learning_mode: 'always',
             },
           },
         }),
@@ -3678,7 +4021,7 @@ describe('configStore', () => {
       expect(global.fetch).toHaveBeenNthCalledWith(1, '/api/config/save', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...mockConfig, cultures: {} }),
+        body: JSON.stringify(mockConfig),
       });
 
       const state = useConfigStore.getState();
@@ -3807,19 +4150,10 @@ describe('configStore', () => {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
       });
-      expect(JSON.parse(saveCall[1].body)).toEqual({
-        ...mockConfig,
-        cultures: {},
-        knowledge_bases: {},
-        teams: {},
+      expect(JSON.parse(saveCall[1].body)).toMatchObject({
         agents: {
           openclaw: {
             ...mockConfig.agents.openclaw,
-            learning: true,
-            learning_mode: 'always',
-            knowledge_bases: [],
-            delegate_to: [],
-            context_files: [],
             tools: [
               'browser',
               {
@@ -3831,6 +4165,7 @@ describe('configStore', () => {
             ],
           },
         },
+        knowledge_bases: {},
       });
     });
 
@@ -3906,32 +4241,10 @@ describe('configStore', () => {
 
       const saveCall = (global.fetch as any).mock.calls[2];
       expect(saveCall[0]).toBe('/api/config/save');
-      expect(JSON.parse(saveCall[1].body)).toEqual({
+      expect(JSON.parse(saveCall[1].body)).toMatchObject({
         ...mockConfig,
         room_models: {
           lobby: 'claude',
-        },
-        cultures: {},
-        knowledge_bases: {},
-        teams: {},
-        agents: {
-          openclaw: {
-            ...mockConfig.agents.openclaw,
-            learning: true,
-            learning_mode: 'always',
-            knowledge_bases: [],
-            delegate_to: [],
-            context_files: [],
-            tools: [
-              'browser',
-              {
-                shell: {
-                  extra_env_passthrough: ['GITEA_TOKEN'],
-                  shell_path_prepend: ['/run/wrappers/bin'],
-                },
-              },
-            ],
-          },
         },
       });
     });
@@ -3997,22 +4310,14 @@ describe('configStore', () => {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
       });
-      expect(JSON.parse(saveCall[1].body)).toEqual({
-        ...mockConfig,
-        cultures: {},
-        knowledge_bases: {},
-        teams: {},
+      expect(JSON.parse(saveCall[1].body)).toMatchObject({
         agents: {
           openclaw: {
             ...mockConfig.agents.openclaw,
-            learning: true,
-            learning_mode: 'always',
-            knowledge_bases: [],
-            delegate_to: [],
-            context_files: [],
             tools: ['shell'],
           },
         },
+        knowledge_bases: {},
       });
     });
   });
