@@ -28,11 +28,19 @@ from mindroom.hooks import (
     ReactionReceivedContext,
     ResponseDraft,
     ResponseResult,
+    build_hook_room_state_putter,
+    build_hook_room_state_querier,
     emit,
     emit_collect,
     emit_transform,
     render_enrichment_block,
     strip_enrichment_from_session_storage,
+)
+from mindroom.hooks.ingress import (
+    HookIngressPolicy,
+    hook_ingress_policy,
+    is_automation_source_kind,
+    should_handle_interactive_text_response,
 )
 from mindroom.hooks.sender import HookMessageSender, send_hook_message
 from mindroom.hooks.types import (
@@ -151,10 +159,16 @@ from .authorization import (
 )
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import config_confirmation
-from .commands.handler import CommandEvent, CommandHandlerContext, _generate_welcome_message, handle_command
+from .commands.handler import (
+    CommandEvent,
+    CommandHandlingBot,
+    _generate_welcome_message,
+    handle_command,
+)
 from .commands.parsing import Command, command_parser
 from .constants import (
     ATTACHMENT_IDS_KEY,
+    HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_COMPLETED,
@@ -167,6 +181,7 @@ from .constants import (
 from .error_handling import get_user_friendly_error_message
 from .history.runtime import create_scope_session_storage, open_scope_storage
 from .history.types import HistoryScope
+from .hooks.state import chain_hook_room_state_putters, chain_hook_room_state_queriers
 from .knowledge.utils import (
     MultiKnowledgeVectorDb,
     ensure_request_knowledge_managers,
@@ -209,6 +224,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.history import CompactionOutcome
+    from mindroom.hooks.types import HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
@@ -222,7 +238,6 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
-_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"scheduled", "hook"})
 
 
 def _get_or_create_lock(locks: dict[object, asyncio.Lock], key: object, *, max_entries: int = 100) -> asyncio.Lock:
@@ -490,6 +505,7 @@ class _PreparedTextEvent:
     source: dict[str, Any]
     server_timestamp: int | None = None
     is_synthetic: bool = False
+    source_kind_override: str | None = None
 
 
 type _TextDispatchEvent = nio.RoomMessageText | _PreparedTextEvent
@@ -522,7 +538,7 @@ def _is_coalescing_exempt_source_kind(event: _DispatchEvent) -> bool:
     if not isinstance(content, dict):
         return False
     source_kind = content.get("com.mindroom.source_kind")
-    return isinstance(source_kind, str) and source_kind in _COALESCING_EXEMPT_SOURCE_KINDS
+    return isinstance(source_kind, str) and is_automation_source_kind(source_kind)
 
 
 def _merge_response_extra_content(
@@ -657,6 +673,8 @@ class AgentBot:
             "logger": self.logger.bind(event_name=event_name),
             "correlation_id": correlation_id,
             "message_sender": self._hook_message_sender(),
+            "room_state_querier": self._hook_room_state_querier(),
+            "room_state_putter": self._hook_room_state_putter(),
         }
 
     def _hook_message_sender(self) -> HookMessageSender | None:
@@ -668,6 +686,22 @@ class AgentBot:
         if self.agent_name == ROUTER_AGENT_NAME and self.client is not None:
             return self._hook_send_message
         return None
+
+    def _hook_room_state_querier(self) -> HookRoomStateQuerier | None:
+        """Return the room-state querier bound into hook contexts for this bot."""
+        primary = build_hook_room_state_querier(self.client) if self.client is not None else None
+        fallback = None
+        if self.agent_name != ROUTER_AGENT_NAME and self.orchestrator is not None:
+            fallback = self.orchestrator._hook_room_state_querier()
+        return chain_hook_room_state_queriers(primary, fallback)
+
+    def _hook_room_state_putter(self) -> HookRoomStatePutter | None:
+        """Return the room-state putter bound into hook contexts for this bot."""
+        primary = build_hook_room_state_putter(self.client) if self.client is not None else None
+        fallback = None
+        if self.agent_name != ROUTER_AGENT_NAME and self.orchestrator is not None:
+            fallback = self.orchestrator._hook_room_state_putter()
+        return chain_hook_room_state_putters(primary, fallback)
 
     def _build_message_envelope(
         self,
@@ -683,12 +717,16 @@ class AgentBot:
     ) -> MessageEnvelope:
         """Build the normalized inbound envelope consumed by message hooks."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
-        resolved_source_kind = source_kind
+        resolved_source_kind = (
+            source_kind
+            if source_kind is not None
+            else event.source_kind_override
+            if isinstance(event, _PreparedTextEvent)
+            else None
+        )
+        source_kind_sender_is_trusted = extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = content.get("com.mindroom.source_kind")
-            source_kind_sender_is_trusted = (isinstance(event, _PreparedTextEvent) and event.is_synthetic) or (
-                extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
-            )
             if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
                 resolved_source_kind = source_kind_override
         if resolved_source_kind is None:
@@ -698,6 +736,15 @@ class AgentBot:
                 resolved_source_kind = "image"
             else:
                 resolved_source_kind = "message"
+        hook_source: str | None = None
+        message_received_depth = 0
+        if isinstance(content, dict) and source_kind_sender_is_trusted:
+            hook_source_override = content.get("com.mindroom.hook_source")
+            if isinstance(hook_source_override, str) and hook_source_override:
+                hook_source = hook_source_override
+            depth_override = content.get(HOOK_MESSAGE_RECEIVED_DEPTH_KEY)
+            if isinstance(depth_override, int) and not isinstance(depth_override, bool) and depth_override > 0:
+                message_received_depth = depth_override
 
         return MessageEnvelope(
             source_event_id=event.event_id,
@@ -719,7 +766,44 @@ class AgentBot:
             ),
             agent_name=agent_name or self.agent_name,
             source_kind=resolved_source_kind,
+            hook_source=hook_source,
+            message_received_depth=message_received_depth,
         )
+
+    async def _build_dispatch_envelope(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+        requester_user_id: str,
+    ) -> MessageEnvelope:
+        """Build the normalized inbound envelope for one prepared dispatch event."""
+        context = await self._extract_dispatch_context(room, event)
+        return self._build_message_envelope(
+            room_id=room.room_id,
+            event=event,
+            requester_user_id=requester_user_id,
+            context=context,
+        )
+
+    def _should_skip_deep_synthetic_full_dispatch(
+        self,
+        *,
+        event_id: str,
+        envelope: MessageEnvelope,
+    ) -> bool:
+        """Return True when a deep synthetic hook relay must stop before dispatch."""
+        ingress_policy = hook_ingress_policy(envelope)
+        if ingress_policy.allow_full_dispatch:
+            return False
+        self.logger.debug(
+            "Ignoring deep synthetic hook relay before command/response dispatch",
+            event_id=event_id,
+            source_kind=envelope.source_kind,
+            hook_source=envelope.hook_source,
+            message_received_depth=envelope.message_received_depth,
+        )
+        return True
 
     def _default_response_envelope(
         self,
@@ -753,22 +837,18 @@ class AgentBot:
         *,
         envelope: MessageEnvelope,
         correlation_id: str,
+        policy: HookIngressPolicy,
     ) -> bool:
         """Emit message:received and return whether hooks suppressed processing."""
-        if envelope.source_kind == "hook":
-            self.logger.debug(
-                "Skipping message:received hooks for hook-originated automation message",
-                event_id=envelope.source_event_id,
-                room_id=envelope.room_id,
-            )
-            return False
-
         if not self.hook_registry.has_hooks(EVENT_MESSAGE_RECEIVED):
+            return False
+        if not policy.rerun_message_received:
             return False
 
         context = MessageReceivedContext(
             **self._hook_base_kwargs(EVENT_MESSAGE_RECEIVED, correlation_id),
             envelope=envelope,
+            skip_plugin_names=policy.skip_message_received_plugin_names,
         )
         await emit(self.hook_registry, EVENT_MESSAGE_RECEIVED, context)
         return context.suppress
@@ -1433,7 +1513,18 @@ class AgentBot:
             return
 
         prepared_event = await self._resolve_text_dispatch_event(prechecked_event.event)
-        await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
+        envelope = await self._build_dispatch_envelope(
+            room=room,
+            event=prepared_event,
+            requester_user_id=prechecked_event.requester_user_id,
+        )
+        if self._should_skip_deep_synthetic_full_dispatch(
+            event_id=prepared_event.event_id,
+            envelope=envelope,
+        ):
+            return
+        if should_handle_interactive_text_response(envelope):
+            await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
         await self._dispatch_text_message(
             room,
             _PrecheckedEvent(
@@ -1462,6 +1553,11 @@ class AgentBot:
         )
         if dispatch is None:
             return
+        if self._should_skip_deep_synthetic_full_dispatch(
+            event_id=event.event_id,
+            envelope=dispatch.envelope,
+        ):
+            return
 
         # Router handles commands exclusively
         command = command_parser.parse(event.body)
@@ -1476,6 +1572,7 @@ class AgentBot:
                         requester_user_id=prechecked_event.requester_user_id,
                     ),
                     command,
+                    source_envelope=dispatch.envelope,
                 )
             return
         await self._hydrate_dispatch_context(room, event, dispatch.context)
@@ -1759,6 +1856,7 @@ class AgentBot:
                     },
                     server_timestamp=None,
                     is_synthetic=True,
+                    source_kind_override="voice",
                 ),
                 requester_user_id=prechecked_event.requester_user_id,
             ),
@@ -1984,7 +2082,18 @@ class AgentBot:
         prepared_text_event = await self._prepare_file_sidecar_text_event(event)
         assert prepared_text_event is not None
         assert self.client is not None
-        await interactive.handle_text_response(self.client, room, prepared_text_event, self.agent_name)
+        envelope = await self._build_dispatch_envelope(
+            room=room,
+            event=prepared_text_event,
+            requester_user_id=prechecked_event.requester_user_id,
+        )
+        if self._should_skip_deep_synthetic_full_dispatch(
+            event_id=prepared_text_event.event_id,
+            envelope=envelope,
+        ):
+            return True
+        if should_handle_interactive_text_response(envelope):
+            await interactive.handle_text_response(self.client, room, prepared_text_event, self.agent_name)
         await self._dispatch_text_message(
             room,
             _PrecheckedEvent(
@@ -2077,12 +2186,14 @@ class AgentBot:
         processed, or ``None`` when the event should be skipped.
 
         Checks (in order): self-authored, already processed (skipped for
-        edits so restart recovery works), sender authorization, and
-        per-agent reply permissions.
+        edits so restart recovery works), effective requester
+        authorization, and per-agent reply permissions.
         """
         requester_user_id = self._requester_user_id_for_event(event)
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        source_kind = content.get("com.mindroom.source_kind") if isinstance(content, dict) else None
 
-        if requester_user_id == self.matrix_id.full_id:
+        if requester_user_id == self.matrix_id.full_id and source_kind != "hook_dispatch":
             return None
 
         # Edits bypass the dedup check: if an edit is redelivered after a
@@ -2091,7 +2202,7 @@ class AgentBot:
             return None
 
         if not is_authorized_sender(
-            event.sender,
+            requester_user_id,
             self.config,
             room.room_id,
             self.runtime_paths,
@@ -2233,15 +2344,17 @@ class AgentBot:
             requester_user_id=effective_requester_user_id,
             context=context,
         )
+        ingress_policy = hook_ingress_policy(envelope)
         if await self._emit_message_received_hooks(
             envelope=envelope,
             correlation_id=correlation_id,
+            policy=ingress_policy,
         ):
             self.response_tracker.mark_responded(event.event_id)
             return None
 
         sender_agent_name = extract_agent_name(effective_requester_user_id, self.config, self.runtime_paths)
-        if sender_agent_name and not context.am_i_mentioned:
+        if sender_agent_name and not context.am_i_mentioned and not ingress_policy.bypass_unmentioned_agent_gate:
             self.logger.debug(f"Ignoring {event_label} from other agent (not mentioned)")
             return None
 
@@ -2831,6 +2944,7 @@ class AgentBot:
         attachment_ids: list[str] | None = None,
         correlation_id: str | None = None,
         resolved_thread_id: str | None = None,
+        source_envelope: MessageEnvelope | None = None,
     ) -> ToolRuntimeContext | None:
         """Build shared runtime context for all tool calls."""
         if self.client is None:
@@ -2857,6 +2971,9 @@ class AgentBot:
             hook_registry=self.hook_registry,
             correlation_id=correlation_id,
             hook_message_sender=self._hook_message_sender(),
+            room_state_querier=self._hook_room_state_querier(),
+            room_state_putter=self._hook_room_state_putter(),
+            message_received_depth=source_envelope.message_received_depth if source_envelope is not None else 0,
         )
 
     def _resolve_runtime_model_for_room(self, room_id: str) -> str:
@@ -3012,6 +3129,7 @@ class AgentBot:
         active_model_name: str | None = None,
         attachment_ids: list[str] | None = None,
         correlation_id: str | None = None,
+        source_envelope: MessageEnvelope | None = None,
     ) -> _PreparedResponseRuntime:
         """Derive prompt metadata and tool runtime from one canonical response target."""
         return _PreparedResponseRuntime(
@@ -3034,6 +3152,7 @@ class AgentBot:
                 attachment_ids=attachment_ids,
                 correlation_id=correlation_id,
                 resolved_thread_id=response_target.resolved_thread_id,
+                source_envelope=source_envelope,
             ),
             execution_identity=self._build_tool_execution_identity(
                 room_id=room_id,
@@ -3125,6 +3244,8 @@ class AgentBot:
             mentioned_agents=dispatch.envelope.mentioned_agents,
             agent_name=target_entity_name,
             source_kind=dispatch.envelope.source_kind,
+            hook_source=dispatch.envelope.hook_source,
+            message_received_depth=dispatch.envelope.message_received_depth,
         )
         model_prompt: str | None = None
         strip_transient_enrichment_after_run = False
@@ -3323,6 +3444,7 @@ class AgentBot:
             active_model_name=model_name,
             attachment_ids=payload.attachment_ids,
             correlation_id=resolved_correlation_id,
+            source_envelope=response_envelope,
         )
         model_message = runtime.model_prompt
         resolved_response_envelope = response_envelope or self._default_response_envelope(
@@ -3744,6 +3866,7 @@ class AgentBot:
             active_model_name=active_model_name,
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
+            source_envelope=response_envelope,
         )
         response_thread_id = effective_response_target.delivery_thread_id
         session_id = effective_response_target.session_id
@@ -3861,6 +3984,7 @@ class AgentBot:
         agent_name: str,
         user_id: str | None,
         reply_to_event: nio.RoomMessageText | None = None,
+        source_envelope: MessageEnvelope | None = None,
     ) -> str | None:
         """Send a skill command response using a specific agent."""
         response_target = self._prepare_response_target(
@@ -3885,6 +4009,7 @@ class AgentBot:
                 user_id=user_id,
                 reply_to_event=reply_to_event,
                 response_target=response_target,
+                source_envelope=source_envelope,
             )
 
     async def _send_skill_command_response_locked(
@@ -3899,6 +4024,7 @@ class AgentBot:
         user_id: str | None,
         reply_to_event: nio.RoomMessageText | None = None,
         response_target: _ResponseTarget,
+        source_envelope: MessageEnvelope | None = None,
     ) -> str | None:
         """Send a skill command response after acquiring the per-thread lock."""
         assert self.client is not None
@@ -3917,6 +4043,7 @@ class AgentBot:
             response_target=response_target,
             include_context=self._agent_has_matrix_messaging_tool(agent_name),
             agent_name=agent_name,
+            source_envelope=source_envelope,
         )
         session_id = response_target.session_id
         model_prompt = runtime.model_prompt
@@ -4256,6 +4383,7 @@ class AgentBot:
             active_model_name=self._resolve_runtime_model_for_room(room_id),
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
+            source_envelope=response_envelope,
         )
         response_thread_id = effective_response_target.delivery_thread_id
         session_id = effective_response_target.session_id
@@ -4896,6 +5024,8 @@ class AgentBot:
         thread_id: str | None,
         source_hook: str,
         extra_content: dict[str, Any] | None = None,
+        *,
+        trigger_dispatch: bool = False,
     ) -> str | None:
         """Send a hook-originated Matrix message with stable metadata tags."""
         if self.client is None:
@@ -4911,6 +5041,7 @@ class AgentBot:
             thread_id,
             source_hook,
             extra_content,
+            trigger_dispatch=trigger_dispatch,
             sender_domain=self.matrix_id.domain,
         )
         if event_id:
@@ -5129,9 +5260,11 @@ class AgentBot:
             body=edited_content,
             source_kind="edit",
         )
+        ingress_policy = hook_ingress_policy(envelope)
         if await self._emit_message_received_hooks(
             envelope=envelope,
             correlation_id=event.event_id,
+            policy=ingress_policy,
         ):
             self.response_tracker.mark_responded(event_info.original_event_id, response_event_id)
             return
@@ -5245,27 +5378,18 @@ class AgentBot:
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedTextDispatchEvent,
         command: Command,
+        *,
+        source_envelope: MessageEnvelope | None = None,
     ) -> None:
         assert self.client is not None
         event = await self._resolve_text_dispatch_event(prechecked_event.event)
-        context = CommandHandlerContext(
-            client=self.client,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            storage_path=self.storage_path,
-            logger=self.logger,
-            response_tracker=self.response_tracker,
-            derive_conversation_context=self._derive_conversation_context,
-            resolve_reply_thread_id=self._resolve_reply_thread_id,
-            send_response=self._send_response,
-            send_skill_command_response=self._send_skill_command_response,
-        )
         await handle_command(
-            context=context,
+            bot=cast("CommandHandlingBot", self),
             room=room,
             event=event,
             command=command,
             requester_user_id=prechecked_event.requester_user_id,
+            source_envelope=source_envelope,
         )
 
 

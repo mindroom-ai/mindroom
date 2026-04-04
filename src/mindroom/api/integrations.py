@@ -10,6 +10,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom.api.credentials import (
+    RequestCredentialsTarget,
     consume_pending_oauth_request,
     issue_pending_oauth_state,
     load_credentials_for_target,
@@ -29,11 +30,9 @@ def get_dashboard_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
-def _get_spotify_redirect_uri(request: Request) -> str:
+def _get_spotify_redirect_uri(request: Request, runtime_paths: RuntimePaths) -> str:
     """Return the Spotify OAuth callback URL."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    configured = api_runtime_paths(request).env_value("SPOTIFY_REDIRECT_URI")
+    configured = runtime_paths.env_value("SPOTIFY_REDIRECT_URI")
     if configured:
         return configured
     return str(request.url_for("spotify_callback"))
@@ -97,11 +96,12 @@ def _save_spotify_credentials(
     request: Request,
     agent_name: str | None = None,
     *,
+    target: RequestCredentialsTarget | None = None,
     execution_scope_override_provided: bool | None = None,
     execution_scope_override: WorkerScope | None = None,
 ) -> None:
     """Save Spotify credentials."""
-    target = resolve_request_credentials_target(
+    resolved_target = target or resolve_request_credentials_target(
         request,
         agent_name=agent_name,
         service_names=("spotify",),
@@ -110,7 +110,7 @@ def _save_spotify_credentials(
     )
     credentials_to_save = dict(credentials)
     credentials_to_save.setdefault("_source", "ui")
-    target.target_manager.save_credentials("spotify", credentials_to_save)
+    resolved_target.target_manager.save_credentials("spotify", credentials_to_save)
 
 
 @router.get("/spotify/status")
@@ -119,16 +119,15 @@ async def get_spotify_status(
     agent_name: str | None = None,
 ) -> SpotifyStatus:
     """Get Spotify connection status."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
     status = SpotifyStatus(connected=False)
-    creds = _get_spotify_credentials(request, agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
+    creds = load_credentials_for_target("spotify", target)
     if not creds or "access_token" not in creds:
         return status
 
     status.connected = True
     try:
-        spotify_cls, _ = _ensure_spotify_packages(api_runtime_paths(request))
+        spotify_cls, _ = _ensure_spotify_packages(target.runtime_paths)
         sp = spotify_cls(auth=creds["access_token"])
         user = sp.current_user()
         status.details = {
@@ -147,9 +146,8 @@ async def get_spotify_status(
 @router.post("/spotify/connect")
 async def connect_spotify(request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Start Spotify OAuth flow."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
+    runtime_paths = target.runtime_paths
     client_id = runtime_paths.env_value("SPOTIFY_CLIENT_ID")
     client_secret = runtime_paths.env_value("SPOTIFY_CLIENT_SECRET")
 
@@ -159,13 +157,12 @@ async def connect_spotify(request: Request, agent_name: str | None = None) -> di
             detail="Spotify OAuth not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables.",
         )
 
-    resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
     state = issue_pending_oauth_state(request, "spotify", agent_name)
     _, spotify_oauth_cls = _ensure_spotify_packages(runtime_paths)
     sp_oauth = spotify_oauth_cls(
         client_id=client_id,
         client_secret=client_secret,
-        redirect_uri=_get_spotify_redirect_uri(request),
+        redirect_uri=_get_spotify_redirect_uri(request, runtime_paths),
         scope="user-read-private user-read-email user-read-playback-state user-read-currently-playing user-top-read",
     )
 
@@ -186,9 +183,14 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
     pending = consume_pending_oauth_request(request, "spotify", state)
     agent_name = pending.agent_name
 
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
+    target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=("spotify",),
+        execution_scope_override_provided=pending.execution_scope_override_provided,
+        execution_scope_override=pending.execution_scope_override,
+    )
+    runtime_paths = target.runtime_paths
     client_id = runtime_paths.env_value("SPOTIFY_CLIENT_ID")
     client_secret = runtime_paths.env_value("SPOTIFY_CLIENT_SECRET")
 
@@ -200,7 +202,7 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
         sp_oauth = spotify_oauth_cls(
             client_id=client_id,
             client_secret=client_secret,
-            redirect_uri=_get_spotify_redirect_uri(request),
+            redirect_uri=_get_spotify_redirect_uri(request, runtime_paths),
         )
 
         token_info = sp_oauth.get_access_token(code)
@@ -220,11 +222,14 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
             credentials,
             request,
             agent_name,
+            target=target,
             execution_scope_override_provided=pending.execution_scope_override_provided,
             execution_scope_override=pending.execution_scope_override,
         )
 
         return RedirectResponse(url=f"{get_dashboard_url(request)}/?spotify=connected")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OAuth failed: {e!s}") from e
 

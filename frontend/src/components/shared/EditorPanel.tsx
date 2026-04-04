@@ -1,7 +1,46 @@
 import React from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { toast } from '@/components/ui/toaster';
+import type { SaveConfigResult } from '@/store/configStore';
 import { Save, Trash2, LucideIcon, ArrowLeft } from 'lucide-react';
+
+const DEFAULT_STALE_SAVE_MESSAGE = 'Save was superseded by newer draft edits.';
+
+function isSaveConfigResult(value: unknown): value is SaveConfigResult {
+  if (typeof value !== 'object' || value === null || !('status' in value)) {
+    return false;
+  }
+  return value.status === 'saved' || value.status === 'stale' || value.status === 'error';
+}
+
+export function showSaveFailureToastIfNeeded(
+  result: unknown,
+  options: {
+    title?: string;
+    staleMessage?: string;
+    fallbackMessage?: string;
+  } = {}
+): boolean {
+  if (!isSaveConfigResult(result) || result.status === 'saved') {
+    return false;
+  }
+
+  const description =
+    result.status === 'stale'
+      ? options.staleMessage ?? DEFAULT_STALE_SAVE_MESSAGE
+      : result.diagnostics.find(diagnostic => diagnostic.kind === 'global')?.message ??
+        result.message ??
+        options.fallbackMessage ??
+        'Failed to save changes.';
+
+  toast({
+    title: options.title ?? 'Save Failed',
+    description,
+    variant: 'destructive',
+  });
+  return true;
+}
 
 export interface EditorPanelProps {
   /** Icon to display in the header */
@@ -11,7 +50,7 @@ export interface EditorPanelProps {
   /** Whether the panel is in a dirty state (has unsaved changes) */
   isDirty: boolean;
   /** Function to call when save is clicked */
-  onSave: () => void | Promise<void>;
+  onSave: () => void | Promise<unknown>;
   /** Function to call when delete is clicked */
   onDelete: () => void;
   /** Whether to show the save and delete buttons */
@@ -73,8 +112,15 @@ export function EditorPanel({
 }: EditorPanelProps) {
   const handleSave = async () => {
     try {
-      await onSave();
+      const result = await onSave();
+      showSaveFailureToastIfNeeded(result);
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save changes.';
+      toast({
+        title: 'Save Failed',
+        description: message,
+        variant: 'destructive',
+      });
       console.error('Save failed:', error);
     }
   };

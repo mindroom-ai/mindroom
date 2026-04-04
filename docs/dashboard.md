@@ -189,6 +189,8 @@ The dashboard communicates with the backend API at `/api/`:
 |--------|----------|-------------|
 | POST | `/api/config/load` | Fetch current configuration |
 | PUT | `/api/config/save` | Save full configuration |
+| GET | `/api/config/raw` | Fetch the raw `config.yaml` source for recovery editing |
+| PUT | `/api/config/raw` | Replace the entire raw `config.yaml` source during recovery |
 | GET | `/api/config/agents` | List all agents |
 | POST | `/api/config/agents` | Create new agent |
 | PUT | `/api/config/agents/{id}` | Update agent |
@@ -202,6 +204,8 @@ The dashboard communicates with the backend API at `/api/`:
 | GET | `/api/config/room-models` | Get room model overrides |
 | PUT | `/api/config/room-models` | Update room model overrides |
 | POST | `/api/config/agent-policies` | Get backend-derived agent policies for a draft config |
+
+When `/api/config/load` returns validation errors, the dashboard fetches `/api/config/raw`, opens the recovery editor, and saves a full replacement through `PUT /api/config/raw` before retrying the structured reload.
 
 ### Credentials
 

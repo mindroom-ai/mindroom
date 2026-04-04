@@ -27,6 +27,7 @@ export function CultureEditor() {
     deleteCulture,
     saveConfig,
     isDirty,
+    isLoading,
     selectCulture,
   } = useConfigStore();
 
@@ -68,7 +69,7 @@ export function CultureEditor() {
   };
 
   const handleSave = async () => {
-    await saveConfig();
+    return saveConfig();
   };
 
   if (!selectedCulture) {
@@ -82,6 +83,7 @@ export function CultureEditor() {
       isDirty={isDirty}
       onSave={handleSave}
       onDelete={handleDelete}
+      disableSave={isLoading}
       onBack={() => selectCulture(null)}
     >
       <FieldGroup

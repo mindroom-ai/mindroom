@@ -8,13 +8,21 @@ from typing import TYPE_CHECKING, Any
 import yaml
 from pydantic import ValidationError
 
-from mindroom.config.main import Config, load_config
+from mindroom.api import config_lifecycle
+from mindroom.config.main import (
+    Config,
+    ConfigRuntimeValidationError,
+    format_invalid_config_message,
+    load_config_or_user_error,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+
+_CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
 
 
 def _parse_config_args(args_text: str) -> tuple[str, list[str]]:
@@ -175,9 +183,13 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     """
     operation, args = _parse_config_args(args_text)
     path = runtime_paths.config_path
+    load_error_footer = _CONFIG_CHANGE_REJECTED_MESSAGE if operation == "set" else None
 
     # Load current config
-    config = load_config(runtime_paths)
+    config, load_error = load_config_or_user_error(runtime_paths, footer=load_error_footer)
+    if load_error:
+        return load_error, None
+    assert config is not None
     config_dict = config.authored_model_dump()
 
     if operation == "show":
@@ -232,14 +244,8 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             _validate_config_dict(test_config_dict, runtime_paths)
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
-        except ValidationError as e:
-            # Validation failed - explain why
-            errors = []
-            for error in e.errors():
-                location = " → ".join(str(loc) for loc in error["loc"])
-                errors.append(f"• {location}: {error['msg']}")
-            error_msg = "\n".join(errors)
-            return f"❌ Invalid configuration:\n{error_msg}\n\nChanges were NOT applied.", None
+        except (ValidationError, ConfigRuntimeValidationError) as e:
+            return format_invalid_config_message(e, footer=_CONFIG_CHANGE_REJECTED_MESSAGE), None
         else:
             # Format the preview message
             formatted_old = _format_value(old_value) if old_value is not None else "Not set"
@@ -305,7 +311,10 @@ async def apply_config_change(
 
     try:
         # Load the current configuration
-        config = load_config(runtime_paths)
+        config, load_error = load_config_or_user_error(runtime_paths, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+        if load_error:
+            return load_error
+        assert config is not None
         config_dict = config.model_dump()
 
         # Apply the specific change
@@ -314,16 +323,11 @@ async def apply_config_change(
         # Validate the modified config
         try:
             new_config = _validate_config_dict(config_dict, runtime_paths)
-        except ValidationError as ve:
-            errors = ["❌ Configuration validation failed:"]
-            for error in ve.errors():
-                location = " → ".join(str(loc) for loc in error["loc"])
-                errors.append(f"• {location}: {error['msg']}")
-            error_msg = "\n".join(errors)
-            return f"{error_msg}\n\nChanges were NOT applied."
+        except (ValidationError, ConfigRuntimeValidationError) as ve:
+            return format_invalid_config_message(ve, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
 
-        # Save to file
-        new_config.save_to_yaml(path)
+        # Save to file and advance any in-process API snapshot immediately.
+        config_lifecycle.persist_runtime_validated_config(new_config, runtime_paths)
         return (  # noqa: TRY300
             f"✅ **Configuration updated successfully!**\n\n"
             f"Changes saved to {path} and will affect new agent interactions."

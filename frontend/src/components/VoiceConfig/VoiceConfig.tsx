@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
+import { showSaveFailureToastIfNeeded } from '@/components/shared';
 import { useConfigStore } from '@/store/configStore';
 import { VoiceConfig as VoiceConfigType } from '@/types/config';
 
@@ -55,7 +56,7 @@ function normalizeHost(host?: string): string {
 }
 
 export function VoiceConfig() {
-  const { config, saveConfig, markDirty } = useConfigStore();
+  const { config, isLoading, saveConfig, updateVoiceConfig } = useConfigStore();
   const { toast } = useToast();
 
   // Initialize local state with default values if voice config doesn't exist
@@ -72,11 +73,7 @@ export function VoiceConfig() {
     const newConfig = { ...voiceConfig, ...updates };
     setVoiceConfig(newConfig);
 
-    // Update the store
-    if (config) {
-      config.voice = newConfig;
-      markDirty();
-    }
+    updateVoiceConfig(newConfig);
   };
 
   const handleSTTChange = (updates: Partial<VoiceConfigType['stt']>) => {
@@ -104,23 +101,27 @@ export function VoiceConfig() {
   const providerLabel = 'OpenAI';
 
   const handleSave = async () => {
-    try {
-      if (config?.voice?.stt) {
-        config.voice.stt.provider = 'openai';
-        config.voice.stt.host = normalizeHost(config.voice.stt.host);
-      }
-      await saveConfig();
-      toast({
-        title: 'Voice Configuration Saved',
-        description: 'Your voice settings have been updated successfully.',
-      });
-    } catch (error) {
-      toast({
-        title: 'Save Failed',
-        description: 'Failed to save voice configuration.',
-        variant: 'destructive',
-      });
+    updateVoiceConfig({
+      ...voiceConfig,
+      stt: {
+        ...voiceConfig.stt,
+        provider: 'openai',
+        host: normalizeHost(voiceConfig.stt.host),
+      },
+    });
+    const result = await saveConfig();
+    if (
+      showSaveFailureToastIfNeeded(result, {
+        staleMessage: 'Save was superseded by newer voice configuration edits.',
+        fallbackMessage: 'Failed to save voice configuration.',
+      })
+    ) {
+      return;
     }
+    toast({
+      title: 'Voice Configuration Saved',
+      description: 'Your voice settings have been updated successfully.',
+    });
   };
 
   return (
@@ -309,7 +310,9 @@ export function VoiceConfig() {
 
           {/* Save Button */}
           <div className="flex justify-end">
-            <Button onClick={handleSave}>Save Voice Configuration</Button>
+            <Button onClick={handleSave} disabled={isLoading}>
+              Save Voice Configuration
+            </Button>
           </div>
         </CardContent>
       </Card>

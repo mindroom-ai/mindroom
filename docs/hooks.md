@@ -141,6 +141,7 @@ async def block_secret_reads(ctx):
 | `message:after_response` | Observer | `AfterResponseContext` | After final Matrix send or edit | None (frozen) |
 | `agent:started` | Observer | `AgentLifecycleContext` | After bot starts (Matrix login, presence, callbacks registered) | None (frozen) |
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None (frozen) |
+| `bot:ready` | Observer | `AgentLifecycleContext` | After bot completes room joins and initial sync | None (frozen) |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
 | `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
@@ -159,6 +160,7 @@ async def block_secret_reads(ctx):
 | `schedule:fired` | 1000 |
 | `agent:started` | 5000 |
 | `agent:stopped` | 5000 |
+| `bot:ready` | 5000 |
 | `config:reloaded` | 5000 |
 | `tool:before_call` | 200 |
 | `tool:after_call` | 300 |
@@ -320,7 +322,7 @@ A bounded semaphore (default 10) prevents one plugin from flooding the event loo
 ## Custom events
 
 Plugins can define and emit namespaced custom events.
-Built-in namespaces (`message:*`, `agent:*`, `schedule:*`, `reaction:*`, `config:*`, `tool:*`) are reserved.
+Built-in namespaces (`message:*`, `agent:*`, `bot:*`, `schedule:*`, `reaction:*`, `config:*`, `tool:*`) are reserved.
 
 ### Defining a custom event hook
 
@@ -331,18 +333,6 @@ from mindroom.hooks import hook
 @hook("todo:item_completed")
 async def audit_completion(ctx):
     append_jsonl(ctx.state_root / "events.jsonl", {"item_id": ctx.payload["item_id"]})
-```
-
-### Emitting from hook code
-
-```python
-from mindroom.hooks.execution import emit
-
-
-@hook("todo:item_added")
-async def on_item_added(ctx):
-    # Process the item, then emit a follow-up event
-    await emit(ctx.hook_registry, "todo:processed", ctx)
 ```
 
 ### Emitting from tool code
@@ -356,11 +346,14 @@ from mindroom.tool_system.runtime_context import emit_custom_event
 await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
 ```
 
+Hook contexts do not expose a `hook_registry`, so hook callbacks cannot emit custom events directly through `ctx`.
+If you are writing internal code or tests and already have an explicit `HookRegistry`, you can still call `emit(registry, event_name, context)` manually.
+
 ### Event name rules
 
 - Pattern: `^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$`
 - Must contain at least one colon separator
-- Reserved namespaces: `message`, `agent`, `schedule`, `reaction`, `config`, `tool`
+- Reserved namespaces: `message`, `agent`, `bot`, `schedule`, `reaction`, `config`, `tool`
 - Custom events run in observer mode (`emit()`)
 - Recursion guard: nested emissions stop at depth 3
 
@@ -428,11 +421,34 @@ Every hook context includes these fields:
 | `correlation_id` | `str` | Unique ID per inbound event |
 | `state_root` | `Path` | Plugin state directory (property) |
 
-Every hook context also exposes `await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None)`.
-When a runtime sender is available, it sends a hook-originated Matrix message and returns the event ID when available.
-When no sender is bound for the current runtime, it returns `None`.
+Every hook context also exposes the following async helpers:
+
+**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`**
+Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
 For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
 For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while passing `thread_id=None` explicitly posts at room level.
+Plain `hook` sends can still dispatch when they satisfy the usual routing rules, for example if the message explicitly mentions an agent or otherwise qualifies as a normal addressed message.
+Hook-originated sends always carry an internal synthetic-chain depth.
+The first hook-originated hop uses depth `1`, and each later synthetic hop increments it.
+When `trigger_dispatch=True`, MindRoom sends the message as source kind `hook_dispatch`.
+The first synthetic hook hop still re-enters the normal ingress pipeline, including `message:received`.
+For `hook_dispatch`, that first synthetic hop also bypasses the usual "ignore other agent unless mentioned" ingress gate before continuing through normal permissions, routing, and should-respond checks.
+If that first synthetic hop originated from `message:received`, MindRoom skips the origin plugin on the `message:received` re-entry.
+Deeper synthetic hook hops still arrive as messages, but they do not re-enter `message:received` and they stop before further command handling or agent/model dispatch to avoid feedback loops.
+
+**`await ctx.query_room_state(room_id, event_type, state_key=None)`**
+Queries Matrix room state events.
+When `state_key` is provided, returns the content `dict` for that single state event, or `None` on Matrix error response/not-found.
+When `state_key` is `None`, returns a `{state_key: content}` dict of all state events matching `event_type`, or `None` on Matrix error response.
+Returns `None` when no room state querier is available (e.g. no Matrix client bound).
+When both the current bot and the router can query room state, MindRoom tries the current bot first and falls back to the router on Matrix error responses.
+Transport exceptions from the underlying Matrix client propagate to the hook.
+
+**`await ctx.put_room_state(room_id, event_type, state_key, content)`**
+Writes a single Matrix room state event and returns `True` on success, `False` on Matrix error response.
+Returns `False` when no room state putter is available.
+When both the current bot and the router can write room state, MindRoom tries the current bot first and falls back to the router on Matrix error responses.
+Transport exceptions from the underlying Matrix client propagate to the hook.
 
 ### Transport objects
 
@@ -448,7 +464,9 @@ MessageEnvelope(
     attachment_ids: tuple[str, ...],
     mentioned_agents: tuple[str, ...],
     agent_name: str,
-    source_kind: str,  # "message", "edit", "voice", "image", "scheduled", "hook"
+    source_kind: str,  # "message", "edit", "voice", "image", "scheduled", "hook", "hook_dispatch"
+    hook_source: str | None = None,
+    message_received_depth: int = 0,  # internal synthetic-chain depth for hook-originated relays
 )
 
 ResponseDraft(

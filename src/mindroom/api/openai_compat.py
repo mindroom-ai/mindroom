@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mindroom.agents import create_agent
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
-from mindroom.config.main import Config, load_config
+from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.execution_preparation import (
     build_prompt_with_thread_history,
@@ -70,6 +70,8 @@ if TYPE_CHECKING:
     from agno.run.team import TeamRunOutputEvent
     from agno.team import Team
 
+    from mindroom.config.main import Config
+
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
@@ -85,16 +87,20 @@ class _ToolStreamState:
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
 
-def _load_config(request: Request) -> tuple[Config, RuntimePaths]:
-    """Load the current runtime config and return it with its path.
-
-    Loads directly from Config.from_yaml rather than sharing with main.py's
-    loader to avoid circular imports (main.py imports this router).
-    """
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
-    return load_config(runtime_paths), runtime_paths
+def _load_config(
+    request: Request,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+) -> tuple[Config, RuntimePaths]:
+    """Load the current runtime config and return it with its path."""
+    config, committed_runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    if runtime_paths is not None and committed_runtime_paths != runtime_paths:
+        logger.info(
+            "Using bound request runtime snapshot for OpenAI-compatible config load",
+            requested_config_path=str(runtime_paths.config_path),
+            committed_config_path=str(committed_runtime_paths.config_path),
+        )
+    return config, committed_runtime_paths
 
 
 def _openai_compatible_agent_names(config: Config) -> list[str]:
@@ -570,6 +576,8 @@ def _validate_chat_request(
 def _parse_chat_request(
     request: Request,
     body: bytes,
+    *,
+    runtime_paths: RuntimePaths | None = None,
 ) -> tuple[_ChatCompletionRequest, Config, RuntimePaths, str, list[ResolvedVisibleMessage] | None] | JSONResponse:
     """Parse and validate a chat completion request body.
 
@@ -580,7 +588,7 @@ def _parse_chat_request(
     except (json.JSONDecodeError, ValidationError):
         return _error_response(400, "Invalid request body")
 
-    config, runtime_paths = _load_config(request)
+    config, runtime_paths = _load_config(request, runtime_paths=runtime_paths)
     validation_error = _validate_chat_request(req, config)
     if validation_error:
         return validation_error
@@ -656,14 +664,12 @@ async def list_models(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     """List available models (agents) in OpenAI format."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
+    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
     auth_error = _authenticate_request(authorization, runtime_paths)
     if auth_error is not None:
         return auth_error
 
-    config, runtime_paths = _load_config(request)
+    config, runtime_paths = _load_config(request, runtime_paths=runtime_paths)
 
     # Use config file mtime as creation timestamp
     try:
@@ -721,15 +727,13 @@ async def chat_completions(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
+    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
     auth_error = _authenticate_request(authorization, runtime_paths)
     if auth_error is not None:
         return auth_error
 
     # Parse and validate request
-    parsed = _parse_chat_request(request, await request.body())
+    parsed = _parse_chat_request(request, await request.body(), runtime_paths=runtime_paths)
     if isinstance(parsed, JSONResponse):
         return parsed
     req, config, runtime_paths, prompt, thread_history = parsed

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,6 +17,7 @@ from mindroom.thread_summary import (
     _next_threshold,
     _recover_last_summary_count,
     _send_summary_event,
+    _summary_locks,
     maybe_generate_thread_summary,
 )
 
@@ -247,6 +249,7 @@ def _mock_runtime_paths() -> MagicMock:
 def _clear_summary_counts() -> None:
     """Reset in-memory state between tests."""
     _last_summary_counts.clear()
+    _summary_locks.clear()
 
 
 @pytest.mark.asyncio
@@ -451,6 +454,41 @@ class TestMaybeGenerateThreadSummary:
         # Recovered count 10 → next threshold 20 → 12 messages < 20 → skip
         mock_gen.assert_not_awaited()
         assert _last_summary_counts["!room:x:$thread1"] == 10
+
+    async def test_concurrent_calls_generate_one_summary_per_thread(self) -> None:
+        """Concurrent summary checks should serialize on the per-thread critical section."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary1", room_id="!room:x"))
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        release_generation = asyncio.Event()
+
+        async def _blocked_summary(*_args: object, **_kwargs: object) -> str:
+            await release_generation.wait()
+            return "Users discussed testing strategies"
+
+        with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_history",
+                return_value=_make_thread_history(5),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                side_effect=_blocked_summary,
+            ) as mock_gen,
+            patch(
+                "mindroom.thread_summary._recover_last_summary_count",
+                return_value=0,
+            ),
+        ):
+            first = asyncio.create_task(maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp))
+            second = asyncio.create_task(maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp))
+            await asyncio.sleep(0)
+            release_generation.set()
+            await asyncio.gather(first, second)
+
+        mock_gen.assert_awaited_once()
+        client.room_send.assert_awaited_once()
 
 
 # -- event content structure --

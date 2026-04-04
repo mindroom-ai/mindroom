@@ -167,7 +167,7 @@ class AgentPrivateConfig(BaseModel):
 class AgentConfig(BaseModel):
     """Configuration for a single agent."""
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     display_name: str = Field(description="Human-readable name for the agent")
     role: str = Field(default="", description="Description of the agent's purpose")
@@ -311,6 +311,12 @@ class AgentConfig(BaseModel):
                 raise ValueError(msg)
             if "sandbox_tools" in data:
                 msg = "Agent field 'sandbox_tools' was removed. Use 'worker_tools' instead."
+                raise ValueError(msg)
+            if "allowed_toolkits" in data:
+                msg = "Agent field 'allowed_toolkits' was removed. Use 'tools' instead."
+                raise ValueError(msg)
+            if "initial_toolkits" in data:
+                msg = "Agent field 'initial_toolkits' was removed. Use 'tools' instead."
                 raise ValueError(msg)
         return data
 

@@ -25,7 +25,7 @@ from .context import (
     ToolAfterCallContext,
     ToolBeforeCallContext,
 )
-from .types import EnrichmentItem, RegisteredHook, default_timeout_ms_for_event
+from .types import EVENT_MESSAGE_RECEIVED, EnrichmentItem, RegisteredHook, default_timeout_ms_for_event
 
 if TYPE_CHECKING:
     from .registry import HookRegistry
@@ -238,6 +238,12 @@ def _eligible_hooks(
     eligible_hooks: list[RegisteredHook] = []
     for hook in hooks:
         if not _hook_in_scope(hook, context):
+            continue
+        if (
+            isinstance(context, MessageReceivedContext)
+            and event_name == EVENT_MESSAGE_RECEIVED
+            and hook.plugin_name in context.skip_plugin_names
+        ):
             continue
         if _is_hook_on_cooldown(hook):
             logger.warning(

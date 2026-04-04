@@ -34,12 +34,14 @@ my-plugin/
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `name` | string | Plugin identifier (required) |
+| `name` | string | Plugin identifier (required, must use only lowercase ASCII letters, digits, `-`, and `_`, and must be unique across configured plugins; invalid or duplicate names abort plugin loading) |
 | `tools_module` | string | Path to the tools module (optional) |
 | `hooks_module` | string | Path to the hooks module relative to the plugin root (optional) |
 | `skills` | list of strings | Relative directories containing skills (optional) |
 
 Unknown fields are ignored.
+Invalid, duplicate, or malformed configured plugin manifests are configuration errors and stop plugin loading.
+Configured plugin paths, declared module files, and declared skill directories must exist.
 If `hooks_module` is omitted, MindRoom auto-scans `tools_module` for `@hook`-decorated functions.
 If both fields point at the same file, MindRoom imports it once and reuses it for both tool registration and hook discovery.
 

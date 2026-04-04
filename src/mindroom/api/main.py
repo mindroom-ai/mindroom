@@ -19,10 +19,20 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom import constants
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
-from mindroom.api.config_lifecycle import ApiConfigLock
-from mindroom.api.config_lifecycle import load_config_from_file as load_api_config_from_file
-from mindroom.api.config_lifecycle import run_config_write as run_api_config_write
-from mindroom.api.config_lifecycle import watch_config as watch_api_config
+from mindroom.api import config_lifecycle
+from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult
+from mindroom.api.config_lifecycle import api_runtime_paths as api_request_runtime_paths
+from mindroom.api.config_lifecycle import load_config_into_app as load_api_config_into_app
+from mindroom.api.config_lifecycle import raise_for_config_load_result as raise_api_config_load_result
+from mindroom.api.config_lifecycle import read_app_committed_config as read_api_app_committed_config
+from mindroom.api.config_lifecycle import read_committed_config as read_api_committed_config
+from mindroom.api.config_lifecycle import read_raw_config_source as read_api_raw_config_source
+from mindroom.api.config_lifecycle import replace_committed_config as replace_api_committed_config
+from mindroom.api.config_lifecycle import replace_raw_config_source as replace_api_raw_config_source
+from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
+from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
+from mindroom.api.config_lifecycle import write_app_committed_config as write_api_app_committed_config
+from mindroom.api.config_lifecycle import write_committed_config as write_api_committed_config
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
@@ -37,7 +47,6 @@ from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
 from mindroom.credentials_sync import sync_env_to_credentials
-from mindroom.file_watcher import watch_file
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 from mindroom.logging_config import get_logger
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
@@ -50,7 +59,10 @@ from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
+    from mindroom.config.main import Config
+
 logger = get_logger(__name__)
+_UNSET = object()
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
 
 
@@ -68,14 +80,6 @@ class _ApiAuthState:
     runtime_paths: constants.RuntimePaths
     settings: _ApiAuthSettings
     supabase_auth: _SupabaseClientProtocol | None
-
-
-@dataclass
-class _ApiContext:
-    runtime_paths: constants.RuntimePaths
-    config_data: dict[str, Any]
-    config_lock: ApiConfigLock
-    auth_state: _ApiAuthState | None = None
 
 
 class DraftAgentPolicyDefaultsRequest(BaseModel):
@@ -123,6 +127,12 @@ class AgentPoliciesRequest(BaseModel):
     agents: dict[str, DraftAgentPolicyAgentRequest]
 
 
+class RawConfigSourceRequest(BaseModel):
+    """Payload for raw config source recovery edits."""
+
+    source: str
+
+
 def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> float:
     """Return the configured background idle-worker cleanup interval."""
     raw = (runtime_paths.env_value(_WORKER_CLEANUP_INTERVAL_ENV, default="0") or "0").strip()
@@ -159,35 +169,82 @@ def _cleanup_workers_once(runtime_paths: constants.RuntimePaths) -> int:
     return len(cleaned_workers)
 
 
-async def _worker_cleanup_loop(stop_event: asyncio.Event, runtime_paths: constants.RuntimePaths) -> None:
-    """Periodically clean idle workers in the primary runtime."""
-    interval_seconds = _worker_cleanup_interval_seconds(runtime_paths)
-    if interval_seconds <= 0:
-        return
-
+async def _worker_cleanup_loop(
+    stop_event: asyncio.Event,
+    api_app: FastAPI,
+    *,
+    idle_poll_interval_seconds: float = 1.0,
+) -> None:
+    """Periodically clean idle workers using the app's current runtime paths."""
     while not stop_event.is_set():
+        runtime_paths = _app_runtime_paths(api_app)
+        interval_seconds = _worker_cleanup_interval_seconds(runtime_paths)
+        if interval_seconds <= 0:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=idle_poll_interval_seconds)
+                break
+            except TimeoutError:
+                continue
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
             break
         except TimeoutError:
             try:
-                await asyncio.to_thread(_cleanup_workers_once, runtime_paths)
+                await asyncio.to_thread(_cleanup_workers_once, _app_runtime_paths(api_app))
             except Exception:
                 logger.exception("Background worker cleanup failed")
 
 
 def api_runtime_paths(request: Request) -> constants.RuntimePaths:
     """Return the API request's committed runtime paths."""
-    return _app_runtime_paths(request.app)
+    return api_request_runtime_paths(request)
 
 
-def _app_context(api_app: FastAPI) -> _ApiContext:
-    """Return the committed API context for one app instance."""
-    context = getattr(api_app.state, "api_context", None)
-    if not isinstance(context, _ApiContext):
+def _app_state(api_app: FastAPI) -> ApiState:
+    """Return the committed API state holder for one app instance."""
+    try:
+        state = api_app.state.api_state
+    except AttributeError:
+        state = None
+    if not isinstance(state, ApiState):
         msg = "API context is not initialized"
         raise TypeError(msg)
-    return context
+    return state
+
+
+def _published_snapshot(
+    snapshot: ApiSnapshot,
+    *,
+    increment_generation: bool = True,
+    runtime_paths: constants.RuntimePaths | None = None,
+    config_data: dict[str, Any] | None = None,
+    runtime_config: Config | None | object = _UNSET,
+    config_load_result: ConfigLoadResult | None | object = _UNSET,
+    auth_state: _ApiAuthState | None | object = _UNSET,
+) -> ApiSnapshot:
+    """Return one new published snapshot with an incremented generation."""
+    updated_runtime_paths = snapshot.runtime_paths if runtime_paths is None else runtime_paths
+    updated_config_data = snapshot.config_data if config_data is None else config_data
+    updated_runtime_config = snapshot.runtime_config if runtime_config is _UNSET else runtime_config
+    updated_config_load_result = (
+        snapshot.config_load_result
+        if config_load_result is _UNSET
+        else cast("ConfigLoadResult | None", config_load_result)
+    )
+    updated_auth_state = snapshot.auth_state if auth_state is _UNSET else auth_state
+    return ApiSnapshot(
+        generation=snapshot.generation + 1 if increment_generation else snapshot.generation,
+        runtime_paths=updated_runtime_paths,
+        config_data=updated_config_data,
+        runtime_config=cast("Config | None", updated_runtime_config),
+        config_load_result=updated_config_load_result,
+        auth_state=updated_auth_state,
+    )
+
+
+def _app_context(api_app: FastAPI) -> ApiSnapshot:
+    """Return the committed API snapshot for one app instance."""
+    return _app_state(api_app).snapshot
 
 
 def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
@@ -195,45 +252,62 @@ def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
     return _app_context(api_app).runtime_paths
 
 
-def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
-    """Initialize one API app instance with explicit runtime-bound state."""
-    previous_context = getattr(api_app.state, "api_context", None)
-    config_lock: ApiConfigLock
-    auth_state: _ApiAuthState | None = None
-    if isinstance(previous_context, _ApiContext):
-        config_lock = previous_context.config_lock
-        config_data = previous_context.config_data if previous_context.runtime_paths == runtime_paths else {}
-        if previous_context.runtime_paths == runtime_paths:
-            auth_state = previous_context.auth_state
-    else:
-        config_data = {}
-        config_lock = cast("ApiConfigLock", threading.Lock())
-    api_app.state.api_context = _ApiContext(
-        runtime_paths=runtime_paths,
-        config_data=config_data,
-        config_lock=config_lock,
-        auth_state=auth_state,
-    )
-
-
-def api_config_data(request: Request) -> dict[str, Any]:
-    """Return the mutable API config cache for one request."""
-    return _app_config_data(request.app)
-
-
-def api_config_lock(request: Request) -> ApiConfigLock:
-    """Return the API config lock for one request."""
-    return _app_config_lock(request.app)
-
-
 def _app_config_data(api_app: FastAPI) -> dict[str, Any]:
     """Return the mutable config cache for one app instance."""
     return _app_context(api_app).config_data
 
 
-def _app_config_lock(api_app: FastAPI) -> ApiConfigLock:
+def _app_config_lock(api_app: FastAPI) -> threading.Lock:
     """Return the config lock for one app instance."""
-    return _app_context(api_app).config_lock
+    return _app_state(api_app).config_lock
+
+
+def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
+    """Initialize one API app instance with explicit runtime-bound state."""
+    try:
+        previous_state = api_app.state.api_state
+    except AttributeError:
+        previous_state = None
+    if not isinstance(previous_state, ApiState):
+        api_app.state.api_state = ApiState(
+            config_lock=threading.Lock(),
+            snapshot=ApiSnapshot(
+                generation=0,
+                runtime_paths=runtime_paths,
+                config_data={},
+                runtime_config=None,
+                config_load_result=None,
+                auth_state=None,
+            ),
+        )
+        config_lifecycle.register_api_app(api_app)
+        return
+
+    config_lock = previous_state.config_lock
+    with config_lock:
+        try:
+            current_state = api_app.state.api_state
+        except AttributeError:
+            current_state = previous_state
+        if not isinstance(current_state, ApiState):
+            current_state = previous_state
+        current_snapshot = current_state.snapshot
+        auth_state = current_snapshot.auth_state if current_snapshot.runtime_paths == runtime_paths else None
+        config_data = current_snapshot.config_data if current_snapshot.runtime_paths == runtime_paths else {}
+        runtime_config = current_snapshot.runtime_config if current_snapshot.runtime_paths == runtime_paths else None
+        config_load_result = (
+            current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
+        )
+        current_state.snapshot = _published_snapshot(
+            current_snapshot,
+            runtime_paths=runtime_paths,
+            config_data=config_data,
+            runtime_config=runtime_config,
+            auth_state=auth_state,
+            config_load_result=config_load_result,
+        )
+        api_app.state.api_state = current_state
+    config_lifecycle.register_api_app(api_app)
 
 
 def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSettings:
@@ -249,37 +323,75 @@ def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSetti
 
 def _app_auth_state(api_app: FastAPI) -> _ApiAuthState:
     """Return the committed auth state for one API app instance."""
-    context = _app_context(api_app)
-    runtime_paths = context.runtime_paths
-    state = context.auth_state
-    if state is not None and state.runtime_paths == runtime_paths:
+    app_state = _app_state(api_app)
+    with app_state.config_lock:
+        snapshot = app_state.snapshot
+        state = cast("_ApiAuthState | None", snapshot.auth_state)
+        if state is not None and state.runtime_paths == snapshot.runtime_paths:
+            return state
+        settings = _build_auth_settings(snapshot.runtime_paths)
+        state = _ApiAuthState(
+            runtime_paths=snapshot.runtime_paths,
+            settings=settings,
+            supabase_auth=_init_supabase_auth(
+                snapshot.runtime_paths,
+                settings.supabase_url,
+                settings.supabase_anon_key,
+            ),
+        )
+        app_state.snapshot = _published_snapshot(
+            snapshot,
+            increment_generation=False,
+            auth_state=state,
+        )
         return state
-    settings = _build_auth_settings(runtime_paths)
-    state = _ApiAuthState(
-        runtime_paths=runtime_paths,
-        settings=settings,
-        supabase_auth=_init_supabase_auth(
-            runtime_paths,
-            settings.supabase_url,
-            settings.supabase_anon_key,
-        ),
-    )
-    context.auth_state = state
-    return state
 
 
 async def _watch_config(
     stop_event: asyncio.Event,
     api_app: FastAPI,
-    runtime_paths: constants.RuntimePaths,
+    *,
+    poll_interval_seconds: float = 1.0,
 ) -> None:
-    """Watch config.yaml for changes."""
-    await watch_api_config(
-        stop_event,
-        runtime_paths,
-        lambda: _load_config_from_file(runtime_paths, api_app),
-        watch_file_impl=watch_file,
-    )
+    """Watch the current config file, rebinding automatically when runtime paths change."""
+    watched_config_path: Path | None = None
+    last_mtime = 0.0
+
+    while not stop_event.is_set():
+        runtime_paths = _app_runtime_paths(api_app)
+        config_path = runtime_paths.config_path
+        if config_path != watched_config_path:
+            watched_config_path = config_path
+            try:
+                last_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
+            except (OSError, PermissionError):
+                last_mtime = 0.0
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=poll_interval_seconds)
+            break
+        except TimeoutError:
+            pass
+
+        try:
+            runtime_paths = _app_runtime_paths(api_app)
+            config_path = runtime_paths.config_path
+            if config_path != watched_config_path:
+                watched_config_path = config_path
+                try:
+                    last_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
+                except (OSError, PermissionError):
+                    last_mtime = 0.0
+
+            current_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
+            if current_mtime != last_mtime:
+                last_mtime = current_mtime
+                logger.info("Config file changed", path=str(config_path))
+                _load_config_from_file(runtime_paths, api_app)
+        except (OSError, PermissionError):
+            last_mtime = 0.0
+        except Exception:
+            logger.exception("Exception during file watcher callback - continuing to watch")
 
 
 @asynccontextmanager
@@ -299,8 +411,8 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     sync_env_to_credentials(runtime_paths=runtime_paths)
 
     stop_event = asyncio.Event()
-    watch_task = asyncio.create_task(_watch_config(stop_event, _app, runtime_paths))
-    worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event, runtime_paths))
+    watch_task = asyncio.create_task(_watch_config(stop_event, _app))
+    worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event, _app))
 
     yield
 
@@ -344,14 +456,83 @@ def _run_config_write[T](
     error_prefix: str,
 ) -> T:
     """Validate, save, and swap config under lock."""
-    context = _app_context(api_app)
-    return run_api_config_write(
-        context.runtime_paths,
-        context.config_data,
-        context.config_lock,
-        mutate,
-        error_prefix=error_prefix,
-    )
+    return write_api_app_committed_config(api_app, mutate, error_prefix=error_prefix)
+
+
+def _run_request_config_write[T](
+    request: Request,
+    mutate: Callable[[dict[str, Any]], T],
+    *,
+    error_prefix: str,
+) -> T:
+    """Validate, save, and swap config against the request-bound snapshot."""
+    return write_api_committed_config(request, mutate, error_prefix=error_prefix)
+
+
+def _read_committed_config[T](
+    api_app: FastAPI,
+    reader: Callable[[dict[str, Any]], T],
+) -> T:
+    """Read the committed API config only when the current on-disk config is valid."""
+    return read_api_app_committed_config(api_app, reader)
+
+
+def _read_request_committed_config[T](
+    request: Request,
+    reader: Callable[[dict[str, Any]], T],
+) -> T:
+    """Read committed API config from the request-bound snapshot."""
+    return read_api_committed_config(request, reader)
+
+
+def _reload_api_runtime_config(
+    api_app: FastAPI,
+    runtime_paths: constants.RuntimePaths,
+    *,
+    expected_snapshot: ApiSnapshot | None = None,
+    mutate_runtime: Callable[[constants.RuntimePaths], constants.RuntimePaths] | None = None,
+) -> None:
+    """Rebind the API app to one runtime and surface structured config reload failures."""
+    app_state = _app_state(api_app)
+    with app_state.config_lock:
+        current_state = _app_state(api_app)
+        current_snapshot = current_state.snapshot
+        if expected_snapshot is not None and (
+            current_snapshot.generation != expected_snapshot.generation
+            or current_snapshot.runtime_paths != expected_snapshot.runtime_paths
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Configuration changed while request was in progress. Retry the operation.",
+            )
+        target_runtime_paths = runtime_paths if mutate_runtime is None else mutate_runtime(runtime_paths)
+        auth_state = current_snapshot.auth_state if current_snapshot.runtime_paths == target_runtime_paths else None
+        config_data = current_snapshot.config_data if current_snapshot.runtime_paths == target_runtime_paths else {}
+        runtime_config = (
+            current_snapshot.runtime_config if current_snapshot.runtime_paths == target_runtime_paths else None
+        )
+        config_load_result = (
+            current_snapshot.config_load_result if current_snapshot.runtime_paths == target_runtime_paths else None
+        )
+        refreshed_snapshot = _published_snapshot(
+            current_snapshot,
+            runtime_paths=target_runtime_paths,
+            config_data=config_data,
+            runtime_config=runtime_config,
+            auth_state=auth_state,
+            config_load_result=config_load_result,
+        )
+        current_state.snapshot = refreshed_snapshot
+        result, validated_payload, loaded_runtime_config = config_lifecycle._load_config_result(target_runtime_paths)
+        current_state.snapshot = _published_snapshot(
+            refreshed_snapshot,
+            config_data=validated_payload if validated_payload is not None else refreshed_snapshot.config_data,
+            runtime_config=loaded_runtime_config
+            if loaded_runtime_config is not None
+            else refreshed_snapshot.runtime_config,
+            config_load_result=result,
+        )
+    raise_api_config_load_result(result)
 
 
 def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
@@ -482,9 +663,8 @@ def _get_request_token(
     return None
 
 
-def _validate_supabase_token(token: str, api_app: FastAPI) -> _SupabaseUserProtocol | None:
+def _validate_supabase_token(token: str, auth_state: _ApiAuthState) -> _SupabaseUserProtocol | None:
     """Validate a Supabase access token and return the authenticated user."""
-    auth_state = _app_auth_state(api_app)
     if auth_state.supabase_auth is None:
         return None
 
@@ -499,10 +679,56 @@ def _validate_supabase_token(token: str, api_app: FastAPI) -> _SupabaseUserProto
     return response.user
 
 
+def _bind_authenticated_request_snapshot(request: Request) -> ApiSnapshot:
+    """Bind one coherent auth/runtime/config snapshot to the request."""
+    existing = request_api_snapshot(request)
+    bound_auth_state = cast("_ApiAuthState | None", existing.auth_state) if existing is not None else None
+    if (
+        existing is not None
+        and bound_auth_state is not None
+        and bound_auth_state.runtime_paths == existing.runtime_paths
+    ):
+        return existing
+
+    app_state = _app_state(request.app)
+    with app_state.config_lock:
+        current = app_state.snapshot
+        auth_state = cast("_ApiAuthState | None", current.auth_state)
+        if auth_state is None or auth_state.runtime_paths != current.runtime_paths:
+            settings = _build_auth_settings(current.runtime_paths)
+            auth_state = _ApiAuthState(
+                runtime_paths=current.runtime_paths,
+                settings=settings,
+                supabase_auth=_init_supabase_auth(
+                    current.runtime_paths,
+                    settings.supabase_url,
+                    settings.supabase_anon_key,
+                ),
+            )
+            current = _published_snapshot(
+                current,
+                increment_generation=False,
+                auth_state=auth_state,
+            )
+            app_state.snapshot = current
+        return store_request_api_snapshot(request, current)
+
+
+def _request_auth_state(request: Request) -> _ApiAuthState:
+    """Return the request-bound auth state when available."""
+    snapshot = request_api_snapshot(request)
+    if snapshot is None:
+        return _app_auth_state(request.app)
+    auth_state = cast("_ApiAuthState | None", snapshot.auth_state)
+    if auth_state is None or auth_state.runtime_paths != snapshot.runtime_paths:
+        return cast("_ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
+    return auth_state
+
+
 def _request_has_frontend_access(request: Request) -> bool:
     """Return whether the current request may load the dashboard UI."""
     authorization = request.headers.get("authorization")
-    auth_state = _app_auth_state(request.app)
+    auth_state = cast("_ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     mindroom_api_key = auth_state.settings.mindroom_api_key
 
     if auth_state.supabase_auth is None:
@@ -520,7 +746,7 @@ def _request_has_frontend_access(request: Request) -> bool:
         authorization,
         cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),
     )
-    return token is not None and _validate_supabase_token(token, request.app) is not None
+    return token is not None and _validate_supabase_token(token, auth_state) is not None
 
 
 def _sanitize_next_path(next_path: str | None) -> str:
@@ -528,6 +754,11 @@ def _sanitize_next_path(next_path: str | None) -> str:
     if not next_path or not next_path.startswith("/") or next_path.startswith("//"):
         return "/"
     return next_path
+
+
+def _set_config_generation_header(response: Response, generation: int) -> None:
+    """Attach the committed config generation to one API response."""
+    response.headers[config_lifecycle.CONFIG_GENERATION_HEADER] = str(generation)
 
 
 def _render_standalone_login_page(
@@ -646,7 +877,8 @@ async def verify_user(
 
     In standalone mode (no Supabase), returns a default user to allow access.
     """
-    auth_state = _app_auth_state(request.app)
+    snapshot = _bind_authenticated_request_snapshot(request)
+    auth_state = cast("_ApiAuthState", snapshot.auth_state)
     mindroom_api_key = auth_state.settings.mindroom_api_key
 
     if auth_state.supabase_auth is None:
@@ -678,7 +910,7 @@ async def verify_user(
     if token is None:
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
-    user = _validate_supabase_token(token, request.app)
+    user = _validate_supabase_token(token, auth_state)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -692,12 +924,7 @@ async def verify_user(
 
 def _load_config_from_file(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> bool:
     """Load config from YAML file."""
-    context = _app_context(api_app)
-    return load_api_config_from_file(
-        runtime_paths,
-        config_data=context.config_data,
-        config_lock=context.config_lock,
-    )
+    return load_api_config_into_app(runtime_paths, api_app)
 
 
 # Include routers
@@ -780,7 +1007,7 @@ async def clear_auth_session(response: Response) -> dict[str, bool]:
 @app.get("/login", include_in_schema=False)
 async def standalone_login(request: Request, next: str = "/") -> Response:  # noqa: A002
     """Render the standalone dashboard login form when API-key auth is enabled."""
-    if not _app_auth_state(request.app).settings.mindroom_api_key:
+    if not cast("_ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state).settings.mindroom_api_key:
         raise HTTPException(status_code=404, detail="Not found")
 
     next_path = _sanitize_next_path(next)
@@ -791,32 +1018,66 @@ async def standalone_login(request: Request, next: str = "/") -> Response:  # no
 
 
 @app.post("/api/config/load")
-async def load_config(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def load_config(
+    request: Request,
+    response: Response,
+    _user: Annotated[dict, Depends(verify_user)],
+) -> dict[str, Any]:
     """Load configuration from file."""
-    context = _app_context(request.app)
-    with context.config_lock:
-        if not context.config_data:
-            raise HTTPException(status_code=500, detail="Failed to load configuration")
-        return context.config_data
+    generation = config_lifecycle.committed_generation(request)
+    payload = read_api_committed_config(request, lambda config_data: dict(config_data))
+    _set_config_generation_header(response, generation)
+    return payload
 
 
 @app.put("/api/config/save")
 async def save_config(
     request: Request,
+    response: Response,
     new_config: dict[str, Any],
     _user: Annotated[dict, Depends(verify_user)],
+    x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Save configuration to file."""
-
-    def mutate(candidate_config: dict[str, Any]) -> None:
-        candidate_config.clear()
-        candidate_config.update(new_config)
-
-    _run_config_write(
-        request.app,
-        mutate,
+    generation = replace_api_committed_config(
+        request,
+        new_config,
         error_prefix="Failed to save configuration",
+        expected_generation=x_mindroom_config_generation,
     )
+    _set_config_generation_header(response, generation)
+    return {"success": True}
+
+
+@app.get("/api/config/raw")
+async def get_raw_config_source(
+    request: Request,
+    response: Response,
+    _user: Annotated[dict, Depends(verify_user)],
+) -> dict[str, str]:
+    """Return the raw config source text for recovery editing."""
+    generation = config_lifecycle.committed_generation(request)
+    payload = {"source": read_api_raw_config_source(request)}
+    _set_config_generation_header(response, generation)
+    return payload
+
+
+@app.put("/api/config/raw")
+async def save_raw_config_source(
+    request: Request,
+    response: Response,
+    payload: RawConfigSourceRequest,
+    _user: Annotated[dict, Depends(verify_user)],
+    x_mindroom_config_generation: Annotated[int | None, Header()] = None,
+) -> dict[str, bool]:
+    """Replace the raw config source text after validating it against the active runtime."""
+    generation = replace_api_raw_config_source(
+        request,
+        payload.source,
+        error_prefix="Failed to save raw configuration",
+        expected_generation=x_mindroom_config_generation,
+    )
+    _set_config_generation_header(response, generation)
     return {"success": True}
 
 
@@ -844,15 +1105,17 @@ async def get_agent_policies(
 @app.get("/api/config/agents")
 async def get_agents(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all agents."""
-    context = _app_context(request.app)
-    with context.config_lock:
-        agents = context.config_data.get("agents", {})
+
+    def read_agents(config_data: dict[str, Any]) -> list[dict[str, Any]]:
+        agents = config_data.get("agents", {})
         # Convert to list format with IDs
         agent_list = []
         for agent_id, agent_data in agents.items():
             agent = {"id": agent_id, **agent_data}
             agent_list.append(agent)
         return agent_list
+
+    return _read_request_committed_config(request, read_agents)
 
 
 @app.put("/api/config/agents/{agent_id}")
@@ -869,8 +1132,8 @@ async def update_agent(
             candidate_config["agents"] = {}
         candidate_config["agents"][agent_id] = _sanitize_entity_payload(agent_data)
 
-    _run_config_write(
-        request.app,
+    _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to save agent",
     )
@@ -893,8 +1156,8 @@ async def create_agent(
         candidate_config["agents"][agent_id] = _sanitize_entity_payload(agent_data)
         return agent_id
 
-    agent_id = _run_config_write(
-        request.app,
+    agent_id = _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to create agent",
     )
@@ -914,8 +1177,8 @@ async def delete_agent(
             raise HTTPException(status_code=404, detail="Agent not found")
         del candidate_config["agents"][agent_id]
 
-    _run_config_write(
-        request.app,
+    _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to delete agent",
     )
@@ -925,15 +1188,17 @@ async def delete_agent(
 @app.get("/api/config/teams")
 async def get_teams(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all teams."""
-    context = _app_context(request.app)
-    with context.config_lock:
-        teams = context.config_data.get("teams", {})
+
+    def read_teams(config_data: dict[str, Any]) -> list[dict[str, Any]]:
+        teams = config_data.get("teams", {})
         # Convert to list format with IDs
         team_list = []
         for team_id, team_data in teams.items():
             team = {"id": team_id, **team_data}
             team_list.append(team)
         return team_list
+
+    return _read_request_committed_config(request, read_teams)
 
 
 @app.put("/api/config/teams/{team_id}")
@@ -950,8 +1215,8 @@ async def update_team(
             candidate_config["teams"] = {}
         candidate_config["teams"][team_id] = _sanitize_entity_payload(team_data)
 
-    _run_config_write(
-        request.app,
+    _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to save team",
     )
@@ -974,8 +1239,8 @@ async def create_team(
         candidate_config["teams"][team_id] = _sanitize_entity_payload(team_data)
         return team_id
 
-    team_id = _run_config_write(
-        request.app,
+    team_id = _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to create team",
     )
@@ -995,8 +1260,8 @@ async def delete_team(
             raise HTTPException(status_code=404, detail="Team not found")
         del candidate_config["teams"][team_id]
 
-    _run_config_write(
-        request.app,
+    _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to delete team",
     )
@@ -1006,10 +1271,10 @@ async def delete_team(
 @app.get("/api/config/models")
 async def get_models(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get all model configurations."""
-    context = _app_context(request.app)
-    with context.config_lock:
-        models = context.config_data.get("models", {})
-        return dict(models) if models else {}
+    return _read_request_committed_config(
+        request,
+        lambda config_data: dict(config_data.get("models", {})) if config_data.get("models") else {},
+    )
 
 
 @app.put("/api/config/models/{model_id}")
@@ -1026,8 +1291,8 @@ async def update_model(
             candidate_config["models"] = {}
         candidate_config["models"][model_id] = model_data
 
-    _run_config_write(
-        request.app,
+    _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to save model",
     )
@@ -1037,10 +1302,10 @@ async def update_model(
 @app.get("/api/config/room-models")
 async def get_room_models(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get room-specific model overrides."""
-    context = _app_context(request.app)
-    with context.config_lock:
-        room_models = context.config_data.get("room_models", {})
-        return dict(room_models) if room_models else {}
+    return _read_request_committed_config(
+        request,
+        lambda config_data: dict(config_data.get("room_models", {})) if config_data.get("room_models") else {},
+    )
 
 
 @app.put("/api/config/room-models")
@@ -1054,8 +1319,8 @@ async def update_room_models(
     def mutate(candidate_config: dict[str, Any]) -> None:
         candidate_config["room_models"] = room_models
 
-    _run_config_write(
-        request.app,
+    _run_request_config_write(
+        request,
         mutate,
         error_prefix="Failed to save room models",
     )
@@ -1065,15 +1330,15 @@ async def update_room_models(
 @app.get("/api/rooms")
 async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[str]:
     """Get list of available rooms."""
-    # Extract unique rooms from all agents
-    rooms = set()
-    context = _app_context(request.app)
-    with context.config_lock:
-        for agent_data in context.config_data.get("agents", {}).values():
+
+    def read_rooms(config_data: dict[str, Any]) -> list[str]:
+        rooms: set[str] = set()
+        for agent_data in config_data.get("agents", {}).values():
             agent_rooms = agent_data.get("rooms", [])
             rooms.update(agent_rooms)
+        return sorted(rooms)
 
-    return sorted(rooms)
+    return _read_request_committed_config(request, read_rooms)
 
 
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
@@ -1085,7 +1350,7 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
         raise HTTPException(status_code=404, detail="Not found")
 
     if not _request_has_frontend_access(request):
-        auth_settings = _app_auth_state(request.app).settings
+        auth_settings = _request_auth_state(request).settings
         target_path = _sanitize_next_path(f"/{path}" if path else "/")
         if auth_settings.supabase_url and auth_settings.supabase_anon_key and auth_settings.platform_login_url:
             redirect_to = quote(str(request.url), safe="")
@@ -1096,7 +1361,7 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
 
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    frontend_dir = ensure_frontend_dist_dir(_app_runtime_paths(request.app))
+    frontend_dir = ensure_frontend_dist_dir(api_runtime_paths(request))
     if frontend_dir is None:
         raise HTTPException(status_code=404, detail="Frontend assets are not available")
 

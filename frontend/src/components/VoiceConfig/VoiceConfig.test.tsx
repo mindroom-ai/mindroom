@@ -2,19 +2,42 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { VoiceConfig } from './VoiceConfig';
 import { useConfigStore } from '@/store/configStore';
+import type { ConfigDiagnostic } from '@/lib/configValidation';
 import { Config } from '@/types/config';
+import type { SaveConfigResult } from '@/store/configStore';
 
 vi.mock('@/store/configStore');
 
-const mockToast = vi.fn();
+const { mockToast, mockToaster } = vi.hoisted(() => ({
+  mockToast: vi.fn(),
+  mockToaster: vi.fn(),
+}));
 vi.mock('@/components/ui/use-toast', () => ({
   useToast: () => ({ toast: mockToast }),
+}));
+vi.mock('@/components/ui/toaster', () => ({
+  toast: mockToaster,
 }));
 
 describe('VoiceConfig', () => {
   const mockSaveConfig = vi.fn();
-  const mockMarkDirty = vi.fn();
-  type StoreState = ReturnType<typeof useConfigStore>;
+  const mockUpdateVoiceConfig = vi.fn();
+  type MockStoreState = {
+    config: Config;
+    diagnostics: ConfigDiagnostic[];
+    syncStatus: 'synced' | 'syncing' | 'error' | 'disconnected';
+    isDirty: boolean;
+    isLoading: boolean;
+    saveConfig: () => Promise<SaveConfigResult>;
+    updateVoiceConfig: typeof mockUpdateVoiceConfig;
+  };
+  type MockedStoreHook = {
+    (): MockStoreState;
+    getState: () => MockStoreState;
+    mockReturnValue: (value: MockStoreState) => void;
+  };
+  const mockedUseConfigStore = useConfigStore as unknown as MockedStoreHook;
+  let mockStoreState: MockStoreState;
 
   const createConfig = (): Partial<Config> => ({
     models: {
@@ -37,15 +60,26 @@ describe('VoiceConfig', () => {
   });
 
   const setMockStore = (config: Partial<Config>) => {
-    vi.mocked(useConfigStore).mockReturnValue({
+    mockStoreState = {
       config: config as Config,
+      diagnostics: [],
+      syncStatus: 'synced',
+      isDirty: false,
+      isLoading: false,
       saveConfig: mockSaveConfig,
-      markDirty: mockMarkDirty,
-    } as unknown as StoreState);
+      updateVoiceConfig: mockUpdateVoiceConfig,
+    };
+    mockedUseConfigStore.mockReturnValue(mockStoreState);
+    mockedUseConfigStore.getState = vi.fn(() => mockStoreState);
   };
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSaveConfig.mockImplementation(async () => {
+      mockStoreState.syncStatus = 'synced';
+      mockStoreState.isDirty = false;
+      return { status: 'saved' };
+    });
     setMockStore(createConfig());
   });
 
@@ -80,7 +114,19 @@ describe('VoiceConfig', () => {
     fireEvent.change(hostInput, { target: { value: '' } });
 
     await waitFor(() => {
-      expect(mockMarkDirty).toHaveBeenCalled();
+      expect(mockUpdateVoiceConfig).toHaveBeenCalledWith({
+        enabled: true,
+        visible_router_echo: false,
+        stt: {
+          provider: 'openai',
+          model: 'whisper-1',
+          host: '',
+          api_key: '',
+        },
+        intelligence: {
+          model: 'default',
+        },
+      });
       expect(
         screen.getByText('https://api.openai.com/v1/audio/transcriptions')
       ).toBeInTheDocument();
@@ -100,9 +146,74 @@ describe('VoiceConfig', () => {
 
     await waitFor(() => {
       expect(mockSaveConfig).toHaveBeenCalled();
-      expect(config.voice?.stt.provider).toBe('openai');
-      expect(config.voice?.stt.host).toBe('http://localhost:8080');
+      expect(mockUpdateVoiceConfig).toHaveBeenLastCalledWith({
+        enabled: true,
+        visible_router_echo: false,
+        stt: {
+          provider: 'openai',
+          model: 'whisper-1',
+          host: 'http://localhost:8080',
+          api_key: '',
+        },
+        intelligence: {
+          model: 'default',
+        },
+      });
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Voice Configuration Saved',
+        description: 'Your voice settings have been updated successfully.',
+      });
     });
+  });
+
+  it('shows an error toast when saving fails', async () => {
+    mockSaveConfig.mockImplementation(async () => {
+      mockStoreState.syncStatus = 'error';
+      mockStoreState.isDirty = true;
+      return {
+        status: 'error',
+        message: 'Configuration validation failed',
+        diagnostics: mockStoreState.diagnostics,
+      };
+    });
+    mockStoreState.diagnostics = [
+      {
+        kind: 'global',
+        message: 'Configuration validation failed',
+        blocking: false,
+      },
+    ];
+
+    render(<VoiceConfig />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Voice Configuration' }));
+
+    await waitFor(() => {
+      expect(mockToaster).toHaveBeenCalledWith({
+        title: 'Save Failed',
+        description: 'Configuration validation failed',
+        variant: 'destructive',
+      });
+    });
+  });
+
+  it('shows a stale-save toast when a newer voice draft supersedes the request', async () => {
+    mockSaveConfig.mockResolvedValueOnce({ status: 'stale' });
+
+    render(<VoiceConfig />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Voice Configuration' }));
+
+    await waitFor(() => {
+      expect(mockToaster).toHaveBeenCalledWith({
+        title: 'Save Failed',
+        description: 'Save was superseded by newer voice configuration edits.',
+        variant: 'destructive',
+      });
+    });
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Voice Configuration Saved' })
+    );
   });
 
   it('shows save button even when voice is disabled', async () => {
@@ -134,10 +245,31 @@ describe('VoiceConfig', () => {
     fireEvent.click(visibleRouterEchoToggle);
 
     await waitFor(() => {
-      expect(mockMarkDirty).toHaveBeenCalled();
-      expect(config.voice?.visible_router_echo).toBe(true);
+      expect(mockUpdateVoiceConfig).toHaveBeenCalledWith({
+        enabled: true,
+        visible_router_echo: true,
+        stt: {
+          provider: 'openai',
+          model: 'whisper-1',
+          host: 'http://localhost:8080',
+          api_key: '',
+        },
+        intelligence: {
+          model: 'default',
+        },
+      });
       expect(screen.getByText('Visible Router Echo:')).toBeInTheDocument();
       expect(visibleRouterEchoToggle).toBeChecked();
     });
+  });
+
+  it('disables save while a save is already in progress', () => {
+    const config = createConfig();
+    setMockStore(config);
+    mockStoreState.isLoading = true;
+
+    render(<VoiceConfig />);
+
+    expect(screen.getByRole('button', { name: 'Save Voice Configuration' })).toBeDisabled();
   });
 });

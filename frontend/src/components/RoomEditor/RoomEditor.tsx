@@ -24,6 +24,7 @@ export function RoomEditor() {
     deleteRoom,
     saveConfig,
     isDirty,
+    isLoading,
     selectRoom,
   } = useConfigStore();
 
@@ -73,6 +74,7 @@ export function RoomEditor() {
       isDirty={isDirty}
       onSave={saveConfig}
       onDelete={handleDelete}
+      disableSave={isLoading}
       onBack={() => selectRoom(null)}
     >
       {/* Display Name */}

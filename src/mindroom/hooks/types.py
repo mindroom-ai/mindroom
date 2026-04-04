@@ -55,9 +55,31 @@ DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
 DEFAULT_CUSTOM_EVENT_TIMEOUT_MS = 1000
 
 EnrichmentCachePolicy = Literal["stable", "volatile"]
-type HookMessageSender = Callable[
-    [str, str, str | None, str, dict[str, Any] | None],
-    Awaitable[str | None],
+
+
+class HookMessageSender(Protocol):
+    """Async sender protocol used by hook contexts for Matrix relays."""
+
+    def __call__(
+        self,
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, Any] | None,
+        *,
+        trigger_dispatch: bool = False,
+    ) -> Awaitable[str | None]:
+        """Send one hook-originated Matrix message."""
+
+
+type HookRoomStateQuerier = Callable[
+    [str, str, str | None],
+    Awaitable[dict[str, Any] | None],
+]
+type HookRoomStatePutter = Callable[
+    [str, str, str, dict[str, Any]],
+    Awaitable[bool],
 ]
 
 

@@ -37,6 +37,7 @@ export function TeamEditor() {
     agentPoliciesByAgent,
     config,
     isDirty,
+    isLoading,
     selectTeam,
   } = useConfigStore();
 
@@ -121,7 +122,7 @@ export function TeamEditor() {
   };
 
   const handleSave = async () => {
-    await saveConfig();
+    return saveConfig();
   };
 
   if (!selectedTeam) {
@@ -135,6 +136,7 @@ export function TeamEditor() {
       isDirty={isDirty}
       onSave={handleSave}
       onDelete={handleDelete}
+      disableSave={isLoading}
       onBack={() => selectTeam(null)}
     >
       {teamRootError && (

@@ -256,6 +256,29 @@ class TestHasNewerUnrespondedInScope:
         )
         assert bot._has_newer_unresponded_in_scope(event, context) is False
 
+    def test_hook_dispatch_event_not_coalesced(self, tmp_path: Path) -> None:
+        """Dispatch-triggering hook automation should bypass coalescing like other synthetic sends."""
+        bot = _make_bot(tmp_path)
+        event = _make_event(sender="@mindroom_router:localhost", event_id="$m1", server_timestamp=1000)
+        event.source["content"]["com.mindroom.source_kind"] = "hook_dispatch"
+        context = _make_context(
+            [
+                _message(
+                    sender="@mindroom_router:localhost",
+                    event_id="$m1",
+                    timestamp=1000,
+                    body="dispatch hook fire",
+                ),
+                _message(
+                    sender="@mindroom_router:localhost",
+                    event_id="$m2",
+                    timestamp=2000,
+                    body="newer bot activity",
+                ),
+            ],
+        )
+        assert bot._has_newer_unresponded_in_scope(event, context) is False
+
     def test_multiple_scheduled_fires_not_coalesced(self, tmp_path: Path) -> None:
         """Repeated scheduled fires in one thread should all dispatch independently."""
         bot = _make_bot(tmp_path)

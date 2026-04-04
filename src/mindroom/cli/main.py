@@ -11,8 +11,6 @@ from typing import TYPE_CHECKING
 
 import httpx
 import typer
-import yaml
-from pydantic import ValidationError
 
 import mindroom.cli.connect as cli_connect
 from mindroom import __version__, constants
@@ -38,8 +36,9 @@ from .local_stack import local_stack_setup
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+
+from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, Config
 
 _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
@@ -132,12 +131,8 @@ def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
 
     try:
         config = _load_config_quiet(runtime_paths=runtime_paths)
-    except ValidationError as exc:
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         _format_validation_errors(exc, config_path)
-        raise typer.Exit(1) from None
-    except (yaml.YAMLError, OSError) as exc:
-        console.print(f"[red]Error:[/red] Could not load configuration: {exc}")
-        console.print("\n  [cyan]mindroom config validate[/cyan]  Check your config")
         raise typer.Exit(1) from None
 
     return config

@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.plugin_identity import validate_plugin_name
 
 from .types import (
     EVENT_TOOL_AFTER_CALL,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
 
     from .sender import HookMessageSender
+    from .types import HookRoomStatePutter, HookRoomStateQuerier
 
 
 def _resolve_plugin_state_root(
@@ -43,7 +45,7 @@ def _resolve_plugin_state_root(
     if runtime_paths is None:
         msg = "runtime_paths are required to access hook state_root"
         raise RuntimeError(msg)
-    plugin_root = runtime_paths.storage_root / "plugins" / plugin_name
+    plugin_root = runtime_paths.storage_root / "plugins" / validate_plugin_name(plugin_name)
     plugin_root.mkdir(parents=True, exist_ok=True)
     return plugin_root
 
@@ -59,6 +61,8 @@ async def _send_bound_message(
     thread_id: str | None = None,
     extra_content: dict[str, Any] | None = None,
     requester_id: str | None = None,
+    message_received_depth: int = 0,
+    trigger_dispatch: bool = False,
 ) -> str | None:
     """Send one hook-originated Matrix message through a bound sender."""
     if message_sender is None:
@@ -68,7 +72,54 @@ async def _send_bound_message(
     resolved_extra_content = dict(extra_content or {})
     if requester_id:
         resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
-    return await message_sender(room_id, text, thread_id, source_hook, resolved_extra_content or None)
+    if message_received_depth > 0:
+        resolved_extra_content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = message_received_depth
+    return await message_sender(
+        room_id,
+        text,
+        thread_id,
+        source_hook,
+        resolved_extra_content or None,
+        trigger_dispatch=trigger_dispatch,
+    )
+
+
+async def _query_bound_room_state(
+    logger: structlog.stdlib.BoundLogger,
+    room_state_querier: HookRoomStateQuerier | None,
+    room_id: str,
+    event_type: str,
+    state_key: str | None = None,
+) -> dict[str, Any] | None:
+    """Query Matrix room state through a bound hook querier when available."""
+    if room_state_querier is None:
+        logger.warning("No room state querier available")
+        return None
+    return await room_state_querier(room_id, event_type, state_key)
+
+
+async def _put_bound_room_state(
+    logger: structlog.stdlib.BoundLogger,
+    room_state_putter: HookRoomStatePutter | None,
+    room_id: str,
+    event_type: str,
+    state_key: str,
+    content: dict[str, Any],
+) -> bool:
+    """Write Matrix room state through a bound hook putter when available."""
+    if room_state_putter is None:
+        logger.warning("No room state putter available")
+        return False
+    return await room_state_putter(room_id, event_type, state_key, content)
+
+
+@dataclass(frozen=True, slots=True)
+class _EnvelopeTargetView:
+    """Compatibility view exposing thread targeting as one object."""
+
+    room_id: str
+    thread_id: str | None
+    resolved_thread_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +137,17 @@ class MessageEnvelope:
     mentioned_agents: tuple[str, ...]
     agent_name: str
     source_kind: str
+    hook_source: str | None = None
+    message_received_depth: int = 0
+
+    @property
+    def target(self) -> _EnvelopeTargetView:
+        """Return a compatibility target view for newer plugin code."""
+        return _EnvelopeTargetView(
+            room_id=self.room_id,
+            thread_id=self.thread_id,
+            resolved_thread_id=self.resolved_thread_id,
+        )
 
 
 @dataclass(slots=True)
@@ -123,6 +185,8 @@ class HookContext:
     logger: structlog.stdlib.BoundLogger
     correlation_id: str
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
+    room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
+    room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
 
     @property
     def state_root(self) -> Path:
@@ -136,8 +200,21 @@ class HookContext:
         *,
         thread_id: str | None = None,
         extra_content: dict[str, Any] | None = None,
+        trigger_dispatch: bool = False,
     ) -> str | None:
-        """Send a Matrix message from a hook and return the event ID when available."""
+        """Send a Matrix message from a hook and return the event ID when available.
+
+        Plain ``hook`` sends may still dispatch when they satisfy the
+        usual routing rules. When *trigger_dispatch* is True the message
+        uses source_kind ``hook_dispatch``, which also bypasses the
+        normal "ignore other agent unless mentioned" ingress gate before
+        re-entering the normal dispatch pipeline. Automation that
+        originates from ``message:received`` re-enters
+        ``message:received`` at most once: MindRoom skips the origin
+        plugin on the first synthetic hop, then suppresses deeper
+        ``message:received`` re-entry for the rest of that synthetic
+        chain to avoid cross-plugin feedback loops.
+        """
         return await _send_bound_message(
             self.logger,
             self.message_sender,
@@ -147,7 +224,41 @@ class HookContext:
             text,
             thread_id=thread_id,
             extra_content=extra_content,
-            requester_id=_requester_id_for_hook_send(self),
+            requester_id=_requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch),
+            message_received_depth=_message_received_depth_for_hook_send(self),
+            trigger_dispatch=trigger_dispatch,
+        )
+
+    async def query_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Query Matrix room state and return the result when a querier is available."""
+        return await _query_bound_room_state(
+            self.logger,
+            self.room_state_querier,
+            room_id,
+            event_type,
+            state_key,
+        )
+
+    async def put_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+        content: dict[str, Any],
+    ) -> bool:
+        """Write a Matrix room state event and return ``True`` on success."""
+        return await _put_bound_room_state(
+            self.logger,
+            self.room_state_putter,
+            room_id,
+            event_type,
+            state_key,
+            content,
         )
 
 
@@ -156,6 +267,7 @@ class MessageReceivedContext(HookContext):
     """Context for message:received hooks."""
 
     envelope: MessageEnvelope
+    skip_plugin_names: frozenset[str] = field(default_factory=frozenset)
     suppress: bool = False
 
 
@@ -223,6 +335,7 @@ class ScheduleFiredContext(HookContext):
         *,
         thread_id: str | None | _UnsetType = _UNSET,
         extra_content: dict[str, Any] | None = None,
+        trigger_dispatch: bool = False,
     ) -> str | None:
         """Send a Matrix message from a schedule hook and return the event ID when available."""
         resolved_thread_id = self.thread_id if isinstance(thread_id, _UnsetType) else thread_id
@@ -235,7 +348,9 @@ class ScheduleFiredContext(HookContext):
             text,
             thread_id=resolved_thread_id,
             extra_content=extra_content,
-            requester_id=_requester_id_for_hook_send(self),
+            requester_id=_requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch),
+            message_received_depth=_message_received_depth_for_hook_send(self),
+            trigger_dispatch=trigger_dispatch,
         )
 
 
@@ -270,6 +385,7 @@ class CustomEventContext(HookContext):
     room_id: str | None
     thread_id: str | None
     sender_id: str | None
+    message_received_depth: int = 0
 
 
 @dataclass(slots=True)
@@ -293,6 +409,9 @@ class ToolBeforeCallContext:
     logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
     correlation_id: str = ""
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
+    room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
+    room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
+    message_received_depth: int = 0
 
     def decline(self, reason: str) -> None:
         """Mark the tool call as declined with one model-facing reason."""
@@ -301,7 +420,7 @@ class ToolBeforeCallContext:
 
     @property
     def state_root(self) -> Path:
-        """Return the plugin state root when runtime paths are available."""
+        """Return the plugin state root, creating it on first access."""
         return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
 
     async def send_message(
@@ -311,6 +430,7 @@ class ToolBeforeCallContext:
         *,
         thread_id: str | None = None,
         extra_content: dict[str, Any] | None = None,
+        trigger_dispatch: bool = False,
     ) -> str | None:
         """Send a Matrix message from a tool hook and return the event ID when available."""
         return await _send_bound_message(
@@ -323,6 +443,40 @@ class ToolBeforeCallContext:
             thread_id=thread_id,
             extra_content=extra_content,
             requester_id=self.requester_id,
+            message_received_depth=_message_received_depth_for_hook_send(self),
+            trigger_dispatch=trigger_dispatch,
+        )
+
+    async def query_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Query Matrix room state and return the result when a querier is available."""
+        return await _query_bound_room_state(
+            self.logger,
+            self.room_state_querier,
+            room_id,
+            event_type,
+            state_key,
+        )
+
+    async def put_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+        content: dict[str, Any],
+    ) -> bool:
+        """Write a Matrix room state event and return ``True`` on success."""
+        return await _put_bound_room_state(
+            self.logger,
+            self.room_state_putter,
+            room_id,
+            event_type,
+            state_key,
+            content,
         )
 
 
@@ -349,10 +503,13 @@ class ToolAfterCallContext:
     logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
     correlation_id: str = ""
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
+    room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
+    room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
+    message_received_depth: int = 0
 
     @property
     def state_root(self) -> Path:
-        """Return the plugin state root when runtime paths are available."""
+        """Return the plugin state root, creating it on first access."""
         return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
 
     async def send_message(
@@ -362,6 +519,7 @@ class ToolAfterCallContext:
         *,
         thread_id: str | None = None,
         extra_content: dict[str, Any] | None = None,
+        trigger_dispatch: bool = False,
     ) -> str | None:
         """Send a Matrix message from a tool hook and return the event ID when available."""
         return await _send_bound_message(
@@ -374,19 +532,86 @@ class ToolAfterCallContext:
             thread_id=thread_id,
             extra_content=extra_content,
             requester_id=self.requester_id,
+            message_received_depth=_message_received_depth_for_hook_send(self),
+            trigger_dispatch=trigger_dispatch,
+        )
+
+    async def query_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Query Matrix room state and return the result when a querier is available."""
+        return await _query_bound_room_state(
+            self.logger,
+            self.room_state_querier,
+            room_id,
+            event_type,
+            state_key,
+        )
+
+    async def put_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+        content: dict[str, Any],
+    ) -> bool:
+        """Write a Matrix room state event and return ``True`` on success."""
+        return await _put_bound_room_state(
+            self.logger,
+            self.room_state_putter,
+            room_id,
+            event_type,
+            state_key,
+            content,
         )
 
 
-def _requester_id_for_hook_send(context: HookContext) -> str | None:
+def _requester_id_for_hook_send(
+    context: HookContext,
+    *,
+    trigger_dispatch: bool = False,
+) -> str | None:
     """Return the requester identity to preserve on hook-originated sends."""
     if isinstance(context, MessageReceivedContext | MessageEnrichContext):
-        return context.envelope.requester_id
-    if isinstance(context, BeforeResponseContext):
-        return context.draft.envelope.requester_id
-    if isinstance(context, AfterResponseContext):
-        return context.result.envelope.requester_id
-    if isinstance(context, ScheduleFiredContext):
-        return context.created_by
-    if isinstance(context, ReactionReceivedContext | CustomEventContext):
-        return context.sender_id
+        requester_id = context.envelope.requester_id
+    elif isinstance(context, BeforeResponseContext):
+        requester_id = context.draft.envelope.requester_id
+    elif isinstance(context, AfterResponseContext):
+        requester_id = context.result.envelope.requester_id
+    elif isinstance(context, ScheduleFiredContext):
+        requester_id = context.created_by
+    elif isinstance(context, ReactionReceivedContext | CustomEventContext):
+        requester_id = context.sender_id
+    else:
+        requester_id = None
+    if requester_id is not None:
+        return requester_id
+    if trigger_dispatch:
+        return context.config.get_mindroom_user_id(context.runtime_paths)
     return None
+
+
+def _message_received_depth_for_hook_send(context: object) -> int:
+    """Return the synthetic hook-chain depth to preserve on hook sends."""
+    return _next_message_received_depth(_current_message_received_depth(context))
+
+
+def _current_message_received_depth(context: object) -> int:
+    """Return the inbound synthetic hook-chain depth for one hook context."""
+    if isinstance(context, MessageReceivedContext | MessageEnrichContext):
+        return context.envelope.message_received_depth
+    if isinstance(context, BeforeResponseContext):
+        return context.draft.envelope.message_received_depth
+    if isinstance(context, AfterResponseContext):
+        return context.result.envelope.message_received_depth
+    if isinstance(context, CustomEventContext | ToolBeforeCallContext | ToolAfterCallContext):
+        return context.message_received_depth
+    return 0
+
+
+def _next_message_received_depth(current_depth: int) -> int:
+    """Return the next synthetic-chain depth after one downstream hook hop."""
+    return current_depth + 1

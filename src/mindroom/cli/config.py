@@ -14,12 +14,16 @@ from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING, Literal
 
 import typer
-import yaml
-from pydantic import ValidationError
 from rich.console import Console
 from rich.syntax import Syntax
 
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import (
+    CONFIG_LOAD_USER_ERROR_TYPES,
+    Config,
+    ConfigRuntimeValidationError,
+    iter_config_validation_messages,
+    load_config,
+)
 from mindroom.constants import (
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
     VERTEXAI_CLAUDE_ENV_KEYS,
@@ -36,6 +40,9 @@ from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    import yaml
+    from pydantic import ValidationError
 
 console = Console()
 
@@ -241,16 +248,19 @@ def _get_editor() -> str:
     return "vi"
 
 
-def _format_validation_errors(exc: ValidationError, config_path: Path | None = None) -> None:
-    """Print Pydantic validation errors in a user-friendly format."""
+def _format_validation_errors(
+    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    config_path: Path | None = None,
+) -> None:
+    """Print config validation errors in a user-friendly format."""
     if config_path:
         console.print(f"[red]Error:[/red] Invalid configuration in {config_path}\n")
     else:
         console.print("[red]Error:[/red] Invalid configuration\n")
     console.print("Issues found:")
-    for error in exc.errors():
-        loc = " -> ".join(str(x) for x in error["loc"])
-        console.print(f"  [red]*[/red] {loc}: {error['msg']}")
+    for location, message in iter_config_validation_messages(exc):
+        display_location = location.replace(" → ", " -> ")
+        console.print(f"  [red]*[/red] {display_location}: {message}")
     console.print("\nFix these issues:")
     console.print("  [cyan]mindroom config edit[/cyan]      Edit your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Check config after editing")
@@ -372,7 +382,11 @@ def config_show(
             console.print(f"  {i}. {loc} ({status})")
         raise typer.Exit(1)
 
-    content = config_file.read_text(encoding="utf-8")
+    try:
+        content = config_file.read_text(encoding="utf-8")
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        _format_validation_errors(exc, config_path=config_file)
+        raise typer.Exit(1) from None
 
     if raw:
         print(content, end="")
@@ -447,11 +461,8 @@ def config_validate(
 
     try:
         config = _load_config_quiet(runtime_paths=runtime_paths)
-    except ValidationError as exc:
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         _format_validation_errors(exc, config_path)
-        raise typer.Exit(1) from None
-    except (yaml.YAMLError, OSError) as e:
-        console.print(f"[red]Error:[/red] Could not load configuration: {e}")
         raise typer.Exit(1) from None
 
     console.print("[green]Configuration is valid.[/green]\n")

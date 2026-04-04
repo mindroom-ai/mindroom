@@ -733,6 +733,10 @@ class TestSharedIntegrationCredentialTagging:
         """Spotify OAuth saves should mark credentials as UI-managed so unscoped workers mirror them."""
         manager = CredentialsManager(temp_credentials_dir)
         target = RequestCredentialsTarget(
+            runtime_paths=constants_mod.resolve_primary_runtime_paths(
+                config_path=temp_credentials_dir / "config.yaml",
+                storage_path=temp_credentials_dir,
+            ),
             base_manager=manager,
             target_manager=manager,
             worker_scope=None,

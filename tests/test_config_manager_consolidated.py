@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -32,6 +33,58 @@ def _runtime_paths() -> RuntimePaths:
 def _config_manager(config_path: Path) -> ConfigManagerTools:
     """Construct ConfigManagerTools with explicit RuntimePaths."""
     return ConfigManagerTools(resolve_runtime_paths(config_path=config_path, process_env={}))
+
+
+def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> Path:
+    """Write one config whose plugin manifest fails runtime validation."""
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    Config(
+        agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
+        models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        plugins=["./plugins/bad-name"],
+    ).save_to_yaml(config_path)
+    return config_path
+
+
+def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager_plugin_tool") -> Path:
+    """Write one config that enables a plugin-defined tool."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        f"    name='{tool_name}',\n"
+        "    display_name='Plugin Tool',\n"
+        "    description='Plugin-defined tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    Config(
+        agents={},
+        models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        plugins=["./plugins/demo"],
+    ).save_to_yaml(config_path)
+    return config_path
 
 
 class TestConsolidatedConfigManager:
@@ -91,6 +144,26 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_get_info_agents_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
+        """Read-only config-manager info should surface runtime plugin validation failures."""
+        cm = _config_manager(_invalid_plugin_config_path(tmp_path))
+
+        result = cm.get_info(info_type="agents")
+
+        assert "Invalid configuration" in result
+        assert "Invalid plugin name" in result
+
+    def test_get_info_agents_returns_malformed_yaml_error(self, tmp_path: Path) -> None:
+        """Malformed YAML should return one user-facing invalid-config message."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
+        cm = _config_manager(config_path)
+
+        result = cm.get_info(info_type="agents")
+
+        assert "Invalid configuration" in result
+        assert "Could not parse configuration YAML" in result
+
     def test_get_info_teams(self) -> None:
         """Test get_info with teams info type."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -126,6 +199,15 @@ class TestConsolidatedConfigManager:
         result = cm.get_info(info_type="available_tools")
         assert "Available Tools by Category" in result
 
+    def test_get_info_available_tools_includes_plugin_tools_from_current_config(self, tmp_path: Path) -> None:
+        """Available tool listing should resolve plugin tools from the current config."""
+        cm = _config_manager(_plugin_tool_config_path(tmp_path))
+
+        result = cm.get_info(info_type="available_tools")
+
+        assert "config_manager_plugin_tool" in result
+        assert "Plugin-defined tool" in result
+
     def test_get_info_tool_details(self, tmp_path: Path) -> None:
         """Test get_info with tool_details info type."""
         cm = _config_manager(_minimal_config_path(tmp_path))
@@ -144,6 +226,15 @@ class TestConsolidatedConfigManager:
         result = cm.get_info(info_type="tool_details", name="openclaw_compat")
         assert "Tool: openclaw_compat" in result
         assert "OpenClaw Compat" in result
+
+    def test_get_info_tool_details_includes_plugin_tool_from_current_config(self, tmp_path: Path) -> None:
+        """Tool details should resolve plugin tools from the current config."""
+        cm = _config_manager(_plugin_tool_config_path(tmp_path))
+
+        result = cm.get_info(info_type="tool_details", name="config_manager_plugin_tool")
+
+        assert "Tool: config_manager_plugin_tool" in result
+        assert "Plugin-defined tool" in result
 
     def test_get_info_invalid_type(self, tmp_path: Path) -> None:
         """Test get_info with invalid info type."""
@@ -178,6 +269,60 @@ class TestConsolidatedConfigManager:
             assert config.agents["test_agent"].display_name == "Test Agent"
         finally:
             config_path.unlink(missing_ok=True)
+
+    def test_manage_agent_create_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
+        """Write config-manager flows should keep runtime plugin validation in the invalid-config channel."""
+        cm = _config_manager(_invalid_plugin_config_path(tmp_path, with_agent=False))
+
+        result = cm.manage_agent(
+            operation="create",
+            agent_name="test_agent",
+            display_name="Test Agent",
+            role="Test role",
+            tools=[],
+            model="default",
+        )
+
+        assert "Invalid configuration" in result
+        assert "Invalid plugin name" in result
+        assert "Changes were NOT applied." in result
+
+    def test_manage_agent_create_returns_malformed_yaml_error(self, tmp_path: Path) -> None:
+        """Malformed YAML should be reported through the invalid-config path for mutating flows."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
+        cm = _config_manager(config_path)
+
+        result = cm.manage_agent(
+            operation="create",
+            agent_name="test_agent",
+            display_name="Test Agent",
+            role="Test role",
+            tools=[],
+            model="default",
+        )
+
+        assert "Invalid configuration" in result
+        assert "Could not parse configuration YAML" in result
+        assert "Changes were NOT applied." in result
+
+    def test_manage_agent_create_accepts_plugin_tool_from_current_config(self, tmp_path: Path) -> None:
+        """Agent creation should accept plugin tools without relying on ambient registry state."""
+        config_path = _plugin_tool_config_path(tmp_path, tool_name="config_manager_plugin_tool")
+        cm = _config_manager(config_path)
+
+        result = cm.manage_agent(
+            operation="create",
+            agent_name="test_agent",
+            display_name="Test Agent",
+            role="Test role",
+            tools=["config_manager_plugin_tool"],
+            model="default",
+        )
+
+        assert "Successfully created" in result
+        config = Config.from_yaml(config_path)
+        assert config.agents["test_agent"].tool_names == ["config_manager_plugin_tool"]
 
     def test_manage_agent_create_accepts_openclaw_preset_tool(self) -> None:
         """Agent create should accept preset entries in tools."""
@@ -277,8 +422,9 @@ class TestConsolidatedConfigManager:
                 model="default",
             )
 
-            assert "Error" in result
+            assert "Invalid configuration" in result
             assert "conflicts" in result
+            assert "Changes were NOT applied." in result
             config = Config.from_yaml(config_path)
             assert "assistant" not in config.agents
         finally:

@@ -19,7 +19,6 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom import constants
-from mindroom.api import config_lifecycle
 from mindroom.api.credentials import (
     RequestCredentialsTarget,
     consume_pending_oauth_request,
@@ -36,6 +35,7 @@ if TYPE_CHECKING:
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import Flow
 
+    from mindroom.api.config_lifecycle import ApiSnapshot
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/google", tags=["google-integration"])
@@ -117,6 +117,14 @@ def _get_oauth_credentials(runtime_paths: RuntimePaths) -> dict[str, Any] | None
     }
 
 
+def _require_oauth_credentials(runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Return Google OAuth credentials or raise one consistent API error."""
+    oauth_config = _get_oauth_credentials(runtime_paths)
+    if oauth_config is None:
+        raise HTTPException(status_code=503, detail="OAuth not configured")
+    return oauth_config
+
+
 def _build_google_token_data(creds: Credentials) -> dict[str, Any]:
     """Convert Google credentials to the stored token payload."""
     token_data = {
@@ -186,6 +194,17 @@ def _refresh_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     )
 
 
+def _require_request_snapshot(request: Request) -> ApiSnapshot:
+    """Return the auth-bound API snapshot for one protected dashboard request."""
+    from mindroom.api.main import request_api_snapshot  # noqa: PLC0415
+
+    snapshot = request_api_snapshot(request)
+    if snapshot is None:
+        msg = "Authenticated request is missing its bound API snapshot"
+        raise RuntimeError(msg)
+    return snapshot
+
+
 def _save_env_credentials(
     client_id: str,
     client_secret: str,
@@ -228,19 +247,38 @@ def _save_env_credentials(
     return _refresh_runtime_paths(runtime_paths)
 
 
+def _reset_google_credentials(runtime_paths: RuntimePaths) -> RuntimePaths:
+    """Clear persisted Google credentials and remove Google env vars."""
+    get_runtime_credentials_manager(runtime_paths).delete_credentials("google")
+
+    env_path = runtime_paths.env_path
+    if env_path.exists():
+        with env_path.open(encoding="utf-8") as f:
+            lines = f.readlines()
+
+        google_vars = [
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET",
+            "GOOGLE_PROJECT_ID",
+            "GOOGLE_REDIRECT_URI",
+        ]
+        filtered_lines = [line for line in lines if not any(line.startswith(f"{var}=") for var in google_vars)]
+
+        with env_path.open("w", encoding="utf-8") as f:
+            f.writelines(filtered_lines)
+
+    return _refresh_runtime_paths(runtime_paths)
+
+
 @router.get("/status")
 async def get_status(request: Request, agent_name: str | None = None) -> GoogleStatus:
     """Check Google integration status."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    # Check environment variables
-    runtime_paths = api_runtime_paths(request)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
+    runtime_paths = target.runtime_paths
     client_id = runtime_paths.env_value("GOOGLE_CLIENT_ID")
     client_secret = runtime_paths.env_value("GOOGLE_CLIENT_SECRET")
     has_credentials = bool(client_id and client_secret)
 
-    # Get current credentials
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
     creds = _get_google_credentials(target, runtime_paths)
 
     if not creds:
@@ -288,9 +326,8 @@ async def get_status(request: Request, agent_name: str | None = None) -> GoogleS
 @router.post("/connect")
 async def connect(request: Request, agent_name: str | None = None) -> GoogleAuthUrl:
     """Start Google OAuth flow."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
+    runtime_paths = target.runtime_paths
     oauth_config = _get_oauth_credentials(runtime_paths)
     if not oauth_config:
         raise HTTPException(
@@ -299,7 +336,6 @@ async def connect(request: Request, agent_name: str | None = None) -> GoogleAuth
         )
 
     try:
-        resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
         _, _, flow_cls = _ensure_google_packages(runtime_paths)
         state = issue_pending_oauth_state(request, "google", agent_name)
 
@@ -343,14 +379,16 @@ async def callback(request: Request) -> RedirectResponse:
     pending = consume_pending_oauth_request(request, "google", state)
     agent_name = pending.agent_name
 
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
-    oauth_config = _get_oauth_credentials(runtime_paths)
-    if not oauth_config:
-        raise HTTPException(status_code=503, detail="OAuth not configured")
-
     try:
+        target = resolve_request_credentials_target(
+            request,
+            agent_name=agent_name,
+            service_names=("google",),
+            execution_scope_override_provided=pending.execution_scope_override_provided,
+            execution_scope_override=pending.execution_scope_override,
+        )
+        runtime_paths = target.runtime_paths
+        oauth_config = _require_oauth_credentials(runtime_paths)
         _, _, flow_cls = _ensure_google_packages(runtime_paths)
 
         # Create OAuth flow and exchange code for tokens
@@ -360,13 +398,6 @@ async def callback(request: Request) -> RedirectResponse:
         flow.fetch_token(code=code)
 
         # Save credentials
-        target = resolve_request_credentials_target(
-            request,
-            agent_name=agent_name,
-            service_names=("google",),
-            execution_scope_override_provided=pending.execution_scope_override_provided,
-            execution_scope_override=pending.execution_scope_override,
-        )
         _save_credentials(flow.credentials, target)
 
         # Extract the domain from the redirect URI for the final redirect
@@ -417,24 +448,25 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
             detail="client_id and client_secret are required",
         )
 
-    config_reloaded = False
     try:
-        # Save to environment
-        runtime_paths = _save_env_credentials(
-            client_id,
-            client_secret,
-            api_runtime_paths(request),
-            project_id,
-        )
-        from mindroom.api.main import _load_config_from_file, initialize_api_app  # noqa: PLC0415
+        from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
 
-        config_lifecycle.load_runtime_config(runtime_paths)
-        initialize_api_app(request.app, runtime_paths)
-        config_reloaded = _load_config_from_file(runtime_paths, request.app)
+        snapshot = _require_request_snapshot(request)
+        _reload_api_runtime_config(
+            request.app,
+            api_runtime_paths(request),
+            expected_snapshot=snapshot,
+            mutate_runtime=lambda runtime_paths: _save_env_credentials(
+                client_id,
+                client_secret,
+                runtime_paths,
+                project_id,
+            ),
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save credentials: {e!s}") from e
-    if not config_reloaded:
-        raise HTTPException(status_code=500, detail="Failed to reload configuration after updating Google credentials.")
     return {"success": True, "message": "Google OAuth credentials configured successfully"}
 
 
@@ -443,40 +475,18 @@ async def reset(request: Request) -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
-    runtime_paths = api_runtime_paths(request)
-    config_reloaded = False
     try:
-        # Remove credentials using the manager
-        get_runtime_credentials_manager(runtime_paths).delete_credentials("google")
+        from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
 
-        # Remove from environment variables
-        env_path = runtime_paths.env_path
-        if env_path.exists():
-            with env_path.open(encoding="utf-8") as f:
-                lines = f.readlines()
-
-            # Filter out Google-related variables
-            google_vars = [
-                "GOOGLE_CLIENT_ID",
-                "GOOGLE_CLIENT_SECRET",
-                "GOOGLE_PROJECT_ID",
-                "GOOGLE_REDIRECT_URI",
-            ]
-            filtered_lines = [line for line in lines if not any(line.startswith(f"{var}=") for var in google_vars)]
-
-            with env_path.open("w", encoding="utf-8") as f:
-                f.writelines(filtered_lines)
-        refreshed_runtime_paths = _refresh_runtime_paths(runtime_paths)
-        from mindroom.api.main import _load_config_from_file, initialize_api_app  # noqa: PLC0415
-
-        config_lifecycle.load_runtime_config(refreshed_runtime_paths)
-        initialize_api_app(request.app, refreshed_runtime_paths)
-        config_reloaded = _load_config_from_file(refreshed_runtime_paths, request.app)
+        snapshot = _require_request_snapshot(request)
+        _reload_api_runtime_config(
+            request.app,
+            api_runtime_paths(request),
+            expected_snapshot=snapshot,
+            mutate_runtime=_reset_google_credentials,
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset: {e!s}") from e
-    if not config_reloaded:
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to reload configuration after resetting Google integration.",
-        )
     return {"success": True, "message": "Google integration reset successfully"}

@@ -16,9 +16,14 @@ from weakref import WeakKeyDictionary
 
 from agno.tools.function import FunctionCall
 
-from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, emit, emit_gate
+from mindroom.hooks import (
+    ToolAfterCallContext,
+    ToolBeforeCallContext,
+    emit,
+    emit_gate,
+)
 from mindroom.hooks.types import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -119,6 +124,7 @@ def _build_context_kwargs(  # noqa: C901
     correlation_id = "tool-hook:" + uuid4().hex
     if runtime_context is not None and runtime_context.correlation_id:
         correlation_id = runtime_context.correlation_id
+    bindings = resolve_tool_runtime_hook_bindings(runtime_context) if runtime_context is not None else None
 
     return {
         "tool_name": tool_name,
@@ -131,7 +137,10 @@ def _build_context_kwargs(  # noqa: C901
         "config": runtime_context.config if runtime_context is not None else config,
         "runtime_paths": runtime_context.runtime_paths if runtime_context is not None else runtime_paths,
         "correlation_id": correlation_id,
-        "message_sender": runtime_context.hook_message_sender if runtime_context is not None else None,
+        "message_sender": bindings.message_sender if bindings is not None else None,
+        "room_state_querier": bindings.room_state_querier if bindings is not None else None,
+        "room_state_putter": bindings.room_state_putter if bindings is not None else None,
+        "message_received_depth": bindings.message_received_depth if bindings is not None else 0,
     }
 
 

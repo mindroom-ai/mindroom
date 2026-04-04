@@ -33,6 +33,7 @@ from mindroom.tool_system.worker_routing import (
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
@@ -71,6 +72,7 @@ def _validated_service(service: str) -> str:
 class RequestCredentialsTarget:
     """Resolved credential target for one dashboard/API request."""
 
+    runtime_paths: RuntimePaths
     base_manager: CredentialsManager
     target_manager: CredentialsManager
     worker_scope: WorkerScope | None
@@ -166,7 +168,12 @@ def consume_pending_oauth_request(
     return _consume_pending_oauth_request(request, service, state)
 
 
-def build_dashboard_execution_identity(request: Request, agent_name: str) -> ToolExecutionIdentity:
+def build_dashboard_execution_identity(
+    request: Request,
+    agent_name: str,
+    *,
+    runtime_paths: RuntimePaths,
+) -> ToolExecutionIdentity:
     """Build one dashboard-scoped execution identity for API credential and tool lookups.
 
     This is a boundary helper for dashboard/API requests only.
@@ -174,12 +181,9 @@ def build_dashboard_execution_identity(request: Request, agent_name: str) -> Too
     and it exists solely so dashboard previews hit the same scoped-runtime seams as
     live requests once an execution scope is chosen.
     """
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
     auth_user = _request_auth_user(request) or {}
     user_id = auth_user.get("user_id")
     requester_id = user_id if isinstance(user_id, str) and user_id else None
-    runtime_paths = api_runtime_paths(request)
     tenant_id = runtime_paths.env_value("CUSTOMER_ID")
     account_id = runtime_paths.env_value("ACCOUNT_ID")
     return ToolExecutionIdentity(
@@ -329,6 +333,7 @@ def resolve_request_credentials_target(
     # must not start depending on a persisted config file.
     if agent_name is None and not execution_scope_override_provided:
         return RequestCredentialsTarget(
+            runtime_paths=runtime_paths,
             base_manager=base_manager,
             target_manager=base_manager,
             worker_scope=None,
@@ -336,7 +341,7 @@ def resolve_request_credentials_target(
             execution_identity=None,
         )
 
-    config, _ = config_lifecycle.load_runtime_config(runtime_paths)
+    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     scope_request = resolve_dashboard_agent_execution_scope_request(
         config=config,
         agent_name=agent_name,
@@ -346,6 +351,7 @@ def resolve_request_credentials_target(
     )
     if scope_request.agent_name is None:
         return RequestCredentialsTarget(
+            runtime_paths=runtime_paths,
             base_manager=base_manager,
             target_manager=base_manager,
             worker_scope=None,
@@ -355,6 +361,7 @@ def resolve_request_credentials_target(
     execution_scope = scope_request.requested_execution_scope
     if execution_scope is None:
         return RequestCredentialsTarget(
+            runtime_paths=runtime_paths,
             base_manager=base_manager,
             target_manager=base_manager,
             worker_scope=None,
@@ -390,7 +397,11 @@ def resolve_request_credentials_target(
             ),
         )
 
-    execution_identity = build_dashboard_execution_identity(request, scope_request.agent_name)
+    execution_identity = build_dashboard_execution_identity(
+        request,
+        scope_request.agent_name,
+        runtime_paths=runtime_paths,
+    )
     worker_key = require_worker_key_for_scope(
         execution_scope,
         execution_identity=execution_identity,
@@ -398,6 +409,7 @@ def resolve_request_credentials_target(
         failure_message=f"Could not resolve worker credentials for agent '{scope_request.agent_name}'.",
     )
     return RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
         base_manager=base_manager,
         target_manager=base_manager.for_worker(worker_key),
         worker_scope=execution_scope,

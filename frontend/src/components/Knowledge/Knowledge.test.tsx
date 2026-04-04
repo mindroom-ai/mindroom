@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { Knowledge } from './Knowledge';
 import { API_ENDPOINTS } from '@/lib/api';
 import { useConfigStore } from '@/store/configStore';
+import type { SaveConfigResult } from '@/store/configStore';
 import type { Config, KnowledgeBaseConfig } from '@/types/config';
 
 vi.mock('@/store/configStore', () => ({
@@ -16,7 +17,9 @@ vi.mock('@/components/ui/use-toast', () => ({
 
 const mockUpdateKnowledgeBase = vi.fn();
 const mockDeleteKnowledgeBase = vi.fn();
-const mockSaveConfig = vi.fn().mockResolvedValue(undefined);
+const mockSaveConfig = vi
+  .fn<() => Promise<SaveConfigResult>>()
+  .mockResolvedValue({ status: 'saved' });
 
 type KnowledgeApiPayloads = {
   status: {

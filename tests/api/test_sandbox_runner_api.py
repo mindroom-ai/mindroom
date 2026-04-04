@@ -13,7 +13,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -24,6 +23,7 @@ import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
+from mindroom.config.main import ConfigRuntimeValidationError
 from mindroom.constants import (
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
@@ -96,57 +96,48 @@ def runner_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[T
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
 
-    class _RuntimeRefreshingTestClient(TestClient):
-        def request(
-            self,
-            method: str,
-            url: httpx._types.URLTypes,
-            *,
-            content: httpx._types.RequestContent | None = None,
-            data: httpx._types.RequestData | None = None,
-            files: httpx._types.RequestFiles | None = None,
-            json: object | None = None,
-            params: httpx._types.QueryParamTypes | None = None,
-            headers: httpx._types.HeaderTypes | None = None,
-            cookies: httpx._types.CookieTypes | None = None,
-            auth: httpx._types.AuthTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
-            follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
-            timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
-            extensions: dict[str, object] | None = None,
-        ) -> httpx.Response:
-            _refresh_runner_app_from_env()
-            return super().request(
-                method,
-                url,
-                content=content,
-                data=data,
-                files=files,
-                json=json,
-                params=params,
-                headers=headers,
-                cookies=cookies,
-                auth=auth,
-                follow_redirects=follow_redirects,
-                timeout=timeout,
-                extensions=extensions,
-            )
-
     _refresh_runner_app_from_env()
-    with _RuntimeRefreshingTestClient(sandbox_runner_app) as client:
+    with TestClient(sandbox_runner_app) as client:
         yield client
 
 
 def _set_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set the sandbox token through the runner's explicit runtime env boundary."""
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
+    _refresh_runner_app_from_env()
 
 
 def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config]:
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
     config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
-    sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runtime_paths)
-    sandbox_runner_module.ensure_registry_loaded_with_config(runtime_paths, config)
+    sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runtime_paths, config=config)
     return runtime_paths, config
+
+
+def _initialize_runner_app_from_env() -> RuntimePaths:
+    runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        sandbox_runner_app,
+        runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+    )
+    return runtime_paths
+
+
+def _invalid_plugin_config_path(tmp_path: Path) -> Path:
+    """Write one config whose plugin manifest fails runtime validation."""
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\nplugins:\n  - ./plugins/bad-name\n",
+        encoding="utf-8",
+    )
+    return config_path
 
 
 def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
@@ -176,6 +167,35 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
 
     assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert sandbox_runner_module._app_runner_token(sandbox_runner_app) == "from-env"
+
+
+def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_config(tmp_path: Path) -> None:
+    """Existing sandbox-runner state should survive lifespan startup without reparsing config.yaml."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_NAMESPACE": "alpha1234"},
+    )
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        sandbox_runner_app,
+        runtime_paths,
+        config=config,
+        runner_token="preserved-token",
+    )
+    config_path.write_text("agents:\n  broken: [\n", encoding="utf-8")
+
+    with TestClient(sandbox_runner_app) as client:
+        response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert sandbox_runner_module._app_runner_token(sandbox_runner_app) == "preserved-token"
+    assert sandbox_runner_module._app_runtime_config(sandbox_runner_app) == config
 
 
 def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
@@ -629,6 +649,49 @@ def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatc
     assert '"result": 3' in data["result"]
 
 
+def test_sandbox_runner_execute_returns_422_for_invalid_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Explicit runner refresh should reject invalid runtime config before committing it."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(_invalid_plugin_config_path(tmp_path)))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        _refresh_runner_app_from_env()
+
+    assert str(exc_info.value) == (
+        "Invalid plugin name: 'BadName'. Plugin names must use lowercase ASCII letters, digits, "
+        "hyphens, or underscores. (" + str((tmp_path / "plugins" / "bad-name" / "mindroom.plugin.json").resolve()) + ")"
+    )
+
+
+def test_sandbox_runner_execute_uses_committed_startup_config_until_explicit_refresh(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Execute requests should keep using the runner's committed startup config after later disk drift."""
+    _set_sandbox_token(monkeypatch)
+    runtime_paths = sandbox_runner_module._app_runtime_paths(sandbox_runner_app)
+    runtime_paths.config_path.write_text("models: [\n", encoding="utf-8")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "calculator",
+            "function_name": "add",
+            "args": [1, 2],
+            "kwargs": {},
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert '"result": 3' in data["result"]
+
+
 def test_sandbox_runner_applies_tool_init_overrides(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -665,6 +728,7 @@ def test_sandbox_runner_applies_shell_path_prepend_override(
     """Sandbox runner should allow shell_path_prepend for shell execution."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+    _refresh_runner_app_from_env()
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -709,6 +773,8 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     stored_value = "value123"
     original_registry = metadata_module._TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
+    original_builtin_registry = metadata_module._BUILTIN_TOOL_REGISTRY.copy()
+    original_builtin_metadata = metadata_module._BUILTIN_TOOL_METADATA.copy()
     original_manager = credentials_module._credentials_manager
     original_signature = credentials_module._credentials_manager_signature
     shared_storage = tmp_path / "shared-storage"
@@ -719,15 +785,17 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     )
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(shared_storage))
-    metadata_module._TOOL_REGISTRY[tool_name] = lambda: DummyTool
-    TOOL_METADATA[tool_name] = ToolMetadata(
-        name=tool_name,
-        display_name="Dummy",
-        description="Dummy",
-        category=ToolCategory.DEVELOPMENT,
-        status=ToolStatus.REQUIRES_CONFIG,
-        setup_type=SetupType.API_KEY,
-        config_fields=[ConfigField(name="token", label="Token", type="password", required=False)],
+    metadata_module.register_builtin_tool_metadata(
+        ToolMetadata(
+            name=tool_name,
+            display_name="Dummy",
+            description="Dummy",
+            category=ToolCategory.DEVELOPMENT,
+            status=ToolStatus.REQUIRES_CONFIG,
+            setup_type=SetupType.API_KEY,
+            config_fields=[ConfigField(name="token", label="Token", type="password", required=False)],
+            factory=lambda: DummyTool,
+        ),
     )
 
     try:
@@ -750,8 +818,12 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     finally:
         metadata_module._TOOL_REGISTRY.clear()
         metadata_module._TOOL_REGISTRY.update(original_registry)
+        metadata_module._BUILTIN_TOOL_REGISTRY.clear()
+        metadata_module._BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
+        metadata_module._BUILTIN_TOOL_METADATA.clear()
+        metadata_module._BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
         credentials_module._credentials_manager = original_manager
         credentials_module._credentials_manager_signature = original_signature
 
@@ -774,19 +846,23 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
     stored_value = "value123"
     original_registry = metadata_module._TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
+    original_builtin_registry = metadata_module._BUILTIN_TOOL_REGISTRY.copy()
+    original_builtin_metadata = metadata_module._BUILTIN_TOOL_METADATA.copy()
     original_manager = credentials_module._credentials_manager
     original_signature = credentials_module._credentials_manager_signature
     storage_root = tmp_path / "runtime-storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
-    metadata_module._TOOL_REGISTRY[tool_name] = lambda: DummyTool
-    TOOL_METADATA[tool_name] = ToolMetadata(
-        name=tool_name,
-        display_name="Dummy",
-        description="Dummy",
-        category=ToolCategory.DEVELOPMENT,
-        status=ToolStatus.REQUIRES_CONFIG,
-        setup_type=SetupType.API_KEY,
-        config_fields=[ConfigField(name="token", label="Token", type="password", required=False)],
+    metadata_module.register_builtin_tool_metadata(
+        ToolMetadata(
+            name=tool_name,
+            display_name="Dummy",
+            description="Dummy",
+            category=ToolCategory.DEVELOPMENT,
+            status=ToolStatus.REQUIRES_CONFIG,
+            setup_type=SetupType.API_KEY,
+            config_fields=[ConfigField(name="token", label="Token", type="password", required=False)],
+            factory=lambda: DummyTool,
+        ),
     )
 
     try:
@@ -807,8 +883,12 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
     finally:
         metadata_module._TOOL_REGISTRY.clear()
         metadata_module._TOOL_REGISTRY.update(original_registry)
+        metadata_module._BUILTIN_TOOL_REGISTRY.clear()
+        metadata_module._BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
+        metadata_module._BUILTIN_TOOL_METADATA.clear()
+        metadata_module._BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
         credentials_module._credentials_manager = original_manager
         credentials_module._credentials_manager_signature = original_signature
 
@@ -844,6 +924,7 @@ def test_sandbox_runner_executes_tool_call_in_subprocess_mode(
     """Sandbox runner should optionally execute tool calls in a subprocess."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    _refresh_runner_app_from_env()
     response = runner_client.post(
         "/api/sandbox-runner/execute",
         headers=SANDBOX_HEADERS,
@@ -875,6 +956,7 @@ def test_sandbox_runner_shell_handles_survive_requests_in_subprocess_mode(
     )
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
+    _refresh_runner_app_from_env()
 
     run_response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -1133,6 +1215,134 @@ def test_sandbox_runner_rejects_unknown_authored_override_field(
     assert "request.tool_config_overrides.shell.missing_field" in response.json()["detail"]
 
 
+def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_validation(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Execute prevalidation should use the runner's current committed plugin metadata."""
+    _set_sandbox_token(monkeypatch)
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ConfigField, ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoPluginTool(Toolkit):\n"
+        "    def __init__(self, label: str | None = None) -> None:\n"
+        "        super().__init__(name='demo_plugin', tools=[])\n"
+        "        self.label = label\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='demo_plugin',\n"
+        "    display_name='Demo Plugin',\n"
+        "    description='Demo plugin tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        "    config_fields=[ConfigField(name='label', label='Label', type='text', required=False)],\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoPluginTool\n",
+        encoding="utf-8",
+    )
+    config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "agents: {}\n"
+        "router:\n"
+        "  model: default\n"
+        "plugins:\n"
+        "  - ./plugins/demo\n",
+        encoding="utf-8",
+    )
+    _refresh_runner_app_from_env()
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "demo_plugin",
+            "function_name": "missing",
+            "args": [],
+            "kwargs": {},
+            "tool_config_overrides": {"label": "hello"},
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Tool 'demo_plugin' does not expose 'missing'."
+
+
+def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_override_validation(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Tool init override prevalidation should also use the runner's current committed plugin metadata."""
+    _set_sandbox_token(monkeypatch)
+    plugin_root = tmp_path / "plugins" / "demo-init"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin_init", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ConfigField, ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoPluginInitTool(Toolkit):\n"
+        "    def __init__(self, base_dir: str | None = None) -> None:\n"
+        "        super().__init__(name='demo_plugin_init', tools=[])\n"
+        "        self.base_dir = base_dir\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='demo_plugin_init',\n"
+        "    display_name='Demo Plugin Init',\n"
+        "    description='Demo plugin tool with init overrides',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        "    config_fields=[ConfigField(name='base_dir', label='Base dir', type='path', required=False)],\n"
+        ")\n"
+        "def demo_plugin_init_tools():\n"
+        "    return DemoPluginInitTool\n",
+        encoding="utf-8",
+    )
+    config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "agents: {}\n"
+        "router:\n"
+        "  model: default\n"
+        "plugins:\n"
+        "  - ./plugins/demo-init\n",
+        encoding="utf-8",
+    )
+    _refresh_runner_app_from_env()
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "demo_plugin_init",
+            "function_name": "missing",
+            "args": [],
+            "kwargs": {},
+            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Tool 'demo_plugin_init' does not expose 'missing'."
+
+
 def test_sandbox_runner_subprocess_rejects_unsafe_tool_init_overrides(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1140,6 +1350,7 @@ def test_sandbox_runner_subprocess_rejects_unsafe_tool_init_overrides(
     """Unsafe tool init overrides should be rejected before subprocess execution starts."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    _refresh_runner_app_from_env()
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -1164,6 +1375,7 @@ def test_sandbox_runner_subprocess_rejects_invalid_base_dir_override_type(
     """Malformed base_dir overrides should be rejected before subprocess dispatch."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    _refresh_runner_app_from_env()
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -1215,6 +1427,7 @@ def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_state_roo
     """Scoped workers should reject base_dir overrides outside their visible state roots."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
+    _refresh_runner_app_from_env()
 
     with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
         response = runner_client.post(
@@ -1248,6 +1461,7 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
     monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
+    _refresh_runner_app_from_env()
 
     with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
         response = runner_client.post(
@@ -1278,6 +1492,7 @@ def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
 
     def fake_create(_self: object, venv_dir: Path) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
@@ -1310,6 +1525,7 @@ def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
     """Malformed worker keys must not gain shared-storage base_dir access."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
+    _refresh_runner_app_from_env()
 
     with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
         response = runner_client.post(
@@ -1392,6 +1608,7 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
     storage_root = tmp_path / "storage"
     worker_key = "v1:tenant-123:shared:general"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
 
     prepare_calls = 0
     original_prepare = sandbox_worker_prep_module.prepare_worker
@@ -1409,12 +1626,14 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
     async def _fake_execute_request_subprocess(
         request: sandbox_runner_module.SandboxRunnerExecuteRequest,
         runtime_paths: object,
+        config: object,
         prepared_worker: object | None = None,
         *,
         runner_token: str | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
         assert runtime_paths is not None
+        assert config is not None
         assert prepared_worker is not None
         assert runner_token == SANDBOX_TOKEN
         return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
@@ -1492,6 +1711,7 @@ def test_sandbox_runner_subprocess_consumes_lease(runner_client: TestClient, mon
     """Lease-based credential overrides should work in subprocess mode."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    _refresh_runner_app_from_env()
 
     lease_response = runner_client.post(
         "/api/sandbox-runner/leases",
@@ -1586,6 +1806,7 @@ def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
     _set_sandbox_token(monkeypatch)
     worker_root = tmp_path / "workers"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path))
+    _refresh_runner_app_from_env()
 
     def fake_create(_self: object, venv_dir: Path) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
@@ -1652,6 +1873,7 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
     storage_root = tmp_path / "storage"
     worker_key = "v1:tenant-123:shared:general"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -1690,6 +1912,7 @@ def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_uns
     monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
     monkeypatch.delenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", raising=False)
     monkeypatch.delenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", raising=False)
+    _refresh_runner_app_from_env()
 
     canonical_base_dir = agent_workspace_root_path(storage_root, "general") / "mind_data"
     response = runner_client.post(
@@ -1881,6 +2104,7 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    _refresh_runner_app_from_env()
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -1919,6 +2143,7 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_nested_work
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
     monkeypatch.delenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", raising=False)
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX", "nested/workers")
+    _refresh_runner_app_from_env()
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -1951,6 +2176,7 @@ def test_sandbox_runner_worker_python_uses_persistent_virtualenv(
     _set_sandbox_token(monkeypatch)
     worker_root = tmp_path / "workers"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path))
+    _refresh_runner_app_from_env()
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -1981,6 +2207,7 @@ def test_sandbox_runner_worker_python_supports_matrix_scoped_worker_keys(
     _set_sandbox_token(monkeypatch)
     worker_root = tmp_path / "workers"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path))
+    _refresh_runner_app_from_env()
     worker_key = resolve_worker_key(
         "user",
         ToolExecutionIdentity(
@@ -2028,6 +2255,7 @@ def test_sandbox_runner_worker_shell_uses_worker_home_and_venv(
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -2092,6 +2320,7 @@ def test_sandbox_runner_cleanup_marks_idle_workers_without_deleting_state(
     """Idle cleanup should evict the live worker handle but keep its persisted state."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_IDLE_TIMEOUT_SECONDS", "60")
+    _refresh_runner_app_from_env()
 
     save_response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -2139,6 +2368,7 @@ def test_dedicated_worker_mode_uses_mounted_root(
     worker_root = tmp_path / "dedicated-worker"
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    _refresh_runner_app_from_env()
 
     def fake_create(_self: object, venv_dir: Path) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
@@ -2211,6 +2441,7 @@ def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
     worker_root = tmp_path / "dedicated-worker"
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    _refresh_runner_app_from_env()
 
     def fake_create(_self: object, venv_dir: Path) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
@@ -2267,6 +2498,7 @@ def test_dedicated_worker_mode_does_not_treat_empty_worker_key_as_missing(
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(tmp_path / "dedicated-worker"))
+    _refresh_runner_app_from_env()
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -2293,6 +2525,7 @@ def test_dedicated_worker_mode_rejects_mismatched_worker_key(
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(tmp_path / "dedicated-worker"))
+    _refresh_runner_app_from_env()
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",

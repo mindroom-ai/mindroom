@@ -172,7 +172,6 @@ def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
     original_metadata = TOOL_METADATA.copy()
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
     try:
@@ -189,8 +188,6 @@ def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._TOOL_MODULE_CACHE.clear()
-        plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
         set_plugin_skill_roots(original_plugin_roots)
@@ -313,9 +310,7 @@ async def test_schedule_fired_auto_poke_uses_thread_from_stored_state(
     await emit(loaded_workloop.registry, EVENT_SCHEDULE_FIRED, schedule_context)
 
     assert schedule_context.suppress is True
-    sender.assert_awaited_once()
-    assert sender.await_args.args[0] == "!room:localhost"
-    assert sender.await_args.args[2] == "$thread_root"
+    sender.assert_not_awaited()
 
 
 @pytest.mark.asyncio

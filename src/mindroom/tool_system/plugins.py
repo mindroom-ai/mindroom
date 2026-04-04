@@ -14,17 +14,23 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.hooks.decorators import iter_module_hooks
-from mindroom.hooks.types import HookCallback  # noqa: TC001
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.skills import set_plugin_skill_roots
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.hooks.types import HookCallback
+    from mindroom.tool_system.metadata import ToolMetadata
 
 logger = get_logger(__name__)
 
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+class PluginValidationError(ValueError):
+    """Raised when plugin config or plugin runtime validation fails for authored config."""
 
 
 @dataclass(frozen=True)
@@ -52,7 +58,7 @@ class _PluginBase:
 @dataclass
 class _PluginCacheEntry:
     manifest_mtime: float
-    plugin: _PluginBase
+    manifest: _PluginManifest
 
 
 @dataclass(frozen=True)
@@ -73,11 +79,11 @@ class _Plugin:
 @dataclass
 class _ModuleCacheEntry:
     mtime: float
+    module_name: str
     module: ModuleType
 
 
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
-_TOOL_MODULE_CACHE: dict[Path, float] = {}
 _MODULE_IMPORT_CACHE: dict[Path, _ModuleCacheEntry] = {}
 
 
@@ -85,37 +91,102 @@ def _hook_display_name(callback: HookCallback) -> str:
     return cast("Any", callback).__name__
 
 
+def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
+    """Remove plugin tool registrations for plugins no longer present in config."""
+    from mindroom.tool_system.metadata import synchronize_plugin_tools  # noqa: PLC0415
+
+    active_tool_modules = [
+        (plugin.name, _module_name(plugin.name, plugin.tools_module_path))
+        for plugin in plugins
+        if plugin.tools_module_path is not None
+    ]
+    synchronize_plugin_tools(active_tool_modules)
+
+
 def load_plugins(
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    set_skill_roots: bool = True,
 ) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
-    plugin_entries = config.plugins
-    if not plugin_entries:
-        set_plugin_skill_roots([])
-        return []
-    plugins: list[_Plugin] = []
-    skill_roots: list[Path] = []
+    import mindroom.tools  # noqa: F401, PLC0415
+    from mindroom.tool_system.metadata import (  # noqa: PLC0415
+        _capture_tool_registry_snapshot,
+        _restore_tool_registry_snapshot,
+        locked_tool_registry_state,
+    )
 
-    for plugin_order, plugin_entry in enumerate(plugin_entries):
-        if not plugin_entry.enabled:
-            continue
+    with locked_tool_registry_state():
+        plugin_entries = config.plugins
+        if not plugin_entries:
+            _sync_loaded_plugin_tools([])
+            if set_skill_roots:
+                set_plugin_skill_roots([])
+            return []
+        plugins: list[_Plugin] = []
+        skill_roots: list[Path] = []
+        plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]] = []
+        snapshot = _capture_tool_registry_snapshot()
+        try:
+            for plugin_order, plugin_entry in enumerate(plugin_entries):
+                if not plugin_entry.enabled:
+                    continue
 
-        root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
-        plugin = _load_plugin(root, plugin_entry, plugin_order)
-        if plugin is None:
-            continue
-        plugins.append(plugin)
-        skill_roots.extend(plugin.skill_dirs)
+                root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
+                plugin_base = _load_plugin_base(root)
+                plugin_bases.append((plugin_base, plugin_entry, plugin_order))
 
-    if plugins:
-        logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
+            _reject_duplicate_plugin_manifest_names(plugin_bases)
 
-    set_plugin_skill_roots(skill_roots)
-    return plugins
+            for plugin_base, plugin_entry, plugin_order in plugin_bases:
+                plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
+                plugins.append(plugin)
+                skill_roots.extend(plugin.skill_dirs)
+
+            if plugins:
+                logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
+
+            _sync_loaded_plugin_tools(plugins)
+
+            if set_skill_roots:
+                set_plugin_skill_roots(skill_roots)
+        except Exception:
+            _restore_tool_registry_snapshot(snapshot)
+            raise
+
+        return plugins
+
+
+def _reject_duplicate_plugin_manifest_names(
+    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]],
+) -> None:
+    """Fail plugin loading when configured manifests reuse the same plugin name."""
+    manifest_paths_by_name: dict[str, list[Path]] = {}
+    for plugin_base, _, _ in plugin_bases:
+        manifest_paths_by_name.setdefault(plugin_base.name, []).append(plugin_base.manifest_path)
+
+    duplicates = {name: paths for name, paths in manifest_paths_by_name.items() if len(paths) > 1}
+    if not duplicates:
+        return
+
+    duplicate_descriptions = ", ".join(
+        f"{name}: {', '.join(str(path) for path in paths)}" for name, paths in sorted(duplicates.items())
+    )
+    logger.error("Duplicate plugin manifest names configured", duplicates=duplicates)
+    msg = f"Duplicate plugin manifest names configured: {duplicate_descriptions}"
+    raise PluginValidationError(msg)
 
 
 def _resolve_plugin_root(plugin_path: str, runtime_paths: RuntimePaths) -> Path:
+    parsed_python_spec = _parse_python_plugin_spec(plugin_path)
+    if parsed_python_spec is not None and parsed_python_spec[2]:
+        module_root = _resolve_python_plugin_root(plugin_path)
+        if module_root is not None:
+            return module_root
+        msg = f"Configured plugin module could not be resolved: {plugin_path}"
+        raise PluginValidationError(msg)
+
     relative = resolve_config_relative_path(plugin_path, runtime_paths)
     if relative.exists():
         return relative
@@ -180,19 +251,17 @@ def _parse_python_plugin_spec(plugin_path: str) -> tuple[str, str | None, bool] 
     return module_name, subpath, explicit
 
 
-def _load_plugin(
-    root: Path,
-    entry_config: PluginEntryConfig,
-    plugin_order: int,
-) -> _Plugin | None:
+def _load_plugin_base(root: Path) -> _PluginBase:
     if not root.exists() or not root.is_dir():
-        logger.warning("Plugin path does not exist", path=str(root))
-        return None
+        msg = f"Configured plugin path does not exist: {root}"
+        logger.error("Plugin path does not exist", path=str(root))
+        raise PluginValidationError(msg)
 
     manifest_path = root / _PLUGIN_MANIFEST
     if not manifest_path.exists():
-        logger.warning("Plugin manifest missing", path=str(manifest_path))
-        return None
+        msg = f"Plugin manifest missing: {manifest_path}"
+        logger.error("Plugin manifest missing", path=str(manifest_path))
+        raise PluginValidationError(msg)
 
     if not root.is_relative_to(_REPO_ROOT):
         logger.warning("Loading non-bundled plugin", path=str(root))
@@ -200,22 +269,22 @@ def _load_plugin(
     try:
         manifest_mtime = manifest_path.stat().st_mtime
     except OSError as exc:
-        logger.warning("Failed to stat plugin manifest", path=str(manifest_path), error=str(exc))
-        return None
+        msg = f"Failed to stat plugin manifest {manifest_path}: {exc}"
+        logger.exception("Failed to stat plugin manifest", path=str(manifest_path), error=str(exc))
+        raise PluginValidationError(msg) from exc
 
     cached = _PLUGIN_CACHE.get(manifest_path)
     if cached and cached.manifest_mtime == manifest_mtime:
-        return _materialize_plugin(cached.plugin, entry_config, plugin_order)
+        manifest = cached.manifest
+    else:
+        manifest = _parse_manifest(manifest_path)
+        _PLUGIN_CACHE[manifest_path] = _PluginCacheEntry(manifest_mtime=manifest_mtime, manifest=manifest)
 
-    manifest = _parse_manifest(manifest_path)
-    if manifest is None:
-        return None
-
-    tools_module_path = _resolve_tools_module(root, manifest.tools_module)
-    hooks_module_path = _resolve_tools_module(root, manifest.hooks_module)
+    tools_module_path = _resolve_module_path(root, manifest.tools_module, kind="tools")
+    hooks_module_path = _resolve_module_path(root, manifest.hooks_module, kind="hooks")
     skill_dirs = _resolve_skill_dirs(root, manifest.skills)
 
-    plugin = _PluginBase(
+    return _PluginBase(
         name=manifest.name,
         root=root,
         manifest_path=manifest_path,
@@ -223,9 +292,6 @@ def _load_plugin(
         hooks_module_path=hooks_module_path,
         skill_dirs=skill_dirs,
     )
-
-    _PLUGIN_CACHE[manifest_path] = _PluginCacheEntry(manifest_mtime=manifest_mtime, plugin=plugin)
-    return _materialize_plugin(plugin, entry_config, plugin_order)
 
 
 def _materialize_plugin(
@@ -258,55 +324,68 @@ def _materialize_plugin(
     )
 
 
-def _parse_manifest(path: Path) -> _PluginManifest | None:  # noqa: PLR0911
+def _parse_manifest(path: Path) -> _PluginManifest:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Failed to parse plugin manifest", path=str(path), error=str(exc))
-        return None
+        msg = f"Failed to parse plugin manifest {path}: {exc}"
+        logger.exception("Failed to parse plugin manifest", path=str(path), error=str(exc))
+        raise PluginValidationError(msg) from exc
 
     if not isinstance(data, dict):
-        logger.warning("Plugin manifest must be a JSON object", path=str(path))
-        return None
+        msg = f"Plugin manifest must be a JSON object: {path}"
+        logger.error("Plugin manifest must be a JSON object", path=str(path))
+        raise PluginValidationError(msg)
 
     name = data.get("name")
-    if not isinstance(name, str) or not name.strip():
-        logger.warning("Plugin manifest missing name", path=str(path))
-        return None
+    if not isinstance(name, str):
+        msg = f"Plugin manifest missing valid string name ({path})"
+        logger.error("Plugin manifest missing valid string name", path=str(path))
+        raise PluginValidationError(msg)
+    try:
+        normalized_name = validate_plugin_name(name)
+    except ValueError as exc:
+        logger.error("Invalid plugin manifest name", path=str(path), plugin_name=name, error=str(exc))  # noqa: TRY400
+        msg = f"{exc} ({path})"
+        raise PluginValidationError(msg) from exc
 
     tools_module = data.get("tools_module")
     if tools_module is not None and not isinstance(tools_module, str):
-        logger.warning("Plugin tools_module must be a string", path=str(path))
-        return None
+        msg = f"Plugin tools_module must be a string: {path}"
+        logger.error("Plugin tools_module must be a string", path=str(path))
+        raise PluginValidationError(msg)
 
     hooks_module = data.get("hooks_module")
     if hooks_module is not None and not isinstance(hooks_module, str):
-        logger.warning("Plugin hooks_module must be a string", path=str(path))
-        return None
+        msg = f"Plugin hooks_module must be a string: {path}"
+        logger.error("Plugin hooks_module must be a string", path=str(path))
+        raise PluginValidationError(msg)
 
     raw_skills = data.get("skills", [])
     if raw_skills is None:
         raw_skills = []
     if not isinstance(raw_skills, list) or any(not isinstance(item, str) for item in raw_skills):
-        logger.warning("Plugin skills must be a list of strings", path=str(path))
-        return None
+        msg = f"Plugin skills must be a list of strings: {path}"
+        logger.error("Plugin skills must be a list of strings", path=str(path))
+        raise PluginValidationError(msg)
 
     return _PluginManifest(
-        name=name.strip(),
+        name=normalized_name,
         tools_module=tools_module,
         hooks_module=hooks_module,
         skills=raw_skills,
     )
 
 
-def _resolve_tools_module(root: Path, tools_module: str | None) -> Path | None:
-    if not tools_module:
+def _resolve_module_path(root: Path, module_path: str | None, *, kind: str) -> Path | None:
+    if not module_path:
         return None
-    module_path = (root / tools_module).resolve()
-    if not module_path.exists():
-        logger.warning("Plugin tools module not found", path=str(module_path))
-        return None
-    return module_path
+    resolved_path = (root / module_path).resolve()
+    if not resolved_path.exists() or not resolved_path.is_file():
+        msg = f"Plugin {kind} module not found: {resolved_path}"
+        logger.error("Plugin module not found", kind=kind, path=str(resolved_path))
+        raise PluginValidationError(msg)
+    return resolved_path
 
 
 def _resolve_skill_dirs(root: Path, skills: list[str]) -> list[Path]:
@@ -314,10 +393,51 @@ def _resolve_skill_dirs(root: Path, skills: list[str]) -> list[Path]:
     for relative_path in skills:
         path = (root / relative_path).resolve()
         if not path.exists() or not path.is_dir():
-            logger.warning("Plugin skill path is not a directory", path=str(path))
-            continue
+            msg = f"Plugin skill path is not a directory: {path}"
+            logger.error("Plugin skill path is not a directory", path=str(path))
+            raise PluginValidationError(msg)
         skill_dirs.append(path)
     return skill_dirs
+
+
+def _prepare_plugin_tool_module_reload(
+    module_name: str,
+    cached: _ModuleCacheEntry | None,
+) -> dict[str, dict[str, ToolMetadata]]:
+    """Snapshot one tool module's cached registrations before reload."""
+    from mindroom.tool_system.metadata import (  # noqa: PLC0415
+        clear_plugin_tool_registrations,
+        snapshot_plugin_tool_registrations,
+    )
+
+    previous_registrations_by_module_name: dict[str, dict[str, ToolMetadata]] = {}
+    for candidate_module_name in {module_name, cached.module_name if cached is not None else None}:
+        if candidate_module_name is None:
+            continue
+        previous_registrations_by_module_name[candidate_module_name] = snapshot_plugin_tool_registrations(
+            candidate_module_name,
+        )
+        clear_plugin_tool_registrations(candidate_module_name)
+    return previous_registrations_by_module_name
+
+
+def _restore_failed_plugin_tool_module_reload(
+    module_path: Path,
+    module_name: str,
+    cached: _ModuleCacheEntry | None,
+    previous_registrations_by_module_name: dict[str, dict[str, ToolMetadata]],
+) -> None:
+    """Restore cached tool registrations and module imports after one failed reload."""
+    from mindroom.tool_system.metadata import restore_plugin_tool_registrations  # noqa: PLC0415
+
+    sys.modules.pop(module_name, None)
+    for restored_module_name, registrations in previous_registrations_by_module_name.items():
+        restore_plugin_tool_registrations(restored_module_name, registrations)
+    if cached is not None:
+        _MODULE_IMPORT_CACHE[module_path] = cached
+        sys.modules[cached.module_name] = cached.module
+    else:
+        _MODULE_IMPORT_CACHE.pop(module_path, None)
 
 
 def _load_plugin_module(
@@ -331,32 +451,58 @@ def _load_plugin_module(
     try:
         mtime = module_path.stat().st_mtime
     except OSError as exc:
-        logger.warning("Failed to stat plugin module", path=str(module_path), kind=kind, error=str(exc))
-        return None
-
-    cached = _MODULE_IMPORT_CACHE.get(module_path)
-    if cached is not None and cached.mtime == mtime:
-        if kind == "tools":
-            _TOOL_MODULE_CACHE[module_path] = mtime
-        return cached.module
+        msg = f"Failed to stat plugin {kind} module {module_path}: {exc}"
+        logger.exception("Failed to stat plugin module", path=str(module_path), kind=kind, error=str(exc))
+        raise PluginValidationError(msg) from exc
 
     module_name = _module_name(plugin_name, module_path)
+    cached = _MODULE_IMPORT_CACHE.get(module_path)
+    if cached is not None and cached.mtime == mtime and cached.module_name == module_name:
+        return cached.module
+
+    previous_registrations_by_module_name = (
+        _prepare_plugin_tool_module_reload(module_name, cached) if kind == "tools" else {}
+    )
+
+    if cached is not None and cached.module_name != module_name:
+        sys.modules.pop(cached.module_name, None)
+
     spec = util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
-        logger.warning("Failed to load plugin module", path=str(module_path), kind=kind)
-        return None
+        msg = f"Failed to load plugin {kind} module: {module_path}"
+        logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
+        raise PluginValidationError(msg)
 
     module = util.module_from_spec(spec)
     sys.modules[module_name] = module
     try:
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        logger.warning("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
-        return None
+        if kind == "tools":
+            from mindroom.tool_system.metadata import _scoped_plugin_registration_owner  # noqa: PLC0415
 
-    _MODULE_IMPORT_CACHE[module_path] = _ModuleCacheEntry(mtime=mtime, module=module)
-    if kind == "tools":
-        _TOOL_MODULE_CACHE[module_path] = mtime
+            with _scoped_plugin_registration_owner(module_name):
+                spec.loader.exec_module(module)
+        else:
+            spec.loader.exec_module(module)
+    except Exception as exc:
+        if kind == "tools":
+            _restore_failed_plugin_tool_module_reload(
+                module_path,
+                module_name,
+                cached,
+                previous_registrations_by_module_name,
+            )
+        else:
+            sys.modules.pop(module_name, None)
+            if cached is not None:
+                _MODULE_IMPORT_CACHE[module_path] = cached
+                sys.modules[cached.module_name] = cached.module
+            else:
+                _MODULE_IMPORT_CACHE.pop(module_path, None)
+        msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
+        logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
+        raise PluginValidationError(msg) from exc
+
+    _MODULE_IMPORT_CACHE[module_path] = _ModuleCacheEntry(mtime=mtime, module_name=module_name, module=module)
     return module
 
 

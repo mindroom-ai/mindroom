@@ -333,7 +333,18 @@ export function Knowledge() {
     setSavingSettings(true);
     setError(null);
     try {
-      await saveConfig();
+      const result = await saveConfig();
+      if (result.status !== 'saved') {
+        const message =
+          result.status === 'error' ? result.message : 'Save was superseded by newer draft edits';
+        setError(message);
+        toast({
+          title: 'Save failed',
+          description: message,
+          variant: 'destructive',
+        });
+        return;
+      }
       await loadData(selectedBase);
       toast({
         title: 'Knowledge settings saved',
@@ -386,7 +397,18 @@ export function Knowledge() {
       }
 
       updateKnowledgeBase(baseName, nextBaseConfig);
-      await saveConfig();
+      const result = await saveConfig();
+      if (result.status !== 'saved') {
+        const message =
+          result.status === 'error' ? result.message : 'Save was superseded by newer draft edits';
+        setError(message);
+        toast({
+          title: 'Create failed',
+          description: message,
+          variant: 'destructive',
+        });
+        return;
+      }
       setSelectedBase(baseName);
       setNewBaseName('');
       setNewBaseSourceType('local');
@@ -437,7 +459,18 @@ export function Knowledge() {
 
     try {
       deleteKnowledgeBase(selectedBase);
-      await saveConfig();
+      const result = await saveConfig();
+      if (result.status !== 'saved') {
+        const message =
+          result.status === 'error' ? result.message : 'Save was superseded by newer draft edits';
+        setError(message);
+        toast({
+          title: 'Delete failed',
+          description: message,
+          variant: 'destructive',
+        });
+        return;
+      }
       setSelectedBase(nextBase || '');
       await loadData(nextBase);
       toast({

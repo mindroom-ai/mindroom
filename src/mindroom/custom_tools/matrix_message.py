@@ -20,6 +20,7 @@ from mindroom.custom_tools.attachment_helpers import (
 from mindroom.custom_tools.attachments import send_context_attachments
 from mindroom.interactive import (
     add_reaction_buttons,
+    clear_interactive_question,
     parse_and_format_interactive,
     register_interactive_question,
     should_create_interactive_question,
@@ -50,6 +51,10 @@ class MatrixMessageTools(Toolkit):
     _DEFAULT_READ_LIMIT: ClassVar[int] = 20
     _MAX_READ_LIMIT: ClassVar[int] = 50
     _ROOM_TIMELINE_SENTINEL: ClassVar[str] = "room"
+    _VISIBLE_ROOM_MESSAGE_EVENT_TYPES: ClassVar[tuple[type[nio.RoomMessageText], type[nio.RoomMessageNotice]]] = (
+        nio.RoomMessageText,
+        nio.RoomMessageNotice,
+    )
     _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset(
         {"send", "thread-reply", "reply", "react", "read", "thread-list", "edit", "context"},
     )
@@ -398,7 +403,7 @@ class MatrixMessageTools(Toolkit):
         resolved = [
             await extract_and_resolve_message(event, context.client)
             for event in reversed(response.chunk)
-            if isinstance(event, nio.RoomMessageText)
+            if isinstance(event, self._VISIBLE_ROOM_MESSAGE_EVENT_TYPES)
         ]
         return self._payload(
             "ok",
@@ -509,15 +514,18 @@ class MatrixMessageTools(Toolkit):
             if latest_thread_event_id is None:
                 latest_thread_event_id = target
 
+        clear_interactive_question(target)
+        interactive_response = parse_and_format_interactive(new_text, extract_mapping=True)
+        formatted_text = interactive_response.formatted_text
         content = format_message_with_mentions(
             context.config,
             context.runtime_paths,
-            new_text,
+            formatted_text,
             sender_domain=context.config.get_domain(context.runtime_paths),
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
         )
-        edit_event_id = await edit_message(context.client, room_id, target, content, new_text)
+        edit_event_id = await edit_message(context.client, room_id, target, content, formatted_text)
         if edit_event_id is None:
             return self._payload(
                 "error",
@@ -526,6 +534,21 @@ class MatrixMessageTools(Toolkit):
                 thread_id=thread_id,
                 target=target,
                 message="Failed to edit message in Matrix.",
+            )
+
+        if interactive_response.option_map and interactive_response.options_list:
+            register_interactive_question(
+                target,
+                room_id,
+                thread_id,
+                interactive_response.option_map,
+                context.agent_name,
+            )
+            await add_reaction_buttons(
+                context.client,
+                room_id,
+                target,
+                interactive_response.options_list,
             )
 
         return self._payload(

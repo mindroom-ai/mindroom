@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom.bot import AgentBot
@@ -15,6 +16,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
+    EVENT_AGENT_STOPPED,
     EVENT_BOT_READY,
     AgentLifecycleContext,
     HookRegistry,
@@ -192,6 +194,107 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
 
     assert captured_content["com.mindroom.source_kind"] == "hook"
     assert captured_content["com.mindroom.hook_source"] == "test-plugin:bot:ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_name", [EVENT_AGENT_STARTED, EVENT_AGENT_STOPPED])
+async def test_lifecycle_hooks_prefer_bot_room_state_helpers_before_router_fallback(
+    tmp_path: Path,
+    event_name: str,
+) -> None:
+    """Lifecycle hooks should query room state with the current bot before falling back to the router."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.room_get_state_event.return_value = MagicMock(content={"name": "Agent Lobby"})
+    bot.client.room_put_state.return_value = object()
+    router_bot = _agent_bot(tmp_path, agent_name="router")
+    router_bot.client = AsyncMock(spec=nio.AsyncClient)
+    router_bot.client.room_get_state_event.return_value = MagicMock(content={"name": "Router Lobby"})
+    router_bot.client.room_put_state.return_value = object()
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.agent_bots = {"router": router_bot, "code": bot}
+    bot.orchestrator = orchestrator
+
+    results: list[tuple[dict[str, object] | None, bool]] = []
+
+    @hook(event_name)
+    async def on_lifecycle(ctx: AgentLifecycleContext) -> None:
+        query_result = await ctx.query_room_state("!room:localhost", "m.room.name", "")
+        put_result = await ctx.put_room_state(
+            "!room:localhost",
+            "com.mindroom.thread.tags",
+            "$thread",
+            {"tags": {"queued": True}},
+        )
+        results.append((query_result, put_result))
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_lifecycle])])
+
+    await bot._emit_agent_lifecycle_event(event_name)
+
+    assert results == [({"name": "Agent Lobby"}, True)]
+    bot.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
+    bot.client.room_put_state.assert_awaited_once_with(
+        "!room:localhost",
+        "com.mindroom.thread.tags",
+        {"tags": {"queued": True}},
+        state_key="$thread",
+    )
+    router_bot.client.room_get_state_event.assert_not_awaited()
+    router_bot.client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_name", [EVENT_AGENT_STARTED, EVENT_AGENT_STOPPED])
+async def test_lifecycle_hooks_fallback_to_router_room_state_helpers_when_bot_cannot_access_room(
+    tmp_path: Path,
+    event_name: str,
+) -> None:
+    """Lifecycle hooks should fall back to the router when the current bot cannot access room state."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.room_get_state_event.return_value = nio.RoomGetStateEventError(message="forbidden")
+    bot.client.room_put_state.return_value = nio.RoomPutStateError(message="forbidden")
+    router_bot = _agent_bot(tmp_path, agent_name="router")
+    router_bot.client = AsyncMock(spec=nio.AsyncClient)
+    router_bot.client.room_get_state_event.return_value = MagicMock(content={"name": "Router Lobby"})
+    router_bot.client.room_put_state.return_value = object()
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.agent_bots = {"router": router_bot, "code": bot}
+    bot.orchestrator = orchestrator
+
+    results: list[tuple[dict[str, object] | None, bool]] = []
+
+    @hook(event_name)
+    async def on_lifecycle(ctx: AgentLifecycleContext) -> None:
+        query_result = await ctx.query_room_state("!room:localhost", "m.room.name", "")
+        put_result = await ctx.put_room_state(
+            "!room:localhost",
+            "com.mindroom.thread.tags",
+            "$thread",
+            {"tags": {"queued": True}},
+        )
+        results.append((query_result, put_result))
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_lifecycle])])
+
+    await bot._emit_agent_lifecycle_event(event_name)
+
+    assert results == [({"name": "Router Lobby"}, True)]
+    bot.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
+    bot.client.room_put_state.assert_awaited_once_with(
+        "!room:localhost",
+        "com.mindroom.thread.tags",
+        {"tags": {"queued": True}},
+        state_key="$thread",
+    )
+    router_bot.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
+    router_bot.client.room_put_state.assert_awaited_once_with(
+        "!room:localhost",
+        "com.mindroom.thread.tags",
+        {"tags": {"queued": True}},
+        state_key="$thread",
+    )
 
 
 @pytest.mark.asyncio

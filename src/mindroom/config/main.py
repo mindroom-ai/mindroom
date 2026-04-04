@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import yaml
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from mindroom.agent_policy import (
     build_agent_policy_seeds,
@@ -43,6 +43,8 @@ from mindroom.matrix.identity import (
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
+from mindroom.tool_system.metadata import ToolConfigOverrideError, ToolMetadataValidationError
+from mindroom.tool_system.plugins import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
 
@@ -71,6 +73,52 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_room_access",
     "matrix_space",
 )
+
+
+class ConfigRuntimeValidationError(ValueError):
+    """Runtime-aware config validation failed after Pydantic schema validation."""
+
+    def errors(self, *, include_context: bool = False) -> list[dict[str, object]]:
+        """Return one ValidationError-like payload for shared config UX code."""
+        del include_context
+        return [{"loc": ("config",), "msg": str(self), "type": "value_error"}]
+
+
+CONFIG_LOAD_USER_ERROR_TYPES = (
+    ValidationError,
+    ConfigRuntimeValidationError,
+    yaml.YAMLError,
+    OSError,
+    UnicodeError,
+)
+
+
+def iter_config_validation_messages(
+    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+) -> list[tuple[str, str]]:
+    """Return user-facing validation messages from one config validation exception."""
+    if isinstance(exc, ValidationError):
+        return [(" → ".join(str(x) for x in error["loc"]), error["msg"]) for error in exc.errors(include_context=False)]
+    if isinstance(exc, ConfigRuntimeValidationError):
+        return [("config", str(exc))]
+    if isinstance(exc, yaml.YAMLError):
+        return [("config", f"Could not parse configuration YAML: {exc}")]
+    if isinstance(exc, UnicodeError):
+        return [("config", f"Could not read configuration text: {exc}")]
+    return [("config", f"Could not load configuration: {exc}")]
+
+
+def format_invalid_config_message(
+    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    *,
+    footer: str | None = None,
+) -> str:
+    """Return one shared invalid-configuration message for user-facing surfaces."""
+    errors = [f"• {location}: {message}" for location, message in iter_config_validation_messages(exc)]
+    response = f"❌ Invalid configuration:\n{'\n'.join(errors)}"
+    if footer:
+        response = f"{response}\n\n{footer}"
+    return response
 
 
 @dataclass(frozen=True)
@@ -267,6 +315,8 @@ def _router_agents_for_room(
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
+    model_config = ConfigDict(extra="forbid")
+
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
         "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
@@ -330,6 +380,15 @@ class Config(BaseModel):
                 continue
             normalized_plugins.append(plugin_entry)
         return normalized_plugins
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_root_fields(cls, data: object) -> object:
+        """Reject removed top-level config fields to prevent silent upgrades."""
+        if isinstance(data, dict) and "mcp_servers" in data:
+            msg = "Top-level field 'mcp_servers' was removed. MCP server configuration is no longer supported."
+            raise ValueError(msg)
+        return data
 
     @model_validator(mode="after")
     def validate_entity_names(self) -> Config:
@@ -762,7 +821,10 @@ class Config(BaseModel):
     ) -> Config:
         """Validate config data against one explicit runtime context."""
         config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
-        config._validate_authored_tool_entries(runtime_paths)
+        try:
+            config._validate_authored_tool_entries(runtime_paths)
+        except (PluginValidationError, ToolConfigOverrideError, ToolMetadataValidationError) as exc:
+            raise ConfigRuntimeValidationError(str(exc)) from exc
         return config
 
     def authored_model_dump(self) -> dict[str, Any]:
@@ -1052,32 +1114,39 @@ class Config(BaseModel):
         entry: ToolConfigEntry,
         *,
         config_path_prefix: str,
+        tool_metadata: dict[str, Any],
     ) -> None:
         """Validate one authored tool entry against the loaded tool metadata."""
-        from mindroom.tool_system.metadata import TOOL_METADATA, validate_authored_overrides  # noqa: PLC0415
+        from mindroom.tool_system.metadata import validate_authored_overrides  # noqa: PLC0415
 
-        if entry.name not in TOOL_METADATA and not self.is_tool_preset(entry.name):
+        if entry.name not in tool_metadata and not self.is_tool_preset(entry.name):
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
-            raise ValueError(msg)
+            raise ToolConfigOverrideError(msg)
 
         validate_authored_overrides(
             entry.name,
             entry.overrides,
             config_path_prefix=config_path_prefix,
+            tool_metadata=tool_metadata,
         )
 
     def _validate_authored_tool_entries(self, runtime_paths: RuntimePaths) -> None:
         """Validate defaults and per-agent authored tool overrides with runtime metadata loaded."""
-        from mindroom.tool_system.metadata import ensure_tool_registry_loaded  # noqa: PLC0415
+        from mindroom.tool_system.metadata import resolved_tool_metadata_for_runtime  # noqa: PLC0415
 
-        ensure_tool_registry_loaded(runtime_paths, self)
+        tool_metadata = resolved_tool_metadata_for_runtime(runtime_paths, self)
         for index, entry in enumerate(self.defaults.tools):
-            self._validate_authored_tool_entry(entry, config_path_prefix=f"defaults.tools[{index}]")
+            self._validate_authored_tool_entry(
+                entry,
+                config_path_prefix=f"defaults.tools[{index}]",
+                tool_metadata=tool_metadata,
+            )
         for agent_name, agent_config in self.agents.items():
             for index, entry in enumerate(agent_config.tools):
                 self._validate_authored_tool_entry(
                     entry,
                     config_path_prefix=f"agents.{agent_name}.tools[{index}]",
+                    tool_metadata=tool_metadata,
                 )
 
     def get_agent_tool_configs(self, agent_name: str) -> list[ResolvedToolConfig]:
@@ -1117,11 +1186,6 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths | None = None,
     ) -> dict[str, object] | None:
         """Return runtime kwargs derived from one agent's authored tool overrides."""
-        agent_config = self.get_agent(agent_name)
-        overrides = agent_config.get_tool_overrides(tool_name)
-        if not overrides:
-            return None
-
         from mindroom.tool_system.metadata import (  # noqa: PLC0415
             authored_tool_overrides_to_runtime,
             ensure_tool_registry_loaded,
@@ -1129,6 +1193,11 @@ class Config(BaseModel):
 
         if runtime_paths is not None:
             ensure_tool_registry_loaded(runtime_paths, self)
+
+        agent_config = self.get_agent(agent_name)
+        overrides = agent_config.get_tool_overrides(tool_name)
+        if not overrides:
+            return None
 
         return authored_tool_overrides_to_runtime(tool_name, overrides)
 
@@ -1500,3 +1569,15 @@ def load_config(runtime_paths: RuntimePaths) -> Config:
     logger.info(f"Loaded agent configuration from {path}")
     logger.info(f"Found {len(config.agents)} agent configurations")
     return config
+
+
+def load_config_or_user_error(
+    runtime_paths: RuntimePaths,
+    *,
+    footer: str | None = None,
+) -> tuple[Config | None, str | None]:
+    """Load config or return one shared user-facing invalid-configuration message."""
+    try:
+        return load_config(runtime_paths), None
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        return None, format_invalid_config_message(exc, footer=footer)

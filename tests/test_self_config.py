@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from mindroom.agents import create_agent
+from mindroom.api import config_lifecycle, main
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -61,6 +63,58 @@ def _self_config_tools(agent_name: str, config_path: Path) -> SelfConfigTools:
     return SelfConfigTools(agent_name=agent_name, runtime_paths=resolve_runtime_paths(config_path=config_path))
 
 
+def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> Path:
+    """Write one config whose plugin manifest fails runtime validation."""
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    Config(
+        agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
+        models=_DEFAULT_MODELS,
+        plugins=["./plugins/bad-name"],
+    ).save_to_yaml(config_path)
+    return config_path
+
+
+def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "self_config_plugin_tool") -> Path:
+    """Write one config that enables a plugin-defined tool for self-config tests."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        f"    name='{tool_name}',\n"
+        "    display_name='Plugin Tool',\n"
+        "    description='Plugin-defined tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    Config(
+        agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[])},
+        models=_DEFAULT_MODELS,
+        plugins=["./plugins/demo"],
+    ).save_to_yaml(config_path)
+    return config_path
+
+
 class TestGetOwnConfig:
     """Tests for SelfConfigTools.get_own_config."""
 
@@ -105,6 +159,36 @@ class TestGetOwnConfig:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_get_own_config_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
+        """Read-only self-config should surface runtime plugin validation failures consistently."""
+        config_path = _invalid_plugin_config_path(tmp_path)
+        tool = _self_config_tools(agent_name="writer", config_path=config_path)
+
+        result = tool.get_own_config()
+
+        assert "Invalid configuration" in result
+        assert "Invalid plugin name" in result
+
+    def test_get_own_config_returns_malformed_yaml_error(self, tmp_path: Path) -> None:
+        """Malformed YAML should return one user-facing invalid-config message, not raise."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
+        tool = _self_config_tools(agent_name="writer", config_path=config_path)
+
+        result = tool.get_own_config()
+
+        assert "Invalid configuration" in result
+        assert "Could not parse configuration YAML" in result
+
+    def test_get_own_config_returns_missing_config_error(self, tmp_path: Path) -> None:
+        """Missing config files should return one user-facing invalid-config message, not raise."""
+        tool = _self_config_tools(agent_name="writer", config_path=tmp_path / "missing.yaml")
+
+        result = tool.get_own_config()
+
+        assert "Invalid configuration" in result
+        assert "Could not load configuration" in result
+
 
 class TestUpdateOwnConfig:
     """Tests for SelfConfigTools.update_own_config."""
@@ -123,6 +207,26 @@ class TestUpdateOwnConfig:
             # Verify persisted
             reloaded = Config.from_yaml(config_path)
             assert reloaded.agents["coder"].role == "New role"
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_own_config_advances_registered_api_snapshot_generation(self) -> None:
+        """Tool-side self-config writes should advance the in-process API generation immediately."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Old role")},
+        )
+        try:
+            runtime_paths = resolve_runtime_paths(config_path=config_path)
+            main.initialize_api_app(main.app, runtime_paths)
+            assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is True
+            initial_generation = main._app_context(main.app).generation
+
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(role="New role")
+
+            assert "Successfully" in result
+            assert main._app_context(main.app).generation > initial_generation
+            assert main._app_context(main.app).config_data["agents"]["coder"]["role"] == "New role"
         finally:
             config_path.unlink(missing_ok=True)
 
@@ -172,6 +276,17 @@ class TestUpdateOwnConfig:
             assert "nonexistent_tool" in result
         finally:
             config_path.unlink(missing_ok=True)
+
+    def test_update_tools_accepts_plugin_tool_from_current_config(self, tmp_path: Path) -> None:
+        """Self-config should accept plugin tools without relying on ambient registry state."""
+        config_path = _plugin_tool_config_path(tmp_path)
+        tool = _self_config_tools(agent_name="coder", config_path=config_path)
+
+        result = tool.update_own_config(tools=["self_config_plugin_tool"])
+
+        assert "Successfully" in result
+        reloaded = Config.from_yaml(config_path)
+        assert reloaded.agents["coder"].tool_names == ["self_config_plugin_tool"]
 
     def test_update_tools_blocks_privileged_tool(self) -> None:
         """Self-config should not allow assigning privileged global-config tools."""
@@ -269,6 +384,29 @@ class TestUpdateOwnConfig:
             ]
         finally:
             config_path.unlink(missing_ok=True)
+
+    def test_update_own_config_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
+        """Write self-config should keep runtime plugin validation in the invalid-config channel."""
+        config_path = _invalid_plugin_config_path(tmp_path)
+        tool = _self_config_tools(agent_name="writer", config_path=config_path)
+
+        result = tool.update_own_config(role="Updated role")
+
+        assert "Invalid configuration" in result
+        assert "Invalid plugin name" in result
+        assert "Changes were NOT applied." in result
+
+    def test_update_own_config_returns_malformed_yaml_error(self, tmp_path: Path) -> None:
+        """Malformed YAML should be reported through the invalid-config path on writes too."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
+        tool = _self_config_tools(agent_name="writer", config_path=config_path)
+
+        result = tool.update_own_config(role="Updated role")
+
+        assert "Invalid configuration" in result
+        assert "Could not parse configuration YAML" in result
+        assert "Changes were NOT applied." in result
 
     def test_update_knowledge_bases_valid(self) -> None:
         """Valid knowledge base IDs should be accepted."""
@@ -375,8 +513,9 @@ class TestUpdateOwnConfig:
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
             result = tool.update_own_config(rooms=["_mindroom_root_space"])
-            assert "Error" in result
+            assert "Invalid configuration" in result
             assert "reserved root Space alias" in result
+            assert "Changes were NOT applied." in result
 
             reloaded = Config.from_yaml(config_path)
             assert reloaded.agents["coder"].rooms == ["lobby"]

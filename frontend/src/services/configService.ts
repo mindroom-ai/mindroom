@@ -18,6 +18,7 @@ export type RawConfig = Omit<Config, 'agents' | 'defaults'> & {
 export type ConfigSavePayload = RawConfig;
 
 const API_BASE = '/api';
+const CONFIG_GENERATION_HEADER = 'x-mindroom-config-generation';
 
 function isConfigValidationIssue(detail: unknown): detail is ConfigValidationIssue {
   return (
@@ -43,6 +44,15 @@ export class ConfigValidationError extends Error {
   }
 }
 
+export class ConfigStaleError extends Error {
+  constructor(
+    message = 'Configuration changed while request was in progress. Retry the operation.'
+  ) {
+    super(message);
+    this.name = 'ConfigStaleError';
+  }
+}
+
 async function responseDetail(response: Response): Promise<unknown> {
   try {
     const payload = (await response.json()) as { detail?: unknown };
@@ -52,12 +62,28 @@ async function responseDetail(response: Response): Promise<unknown> {
   }
 }
 
-export async function loadConfig(): Promise<RawConfig> {
+function responseGeneration(response: Response, fallbackGeneration: number): number {
+  const headerValue =
+    typeof response.headers?.get === 'function'
+      ? response.headers.get(CONFIG_GENERATION_HEADER)
+      : null;
+  const parsed =
+    headerValue == null || headerValue.trim() === ''
+      ? Number.NaN
+      : Number.parseInt(headerValue, 10);
+  return Number.isFinite(parsed) ? parsed : fallbackGeneration;
+}
+
+export async function loadConfig(): Promise<{ config: RawConfig; generation: number }> {
   const response = await fetch(`${API_BASE}/config/load`, {
     method: 'POST',
   });
 
   if (!response.ok) {
+    const detail = await responseDetail(response);
+    if (response.status === 422 && isConfigValidationIssueList(detail)) {
+      throw new ConfigValidationError(detail);
+    }
     if (response.status === 401) {
       throw new Error('Authentication required. Please log in to access this instance.');
     }
@@ -70,7 +96,10 @@ export async function loadConfig(): Promise<RawConfig> {
     throw new Error(`Failed to load configuration (Error ${response.status})`);
   }
 
-  return response.json();
+  return {
+    config: (await response.json()) as RawConfig,
+    generation: responseGeneration(response, 0),
+  };
 }
 
 export async function getAgentPolicies(
@@ -105,17 +134,26 @@ export async function getAgentPolicies(
   return payload.agent_policies;
 }
 
-export async function saveConfig(config: ConfigSavePayload): Promise<void> {
+export async function saveConfig(
+  config: ConfigSavePayload,
+  generation: number
+): Promise<{ generation: number }> {
   const response = await fetch(`${API_BASE}/config/save`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
+      [CONFIG_GENERATION_HEADER]: String(generation),
     },
     body: JSON.stringify(config),
   });
 
   if (!response.ok) {
     const detail = await responseDetail(response);
+    if (response.status === 409) {
+      throw new ConfigStaleError(
+        typeof detail === 'string' && detail.length > 0 ? detail : undefined
+      );
+    }
     if (response.status === 422 && isConfigValidationIssueList(detail)) {
       throw new ConfigValidationError(detail);
     }
@@ -124,6 +162,58 @@ export async function saveConfig(config: ConfigSavePayload): Promise<void> {
     }
     throw new Error(`Failed to save configuration (Error ${response.status})`);
   }
+
+  return { generation: responseGeneration(response, generation + 1) };
+}
+
+export async function loadRawConfigSource(): Promise<{ source: string; generation: number }> {
+  const response = await fetch(`${API_BASE}/config/raw`);
+
+  if (!response.ok) {
+    const detail = await responseDetail(response);
+    if (typeof detail === 'string' && detail.length > 0) {
+      throw new Error(detail);
+    }
+    throw new Error(`Failed to load raw configuration (Error ${response.status})`);
+  }
+
+  const payload = (await response.json()) as { source: string };
+  return {
+    source: payload.source,
+    generation: responseGeneration(response, 0),
+  };
+}
+
+export async function saveRawConfigSource(
+  source: string,
+  generation: number
+): Promise<{ generation: number }> {
+  const response = await fetch(`${API_BASE}/config/raw`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      [CONFIG_GENERATION_HEADER]: String(generation),
+    },
+    body: JSON.stringify({ source }),
+  });
+
+  if (!response.ok) {
+    const detail = await responseDetail(response);
+    if (response.status === 409) {
+      throw new ConfigStaleError(
+        typeof detail === 'string' && detail.length > 0 ? detail : undefined
+      );
+    }
+    if (response.status === 422 && isConfigValidationIssueList(detail)) {
+      throw new ConfigValidationError(detail);
+    }
+    if (typeof detail === 'string' && detail.length > 0) {
+      throw new Error(detail);
+    }
+    throw new Error(`Failed to save raw configuration (Error ${response.status})`);
+  }
+
+  return { generation: responseGeneration(response, generation + 1) };
 }
 
 export async function getAvailableTools(): Promise<string[]> {

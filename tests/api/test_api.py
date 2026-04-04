@@ -1,21 +1,27 @@
 """Tests for the dashboard backend API endpoints."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import json
+import os
+import threading
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, NoReturn
+from types import TracebackType
+from typing import Any, NoReturn, cast
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
-from mindroom.api import main
+from mindroom.api import config_lifecycle, google_integration, main
 from mindroom.api import workers as workers_api
+from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
 from mindroom.matrix.health import (
     mark_matrix_sync_loop_started,
@@ -54,6 +60,65 @@ def _config_with_worker_scope(worker_scope: str | None) -> Config:
     )
     config.agents["general"].worker_scope = worker_scope
     return config
+
+
+def _authored_config_payload(agent_name: str) -> dict[str, Any]:
+    return {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {
+            agent_name: {
+                "display_name": agent_name.title(),
+                "role": "valid",
+                "rooms": [],
+            },
+        },
+    }
+
+
+def _validated_authored_payload(
+    runtime_paths: constants.RuntimePaths,
+    agent_name: str,
+) -> dict[str, Any]:
+    return Config.validate_with_runtime(
+        _authored_config_payload(agent_name),
+        runtime_paths,
+    ).authored_model_dump()
+
+
+def _publish_committed_runtime_config(
+    api_app: FastAPI,
+    runtime_paths: constants.RuntimePaths,
+    authored_payload: dict[str, Any],
+) -> None:
+    """Publish one committed config snapshot for request-bound API tests."""
+    main.initialize_api_app(api_app, runtime_paths)
+    context = main._app_context(api_app)
+    runtime_config = Config.validate_with_runtime(authored_payload, runtime_paths)
+    context.config_data = runtime_config.authored_model_dump()
+    context.runtime_config = runtime_config
+    context.config_load_result = main.ConfigLoadResult(success=True)
+    context.auth_state = None
+
+
+class _ContextSwapLock:
+    def __init__(self, on_enter: Callable[[], None] | None = None) -> None:
+        self.on_enter = on_enter
+
+    def __enter__(self) -> object:
+        if self.on_enter is not None:
+            on_enter = self.on_enter
+            self.on_enter = None
+            on_enter()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
+        return None
 
 
 def test_init_supabase_auth_returns_none_without_credentials(tmp_path: Path) -> None:
@@ -226,9 +291,8 @@ def test_api_lifespan_syncs_env_credentials_on_startup(
     async def _fake_watch_config(
         stop_event: asyncio.Event,
         _app: FastAPI,
-        runtime_paths: constants.RuntimePaths,
     ) -> None:
-        assert runtime_paths == main._app_runtime_paths(main.app)
+        assert main._app_runtime_paths(_app) == main._app_runtime_paths(main.app)
         watch_calls.append("watch")
         await stop_event.wait()
 
@@ -276,7 +340,7 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     main.initialize_api_app(fresh_app, initial_runtime)
     assert main._app_auth_state(fresh_app).settings.mindroom_api_key is None
 
-    main._app_context(fresh_app).runtime_paths = refreshed_runtime
+    main.initialize_api_app(fresh_app, refreshed_runtime)
 
     assert main._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
 
@@ -353,6 +417,221 @@ def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: P
     assert main._app_config_data(fresh_app) == {}
 
 
+def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path: Path) -> None:
+    """A late load result from an old runtime must not poison the current app cache."""
+    fresh_app = FastAPI()
+    first_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        process_env={},
+    )
+    second_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        process_env={},
+    )
+    started = threading.Event()
+    allow_finish = threading.Event()
+    original_loader = config_lifecycle.load_runtime_config_model
+
+    def _fake_loader(runtime_paths: constants.RuntimePaths) -> Config:
+        if runtime_paths == first_runtime:
+            started.set()
+            allow_finish.wait(timeout=1)
+            message = "invalid old config"
+            raise yaml.YAMLError(message)
+        if runtime_paths == second_runtime:
+            return Config.validate_with_runtime(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "router": {"model": "default"},
+                    "agents": {
+                        "second": {
+                            "display_name": "Second",
+                            "role": "valid",
+                            "rooms": [],
+                        },
+                    },
+                },
+                second_runtime,
+            )
+        return original_loader(runtime_paths)
+
+    with patch.object(config_lifecycle, "load_runtime_config_model", side_effect=_fake_loader):
+        main.initialize_api_app(fresh_app, first_runtime)
+
+        stale_thread = threading.Thread(
+            target=config_lifecycle.load_config_into_app,
+            args=(first_runtime, fresh_app),
+        )
+        stale_thread.start()
+        assert started.wait(timeout=1)
+
+        main.initialize_api_app(fresh_app, second_runtime)
+        assert config_lifecycle.load_config_into_app(second_runtime, fresh_app) is True
+        allow_finish.set()
+        stale_thread.join(timeout=1)
+
+    context = main._app_context(fresh_app)
+    assert context.runtime_paths == second_runtime
+    assert context.config_load_result == main.ConfigLoadResult(success=True)
+    assert set(context.config_data["agents"]) == {"second"}
+
+
+def test_load_config_from_file_ignores_runtime_mismatches_after_api_runtime_swap(tmp_path: Path) -> None:
+    """Loading one old runtime after a swap must not overwrite the current app context."""
+    fresh_app = FastAPI()
+    first_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        process_env={},
+    )
+    second_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        process_env={},
+    )
+    first_runtime.config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"first": {"display_name": "First", "role": "old", "rooms": []}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    second_runtime.config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"second": {"display_name": "Second", "role": "new", "rooms": []}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    main.initialize_api_app(fresh_app, first_runtime)
+    assert main._load_config_from_file(first_runtime, fresh_app) is True
+    assert set(main._app_config_data(fresh_app)["agents"]) == {"first"}
+
+    main.initialize_api_app(fresh_app, second_runtime)
+    assert main._load_config_from_file(second_runtime, fresh_app) is True
+    assert set(main._app_config_data(fresh_app)["agents"]) == {"second"}
+
+    assert main._load_config_from_file(first_runtime, fresh_app) is False
+    assert set(main._app_config_data(fresh_app)["agents"]) == {"second"}
+    assert main._app_context(fresh_app).config_load_result == main.ConfigLoadResult(success=True)
+
+
+def test_read_app_committed_config_uses_current_context_after_runtime_swap(tmp_path: Path) -> None:
+    """Read helpers should use the runtime context that is current after locking."""
+    fresh_app = FastAPI()
+    first_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        process_env={},
+    )
+    second_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        process_env={},
+    )
+    swap_lock = _ContextSwapLock()
+    first_snapshot = main.ApiSnapshot(
+        generation=0,
+        runtime_paths=first_runtime,
+        config_data=_validated_authored_payload(first_runtime, "old"),
+        config_load_result=main.ConfigLoadResult(success=True),
+    )
+    second_snapshot = main.ApiSnapshot(
+        generation=1,
+        runtime_paths=second_runtime,
+        config_data=_validated_authored_payload(second_runtime, "new"),
+        config_load_result=main.ConfigLoadResult(success=True),
+    )
+    fresh_app.state.api_state = main.ApiState(
+        config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
+        snapshot=first_snapshot,
+    )
+    swap_lock.on_enter = lambda: setattr(
+        fresh_app.state,
+        "api_state",
+        main.ApiState(
+            config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
+            snapshot=second_snapshot,
+        ),
+    )
+
+    loaded_agents = config_lifecycle.read_app_committed_config(
+        fresh_app,
+        lambda config_data: list(config_data["agents"]),
+    )
+
+    assert loaded_agents == ["new"]
+
+
+def test_write_app_committed_config_uses_current_context_after_runtime_swap(tmp_path: Path) -> None:
+    """Write helpers should mutate the runtime context that is current after locking."""
+    fresh_app = FastAPI()
+    first_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        process_env={},
+    )
+    second_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        process_env={},
+    )
+    first_runtime.config_path.write_text(
+        yaml.safe_dump(_authored_config_payload("old")),
+        encoding="utf-8",
+    )
+    second_runtime.config_path.write_text(
+        yaml.safe_dump(_authored_config_payload("new")),
+        encoding="utf-8",
+    )
+    swap_lock = _ContextSwapLock()
+    first_snapshot = main.ApiSnapshot(
+        generation=0,
+        runtime_paths=first_runtime,
+        config_data=_validated_authored_payload(first_runtime, "old"),
+        config_load_result=main.ConfigLoadResult(success=True),
+    )
+    second_snapshot = main.ApiSnapshot(
+        generation=1,
+        runtime_paths=second_runtime,
+        config_data=_validated_authored_payload(second_runtime, "new"),
+        config_load_result=main.ConfigLoadResult(success=True),
+    )
+    fresh_app.state.api_state = main.ApiState(
+        config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
+        snapshot=first_snapshot,
+    )
+    swap_lock.on_enter = lambda: setattr(
+        fresh_app.state,
+        "api_state",
+        main.ApiState(
+            config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
+            snapshot=second_snapshot,
+        ),
+    )
+
+    def _mutate(config_data: dict[str, Any]) -> None:
+        config_data["agents"]["written"] = {
+            "display_name": "Written",
+            "role": "updated",
+            "rooms": [],
+        }
+
+    config_lifecycle.write_app_committed_config(
+        fresh_app,
+        _mutate,
+        error_prefix="Failed to update configuration",
+    )
+
+    assert set(main._app_context(fresh_app).config_data["agents"]) == {"new", "written"}
+    assert set(yaml.safe_load(first_runtime.config_path.read_text(encoding="utf-8"))["agents"]) == {"old"}
+    assert set(yaml.safe_load(second_runtime.config_path.read_text(encoding="utf-8"))["agents"]) == {
+        "new",
+        "written",
+    }
+
+
 def test_api_lifespan_loads_config_from_injected_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -379,11 +658,10 @@ def test_api_lifespan_loads_config_from_injected_runtime(
     async def _idle_watch_config(
         stop_event: asyncio.Event,
         _app: FastAPI,
-        _runtime_paths: constants.RuntimePaths,
     ) -> None:
         await stop_event.wait()
 
-    async def _idle_worker_cleanup(stop_event: asyncio.Event, _runtime_paths: constants.RuntimePaths) -> None:
+    async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
         await stop_event.wait()
 
     monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
@@ -398,34 +676,87 @@ def test_api_lifespan_loads_config_from_injected_runtime(
 
 
 @pytest.mark.asyncio
-async def test_watch_config_uses_single_file_watcher(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Config watching should target the config file itself, not the whole runtime directory."""
-    watched_paths: list[Path] = []
+async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Config watching should follow the app's current runtime paths."""
+    loaded_paths: list[Path] = []
+    load_event = asyncio.Event()
     stop_event = asyncio.Event()
-    config_path = tmp_path / "config.yaml"
-
-    async def _fake_watch_file(
-        file_path: Path,
-        callback: Callable[[], Awaitable[object]],
-        stop_event: asyncio.Event | None = None,
-    ) -> None:
-        watched_paths.append(file_path)
-        assert stop_event is not None
-        await callback()
-        stop_event.set()
-
-    runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
-    main.initialize_api_app(main.app, runtime_paths)
-    monkeypatch.setattr(main, "watch_file", _fake_watch_file)
+    first_config_path = tmp_path / "first.yaml"
+    second_config_path = tmp_path / "second.yaml"
+    first_config_path.write_text("models: {}\n", encoding="utf-8")
+    second_config_path.write_text("models: {}\n", encoding="utf-8")
+    first_runtime = constants.resolve_primary_runtime_paths(config_path=first_config_path, process_env={})
+    second_runtime = constants.resolve_primary_runtime_paths(config_path=second_config_path, process_env={})
+    main.initialize_api_app(main.app, first_runtime)
     monkeypatch.setattr(
         main,
         "_load_config_from_file",
-        lambda _runtime_paths, _app: watched_paths.append(Path("loaded")),
+        lambda runtime_paths, _app: _record_loaded_path(runtime_paths, loaded_paths, load_event),
     )
 
-    await main._watch_config(stop_event, main.app, main._app_runtime_paths(main.app))
+    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
 
-    assert watched_paths == [config_path, Path("loaded")]
+    await asyncio.sleep(0.02)
+    first_timestamp = time.time() + 1
+    first_config_path.write_text("models: {default: {provider: openai, id: gpt-5.4}}\n", encoding="utf-8")
+    os.utime(first_config_path, (first_timestamp, first_timestamp))
+    await asyncio.wait_for(load_event.wait(), timeout=1)
+    assert loaded_paths == [first_config_path]
+
+    main.initialize_api_app(main.app, second_runtime)
+    load_event.clear()
+    await asyncio.sleep(0.02)
+    second_timestamp = first_timestamp + 1
+    second_config_path.write_text("models: {default: {provider: openai, id: gpt-5.4}}\n", encoding="utf-8")
+    os.utime(second_config_path, (second_timestamp, second_timestamp))
+    await asyncio.wait_for(load_event.wait(), timeout=1)
+    assert loaded_paths == [first_config_path, second_config_path]
+
+    stop_event.set()
+    await watch_task
+
+    assert loaded_paths == [first_config_path, second_config_path]
+
+
+def _record_loaded_path(
+    runtime_paths: constants.RuntimePaths,
+    loaded_paths: list[Path],
+    load_event: asyncio.Event,
+) -> None:
+    loaded_paths.append(runtime_paths.config_path)
+    load_event.set()
+
+
+@pytest.mark.asyncio
+async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker cleanup should use the current runtime, not the startup runtime."""
+    stop_event = asyncio.Event()
+    first_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "first.yaml", process_env={})
+    second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
+    cleanup_paths: list[Path] = []
+
+    def _fake_cleanup(runtime_paths: constants.RuntimePaths) -> int:
+        cleanup_paths.append(runtime_paths.config_path)
+        if len(cleanup_paths) == 1:
+            main.initialize_api_app(main.app, second_runtime)
+        else:
+            stop_event.set()
+        return 0
+
+    async def _fake_to_thread(func: Callable[..., int], *args: object) -> int:
+        return func(*args)
+
+    main.initialize_api_app(main.app, first_runtime)
+    monkeypatch.setattr(main, "_worker_cleanup_interval_seconds", lambda _runtime_paths: 0.01)
+    monkeypatch.setattr(main, "_cleanup_workers_once", _fake_cleanup)
+    monkeypatch.setattr(main.asyncio, "to_thread", _fake_to_thread)
+
+    await main._worker_cleanup_loop(stop_event, main.app, idle_poll_interval_seconds=0.01)
+
+    assert cleanup_paths == [first_runtime.config_path, second_runtime.config_path]
 
 
 def test_health_check(test_client: TestClient) -> None:
@@ -860,9 +1191,10 @@ def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_work
 ) -> None:
     """Shared-only integrations should stay visible but be marked unsupported."""
     config = _config_with_worker_scope("user")
+    runtime_paths = main._app_runtime_paths(main.app)
 
     with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
     ):
         response = test_client.get("/api/tools/?agent_name=general")
 
@@ -880,6 +1212,7 @@ def test_get_tools_execution_scope_override_marks_backend_tools_unsupported(
 ) -> None:
     """Draft execution-scope overrides should drive shared-only tool support flags."""
     config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(main.app)
     tools = [
         {
             "name": "homeassistant",
@@ -902,8 +1235,7 @@ def test_get_tools_execution_scope_override_marks_backend_tools_unsupported(
     ]
 
     with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
-        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
@@ -922,6 +1254,7 @@ def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
 ) -> None:
     """An explicit unscoped draft must not fall back to the persisted agent scope."""
     config = _config_with_worker_scope("user")
+    runtime_paths = main._app_runtime_paths(main.app)
     tools = [
         {
             "name": "homeassistant",
@@ -944,8 +1277,7 @@ def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
     ]
 
     with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
-        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=unscoped")
@@ -961,8 +1293,9 @@ def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
 def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
     """Tool preview should reject unknown agents instead of falling back to shared state."""
     config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(main.app)
 
-    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
+    with patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)):
         response = test_client.get("/api/tools/?agent_name=missing")
 
     assert response.status_code == 404
@@ -972,6 +1305,7 @@ def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
 def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClient) -> None:
     """Supported scoped tools should report runtime env credentials as available."""
     config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(main.app)
     tools = [
         {
             "name": "weather",
@@ -990,8 +1324,7 @@ def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClie
     ]
 
     with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
-        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
         patch(
             "mindroom.api.tools._load_env_shared_preview_credentials",
@@ -1013,6 +1346,7 @@ def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboar
 ) -> None:
     """Requester-owned scoped credentials must not flip isolated dashboard status to available."""
     config = _config_with_worker_scope("user")
+    runtime_paths = main._app_runtime_paths(main.app)
     tools = [
         {
             "name": "weather",
@@ -1031,8 +1365,7 @@ def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboar
     ]
 
     with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
-        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
         patch("mindroom.api.tools.load_scoped_credentials") as mock_load_scoped_credentials,
     ):
@@ -1048,12 +1381,83 @@ def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboar
     mock_load_scoped_credentials.assert_not_called()
 
 
+def test_get_tools_uses_one_runtime_snapshot(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """The tools route should not mix one old config read with a newer runtime."""
+    from mindroom.api import tools as tools_api  # noqa: PLC0415
+
+    first_runtime = main._app_runtime_paths(main.app)
+    second_runtime = _runtime_paths(tmp_path / "second-runtime")
+    second_runtime.config_path.parent.mkdir(parents=True, exist_ok=True)
+    second_runtime.config_path.write_text(
+        yaml.safe_dump(_authored_config_payload("new_agent")),
+        encoding="utf-8",
+    )
+    captured_runtime_paths: list[constants.RuntimePaths] = []
+
+    def _read_tools_runtime_config(_request: object) -> tuple[Config, constants.RuntimePaths]:
+        main.initialize_api_app(main.app, second_runtime)
+        main._load_config_from_file(second_runtime, main.app)
+        return _config_with_worker_scope("shared"), first_runtime
+
+    def _resolve_tool_availability_context(
+        _request: object,
+        *,
+        runtime_paths: constants.RuntimePaths,
+        config: Config,
+        agent_name: str | None,
+        execution_scope_override_provided: bool,
+        execution_scope_override: str | None,
+    ) -> tools_api._ResolvedToolAvailabilityContext:
+        _ = (config, agent_name, execution_scope_override_provided, execution_scope_override)
+        captured_runtime_paths.append(runtime_paths)
+        return tools_api._ResolvedToolAvailabilityContext(
+            execution_scope=None,
+            dashboard_configuration_supported=True,
+            status_authoritative=True,
+            credentials_manager=MagicMock(),
+            worker_target=None,
+        )
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", side_effect=_read_tools_runtime_config),
+        patch(
+            "mindroom.api.tools.resolved_tool_metadata_for_runtime",
+            side_effect=lambda runtime_paths, _config: (captured_runtime_paths.append(runtime_paths), {})[1],
+        ),
+        patch(
+            "mindroom.api.tools.export_tools_metadata",
+            return_value=[
+                {
+                    "name": "calculator",
+                    "display_name": "Calculator",
+                    "description": "Calc",
+                    "category": "utility",
+                    "status": "available",
+                    "setup_type": "none",
+                    "config_fields": None,
+                },
+            ],
+        ),
+        patch(
+            "mindroom.api.tools._resolve_tool_availability_context",
+            side_effect=_resolve_tool_availability_context,
+        ),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general")
+
+    assert response.status_code == 200
+    assert captured_runtime_paths == [first_runtime, first_runtime]
+
+
 def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClient) -> None:
     """Google dashboard actions should reject unsupported worker scopes."""
     config = _config_with_worker_scope("user")
-
-    with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    with patch(
+        "mindroom.api.config_lifecycle.read_committed_runtime_config",
+        return_value=(config, main._app_runtime_paths(test_client.app)),
     ):
         response = test_client.post("/api/google/disconnect?agent_name=general")
 
@@ -1064,9 +1468,9 @@ def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClien
 def test_homeassistant_connect_oauth_rejects_isolating_worker_scope(test_client: TestClient) -> None:
     """Home Assistant OAuth should reject unsupported worker scopes."""
     config = _config_with_worker_scope("user")
-
-    with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    with patch(
+        "mindroom.api.config_lifecycle.read_committed_runtime_config",
+        return_value=(config, main._app_runtime_paths(test_client.app)),
     ):
         response = test_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general",
@@ -1126,9 +1530,12 @@ def test_google_connect_uses_pending_oauth_state(
     )
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
-
-    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
-        response = api_key_client.post("/api/google/connect?agent_name=general")
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+    response = api_key_client.post("/api/google/connect?agent_name=general")
 
     assert response.status_code == 200
     assert response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
@@ -1141,13 +1548,15 @@ def test_google_connect_rejects_draft_execution_scope_override(api_key_client: T
     config = _config_with_worker_scope("user")
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
-
     with (
         patch(
             "mindroom.api.google_integration._get_oauth_credentials",
             return_value={"web": {"client_id": "client-id", "client_secret": "client-secret"}},
         ),
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch(
+            "mindroom.api.config_lifecycle.read_committed_runtime_config",
+            return_value=(config, main._app_runtime_paths(api_key_client.app)),
+        ),
     ):
         connect_response = api_key_client.post("/api/google/connect?agent_name=general&execution_scope=shared")
     assert connect_response.status_code == 409
@@ -1214,11 +1623,15 @@ def test_google_configure_writes_runtime_env_file_and_refreshes_runtime(
         "mindroom.api.google_integration._ensure_google_packages",
         lambda _runtime_paths: (object, object, _FakeFlowFactory),
     )
-    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, temp_config_file)):
-        connect_response = api_key_client.post(
-            "/api/google/connect?agent_name=general",
-            headers={"Authorization": "Bearer test-key"},
-        )
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+    connect_response = api_key_client.post(
+        "/api/google/connect?agent_name=general",
+        headers={"Authorization": "Bearer test-key"},
+    )
 
     assert connect_response.status_code == 200
     assert connect_response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
@@ -1261,11 +1674,15 @@ def test_google_reset_clears_runtime_env_file_and_refreshes_runtime(
     assert "GOOGLE_REDIRECT_URI=" not in env_contents
     assert "UNRELATED=value" in env_contents
 
-    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, temp_config_file)):
-        connect_response = api_key_client.post(
-            "/api/google/connect?agent_name=general",
-            headers={"Authorization": "Bearer test-key"},
-        )
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+    connect_response = api_key_client.post(
+        "/api/google/connect?agent_name=general",
+        headers={"Authorization": "Bearer test-key"},
+    )
 
     assert connect_response.status_code == 503
     assert "GOOGLE_CLIENT_ID" in connect_response.json()["detail"]
@@ -1313,11 +1730,11 @@ def test_google_runtime_refresh_keeps_config_cache_live(
     assert "test_agent" in after_reset.json()["agents"]
 
 
-def test_google_configure_reports_reload_failures_without_clearing_cached_config(
+def test_google_configure_surfaces_runtime_validation_failures(
     api_key_client: TestClient,
     temp_config_file: Path,
 ) -> None:
-    """Google configure should fail closed when the refreshed runtime cannot reload config."""
+    """Google configure should surface runtime config failures as 422 user errors."""
     before_response = api_key_client.post(
         "/api/config/load",
         headers={"Authorization": "Bearer test-key"},
@@ -1346,15 +1763,112 @@ def test_google_configure_reports_reload_failures_without_clearing_cached_config
         },
     )
 
-    assert configure_response.status_code == 500
-    assert "Failed to save credentials" in configure_response.json()["detail"]
+    assert configure_response.status_code == 422
+    assert "mindroom_user.username" in str(configure_response.json()["detail"])
 
     after_response = api_key_client.post(
         "/api/config/load",
         headers={"Authorization": "Bearer test-key"},
     )
-    assert after_response.status_code == 200
-    assert "test_agent" in after_response.json()["agents"]
+    assert after_response.status_code == 422
+    assert "mindroom_user.username" in str(after_response.json()["detail"])
+
+
+def test_google_configure_rejects_stale_runtime_refresh_after_runtime_swap(tmp_path: Path) -> None:
+    """Google configure should fail stale before mutating the older request-bound runtime."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = _authored_config_payload("old")
+    payload_b = _authored_config_payload("new")
+
+    runtime_a.env_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_a.env_path.write_text("UNRELATED=value\n", encoding="utf-8")
+    original_require_request_snapshot = google_integration._require_request_snapshot
+
+    def _swap_after_request_snapshot(request: Request) -> config_lifecycle.ApiSnapshot:
+        snapshot = original_require_request_snapshot(request)
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return snapshot
+
+    with (
+        patch(
+            "mindroom.api.google_integration._require_request_snapshot",
+            side_effect=_swap_after_request_snapshot,
+        ),
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.post(
+            "/api/google/configure",
+            headers={"Authorization": "Bearer key-a"},
+            json={
+                "client_id": "configured-client-id",
+                "client_secret": "configured-client-secret",
+            },
+        )
+
+    assert response.status_code == 409
+    assert main._app_runtime_paths(main.app) == runtime_b
+    assert main._app_context(main.app).config_data["agents"] == payload_b["agents"]
+    env_contents = runtime_a.env_path.read_text(encoding="utf-8")
+    assert env_contents == "UNRELATED=value\n"
+    assert "GOOGLE_CLIENT_ID=" not in env_contents
+
+
+def test_google_reset_rejects_stale_runtime_refresh_without_mutating_old_runtime(tmp_path: Path) -> None:
+    """Google reset should fail stale before deleting credentials or editing the older runtime `.env`."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = _authored_config_payload("old")
+    payload_b = _authored_config_payload("new")
+    runtime_a.env_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_a.env_path.write_text(
+        "GOOGLE_CLIENT_ID=client-a\nGOOGLE_CLIENT_SECRET=secret-a\nUNRELATED=value\n",
+        encoding="utf-8",
+    )
+    original_require_request_snapshot = google_integration._require_request_snapshot
+
+    def _swap_after_request_snapshot(request: Request) -> config_lifecycle.ApiSnapshot:
+        snapshot = original_require_request_snapshot(request)
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return snapshot
+
+    with (
+        patch(
+            "mindroom.api.google_integration._require_request_snapshot",
+            side_effect=_swap_after_request_snapshot,
+        ),
+        patch("mindroom.api.google_integration.get_runtime_credentials_manager") as mock_get_credentials_manager,
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.post(
+            "/api/google/reset",
+            headers={"Authorization": "Bearer key-a"},
+        )
+
+    assert response.status_code == 409
+    assert main._app_runtime_paths(main.app) == runtime_b
+    assert main._app_context(main.app).config_data["agents"] == payload_b["agents"]
+    env_contents = runtime_a.env_path.read_text(encoding="utf-8")
+    assert env_contents == "GOOGLE_CLIENT_ID=client-a\nGOOGLE_CLIENT_SECRET=secret-a\nUNRELATED=value\n"
+    mock_get_credentials_manager.assert_not_called()
 
 
 def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:
@@ -1362,15 +1876,18 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     config = _config_with_worker_scope("shared")
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
-
-    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
-        response = api_key_client.post(
-            "/api/homeassistant/connect/oauth?agent_name=general",
-            json={
-                "instance_url": "homeassistant.local:8123",
-                "client_id": "client-id",
-            },
-        )
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+    response = api_key_client.post(
+        "/api/homeassistant/connect/oauth?agent_name=general",
+        json={
+            "instance_url": "homeassistant.local:8123",
+            "client_id": "client-id",
+        },
+    )
 
     assert response.status_code == 200
     auth_url = response.json()["auth_url"]
@@ -1401,9 +1918,13 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
     }
     async_client = MagicMock()
     async_client.__aenter__.return_value.post.return_value = token_response
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
 
     with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
         patch("mindroom.api.homeassistant_integration.resolve_request_credentials_target", return_value=target),
         patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
     ):
@@ -1452,9 +1973,9 @@ def test_homeassistant_connect_rejects_draft_execution_scope_override(
     config = _config_with_worker_scope("user")
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
-
-    with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    with patch(
+        "mindroom.api.config_lifecycle.read_committed_runtime_config",
+        return_value=(config, main._app_runtime_paths(api_key_client.app)),
     ):
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general&execution_scope=shared",
@@ -1514,9 +2035,12 @@ def test_spotify_connect_uses_pending_oauth_state(
     )
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
-
-    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
-        response = api_key_client.post("/api/integrations/spotify/connect?agent_name=general")
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+    response = api_key_client.post("/api/integrations/spotify/connect?agent_name=general")
 
     assert response.status_code == 200
     assert response.json()["auth_url"] == "https://accounts.spotify.test/authorize"
@@ -1553,9 +2077,9 @@ def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: 
     )
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
-
-    with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    with patch(
+        "mindroom.api.config_lifecycle.read_committed_runtime_config",
+        return_value=(config, main._app_runtime_paths(api_key_client.app)),
     ):
         connect_response = api_key_client.post(
             "/api/integrations/spotify/connect?agent_name=general&execution_scope=shared",
@@ -1568,14 +2092,89 @@ def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: 
 def test_spotify_status_rejects_isolating_worker_scope(test_client: TestClient) -> None:
     """Spotify dashboard status should reject unsupported worker scopes."""
     config = _config_with_worker_scope("user")
-
-    with (
-        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    with patch(
+        "mindroom.api.config_lifecycle.read_committed_runtime_config",
+        return_value=(config, main._app_runtime_paths(test_client.app)),
     ):
         response = test_client.get("/api/integrations/spotify/status?agent_name=general")
 
     assert response.status_code == 400
     assert "worker_scope=user" in response.json()["detail"]
+
+
+def test_spotify_callback_preserves_runtime_validation_error(
+    api_key_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spotify callback should pass through structured runtime config validation errors."""
+    config = _config_with_worker_scope("shared")
+
+    class _FakeSpotifyOAuth:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_authorize_url(self, state: str | None = None) -> str:
+            return f"https://accounts.spotify.test/authorize?state={state}"
+
+        def get_access_token(self, _code: str) -> dict[str, Any]:
+            return {"access_token": "spotify-token"}
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            return {"display_name": "Spotify User"}
+
+    main.initialize_api_app(
+        main.app,
+        constants.resolve_primary_runtime_paths(
+            config_path=main._app_runtime_paths(main.app).config_path,
+            storage_path=main._app_runtime_paths(main.app).storage_root,
+            process_env={
+                **dict(main._app_runtime_paths(main.app).process_env),
+                "SPOTIFY_CLIENT_ID": "client-id",
+                "SPOTIFY_CLIENT_SECRET": "client-secret",
+            },
+        ),
+    )
+    main._app_context(main.app).auth_state = main._ApiAuthState(
+        runtime_paths=main._app_runtime_paths(main.app),
+        settings=main._ApiAuthSettings(
+            platform_login_url=None,
+            supabase_url=None,
+            supabase_anon_key=None,
+            account_id=None,
+            mindroom_api_key="test-key",
+        ),
+        supabase_auth=None,
+    )
+    monkeypatch.setattr(
+        "mindroom.api.integrations._ensure_spotify_packages",
+        lambda _runtime_paths: (_FakeSpotify, _FakeSpotifyOAuth),
+    )
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    invalid_detail = [{"loc": ["config"], "msg": "Invalid plugin name: BadName", "type": "value_error"}]
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+    with patch(
+        "mindroom.api.config_lifecycle.read_committed_runtime_config",
+        side_effect=[
+            (config, main._app_runtime_paths(api_key_client.app)),
+            HTTPException(status_code=422, detail=invalid_detail),
+        ],
+    ):
+        connect_response = api_key_client.post("/api/integrations/spotify/connect?agent_name=general")
+        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
+        callback_response = api_key_client.get(f"/api/integrations/spotify/callback?code=test-code&state={state}")
+
+    assert callback_response.status_code == 422
+    assert callback_response.json()["detail"] == invalid_detail
 
 
 def test_get_tools_includes_openclaw_compat_metadata(test_client: TestClient) -> None:
@@ -1714,11 +2313,10 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     async def _idle_watch_config(
         stop_event: asyncio.Event,
         _app: FastAPI,
-        _runtime_paths: constants.RuntimePaths,
     ) -> None:
         await stop_event.wait()
 
-    async def _idle_worker_cleanup(stop_event: asyncio.Event, _runtime_paths: constants.RuntimePaths) -> None:
+    async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
         await stop_event.wait()
 
     monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
@@ -1739,6 +2337,296 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     assert response.status_code == 422
     saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert "mindroom_user" not in saved_config
+
+
+def test_save_config_rejects_plugin_with_invalid_dedicated_hooks_module(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """API save should reject plugin configs whose dedicated hooks module cannot load."""
+    plugin_root = temp_config_file.parent / "plugins" / "broken-hooks"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "broken-hooks",
+                "tools_module": "tools.py",
+                "hooks_module": "hooks.py",
+                "skills": [],
+            },
+        ),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text("TOOLS_IMPORTED = True\n", encoding="utf-8")
+    (plugin_root / "hooks.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+
+    response = test_client.put(
+        "/api/config/save",
+        json={
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+            "plugins": ["./plugins/broken-hooks"],
+        },
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail[0]["loc"] == ["config"]
+    assert "hooks.py" in detail[0]["msg"]
+    assert detail[0]["type"] == "value_error"
+
+
+def test_save_config_can_recover_from_invalid_reload(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Full config replacement should recover from an invalid on-disk config."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    temp_config_file.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": ["./plugins/bad-name"],
+            },
+        ),
+        encoding="utf-8",
+    )
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    valid_config = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {
+            "recovered_agent": {
+                "display_name": "Recovered Agent",
+                "role": "Recovered role",
+                "tools": [],
+                "instructions": [],
+                "rooms": ["recovery_room"],
+            },
+        },
+    }
+
+    response = test_client.put("/api/config/save", json=valid_config)
+
+    assert response.status_code == 200
+    saved_config = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+    assert saved_config["agents"]["recovered_agent"]["display_name"] == "Recovered Agent"
+    assert "plugins" not in saved_config
+    assert main._app_context(main.app).config_load_result == main.ConfigLoadResult(success=True)
+
+
+def test_get_raw_config_source_returns_current_invalid_file(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Raw config source should remain readable even when structured load fails."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    invalid_source = "agents:\n  broken: [\n"
+    temp_config_file.write_text(invalid_source, encoding="utf-8")
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    response = test_client.get("/api/config/raw")
+
+    assert response.status_code == 200
+    assert response.json() == {"source": invalid_source}
+
+
+def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_file(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Raw recovery should stay usable even when config.yaml contains unreadable bytes."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    temp_config_file.write_bytes(b"agents:\n  broken: \xff\n")
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    response = test_client.get("/api/config/raw")
+
+    assert response.status_code == 200
+    assert response.json() == {"source": "agents:\n  broken: \ufffd\n"}
+
+
+def test_save_raw_config_source_can_recover_from_invalid_reload(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Raw config recovery should replace an invalid file and republish the structured cache."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    valid_source = yaml.safe_dump(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {
+                "recovered_agent": {
+                    "display_name": "Recovered Agent",
+                    "role": "Recovered role",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["recovery_room"],
+                },
+            },
+        },
+        sort_keys=True,
+    )
+
+    response = test_client.put("/api/config/raw", json={"source": valid_source})
+
+    assert response.status_code == 200
+    assert temp_config_file.read_text(encoding="utf-8") == valid_source
+    assert main._app_context(main.app).config_load_result == main.ConfigLoadResult(success=True)
+
+    load_response = test_client.post("/api/config/load")
+    assert load_response.status_code == 200
+    assert load_response.json()["agents"]["recovered_agent"]["display_name"] == "Recovered Agent"
+
+
+def test_config_generation_headers_protect_full_and_raw_save_endpoints(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Config load/raw endpoints should expose generations and reject stale full/raw saves."""
+    initial_load = test_client.post("/api/config/load")
+    assert initial_load.status_code == 200
+    initial_generation = int(initial_load.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+
+    initial_raw = test_client.get("/api/config/raw")
+    assert initial_raw.status_code == 200
+    assert int(initial_raw.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) == initial_generation
+
+    save_response = test_client.put(
+        "/api/config/save",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(initial_generation)},
+        json=_authored_config_payload("updated"),
+    )
+    assert save_response.status_code == 200
+    updated_generation = int(save_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+    assert updated_generation > initial_generation
+
+    stale_save_response = test_client.put(
+        "/api/config/save",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(initial_generation)},
+        json=_authored_config_payload("stale"),
+    )
+    assert stale_save_response.status_code == 409
+
+    replacement_source = yaml.safe_dump(_authored_config_payload("raw_updated"), sort_keys=True)
+    raw_save_response = test_client.put(
+        "/api/config/raw",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(updated_generation)},
+        json={"source": replacement_source},
+    )
+    assert raw_save_response.status_code == 200
+    raw_generation = int(raw_save_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+    assert raw_generation > updated_generation
+    assert temp_config_file.read_text(encoding="utf-8") == replacement_source
+
+    stale_raw_save_response = test_client.put(
+        "/api/config/raw",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(updated_generation)},
+        json={"source": replacement_source},
+    )
+    assert stale_raw_save_response.status_code == 409
+
+
+def test_first_party_config_writers_advance_generation_before_watcher_reload(
+    test_client: TestClient,
+) -> None:
+    """Command-side config writes should publish a newer generation before the file watcher runs."""
+    initial_load = test_client.post("/api/config/load")
+    assert initial_load.status_code == 200
+    initial_generation = int(initial_load.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+
+    response = asyncio.run(
+        apply_config_change(
+            "defaults.markdown",
+            False,
+            main._app_context(main.app).runtime_paths,
+        ),
+    )
+
+    assert "Configuration updated successfully" in response
+
+    stale_save_response = test_client.put(
+        "/api/config/save",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(initial_generation)},
+        json=_authored_config_payload("stale"),
+    )
+
+    assert stale_save_response.status_code == 409
+
+
+def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path) -> None:
+    """Concurrent raw validation should not let one request read another request's temp file."""
+    runtime_paths = _runtime_paths(tmp_path)
+    first_source = yaml.safe_dump(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {"agent_a": {"display_name": "Agent A", "role": "role a", "rooms": []}},
+        },
+        sort_keys=True,
+    )
+    second_source = yaml.safe_dump(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}},
+        },
+        sort_keys=True,
+    )
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    call_lock = threading.Lock()
+    call_count = 0
+    original_loader = config_lifecycle.load_runtime_config_model
+    results: list[tuple[Config, dict[str, Any]] | None] = [None, None]
+
+    def _interleaving_loader(validation_runtime_paths: constants.RuntimePaths) -> Config:
+        nonlocal call_count
+        with call_lock:
+            call_count += 1
+            call_number = call_count
+        if call_number == 1:
+            first_entered.set()
+            assert second_entered.wait(timeout=5)
+        else:
+            assert first_entered.wait(timeout=5)
+            second_entered.set()
+        return original_loader(validation_runtime_paths)
+
+    def _run_validation(index: int, source: str) -> None:
+        results[index] = config_lifecycle._validate_raw_config_source(source, runtime_paths)
+
+    with patch("mindroom.api.config_lifecycle.load_runtime_config_model", side_effect=_interleaving_loader):
+        first_thread = threading.Thread(target=_run_validation, args=(0, first_source))
+        second_thread = threading.Thread(target=_run_validation, args=(1, second_source))
+        first_thread.start()
+        second_thread.start()
+        first_thread.join(timeout=5)
+        second_thread.join(timeout=5)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert results[0] is not None
+    assert results[1] is not None
+    assert results[0][1]["agents"] == {"agent_a": {"display_name": "Agent A", "role": "role a", "rooms": []}}
+    assert results[1][1]["agents"] == {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}}
 
 
 def test_run_config_write_restores_original_config_before_releasing_lock(tmp_path: Path) -> None:
@@ -1767,8 +2655,9 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
                 assert context.config_data == original_config
             return False
 
-    original_lock = context.config_lock
-    context.config_lock = _AssertingLock()
+    app_state = main._app_state(main.app)
+    original_lock = app_state.config_lock
+    app_state.config_lock = _AssertingLock()
     try:
         with pytest.raises(HTTPException) as exc_info:
             main._run_config_write(
@@ -1784,10 +2673,324 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
                 error_prefix="Failed to save configuration",
             )
     finally:
-        context.config_lock = original_lock
+        app_state.config_lock = original_lock
 
     assert exc_info.value.status_code == 422
     assert context.config_data == original_config
+
+
+def test_run_config_write_returns_422_for_invalid_plugin_manifest_name(tmp_path: Path) -> None:
+    """API config writes should surface invalid plugin manifests as user config errors."""
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    main.initialize_api_app(
+        main.app,
+        constants.resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
+    )
+    context = main._app_context(main.app)
+    context.config_data = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+        "plugins": [],
+    }
+
+    with pytest.raises(HTTPException) as exc_info:
+        main._run_config_write(
+            main.app,
+            lambda candidate_config: candidate_config.update({"plugins": ["./plugins/bad-name"]}),
+            error_prefix="Failed to save configuration",
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail[0]["loc"] == ("config",)
+    assert "Invalid plugin name" in str(exc_info.value.detail[0]["msg"])
+    assert exc_info.value.detail[0]["type"] == "value_error"
+
+
+def test_run_config_write_checks_current_config_load_result_after_acquiring_lock(tmp_path: Path) -> None:
+    """Config writes should see a reload failure published while they are waiting on the lock."""
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={},
+    )
+    main.initialize_api_app(main.app, runtime_paths)
+    context = main._app_context(main.app)
+    original_config = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+    }
+    context.config_data = yaml.safe_load(yaml.safe_dump(original_config))
+    context.config_load_result = main.ConfigLoadResult(success=True)
+
+    class _SignalingLock:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self.blocked = threading.Event()
+            self.allow_waiter = threading.Event()
+
+        def __enter__(self) -> "_SignalingLock":
+            if self._lock.acquire(blocking=False):
+                return self
+            self.blocked.set()
+            self.allow_waiter.wait(timeout=1)
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            self._lock.release()
+            return False
+
+    signaling_lock = _SignalingLock()
+    app_state = main._app_state(main.app)
+    original_lock = app_state.config_lock
+    app_state.config_lock = signaling_lock
+    error_detail = [{"loc": ("config",), "msg": "current config is invalid", "type": "value_error"}]
+    captured_exception: list[HTTPException] = []
+
+    def _run_write() -> None:
+        try:
+            main._run_config_write(
+                main.app,
+                lambda candidate_config: candidate_config["agents"].update(
+                    {
+                        "new_agent": {
+                            "display_name": "New Agent",
+                            "role": "test",
+                            "rooms": [],
+                        },
+                    },
+                ),
+                error_prefix="Failed to save configuration",
+            )
+        except HTTPException as exc:
+            captured_exception.append(exc)
+
+    try:
+        with signaling_lock:
+            writer_thread = threading.Thread(target=_run_write)
+            writer_thread.start()
+            assert signaling_lock.blocked.wait(timeout=1)
+            context.config_load_result = main.ConfigLoadResult(
+                success=False,
+                error_status_code=422,
+                error_detail=error_detail,
+            )
+            signaling_lock.allow_waiter.set()
+
+        writer_thread.join(timeout=1)
+    finally:
+        app_state.config_lock = original_lock
+
+    assert not writer_thread.is_alive()
+    assert len(captured_exception) == 1
+    assert captured_exception[0].status_code == 422
+    assert captured_exception[0].detail == error_detail
+    assert context.config_data == original_config
+
+
+def test_api_config_load_returns_422_for_runtime_validation_error(temp_config_file: Path) -> None:
+    """API config loads should surface runtime validation failures as user config errors."""
+    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    temp_config_file.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": ["./plugins/bad-name"],
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    main.initialize_api_app(main.app, runtime_paths)
+    main._load_config_from_file(runtime_paths, main.app)
+    client = TestClient(main.app)
+
+    response = client.post("/api/config/load")
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["config"]
+    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+
+
+def test_api_config_load_returns_422_for_malformed_yaml(temp_config_file: Path) -> None:
+    """API config loads should surface malformed YAML as a user config error too."""
+    temp_config_file.write_text("agents:\n  bad: [\n", encoding="utf-8")
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    main.initialize_api_app(main.app, runtime_paths)
+    main._load_config_from_file(runtime_paths, main.app)
+    client = TestClient(main.app)
+
+    response = client.post("/api/config/load")
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["config"]
+    assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
+
+
+def test_api_config_load_does_not_serve_stale_cache_after_invalid_reload(temp_config_file: Path) -> None:
+    """API config loads should return the latest validation error instead of stale last-known-good data."""
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    main.initialize_api_app(main.app, runtime_paths)
+    main._load_config_from_file(runtime_paths, main.app)
+    client = TestClient(main.app)
+
+    initial_response = client.post("/api/config/load")
+    assert initial_response.status_code == 200
+    assert "test_agent" in initial_response.json()["agents"]
+
+    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    temp_config_file.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": ["./plugins/bad-name"],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    response = client.post("/api/config/load")
+
+    assert response.status_code == 422
+    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+    assert "test_agent" in main._app_context(main.app).config_data["agents"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/config/agents",
+        "/api/config/teams",
+        "/api/config/models",
+        "/api/config/room-models",
+        "/api/rooms",
+    ],
+)
+def test_api_cached_read_endpoints_refuse_stale_config_after_invalid_reload(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+    path: str,
+) -> None:
+    """Config-backed API reads should return the current validation error instead of stale cache."""
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+
+    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    temp_config_file.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "plugins": ["./plugins/bad-name"],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    response = api_key_client.get(path, headers={"Authorization": "Bearer test-key"})
+
+    assert response.status_code == 422
+    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+
+
+def test_api_cached_write_endpoints_refuse_stale_config_after_invalid_reload(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Config writes should not mutate from stale cache after the current file becomes invalid."""
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+
+    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    invalid_payload = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+        "plugins": ["./plugins/bad-name"],
+    }
+    temp_config_file.write_text(yaml.safe_dump(invalid_payload), encoding="utf-8")
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    response = api_key_client.put(
+        "/api/config/models/default",
+        headers={"Authorization": "Bearer test-key"},
+        json={"provider": "openai", "id": "gpt-5.4"},
+    )
+
+    assert response.status_code == 422
+    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+    assert yaml.safe_load(temp_config_file.read_text(encoding="utf-8")) == invalid_payload
+
+
+def test_api_key_raw_endpoints_recover_from_invalid_reload(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Protected raw config endpoints should stay usable after the structured cache becomes invalid."""
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    invalid_source = "agents:\n  broken: [\n"
+    temp_config_file.write_text(invalid_source, encoding="utf-8")
+
+    assert main._load_config_from_file(runtime_paths, main.app) is False
+
+    raw_response = api_key_client.get(
+        "/api/config/raw",
+        headers={"Authorization": "Bearer test-key"},
+    )
+    assert raw_response.status_code == 200
+    assert raw_response.json() == {"source": invalid_source}
+
+    valid_source = yaml.safe_dump(_authored_config_payload("recovered"), sort_keys=True)
+    save_response = api_key_client.put(
+        "/api/config/raw",
+        headers={
+            "Authorization": "Bearer test-key",
+            config_lifecycle.CONFIG_GENERATION_HEADER: raw_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER],
+        },
+        json={"source": valid_source},
+    )
+    assert save_response.status_code == 200
+
+    load_response = api_key_client.post(
+        "/api/config/load",
+        headers={"Authorization": "Bearer test-key"},
+    )
+    assert load_response.status_code == 200
+    assert load_response.json()["agents"]["recovered"]["display_name"] == "Recovered"
 
 
 def test_load_config_from_file_omits_legacy_null_optional_sections(tmp_path: Path) -> None:
@@ -2336,6 +3539,240 @@ def test_api_key_valid_key_allows_access(api_key_client: TestClient) -> None:
         headers={"Authorization": "Bearer test-key"},
     )
     assert response.status_code == 200
+
+
+def test_protected_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Path) -> None:
+    """Protected reads should stay on the auth-time snapshot even if the app swaps before the handler reads."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "old",
+                "rooms": ["old-room"],
+            },
+        },
+    }
+    payload_b = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "new",
+                "rooms": ["new-room"],
+            },
+        },
+    }
+    original_read = main.read_api_committed_config
+
+    def _swap_then_read(request: Request, reader: Callable[[dict[str, Any]], object]) -> object:
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return original_read(request, reader)
+
+    with (
+        patch.object(main, "read_api_committed_config", side_effect=_swap_then_read),
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.get(
+            "/api/rooms",
+            headers={"Authorization": "Bearer key-a"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == ["old-room"]
+
+
+def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:
+    """Protected writes should fail stale instead of mutating a newer runtime after auth succeeds."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = _authored_config_payload("old")
+    payload_b = _authored_config_payload("new")
+    runtime_b.config_path.write_text(yaml.safe_dump(payload_b), encoding="utf-8")
+    original_replace = main.replace_api_committed_config
+
+    def _swap_then_replace(
+        request: Request,
+        new_config: dict[str, Any],
+        *,
+        error_prefix: str,
+        expected_generation: int | None = None,
+    ) -> int:
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return original_replace(
+            request,
+            new_config,
+            error_prefix=error_prefix,
+            expected_generation=expected_generation,
+        )
+
+    with (
+        patch.object(main, "replace_api_committed_config", side_effect=_swap_then_replace),
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.put(
+            "/api/config/save",
+            headers={"Authorization": "Bearer key-a"},
+            json=_authored_config_payload("written"),
+        )
+
+    assert response.status_code == 409
+    assert Config.validate_with_runtime(yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8")), runtime_b)
+    assert yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8"))["agents"] == payload_b["agents"]
+
+
+def test_protected_raw_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Path) -> None:
+    """Protected raw reads should stay on the auth-time snapshot after a runtime swap."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = _authored_config_payload("old")
+    payload_b = _authored_config_payload("new")
+    source_a = yaml.safe_dump(payload_a, sort_keys=True)
+    source_b = yaml.safe_dump(payload_b, sort_keys=True)
+    runtime_a.config_path.write_text(source_a, encoding="utf-8")
+    runtime_b.config_path.write_text(source_b, encoding="utf-8")
+    original_read = main.read_api_raw_config_source
+
+    def _swap_then_read(request: Request) -> str:
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return original_read(request)
+
+    with (
+        patch.object(main, "read_api_raw_config_source", side_effect=_swap_then_read),
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.get(
+            "/api/config/raw",
+            headers={"Authorization": "Bearer key-a"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"source": source_a}
+
+
+def test_protected_raw_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:
+    """Protected raw writes should fail stale instead of writing to a newer runtime."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = _authored_config_payload("old")
+    payload_b = _authored_config_payload("new")
+    source_b = yaml.safe_dump(payload_b, sort_keys=True)
+    runtime_b.config_path.write_text(source_b, encoding="utf-8")
+    original_replace = main.replace_api_raw_config_source
+
+    def _swap_then_replace(
+        request: Request,
+        source: str,
+        *,
+        error_prefix: str,
+        expected_generation: int | None = None,
+    ) -> int:
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return original_replace(
+            request,
+            source,
+            error_prefix=error_prefix,
+            expected_generation=expected_generation,
+        )
+
+    with (
+        patch.object(main, "replace_api_raw_config_source", side_effect=_swap_then_replace),
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.put(
+            "/api/config/raw",
+            headers={"Authorization": "Bearer key-a"},
+            json={"source": yaml.safe_dump(_authored_config_payload("written"), sort_keys=True)},
+        )
+
+    assert response.status_code == 409
+    assert runtime_b.config_path.read_text(encoding="utf-8") == source_b
+
+
+def test_protected_crud_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:
+    """Legacy CRUD writes should fail stale instead of mutating a newer runtime after auth succeeds."""
+    runtime_a = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        storage_path=tmp_path / "first-store",
+        process_env={"MINDROOM_API_KEY": "key-a"},
+    )
+    runtime_b = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        storage_path=tmp_path / "second-store",
+        process_env={"MINDROOM_API_KEY": "key-b"},
+    )
+    payload_a = _authored_config_payload("old")
+    payload_b = _authored_config_payload("new")
+    runtime_b.config_path.write_text(yaml.safe_dump(payload_b), encoding="utf-8")
+    original_write = main.write_api_committed_config
+
+    def _swap_then_write(
+        request: Request,
+        mutate: Callable[[dict[str, Any]], object],
+        *,
+        error_prefix: str,
+    ) -> object:
+        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
+        return original_write(request, mutate, error_prefix=error_prefix)
+
+    with (
+        patch.object(main, "write_api_committed_config", side_effect=_swap_then_write),
+        TestClient(main.app) as client,
+    ):
+        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
+        response = client.put(
+            "/api/config/agents/assistant",
+            headers={"Authorization": "Bearer key-a"},
+            json={
+                "display_name": "Assistant",
+                "role": "updated",
+                "rooms": ["updated-room"],
+            },
+        )
+
+    assert response.status_code == 409
+    assert Config.validate_with_runtime(yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8")), runtime_b)
+    assert yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8"))["agents"] == payload_b["agents"]
 
 
 def test_api_key_missing_header_rejects(api_key_client: TestClient) -> None:

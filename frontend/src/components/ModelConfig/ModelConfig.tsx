@@ -26,6 +26,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { EditorPanel } from '@/components/shared/EditorPanel';
+import { showSaveFailureToastIfNeeded } from '@/components/shared';
 import { ArrowUpDown, Copy, Pencil, Plus, Save, Settings, Trash2, X } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
 import { Badge } from '@/components/ui/badge';
@@ -300,7 +301,7 @@ function renderTableValue<TContext>(
 }
 
 export function ModelConfig() {
-  const { config, updateModel, deleteModel, saveConfig } = useConfigStore();
+  const { config, updateModel, deleteModel, saveConfig, isLoading } = useConfigStore();
 
   const [providerKeys, setProviderKeys] = useState<Record<string, KeyStatus>>({});
   const [modelKeys, setModelKeys] = useState<Record<string, KeyStatus>>({});
@@ -747,6 +748,11 @@ export function ModelConfig() {
       deleteModel(modelName);
       toast({ title: 'Model Deleted', description: `Model ${modelName} has been removed` });
     }
+  };
+
+  const handleSaveAllChanges = async () => {
+    const result = await saveConfig();
+    showSaveFailureToastIfNeeded(result);
   };
 
   const rows = useMemo<ModelRowData[]>(() => {
@@ -1236,9 +1242,10 @@ export function ModelConfig() {
       icon={Settings}
       title="Model Configuration"
       isDirty={false}
-      onSave={() => saveConfig()}
+      onSave={handleSaveAllChanges}
       onDelete={() => {}}
       showActions={false}
+      disableSave={isLoading}
       className="h-full"
     >
       <div className="space-y-4">
@@ -1416,7 +1423,12 @@ export function ModelConfig() {
           </div>
         </div>
 
-        <Button onClick={() => saveConfig()} variant="default" className="w-full">
+        <Button
+          onClick={() => void handleSaveAllChanges()}
+          variant="default"
+          className="w-full"
+          disabled={isLoading}
+        >
           <Save className="mr-2 h-4 w-4" />
           Save All Changes
         </Button>

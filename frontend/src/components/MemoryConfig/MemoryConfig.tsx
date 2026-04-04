@@ -159,7 +159,7 @@ function defaultEmbedderConfig(provider: string): MemorySettings['embedder']['co
 }
 
 export function MemoryConfig() {
-  const { config, updateMemoryConfig, saveConfig, isDirty } = useConfigStore();
+  const { config, updateMemoryConfig, saveConfig, isDirty, isLoading } = useConfigStore();
   const [localConfig, setLocalConfig] = useState<MemorySettings>(() =>
     normalizeMemorySettings(config?.memory)
   );
@@ -284,7 +284,7 @@ export function MemoryConfig() {
   };
 
   const handleSave = async () => {
-    await saveConfig();
+    return saveConfig();
   };
 
   return (
@@ -295,6 +295,7 @@ export function MemoryConfig() {
       onSave={handleSave}
       onDelete={() => {}}
       showActions={true}
+      disableSave={isLoading}
       disableDelete={true}
       className="h-full"
     >

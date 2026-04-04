@@ -19,6 +19,8 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import (
     ConfigReloadedContext,
     HookRegistry,
+    build_hook_room_state_putter,
+    build_hook_room_state_querier,
     emit,
 )
 from mindroom.hooks.execution import reset_hook_execution_state
@@ -99,6 +101,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import FrameType
 
+    from mindroom.hooks import HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.hooks.sender import HookMessageSender
 
     from .constants import RuntimePaths
@@ -723,17 +726,21 @@ class MultiAgentOrchestrator:
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is None:
             return None
+        return router_bot._hook_send_message
 
-        async def _send(
-            room_id: str,
-            body: str,
-            thread_id: str | None,
-            source_hook: str,
-            extra_content: dict[str, object] | None,
-        ) -> str | None:
-            return await router_bot._hook_send_message(room_id, body, thread_id, source_hook, extra_content)
+    def _hook_room_state_querier(self) -> HookRoomStateQuerier | None:
+        """Return a router-backed room-state querier for hook contexts when available."""
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if router_bot is None or router_bot.client is None:
+            return None
+        return build_hook_room_state_querier(router_bot.client)
 
-        return _send
+    def _hook_room_state_putter(self) -> HookRoomStatePutter | None:
+        """Return a router-backed room-state putter for hook contexts when available."""
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if router_bot is None or router_bot.client is None:
+            return None
+        return build_hook_room_state_putter(router_bot.client)
 
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""
@@ -908,6 +915,8 @@ class MultiAgentOrchestrator:
             logger=logger.bind(event_name=EVENT_CONFIG_RELOADED),
             correlation_id=f"config-reload:{uuid4().hex}",
             message_sender=self._hook_message_sender(),
+            room_state_querier=self._hook_room_state_querier(),
+            room_state_putter=self._hook_room_state_putter(),
             changed_entities=tuple(sorted(changed_entities)),
             added_entities=tuple(sorted(added_entities)),
             removed_entities=tuple(sorted(removed_entities)),
