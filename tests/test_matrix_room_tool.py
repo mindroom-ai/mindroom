@@ -299,8 +299,8 @@ async def test_room_info_creator_fallback_when_create_content_malformed() -> Non
 
 
 @pytest.mark.asyncio
-async def test_room_info_transport_error_returns_structured_error() -> None:
-    """room-info should convert transport errors into tool payloads."""
+async def test_room_info_creator_fallback_when_create_lookup_has_transport_error() -> None:
+    """room-info should keep cached metadata when creator lookup has a transport error."""
     tool = MatrixRoomTools()
     ctx = _make_context()
     ctx.client.rooms = {"!room:localhost": _make_cached_room()}
@@ -309,9 +309,11 @@ async def test_room_info_transport_error_returns_structured_error() -> None:
     with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_room(action="room-info"))
 
-    assert payload["status"] == "error"
+    assert payload["status"] == "ok"
     assert payload["action"] == "room-info"
-    assert "Matrix request failed" in payload["message"]
+    assert payload["room_id"] == "!room:localhost"
+    assert payload["name"] == "Test Room"
+    assert payload["creator"] is None
 
 
 # --- members ---
@@ -400,6 +402,35 @@ def _thread_event(
     return cast("nio.RoomMessageText", nio.RoomMessageText.from_dict(src))
 
 
+def _make_bundled_replacement(
+    *,
+    event_id: str,
+    body: str,
+    bundle_key: str | None = None,
+) -> dict[str, object]:
+    replacement_event: dict[str, object] = {
+        "type": "m.room.message",
+        "event_id": f"{event_id}-edit",
+        "sender": "@editor:localhost",
+        "origin_server_ts": 9999,
+        "content": {
+            "body": f"* {body}",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": body,
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": event_id,
+            },
+        },
+    }
+    if bundle_key is None:
+        return replacement_event
+    return {bundle_key: replacement_event}
+
+
 @pytest.mark.asyncio
 async def test_threads_happy_path() -> None:
     """Threads should return thread roots via get_room_threads_page."""
@@ -427,8 +458,11 @@ async def test_threads_happy_path() -> None:
 
 
 @pytest.mark.asyncio
-async def test_threads_preview_prefers_bundled_replacement_body() -> None:
-    """Threads should mirror matrix_message by showing bundled edit previews."""
+@pytest.mark.parametrize("bundle_key", [None, "event", "latest_event"])
+async def test_threads_preview_prefers_bundled_replacement_body(
+    bundle_key: str | None,
+) -> None:
+    """Threads should mirror matrix_message across supported bundled edit shapes."""
     tool = MatrixRoomTools()
     ctx = _make_context()
 
@@ -436,13 +470,11 @@ async def test_threads_preview_prefers_bundled_replacement_body() -> None:
     event.source["unsigned"] = {
         "m.relations": {
             "m.thread": {"count": 3},
-            "m.replace": {
-                "event": {
-                    "content": {
-                        "m.new_content": {"body": "Edited body"},
-                    },
-                },
-            },
+            "m.replace": _make_bundled_replacement(
+                event_id="$thread1",
+                body="Edited body",
+                bundle_key=bundle_key,
+            ),
         },
     }
 

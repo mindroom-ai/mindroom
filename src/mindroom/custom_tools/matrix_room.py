@@ -163,13 +163,8 @@ class MatrixRoomTools(Toolkit):
         creator: str | None = None
         try:
             create_response = await context.client.room_get_state_event(room_id, "m.room.create")
-        except (ClientError, TimeoutError) as exc:
-            return self._payload(
-                "error",
-                action="room-info",
-                room_id=room_id,
-                message=self._transport_error_message(exc),
-            )
+        except (ClientError, TimeoutError):
+            create_response = None
         if isinstance(create_response, nio.RoomGetStateEventResponse):
             content = create_response.content
             creator = content.get("creator") if isinstance(content, dict) else None
