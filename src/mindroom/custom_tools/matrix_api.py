@@ -44,6 +44,7 @@ class MatrixApiTools(Toolkit):
             "m.room.server_acl",
             "m.room.join_rules",
             "m.room.history_visibility",
+            "m.room.guest_access",
             "m.room.member",
             "m.room.canonical_alias",
             "m.room.tombstone",
@@ -125,9 +126,7 @@ class MatrixApiTools(Toolkit):
         | nio.RoomRedactError
         | nio.RoomGetEventError,
     ) -> tuple[str, str | None]:
-        if response.status_code:
-            return f"{type(response).__name__}: {response.status_code} {response.message}", response.status_code
-        return f"{type(response).__name__}: {response.message}", None
+        return str(response), response.status_code
 
     @classmethod
     def _supported_actions_message(cls) -> str:
@@ -140,13 +139,29 @@ class MatrixApiTools(Toolkit):
     @staticmethod
     def _resolve_room_id(
         context: ToolRuntimeContext,
-        room_id: str | None,
-    ) -> str:
-        if isinstance(room_id, str):
-            normalized_room_id = room_id.strip()
-            if normalized_room_id:
-                return normalized_room_id
-        return context.room_id
+        room_id: object | None,
+    ) -> tuple[str | None, str | None]:
+        if room_id is None:
+            return context.room_id, None
+        if not isinstance(room_id, str):
+            return None, "room_id must be omitted or a non-empty Matrix room ID string."
+
+        normalized_room_id = room_id.strip()
+        if not normalized_room_id:
+            return None, "room_id must be omitted or a non-empty Matrix room ID string."
+        if not normalized_room_id.startswith("!") or ":" not in normalized_room_id:
+            return None, "room_id must be a Matrix room ID in !room:server form."
+        return normalized_room_id, None
+
+    @staticmethod
+    def _validate_bool(
+        value: object,
+        *,
+        field_name: str,
+    ) -> tuple[bool | None, str | None]:
+        if isinstance(value, bool):
+            return value, None
+        return None, f"{field_name} must be a boolean."
 
     @staticmethod
     def _validate_non_empty_string(
@@ -315,6 +330,40 @@ class MatrixApiTools(Toolkit):
             )
         return None, dangerous
 
+    @classmethod
+    def _send_event_policy_error(
+        cls,
+        *,
+        room_id: str,
+        event_type: str,
+    ) -> str | None:
+        if event_type == "m.room.redaction":
+            return cls._error_payload(
+                action="send_event",
+                room_id=room_id,
+                event_type=event_type,
+                message="Event type 'm.room.redaction' must use redact instead of send_event.",
+            )
+        if event_type in cls._HARD_BLOCKED_STATE_TYPES:
+            return cls._error_payload(
+                action="send_event",
+                room_id=room_id,
+                event_type=event_type,
+                message=f"Event type '{event_type}' is blocked by matrix_api.",
+            )
+        if event_type in cls._DANGEROUS_STATE_TYPES:
+            return cls._error_payload(
+                action="send_event",
+                room_id=room_id,
+                event_type=event_type,
+                dangerous=True,
+                message=(
+                    f"Event type '{event_type}' is dangerous room state and cannot be sent with send_event. "
+                    "Use put_state instead."
+                ),
+            )
+        return None
+
     async def _send_event(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
@@ -345,6 +394,9 @@ class MatrixApiTools(Toolkit):
 
         assert normalized_event_type is not None
         assert normalized_content is not None
+
+        if (policy_error := self._send_event_policy_error(room_id=room_id, event_type=normalized_event_type)) is not None:
+            return policy_error
 
         if dry_run:
             return self._payload(
@@ -866,7 +918,38 @@ class MatrixApiTools(Toolkit):
                 message=self._supported_actions_message(),
             )
 
-        resolved_room_id = self._resolve_room_id(context, room_id)
+        normalized_dry_run, dry_run_error = self._validate_bool(dry_run, field_name="dry_run")
+        if dry_run_error is not None:
+            return self._error_payload(
+                action=normalized_action,
+                message=dry_run_error,
+            )
+
+        normalized_allow_dangerous, allow_dangerous_error = self._validate_bool(
+            allow_dangerous,
+            field_name="allow_dangerous",
+        )
+        if allow_dangerous_error is not None:
+            return self._error_payload(
+                action=normalized_action,
+                message=allow_dangerous_error,
+            )
+
+        resolved_room_id, room_id_error = self._resolve_room_id(context, room_id)
+        if room_id_error is not None:
+            room_id_payload: dict[str, object] = {}
+            if isinstance(room_id, str):
+                room_id_payload["room_id"] = room_id.strip()
+            return self._error_payload(
+                action=normalized_action,
+                message=room_id_error,
+                **room_id_payload,
+            )
+
+        assert normalized_dry_run is not None
+        assert normalized_allow_dangerous is not None
+        assert resolved_room_id is not None
+
         if not room_access_allowed(context, resolved_room_id):
             return self._error_payload(
                 action=normalized_action,
@@ -880,7 +963,7 @@ class MatrixApiTools(Toolkit):
                 room_id=resolved_room_id,
                 event_type=event_type,
                 content=content,
-                dry_run=dry_run,
+                dry_run=normalized_dry_run,
             )
         if normalized_action == "get_state":
             return await self._get_state(
@@ -896,8 +979,8 @@ class MatrixApiTools(Toolkit):
                 event_type=event_type,
                 state_key=state_key,
                 content=content,
-                dry_run=dry_run,
-                allow_dangerous=allow_dangerous,
+                dry_run=normalized_dry_run,
+                allow_dangerous=normalized_allow_dangerous,
             )
         if normalized_action == "redact":
             return await self._redact(
@@ -905,7 +988,7 @@ class MatrixApiTools(Toolkit):
                 room_id=resolved_room_id,
                 event_id=event_id,
                 reason=reason,
-                dry_run=dry_run,
+                dry_run=normalized_dry_run,
             )
         return await self._get_event(
             context,

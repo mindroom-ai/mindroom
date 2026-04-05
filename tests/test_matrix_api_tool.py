@@ -395,7 +395,8 @@ async def test_matrix_api_put_state_blocks_room_create() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_put_state_requires_allow_dangerous() -> None:
+@pytest.mark.parametrize("event_type", ["m.room.power_levels", "m.room.guest_access"])
+async def test_matrix_api_put_state_requires_allow_dangerous(event_type: str) -> None:
     """Dangerous state writes should require explicit opt-in."""
     tool = MatrixApiTools()
     ctx = _make_context()
@@ -404,12 +405,13 @@ async def test_matrix_api_put_state_requires_allow_dangerous() -> None:
         payload = json.loads(
             await tool.matrix_api(
                 action="put_state",
-                event_type="m.room.power_levels",
+                event_type=event_type,
                 content={"users": {"@user:localhost": 100}},
             ),
         )
 
     assert payload["status"] == "error"
+    assert payload["event_type"] == event_type
     assert payload["dangerous"] is True
     assert "allow_dangerous" in payload["message"]
     ctx.client.room_put_state.assert_not_awaited()
@@ -547,6 +549,50 @@ async def test_matrix_api_get_event_maps_not_found_to_found_false() -> None:
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_send_event_blocks_redaction_type() -> None:
+    """send_event should reject redaction events so they use the dedicated redact path."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.redaction",
+                content={"redacts": "$target:localhost"},
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "send_event"
+    assert payload["event_type"] == "m.room.redaction"
+    assert "redact" in payload["message"]
+    ctx.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_send_event_blocks_dangerous_state_types() -> None:
+    """send_event should reject dangerous state event types instead of bypassing put_state guards."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.encryption",
+                content={"algorithm": "m.megolm.v1.aes-sha2"},
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "send_event"
+    assert payload["dangerous"] is True
+    assert "put_state" in payload["message"]
+    ctx.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_rate_limit_uses_weighted_budget() -> None:
     """Real writes should consume the shared 8-unit budget with action weights."""
     tool = MatrixApiTools()
@@ -609,6 +655,77 @@ async def test_matrix_api_rate_limit_uses_weighted_budget() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("room_id", "expected_message"),
+    [
+        (123, "non-empty Matrix room ID string"),
+        (False, "non-empty Matrix room ID string"),
+        ("   ", "non-empty Matrix room ID string"),
+        ("#lobby:localhost", "!room:server form"),
+        ("lobby", "!room:server form"),
+    ],
+)
+async def test_matrix_api_rejects_invalid_room_id(room_id: object, expected_message: str) -> None:
+    """Explicit room_id values must be canonical Matrix room IDs."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                room_id=room_id,
+                event_type="com.example.event",
+                content={"body": "x"},
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "send_event"
+    assert expected_message in payload["message"]
+    ctx.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "field_name"),
+    [
+        (
+            {
+                "action": "send_event",
+                "event_type": "com.example.event",
+                "content": {"body": "preview"},
+                "dry_run": "false",
+            },
+            "dry_run",
+        ),
+        (
+            {
+                "action": "put_state",
+                "event_type": "m.room.power_levels",
+                "content": {"users": {"@user:localhost": 100}},
+                "allow_dangerous": "false",
+            },
+            "allow_dangerous",
+        ),
+    ],
+)
+async def test_matrix_api_rejects_non_bool_flags(kwargs: dict[str, object], field_name: str) -> None:
+    """Boolean flags must reject stringified truthy values instead of using Python truthiness."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_api(**kwargs))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == kwargs["action"]
+    assert field_name in payload["message"]
+    ctx.client.room_send.assert_not_awaited()
+    ctx.client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("action", "kwargs"),
     [
         ("send_event", {"event_type": "com.example.event", "content": {"body": "x"}}),
@@ -634,6 +751,101 @@ async def test_matrix_api_cross_room_access_is_denied(action: str, kwargs: dict[
     ctx.client.room_put_state.assert_not_awaited()
     ctx.client.room_redact.assert_not_awaited()
     ctx.client.room_get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "kwargs", "client_attr", "response"),
+    [
+        (
+            "send_event",
+            {"event_type": "com.example.event", "content": {"body": "x"}},
+            "room_send",
+            nio.RoomSendResponse(event_id="$send:localhost", room_id="!other:localhost"),
+        ),
+        (
+            "get_state",
+            {"event_type": "com.example.state"},
+            "room_get_state_event",
+            _state_response(
+                content={"enabled": True},
+                event_type="com.example.state",
+                room_id="!other:localhost",
+            ),
+        ),
+        (
+            "put_state",
+            {"event_type": "com.example.state", "content": {"enabled": True}},
+            "room_put_state",
+            nio.RoomPutStateResponse.from_dict(
+                {"event_id": "$state:localhost"},
+                room_id="!other:localhost",
+            ),
+        ),
+        (
+            "redact",
+            {"event_id": "$evt:localhost"},
+            "room_redact",
+            nio.RoomRedactResponse(event_id="$redaction:localhost", room_id="!other:localhost"),
+        ),
+        (
+            "get_event",
+            {"event_id": "$evt:localhost"},
+            "room_get_event",
+            _event_response(room_id="!other:localhost"),
+        ),
+    ],
+)
+async def test_matrix_api_cross_room_access_allowed_uses_target_room_id(
+    action: str,
+    kwargs: dict[str, object],
+    client_attr: str,
+    response: object,
+) -> None:
+    """Authorized cross-room actions should dispatch using the requested room id."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    getattr(ctx.client, client_attr).return_value = response
+
+    with (
+        patch("mindroom.custom_tools.matrix_api.room_access_allowed", return_value=True),
+        patch("mindroom.custom_tools.matrix_api.logger.warning"),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_api(action=action, room_id="!other:localhost", **kwargs))
+
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == "!other:localhost"
+    if action == "send_event":
+        ctx.client.room_send.assert_awaited_once_with(
+            room_id="!other:localhost",
+            message_type="com.example.event",
+            content={"body": "x"},
+        )
+    elif action == "get_state":
+        ctx.client.room_get_state_event.assert_awaited_once_with(
+            room_id="!other:localhost",
+            event_type="com.example.state",
+            state_key="",
+        )
+    elif action == "put_state":
+        ctx.client.room_put_state.assert_awaited_once_with(
+            room_id="!other:localhost",
+            event_type="com.example.state",
+            state_key="",
+            content={"enabled": True},
+        )
+    elif action == "redact":
+        ctx.client.room_redact.assert_awaited_once_with(
+            room_id="!other:localhost",
+            event_id="$evt:localhost",
+            reason=None,
+        )
+    else:
+        ctx.client.room_get_event.assert_awaited_once_with(
+            room_id="!other:localhost",
+            event_id="$evt:localhost",
+        )
 
 
 @pytest.mark.asyncio
@@ -728,6 +940,35 @@ async def test_matrix_api_rejects_non_string_state_key(action: str) -> None:
     assert payload["status"] == "error"
     assert payload["action"] == action
     assert "state_key" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_preserves_retry_after_ms_in_error_output() -> None:
+    """Normalized Matrix errors should keep retry-after details for rate-limited calls."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client.room_send.return_value = nio.RoomSendError(
+        "rate limited",
+        status_code="M_LIMIT_EXCEEDED",
+        retry_after_ms=5000,
+        room_id=ctx.room_id,
+    )
+
+    with (
+        patch("mindroom.custom_tools.matrix_api.logger.warning"),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="com.example.event",
+                content={"body": "hello"},
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["status_code"] == "M_LIMIT_EXCEEDED"
+    assert payload["response"] == "RoomSendError: M_LIMIT_EXCEEDED rate limited - retry after 5000ms"
 
 
 @pytest.mark.asyncio

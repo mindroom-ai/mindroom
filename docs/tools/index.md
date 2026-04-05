@@ -122,7 +122,7 @@ This is why the `openclaw_compat` preset includes `attachments` in its effective
 
 When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable.
 This context carries the current `room_id`, `thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
-Tools like `matrix_message`, `thread_tags`, `matrix_api`, `thread_resolution`, and `thread_summary` use this context to act on the correct room and thread without the caller passing explicit IDs.
+Tools like `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` use this context to act on the correct room and thread without the caller passing explicit IDs.
 `thread_tags` can also target another authorized room, but it still checks the target room's canonical thread root and requester membership before writing the shared tag state.
 `thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`.
 `thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread.
@@ -130,7 +130,6 @@ Tools like `matrix_message`, `thread_tags`, `matrix_api`, `thread_resolution`, a
 `thread_tags` also validates and normalizes predefined payload schemas for `blocked.data.blocked_by`, `waiting.data.waiting_on`, `priority.data.level`, and `due.data.deadline`.
 `thread_tags` intentionally replaces the removed experimental `thread_resolution` tool and does not auto-read old `com.mindroom.thread.resolution` markers.
 `matrix_api` defaults `room_id` to the active room, supports authorized cross-room targeting, and never infers event IDs or state keys from thread context.
-`thread_summary` uses the same context to let an agent call `set_thread_summary` from a thread or a room-level reply without restating the thread root explicitly.
 
 Attachment IDs from the current conversation are also available in the runtime context.
 Tools that accept `attachment_ids` (such as `matrix_message`) resolve those IDs against the context-scoped attachment registry, preventing one conversation from accessing files uploaded in another.

@@ -93,10 +93,9 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | Icon | Tool | Description | Config Required |
 |------|------|-------------|-----------------|
 | :lucide-message-square: | `matrix_message` | Native Matrix messaging actions (`send`, `reply`, `thread-reply`, `react`, `read`, `room-threads`, `thread-list`, `edit`, `context`) | - |
+| :lucide-message-square: | `matrix_room` | Inspect room metadata, members, threads, and state (`room-info`, `members`, `threads`, `state`) | - |
 | :lucide-tags: | `thread_tags` | Tag, untag, and inspect Matrix threads using shared room-state markers (`tag_thread`, `untag_thread`, `list_thread_tags`) | - |
 | :lucide-message-square: | `matrix_api` | Low-level Matrix event and state operations (`send_event`, `get_state`, `put_state`, `redact`, `get_event`) | - |
-| :lucide-check-check: | `thread_resolution` | Resolve or reopen Matrix threads using shared room-state markers (`resolve_thread`, `unresolve_thread`) | - |
-| :lucide-message-square: | `thread_summary` | Set or update Matrix thread summaries with `set_thread_summary`, defaulting to the current room and thread context | - |
 | :lucide-message-square: | `gmail` | Read, search, and manage Gmail emails | Google OAuth |
 | :lucide-message-square: | `slack` | Send messages and manage channels | `token` |
 | :lucide-message-square: | `discord` | Interact with Discord channels and servers | `bot_token` |
