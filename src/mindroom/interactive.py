@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import re
+import tempfile
 import threading
 import time
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
 import nio
@@ -18,8 +21,6 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import is_agent_id
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -56,7 +57,12 @@ class _InteractiveResponse(NamedTuple):
 # Track active interactive questions by event_id
 _active_questions: dict[str, _InteractiveQuestion] = {}
 _persistence_file: Path | None = None
+_persistence_lock_file: Path | None = None
+# _thread_lock protects the in-process dictionaries.
+# The flock on _persistence_lock_file serializes JSON persistence across processes.
 _thread_lock = threading.RLock()
+_dirty_question_ids: set[str] = set()
+_deleted_question_ids: set[str] = set()
 
 # Constants
 # Match interactive code blocks
@@ -67,9 +73,9 @@ _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
 _INTERACTIVE_TTL_SECONDS = 24 * 60 * 60
 
 
-def _serialize_active_questions() -> dict[str, dict[str, object]]:
+def _serialize_active_questions(questions: dict[str, _InteractiveQuestion]) -> dict[str, dict[str, object]]:
     """Return the JSON-serializable persistence payload."""
-    return {event_id: asdict(question) for event_id, question in _active_questions.items()}
+    return {event_id: asdict(question) for event_id, question in questions.items()}
 
 
 def _load_active_questions(payload: object) -> dict[str, _InteractiveQuestion]:
@@ -119,27 +125,106 @@ def _question_has_expired(question: _InteractiveQuestion) -> bool:
     return time.time() - question.created_at >= _INTERACTIVE_TTL_SECONDS
 
 
+def _load_persisted_questions() -> dict[str, _InteractiveQuestion]:
+    """Read the persisted questions file."""
+    if _persistence_file is None or not _persistence_file.exists():
+        return {}
+    raw_payload = _persistence_file.read_text().strip()
+    return _prune_expired_questions(_load_active_questions(json.loads(raw_payload) if raw_payload else {}))
+
+
+def _write_active_questions_atomically_locked(questions: dict[str, _InteractiveQuestion]) -> None:
+    """Atomically replace the persisted questions file.
+
+    This method must be called while holding the cross-process persistence lock.
+    """
+    if _persistence_file is None:
+        return
+
+    _persistence_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_fd, temp_path = tempfile.mkstemp(
+        dir=str(_persistence_file.parent),
+        prefix=f".{_persistence_file.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as temp_file:
+            json.dump(_serialize_active_questions(questions), temp_file, indent=2)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        Path(temp_path).replace(_persistence_file)
+        directory_fd = os.open(_persistence_file.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        with suppress(FileNotFoundError):
+            Path(temp_path).unlink()
+        raise
+
+
+def _replace_active_questions_locked(questions: dict[str, _InteractiveQuestion]) -> None:
+    """Replace in-memory state after a successful load or save."""
+    global _active_questions
+    _active_questions = questions
+    _dirty_question_ids.clear()
+    _deleted_question_ids.clear()
+
+
+def _store_active_question_locked(event_id: str, question: _InteractiveQuestion) -> None:
+    """Record a new or updated active question."""
+    _active_questions[event_id] = question
+    _dirty_question_ids.add(event_id)
+    _deleted_question_ids.discard(event_id)
+
+
+def _remove_active_question_locked(event_id: str) -> bool:
+    """Remove a tracked question and record the deletion for persistence."""
+    if event_id not in _active_questions:
+        return False
+    del _active_questions[event_id]
+    _dirty_question_ids.discard(event_id)
+    _deleted_question_ids.add(event_id)
+    return True
+
+
 def _save_active_questions_locked() -> None:
     """Persist active questions when persistence is enabled.
 
     This method must be called while holding ``_thread_lock``.
     """
-    global _active_questions
-    if _persistence_file is None:
+    if _persistence_file is None or _persistence_lock_file is None:
         return
 
     try:
         _persistence_file.parent.mkdir(parents=True, exist_ok=True)
-        _active_questions = _prune_expired_questions(_active_questions)
-        with _persistence_file.open("a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        with _persistence_lock_file.open("a+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
-                f.seek(0)
-                f.truncate()
-                json.dump(_serialize_active_questions(), f, indent=2)
-                f.flush()
+                try:
+                    merged_questions = _load_persisted_questions()
+                except Exception as exc:
+                    merged_questions = {}
+                    logger.warning(
+                        "Failed to read persisted interactive questions before save; rebuilding file from local changes",
+                        path=str(_persistence_file),
+                        error=str(exc),
+                    )
+                for event_id in _deleted_question_ids:
+                    merged_questions.pop(event_id, None)
+                for event_id in _dirty_question_ids:
+                    question = _active_questions.get(event_id)
+                    if question is None or _question_has_expired(question):
+                        merged_questions.pop(event_id, None)
+                    else:
+                        merged_questions[event_id] = question
+                merged_questions = _prune_expired_questions(merged_questions)
+                _write_active_questions_atomically_locked(merged_questions)
+                _replace_active_questions_locked(merged_questions)
             finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except Exception as exc:
         logger.warning(
             "Failed to persist interactive questions; continuing in-memory",
@@ -150,28 +235,36 @@ def _save_active_questions_locked() -> None:
 
 def init_persistence(storage_root: Path) -> None:
     """Initialize interactive question persistence from disk."""
-    global _active_questions, _persistence_file
+    global _active_questions, _persistence_file, _persistence_lock_file
     persistence_file = storage_root / "tracking" / "interactive_questions.json"
+    persistence_lock_file = storage_root / "tracking" / "interactive_questions.lock"
 
     with _thread_lock:
         _persistence_file = persistence_file
+        _persistence_lock_file = persistence_lock_file
         try:
             persistence_file.parent.mkdir(parents=True, exist_ok=True)
-            with persistence_file.open("a+") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            with persistence_lock_file.open("a+") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
                 try:
-                    f.seek(0)
-                    raw_payload = f.read().strip()
-                    loaded_questions = _load_active_questions(json.loads(raw_payload) if raw_payload else {})
-                    _active_questions = _prune_expired_questions(loaded_questions)
-                    f.seek(0)
-                    f.truncate()
-                    json.dump(_serialize_active_questions(), f, indent=2)
-                    f.flush()
+                    loaded_questions = _load_persisted_questions()
+                    _write_active_questions_atomically_locked(loaded_questions)
+                    _replace_active_questions_locked(loaded_questions)
                 finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         except Exception as exc:
             _active_questions = {}
+            _dirty_question_ids.clear()
+            _deleted_question_ids.clear()
+            if isinstance(exc, (json.JSONDecodeError, TypeError, ValueError)):
+                try:
+                    persistence_file.unlink(missing_ok=True)
+                except OSError:
+                    _persistence_file = None
+                    _persistence_lock_file = None
+            else:
+                _persistence_file = None
+                _persistence_lock_file = None
             logger.warning(
                 "Failed to initialize interactive question persistence; continuing in-memory",
                 path=str(persistence_file),
@@ -225,8 +318,8 @@ async def handle_reaction(
             return None
 
         if _question_has_expired(question):
-            del _active_questions[event.reacts_to]
-            _save_active_questions_locked()
+            if _remove_active_question_locked(event.reacts_to):
+                _save_active_questions_locked()
             return None
 
         # Only the agent who created the question should respond to reactions
@@ -258,9 +351,8 @@ async def handle_reaction(
         )
 
         # The emoji reaction itself is the user's response, so just consume the question.
-        with suppress(KeyError):
-            del _active_questions[event.reacts_to]
-        _save_active_questions_locked()
+        if _remove_active_question_locked(event.reacts_to):
+            _save_active_questions_locked()
 
         return (selected_value, question.thread_id)
 
@@ -294,37 +386,50 @@ async def handle_text_response(
 
     # Find matching active questions in this room/thread
     with _thread_lock:
-        for question_event_id, question in list(_active_questions.items()):
-            if question.room_id != room.room_id:
-                continue
-            if question.thread_id != thread_id:
-                continue
-            if _question_has_expired(question):
-                del _active_questions[question_event_id]
+        return _handle_text_response_locked(
+            room_id=room.room_id,
+            thread_id=thread_id,
+            message_text=message_text,
+            sender=event.sender,
+            client_user_id=client.user_id,
+            agent_name=agent_name,
+        )
+
+    return None
+
+
+def _handle_text_response_locked(
+    *,
+    room_id: str,
+    thread_id: str | None,
+    message_text: str,
+    sender: str,
+    client_user_id: str | None,
+    agent_name: str,
+) -> tuple[str, str | None] | None:
+    """Handle a numeric reply while holding ``_thread_lock``."""
+    for question_event_id, question in list(_active_questions.items()):
+        if question.room_id != room_id or question.thread_id != thread_id:
+            continue
+        if _question_has_expired(question):
+            if _remove_active_question_locked(question_event_id):
                 _save_active_questions_locked()
-                continue
-            if message_text not in question.options:
-                continue
-            if event.sender == client.user_id:
-                continue
-            # Only respond if this agent created the question
-            if agent_name != question.creator_agent:
-                continue
+            continue
+        if message_text not in question.options or sender == client_user_id:
+            continue
+        if agent_name != question.creator_agent:
+            continue
 
-            selected_value = question.options[message_text]
-
-            logger.info(
-                "Received answer via text",
-                user=event.sender,
-                text=message_text,
-                value=selected_value,
-            )
-
-            del _active_questions[question_event_id]
+        selected_value = question.options[message_text]
+        logger.info(
+            "Received answer via text",
+            user=sender,
+            text=message_text,
+            value=selected_value,
+        )
+        if _remove_active_question_locked(question_event_id):
             _save_active_questions_locked()
-
-            return (selected_value, question.thread_id)
-
+        return (selected_value, question.thread_id)
     return None
 
 
@@ -406,11 +511,14 @@ def register_interactive_question(
 
     """
     with _thread_lock:
-        _active_questions[event_id] = _InteractiveQuestion(
-            room_id=room_id,
-            thread_id=thread_id,
-            options=option_map,
-            creator_agent=agent_name,
+        _store_active_question_locked(
+            event_id,
+            _InteractiveQuestion(
+                room_id=room_id,
+                thread_id=thread_id,
+                options=option_map,
+                creator_agent=agent_name,
+            ),
         )
         _save_active_questions_locked()
     logger.info("Registered interactive question", event_id=event_id, options=len(option_map))
@@ -418,8 +526,9 @@ def register_interactive_question(
 
 def clear_interactive_question(event_id: str) -> None:
     """Remove one tracked interactive question when its message is edited away."""
-    with suppress(KeyError):
-        del _active_questions[event_id]
+    with _thread_lock:
+        if _remove_active_question_locked(event_id):
+            _save_active_questions_locked()
 
 
 async def add_reaction_buttons(
@@ -456,7 +565,10 @@ async def add_reaction_buttons(
 
 def _cleanup() -> None:
     """Clean up when shutting down."""
-    global _persistence_file
+    global _persistence_file, _persistence_lock_file
     with _thread_lock:
         _active_questions.clear()
+        _dirty_question_ids.clear()
+        _deleted_question_ids.clear()
         _persistence_file = None
+        _persistence_lock_file = None

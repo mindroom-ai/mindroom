@@ -6,7 +6,7 @@ import json
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -32,7 +32,10 @@ class TestInteractiveFunctions:
     def setup_method(self) -> None:
         """Set up test config."""
         interactive._active_questions.clear()
+        interactive._dirty_question_ids.clear()
+        interactive._deleted_question_ids.clear()
         interactive._persistence_file = None
+        interactive._persistence_lock_file = None
         runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
         self.config = bind_runtime_paths(
             Config(
@@ -49,7 +52,10 @@ class TestInteractiveFunctions:
     def teardown_method(self) -> None:
         """Reset interactive module state between tests."""
         interactive._active_questions.clear()
+        interactive._dirty_question_ids.clear()
+        interactive._deleted_question_ids.clear()
         interactive._persistence_file = None
+        interactive._persistence_lock_file = None
 
     def test_should_create_interactive_question(self) -> None:
         """Test detection of interactive code blocks."""
@@ -696,6 +702,28 @@ Just let me know your preference!"""
         assert interactive._active_questions == {}
         assert json.loads(persistence_file.read_text()) == {}
 
+    def test_clear_interactive_question_persists_removal_across_reload(self, tmp_path: Path) -> None:
+        """Clearing a question should remove it from disk so reloads do not resurrect it."""
+        interactive.init_persistence(tmp_path)
+        persistence_file = tmp_path / "tracking" / "interactive_questions.json"
+
+        interactive.register_interactive_question(
+            "$question123",
+            "!room:localhost",
+            "$thread123",
+            {"1": "yes", "✅": "yes"},
+            "test_agent",
+        )
+
+        interactive.clear_interactive_question("$question123")
+
+        assert json.loads(persistence_file.read_text()) == {}
+
+        interactive._cleanup()
+        interactive.init_persistence(tmp_path)
+
+        assert interactive._active_questions == {}
+
     def test_init_persistence_prunes_expired_questions(self, tmp_path: Path) -> None:
         """Expired persisted questions should be dropped during startup."""
         persistence_file = tmp_path / "tracking" / "interactive_questions.json"
@@ -720,7 +748,7 @@ Just let me know your preference!"""
         assert json.loads(persistence_file.read_text()) == {}
 
     def test_init_persistence_starts_fresh_on_corrupt_json(self, tmp_path: Path) -> None:
-        """Corrupt persistence should fall back to an empty in-memory store."""
+        """Corrupt persistence should be cleared so future saves can recover."""
         persistence_file = tmp_path / "tracking" / "interactive_questions.json"
         persistence_file.parent.mkdir(parents=True, exist_ok=True)
         persistence_file.write_text("{not valid json")
@@ -728,3 +756,90 @@ Just let me know your preference!"""
         interactive.init_persistence(tmp_path)
 
         assert interactive._active_questions == {}
+        assert not persistence_file.exists()
+
+        interactive.register_interactive_question(
+            "$question123",
+            "!room:localhost",
+            "$thread123",
+            {"1": "yes"},
+            "test_agent",
+        )
+
+        persisted = json.loads(persistence_file.read_text())
+        assert persisted["$question123"]["creator_agent"] == "test_agent"
+
+    def test_save_keeps_existing_file_when_atomic_write_is_interrupted(self, tmp_path: Path) -> None:
+        """A failed temp-file write should leave the last committed JSON untouched."""
+        interactive.init_persistence(tmp_path)
+        persistence_file = tmp_path / "tracking" / "interactive_questions.json"
+        interactive.register_interactive_question(
+            "$question123",
+            "!room:localhost",
+            "$thread123",
+            {"1": "yes"},
+            "test_agent",
+        )
+        original_contents = persistence_file.read_text()
+
+        class _InterruptedWriteError(RuntimeError):
+            """Sentinel write failure used to simulate an interrupted persistence attempt."""
+
+        def _partial_dump(*args: object, **kwargs: object) -> None:  # noqa: ARG001
+            file_obj = args[1]
+            assert hasattr(file_obj, "write")
+            file_obj.write("{")
+            file_obj.flush()
+            raise _InterruptedWriteError
+
+        with patch("mindroom.interactive.json.dump", side_effect=_partial_dump):
+            interactive.register_interactive_question(
+                "$question456",
+                "!room:localhost",
+                "$thread123",
+                {"2": "no"},
+                "test_agent",
+            )
+
+        assert persistence_file.read_text() == original_contents
+
+        interactive._cleanup()
+        interactive.init_persistence(tmp_path)
+
+        assert set(interactive._active_questions) == {"$question123"}
+
+    def test_save_merges_with_existing_file_when_local_snapshot_is_stale(self, tmp_path: Path) -> None:
+        """Saving a new local question should preserve questions already persisted by another process."""
+        persistence_file = tmp_path / "tracking" / "interactive_questions.json"
+        persistence_file.parent.mkdir(parents=True, exist_ok=True)
+        persistence_file.write_text(
+            json.dumps(
+                {
+                    "$question123": {
+                        "room_id": "!room:localhost",
+                        "thread_id": "$thread123",
+                        "options": {"1": "yes"},
+                        "creator_agent": "test_agent",
+                        "created_at": time.time(),
+                    },
+                },
+            ),
+        )
+
+        interactive._persistence_file = persistence_file
+        interactive._persistence_lock_file = tmp_path / "tracking" / "interactive_questions.lock"
+        interactive._active_questions = {
+            "$question456": interactive._InteractiveQuestion(
+                room_id="!room:localhost",
+                thread_id="$thread123",
+                options={"2": "no"},
+                creator_agent="test_agent",
+            ),
+        }
+        interactive._dirty_question_ids.add("$question456")
+
+        with interactive._thread_lock:
+            interactive._save_active_questions_locked()
+
+        persisted = json.loads(persistence_file.read_text())
+        assert set(persisted) == {"$question123", "$question456"}
