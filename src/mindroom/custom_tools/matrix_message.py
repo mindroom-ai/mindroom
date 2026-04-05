@@ -6,7 +6,7 @@ import json
 import time
 from collections import defaultdict, deque
 from threading import Lock
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import nio
 from agno.tools import Toolkit
@@ -25,6 +25,7 @@ from mindroom.interactive import (
     register_interactive_question,
     should_create_interactive_question,
 )
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,
@@ -36,7 +37,6 @@ from mindroom.matrix.client import (
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
-from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -494,39 +494,45 @@ class MatrixMessageTools(Toolkit):
         return count if isinstance(count, int) and not isinstance(count, bool) else 0
 
     @staticmethod
-    def _bundled_replacement_body(event_source: dict[str, object]) -> str | None:
+    def _bundled_replacement_body(event_source: dict[str, object]) -> str | None:  # noqa: C901
         for container in (
             event_source.get("unsigned"),
             event_source,
         ):
             if not isinstance(container, dict):
                 continue
-            relations = container.get("m.relations", {})
+            container_dict = cast("dict[str, object]", container)
+            relations = container_dict.get("m.relations")
             if not isinstance(relations, dict):
                 continue
-            replacement = relations.get("m.replace", {})
+            relations_dict = cast("dict[str, object]", relations)
+            replacement = relations_dict.get("m.replace")
             if not isinstance(replacement, dict):
                 continue
+            replacement_dict = cast("dict[str, object]", replacement)
             for candidate in (
-                replacement,
-                replacement.get("event"),
-                replacement.get("latest_event"),
+                replacement_dict,
+                replacement_dict.get("event"),
+                replacement_dict.get("latest_event"),
             ):
                 if not isinstance(candidate, dict):
                     continue
-                content = candidate.get("content", {})
+                candidate_dict = cast("dict[str, object]", candidate)
+                content = candidate_dict.get("content")
                 if not isinstance(content, dict):
                     continue
                 # This bundled replacement is attached by the homeserver for this root event,
                 # so revalidating m.relates_to.event_id here is redundant defensive code.
-                new_content = content.get("m.new_content", {})
+                content_dict = cast("dict[str, object]", content)
+                new_content = content_dict.get("m.new_content")
                 if isinstance(new_content, dict):
-                    body = new_content.get("body")
+                    new_content_dict = cast("dict[str, object]", new_content)
+                    body = new_content_dict.get("body")
                     if isinstance(body, str):
                         # Previews intentionally use the inline bundled body only. Hydrating
                         # io.mindroom.long_text sidecars here would add async I/O to a sync preview path.
                         return body
-                body = content.get("body")
+                body = content_dict.get("body")
                 if isinstance(body, str):
                     return body
         return None

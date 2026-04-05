@@ -902,10 +902,13 @@ def _execute_validation_plugin_module(
     registrations_by_module: dict[str, dict[str, ToolMetadata]],
 ) -> str:
     """Execute one plugin module into a temporary validation import context."""
-    runtime_module_name = plugin_module._module_name(plugin_name, module_path)
+    runtime_module_name = plugin_module._module_name(plugin_name, plugin_root, module_path)
     validation_module_name = f"{runtime_module_name}{_VALIDATION_PLUGIN_MODULE_SUFFIX}{id(registrations_by_module)}"
+    previous_packages = plugin_module._snapshot_plugin_package_chain(plugin_name, plugin_root, module_path)
+    plugin_module._install_plugin_package_chain(plugin_name, plugin_root, module_path)
     spec = importlib_util.spec_from_file_location(validation_module_name, module_path)
     if spec is None or spec.loader is None:
+        plugin_module._restore_plugin_package_chain(previous_packages)
         msg = f"Failed to load plugin validation module: {module_path}"
         raise ToolMetadataValidationError(msg)
 
@@ -935,6 +938,7 @@ def _execute_validation_plugin_module(
                 sys.modules.pop(loaded_module_name, None)
         for loaded_module_name, loaded_module in previous_modules_within_root.items():
             sys.modules[loaded_module_name] = loaded_module
+        plugin_module._restore_plugin_package_chain(previous_packages)
         if previous_module is None:
             sys.modules.pop(validation_module_name, None)
         else:
