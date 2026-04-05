@@ -3089,6 +3089,7 @@ class TestAgentBot:
             thread_id="$thread",
             config=config,
             runtime_paths=bot.runtime_paths,
+            message_count_hint=0,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
@@ -3171,6 +3172,7 @@ class TestAgentBot:
             thread_id="$thread",
             config=config,
             runtime_paths=bot.runtime_paths,
+            message_count_hint=0,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 

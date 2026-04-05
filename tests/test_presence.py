@@ -324,7 +324,11 @@ class TestShouldUseStreaming:
             )
 
         assert result is True
-        mock_is_online.assert_called_once_with(mock_client, "@user:example.com")
+        mock_is_online.assert_called_once_with(
+            mock_client,
+            "@user:example.com",
+            room_id="!room:example.com",
+        )
 
     @pytest.mark.asyncio
     async def test_streaming_user_offline(self) -> None:
@@ -340,4 +344,8 @@ class TestShouldUseStreaming:
             )
 
         assert result is False
-        mock_is_online.assert_called_once_with(mock_client, "@user:example.com")
+        mock_is_online.assert_called_once_with(
+            mock_client,
+            "@user:example.com",
+            room_id="!room:example.com",
+        )

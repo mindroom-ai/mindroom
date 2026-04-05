@@ -39,6 +39,50 @@ class TestPresenceDetection:
         mock_client.get_presence.assert_called_once_with("@user:example.com")
 
     @pytest.mark.asyncio
+    async def test_is_user_online_prefers_cached_room_user_presence(self) -> None:
+        """Cached room membership presence should avoid an extra `/presence` lookup."""
+        mock_client = AsyncMock(spec=nio.AsyncClient)
+        mock_client.rooms = {
+            "!room:example.com": Mock(
+                users={
+                    "@user:example.com": Mock(
+                        presence="online",
+                        last_active_ago=1000,
+                    ),
+                },
+            ),
+        }
+
+        result = await is_user_online(mock_client, "@user:example.com", room_id="!room:example.com")
+
+        assert result is True
+        mock_client.get_presence.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_is_user_online_falls_back_when_cached_room_user_presence_is_offline_default(self) -> None:
+        """A cached room user with nio's offline default should still fall back to `/presence`."""
+        mock_client = AsyncMock(spec=nio.AsyncClient)
+        mock_client.rooms = {
+            "!room:example.com": Mock(
+                users={
+                    "@user:example.com": Mock(
+                        presence="offline",
+                        last_active_ago=None,
+                    ),
+                },
+            ),
+        }
+        mock_response = Mock(spec=nio.PresenceGetResponse)
+        mock_response.presence = "online"
+        mock_response.last_active_ago = 1000
+        mock_client.get_presence.return_value = mock_response
+
+        result = await is_user_online(mock_client, "@user:example.com", room_id="!room:example.com")
+
+        assert result is True
+        mock_client.get_presence.assert_called_once_with("@user:example.com")
+
+    @pytest.mark.asyncio
     async def test_is_user_online_when_unavailable(self) -> None:
         """Test that is_user_online returns True when user is unavailable (idle but client open)."""
         mock_client = AsyncMock(spec=nio.AsyncClient)
@@ -118,7 +162,11 @@ class TestStreamingDecision:
         )
 
         assert result is True
-        mock_is_user_online.assert_called_once_with(mock_client, "@user:example.com")
+        mock_is_user_online.assert_called_once_with(
+            mock_client,
+            "@user:example.com",
+            room_id="!room:example.com",
+        )
 
     @pytest.mark.asyncio
     @patch("mindroom.matrix.presence.is_user_online")
@@ -139,7 +187,11 @@ class TestStreamingDecision:
         )
 
         assert result is False
-        mock_is_user_online.assert_called_once_with(mock_client, "@user:example.com")
+        mock_is_user_online.assert_called_once_with(
+            mock_client,
+            "@user:example.com",
+            room_id="!room:example.com",
+        )
 
     @pytest.mark.asyncio
     async def test_should_use_streaming_when_globally_disabled(self) -> None:

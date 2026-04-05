@@ -652,7 +652,6 @@ async def _assert_thread_tags_write_allowed(
 ) -> None:
     """Fail fast when the current Matrix account lacks state-event power."""
     actor_user_id = _require_non_empty_string(client.user_id, field_name="client.user_id")
-
     response = await client.room_get_state_event(
         room_id=room_id,
         event_type=POWER_LEVELS_EVENT_TYPE,
@@ -663,9 +662,10 @@ async def _assert_thread_tags_write_allowed(
     if not isinstance(response.content, dict):
         msg = f"Failed to parse Matrix power levels for {room_id}: {response.content!r}"
         raise ThreadTagsError(msg)
+    power_levels_content = response.content
 
     _assert_user_can_write_thread_tags(
-        response.content,
+        power_levels_content,
         room_id,
         subject_label="the Matrix client",
         user_id=actor_user_id,
@@ -686,7 +686,7 @@ async def _assert_thread_tags_write_allowed(
         requester_user_id=normalized_requester_user_id,
     )
     _assert_user_can_write_thread_tags(
-        response.content,
+        power_levels_content,
         room_id,
         subject_label="the requester",
         user_id=normalized_requester_user_id,

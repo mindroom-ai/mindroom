@@ -245,7 +245,6 @@ async def maybe_generate_thread_summary(
 
     async with thread_summary_lock(room_id, thread_id):
         cache_key = thread_summary_cache_key(room_id, thread_id)
-
         # Recover from existing summary events on cache miss (e.g., after restart)
         if cache_key not in _last_summary_counts:
             recovered = await _recover_last_summary_count(client, room_id, thread_id)

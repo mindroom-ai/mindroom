@@ -51,9 +51,9 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_type_err
 ) -> None:
     """Unexpected internal type errors should not be rewritten into config validation failures."""
     runtime_paths = _minimal_runtime_paths(tmp_path)
+    message = "unexpected backend type error"
 
     def _raise_type_error(_self: Config, _runtime_paths: object) -> None:
-        message = "unexpected backend type error"
         raise TypeError(message)
 
     monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_type_error)
@@ -75,9 +75,9 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_value_er
 ) -> None:
     """Unexpected internal value errors should escape instead of becoming 422-style config errors."""
     runtime_paths = _minimal_runtime_paths(tmp_path)
+    message = "unexpected backend value error"
 
     def _raise_value_error(_self: Config, _runtime_paths: object) -> None:
-        message = "unexpected backend value error"
         raise ValueError(message)
 
     monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_value_error)

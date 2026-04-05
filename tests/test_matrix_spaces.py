@@ -110,8 +110,11 @@ def test_config_allows_colliding_room_key_when_space_disabled() -> None:
 
 @pytest.mark.asyncio
 async def test_add_room_to_space_is_idempotent_when_child_link_matches() -> None:
-    """Matching `m.space.child` state should not trigger another state write."""
+    """Existing child links should still be verified against `m.space.child` content."""
     client = AsyncMock()
+    space = nio.MatrixRoom("!space:example.com", "@router:example.com")
+    space.children.add("!room:example.com")
+    client.rooms = {"!space:example.com": space}
     client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
         content={"via": ["example.com"], "suggested": True},
         event_type="m.space.child",
@@ -127,7 +130,12 @@ async def test_add_room_to_space_is_idempotent_when_child_link_matches() -> None
     )
 
     assert result is True
-    client.room_put_state.assert_not_called()
+    client.room_get_state_event.assert_awaited_once_with(
+        "!space:example.com",
+        "m.space.child",
+        "!room:example.com",
+    )
+    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -158,6 +166,35 @@ async def test_add_room_to_space_writes_child_link_when_missing() -> None:
         content={"via": ["example.com"], "suggested": True},
         state_key="!room:example.com",
     )
+
+
+@pytest.mark.asyncio
+async def test_add_room_to_space_falls_back_to_state_event_when_child_missing_from_cache() -> None:
+    """A cached space without the child link should still read `m.space.child` before writing."""
+    client = AsyncMock()
+    space = nio.MatrixRoom("!space:example.com", "@router:example.com")
+    client.rooms = {"!space:example.com": space}
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"via": ["example.com"], "suggested": True},
+        event_type="m.space.child",
+        state_key="!room:example.com",
+        room_id="!space:example.com",
+    )
+
+    result = await matrix_client.add_room_to_space(
+        client,
+        "!space:example.com",
+        "!room:example.com",
+        "example.com",
+    )
+
+    assert result is True
+    client.room_get_state_event.assert_awaited_once_with(
+        "!space:example.com",
+        "m.space.child",
+        "!room:example.com",
+    )
+    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
