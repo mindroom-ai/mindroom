@@ -46,6 +46,7 @@ from mindroom.history.runtime import (
     resolve_bound_team_scope_context,
 )
 from mindroom.history.storage import update_scope_seen_event_ids
+from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
@@ -1220,6 +1221,7 @@ async def _prepare_materialized_team_execution(
     compaction_outcomes_collector: list[CompactionOutcome] | None,
     configured_team_name: str | None,
     matrix_run_metadata: dict[str, Any] | None = None,
+    system_enrichment_items: Sequence[EnrichmentItem] = (),
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
     assert orchestrator.config is not None
@@ -1250,6 +1252,11 @@ async def _prepare_materialized_team_execution(
         configured_team_name=configured_team_name,
         history_storage=scope_context.storage if scope_context is not None else None,
     )
+    if system_enrichment_items:
+        rendered_system_context = render_system_enrichment_block(system_enrichment_items)
+        team.additional_context = rendered_system_context
+        for agent in team_members.agents:
+            agent.additional_context = rendered_system_context
     prepared_execution = await prepare_bound_team_execution_context(
         scope_context=scope_context,
         agents=team_members.agents,
@@ -1301,6 +1308,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     configured_team_name: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
+    system_enrichment_items: Sequence[EnrichmentItem] = (),
     *,
     reason_prefix: str = "Team request",
 ) -> str:
@@ -1356,6 +1364,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 compaction_outcomes_collector=compaction_outcomes_collector,
                 configured_team_name=configured_team_name,
                 matrix_run_metadata=matrix_run_metadata,
+                system_enrichment_items=system_enrichment_items,
             )
             team = prepared_execution.team
             prompt = prepared_execution.prepared_prompt
@@ -1547,6 +1556,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     configured_team_name: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
+    system_enrichment_items: Sequence[EnrichmentItem] = (),
     *,
     reason_prefix: str = "Team request",
 ) -> AsyncIterator[_TeamStreamChunk]:
@@ -1608,6 +1618,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 compaction_outcomes_collector=compaction_outcomes_collector,
                 configured_team_name=configured_team_name,
                 matrix_run_metadata=matrix_run_metadata,
+                system_enrichment_items=system_enrichment_items,
             )
             team = prepared_execution.team
             prepared_prompt = prepared_execution.prepared_prompt

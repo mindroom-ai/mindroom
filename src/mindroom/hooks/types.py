@@ -9,6 +9,7 @@ from typing import Any, Literal, Protocol
 
 EVENT_MESSAGE_RECEIVED = "message:received"
 EVENT_MESSAGE_ENRICH = "message:enrich"
+EVENT_SYSTEM_ENRICH = "system:enrich"
 EVENT_MESSAGE_BEFORE_RESPONSE = "message:before_response"
 EVENT_MESSAGE_AFTER_RESPONSE = "message:after_response"
 EVENT_AGENT_STARTED = "agent:started"
@@ -24,6 +25,7 @@ BUILTIN_EVENT_NAMES = frozenset(
     {
         EVENT_MESSAGE_RECEIVED,
         EVENT_MESSAGE_ENRICH,
+        EVENT_SYSTEM_ENRICH,
         EVENT_MESSAGE_BEFORE_RESPONSE,
         EVENT_MESSAGE_AFTER_RESPONSE,
         EVENT_AGENT_STARTED,
@@ -36,11 +38,12 @@ BUILTIN_EVENT_NAMES = frozenset(
         EVENT_TOOL_AFTER_CALL,
     },
 )
-RESERVED_EVENT_NAMESPACES = frozenset({"message", "agent", "bot", "schedule", "reaction", "config", "tool"})
+RESERVED_EVENT_NAMESPACES = frozenset({"message", "system", "agent", "bot", "schedule", "reaction", "config", "tool"})
 EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$")
 DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
     EVENT_MESSAGE_RECEIVED: 15000,
     EVENT_MESSAGE_ENRICH: 2000,
+    EVENT_SYSTEM_ENRICH: 2000,
     EVENT_MESSAGE_BEFORE_RESPONSE: 200,
     EVENT_MESSAGE_AFTER_RESPONSE: 3000,
     EVENT_REACTION_RECEIVED: 500,

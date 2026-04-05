@@ -295,6 +295,26 @@ class MessageEnrichContext(HookContext):
 
 
 @dataclass(slots=True)
+class SystemEnrichContext(HookContext):
+    """Context for system:enrich hooks."""
+
+    envelope: MessageEnvelope
+    target_entity_name: str
+    target_member_names: tuple[str, ...] | None
+    _items: list[EnrichmentItem] = field(default_factory=list)
+
+    def add_instruction(
+        self,
+        key: str,
+        text: str,
+        *,
+        cache_policy: EnrichmentCachePolicy = "volatile",
+    ) -> None:
+        """Append one system-prompt enrichment item."""
+        self._items.append(EnrichmentItem(key=key, text=text, cache_policy=cache_policy))
+
+
+@dataclass(slots=True)
 class BeforeResponseContext(HookContext):
     """Context for message:before_response hooks."""
 
@@ -578,7 +598,7 @@ def _requester_id_for_hook_send(
     trigger_dispatch: bool = False,
 ) -> str | None:
     """Return the requester identity to preserve on hook-originated sends."""
-    if isinstance(context, MessageReceivedContext | MessageEnrichContext):
+    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
         requester_id = context.envelope.requester_id
     elif isinstance(context, BeforeResponseContext):
         requester_id = context.draft.envelope.requester_id
