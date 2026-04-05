@@ -70,7 +70,6 @@ _INTERACTIVE_PATTERN = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```
 _MAX_OPTIONS = 5
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
-_INTERACTIVE_TTL_SECONDS = 24 * 60 * 60
 
 
 def _serialize_active_questions(questions: dict[str, _InteractiveQuestion]) -> dict[str, dict[str, object]]:
@@ -110,27 +109,12 @@ def _load_active_questions(payload: object) -> dict[str, _InteractiveQuestion]:
     return questions
 
 
-def _prune_expired_questions(questions: dict[str, _InteractiveQuestion]) -> dict[str, _InteractiveQuestion]:
-    """Drop questions older than the persistence TTL."""
-    current_time = time.time()
-    return {
-        event_id: question
-        for event_id, question in questions.items()
-        if current_time - question.created_at < _INTERACTIVE_TTL_SECONDS
-    }
-
-
-def _question_has_expired(question: _InteractiveQuestion) -> bool:
-    """Return whether a question is older than the interactive TTL."""
-    return time.time() - question.created_at >= _INTERACTIVE_TTL_SECONDS
-
-
 def _load_persisted_questions() -> dict[str, _InteractiveQuestion]:
     """Read the persisted questions file."""
     if _persistence_file is None or not _persistence_file.exists():
         return {}
     raw_payload = _persistence_file.read_text().strip()
-    return _prune_expired_questions(_load_active_questions(json.loads(raw_payload) if raw_payload else {}))
+    return _load_active_questions(json.loads(raw_payload) if raw_payload else {})
 
 
 def _write_active_questions_atomically_locked(questions: dict[str, _InteractiveQuestion]) -> None:
@@ -173,6 +157,12 @@ def _replace_active_questions_locked(questions: dict[str, _InteractiveQuestion])
     _deleted_question_ids.clear()
 
 
+def _set_active_questions_locked(questions: dict[str, _InteractiveQuestion]) -> None:
+    """Replace the in-memory snapshot without clearing pending local changes."""
+    global _active_questions
+    _active_questions = questions
+
+
 def _store_active_question_locked(event_id: str, question: _InteractiveQuestion) -> None:
     """Record a new or updated active question."""
     _active_questions[event_id] = question
@@ -190,6 +180,45 @@ def _remove_active_question_locked(event_id: str) -> bool:
     return True
 
 
+def _apply_local_changes_locked(
+    questions: dict[str, _InteractiveQuestion],
+) -> dict[str, _InteractiveQuestion]:
+    """Overlay unsaved local additions and deletions onto a persisted snapshot."""
+    merged_questions = dict(questions)
+    for event_id in _deleted_question_ids:
+        merged_questions.pop(event_id, None)
+    for event_id in _dirty_question_ids:
+        question = _active_questions.get(event_id)
+        if question is None:
+            merged_questions.pop(event_id, None)
+            continue
+        merged_questions[event_id] = question
+    return merged_questions
+
+
+def _refresh_active_questions_locked() -> None:
+    """Refresh the in-memory snapshot from disk before answering interactive lookups."""
+    if _persistence_file is None or _persistence_lock_file is None:
+        return
+
+    try:
+        with _persistence_lock_file.open("a+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+            try:
+                persisted_questions = _load_persisted_questions()
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    except Exception as exc:
+        logger.warning(
+            "Failed to refresh persisted interactive questions; continuing with in-memory snapshot",
+            path=str(_persistence_file),
+            error=str(exc),
+        )
+        return
+
+    _set_active_questions_locked(_apply_local_changes_locked(persisted_questions))
+
+
 def _save_active_questions_locked() -> None:
     """Persist active questions when persistence is enabled.
 
@@ -204,23 +233,14 @@ def _save_active_questions_locked() -> None:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
                 try:
-                    merged_questions = _load_persisted_questions()
+                    merged_questions = _apply_local_changes_locked(_load_persisted_questions())
                 except Exception as exc:
-                    merged_questions = {}
+                    merged_questions = dict(_active_questions)
                     logger.warning(
-                        "Failed to read persisted interactive questions before save; rebuilding file from local changes",
+                        "Failed to read persisted interactive questions before save; rebuilding file from in-memory questions",
                         path=str(_persistence_file),
                         error=str(exc),
                     )
-                for event_id in _deleted_question_ids:
-                    merged_questions.pop(event_id, None)
-                for event_id in _dirty_question_ids:
-                    question = _active_questions.get(event_id)
-                    if question is None or _question_has_expired(question):
-                        merged_questions.pop(event_id, None)
-                    else:
-                        merged_questions[event_id] = question
-                merged_questions = _prune_expired_questions(merged_questions)
                 _write_active_questions_atomically_locked(merged_questions)
                 _replace_active_questions_locked(merged_questions)
             finally:
@@ -256,7 +276,7 @@ def init_persistence(storage_root: Path) -> None:
             _active_questions = {}
             _dirty_question_ids.clear()
             _deleted_question_ids.clear()
-            if isinstance(exc, (json.JSONDecodeError, TypeError, ValueError)):
+            if isinstance(exc, (json.JSONDecodeError, KeyError, TypeError, ValueError)):
                 try:
                     persistence_file.unlink(missing_ok=True)
                 except OSError:
@@ -306,6 +326,7 @@ async def handle_reaction(
 
     """
     with _thread_lock:
+        _refresh_active_questions_locked()
         question = _active_questions.get(event.reacts_to)
         if not question:
             logger.debug(
@@ -315,11 +336,6 @@ async def handle_reaction(
                 reaction=event.key,
                 active_questions=list(_active_questions.keys()),
             )
-            return None
-
-        if _question_has_expired(question):
-            if _remove_active_question_locked(event.reacts_to):
-                _save_active_questions_locked()
             return None
 
         # Only the agent who created the question should respond to reactions
@@ -386,6 +402,7 @@ async def handle_text_response(
 
     # Find matching active questions in this room/thread
     with _thread_lock:
+        _refresh_active_questions_locked()
         return _handle_text_response_locked(
             room_id=room.room_id,
             thread_id=thread_id,
@@ -410,10 +427,6 @@ def _handle_text_response_locked(
     """Handle a numeric reply while holding ``_thread_lock``."""
     for question_event_id, question in list(_active_questions.items()):
         if question.room_id != room_id or question.thread_id != thread_id:
-            continue
-        if _question_has_expired(question):
-            if _remove_active_question_locked(question_event_id):
-                _save_active_questions_locked()
             continue
         if message_text not in question.options or sender == client_user_id:
             continue

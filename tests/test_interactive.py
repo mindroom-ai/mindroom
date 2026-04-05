@@ -239,8 +239,8 @@ Based on your choice, I'll proceed accordingly."""
         assert "$question123" not in interactive._active_questions
 
     @pytest.mark.asyncio
-    async def test_handle_reaction_ignores_expired_question(self, mock_client: AsyncMock) -> None:
-        """Expired questions should be dropped instead of consumed."""
+    async def test_handle_reaction_accepts_old_persisted_question(self, mock_client: AsyncMock) -> None:
+        """Questions should stay answerable even when their timestamp is old."""
         interactive._active_questions.clear()
         interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
             room_id="!room:localhost",
@@ -263,7 +263,7 @@ Based on your choice, I'll proceed accordingly."""
             runtime_paths_for(self.config),
         )
 
-        assert result is None
+        assert result == ("fast", "$thread123")
         assert "$question123" not in interactive._active_questions
 
     @pytest.mark.asyncio
@@ -364,8 +364,8 @@ Based on your choice, I'll proceed accordingly."""
         assert "$question123" not in interactive._active_questions
 
     @pytest.mark.asyncio
-    async def test_handle_text_response_ignores_expired_question(self, mock_client: AsyncMock) -> None:
-        """Expired questions should be dropped instead of consumed."""
+    async def test_handle_text_response_accepts_old_persisted_question(self, mock_client: AsyncMock) -> None:
+        """Old questions should stay answerable by text reply."""
         interactive._active_questions.clear()
         interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
             room_id="!room:localhost",
@@ -385,29 +385,26 @@ Based on your choice, I'll proceed accordingly."""
 
         result = await interactive.handle_text_response(mock_client, room, event, "test_agent")
 
-        assert result is None
+        assert result == ("first", "$thread123")
         assert "$question123" not in interactive._active_questions
 
     @pytest.mark.asyncio
-    async def test_handle_text_response_continues_after_pruning_expired_question(
+    async def test_handle_text_response_refreshes_from_disk_before_matching(
         self,
         mock_client: AsyncMock,
+        tmp_path: Path,
     ) -> None:
-        """A fresh question later in the same thread should still be matched."""
-        interactive._active_questions.clear()
-        interactive._active_questions["$expired"] = interactive._InteractiveQuestion(
-            room_id="!room:localhost",
-            thread_id="$thread123",
-            options={"1": "expired"},
-            creator_agent="test_agent",
-            created_at=0.0,
+        """Text replies should not consume questions another process already removed from disk."""
+        interactive.init_persistence(tmp_path)
+        persistence_file = tmp_path / "tracking" / "interactive_questions.json"
+        interactive.register_interactive_question(
+            "$question123",
+            "!room:localhost",
+            "$thread123",
+            {"1": "first"},
+            "test_agent",
         )
-        interactive._active_questions["$fresh"] = interactive._InteractiveQuestion(
-            room_id="!room:localhost",
-            thread_id="$thread123",
-            options={"1": "fresh"},
-            creator_agent="test_agent",
-        )
+        persistence_file.write_text("{}")
 
         room = MagicMock()
         room.room_id = "!room:localhost"
@@ -419,9 +416,8 @@ Based on your choice, I'll proceed accordingly."""
 
         result = await interactive.handle_text_response(mock_client, room, event, "test_agent")
 
-        assert result == ("fresh", "$thread123")
-        assert "$expired" not in interactive._active_questions
-        assert "$fresh" not in interactive._active_questions
+        assert result is None
+        assert interactive._active_questions == {}
 
     @pytest.mark.asyncio
     async def test_handle_text_response_invalid(self, mock_client: AsyncMock) -> None:
@@ -724,19 +720,19 @@ Just let me know your preference!"""
 
         assert interactive._active_questions == {}
 
-    def test_init_persistence_prunes_expired_questions(self, tmp_path: Path) -> None:
-        """Expired persisted questions should be dropped during startup."""
+    def test_init_persistence_keeps_old_questions(self, tmp_path: Path) -> None:
+        """Old persisted questions should still load on startup."""
         persistence_file = tmp_path / "tracking" / "interactive_questions.json"
         persistence_file.parent.mkdir(parents=True, exist_ok=True)
         persistence_file.write_text(
             json.dumps(
                 {
-                    "$expired": {
+                    "$question123": {
                         "room_id": "!room:localhost",
                         "thread_id": "$thread123",
                         "options": {"1": "yes"},
                         "creator_agent": "test_agent",
-                        "created_at": time.time() - interactive._INTERACTIVE_TTL_SECONDS - 1,
+                        "created_at": 0.0,
                     },
                 },
             ),
@@ -744,8 +740,10 @@ Just let me know your preference!"""
 
         interactive.init_persistence(tmp_path)
 
-        assert interactive._active_questions == {}
-        assert json.loads(persistence_file.read_text()) == {}
+        restored = interactive._active_questions["$question123"]
+        assert restored.thread_id == "$thread123"
+        assert restored.options == {"1": "yes"}
+        assert restored.created_at == 0.0
 
     def test_init_persistence_starts_fresh_on_corrupt_json(self, tmp_path: Path) -> None:
         """Corrupt persistence should be cleared so future saves can recover."""
@@ -768,6 +766,28 @@ Just let me know your preference!"""
 
         persisted = json.loads(persistence_file.read_text())
         assert persisted["$question123"]["creator_agent"] == "test_agent"
+
+    def test_init_persistence_starts_fresh_on_missing_required_field(self, tmp_path: Path) -> None:
+        """Structurally corrupt persistence should be cleared so future saves can recover."""
+        persistence_file = tmp_path / "tracking" / "interactive_questions.json"
+        persistence_file.parent.mkdir(parents=True, exist_ok=True)
+        persistence_file.write_text(
+            json.dumps(
+                {
+                    "$question123": {
+                        "room_id": "!room:localhost",
+                        "thread_id": "$thread123",
+                        "options": {"1": "yes"},
+                        "created_at": time.time(),
+                    },
+                },
+            ),
+        )
+
+        interactive.init_persistence(tmp_path)
+
+        assert interactive._active_questions == {}
+        assert not persistence_file.exists()
 
     def test_save_keeps_existing_file_when_atomic_write_is_interrupted(self, tmp_path: Path) -> None:
         """A failed temp-file write should leave the last committed JSON untouched."""
@@ -840,6 +860,66 @@ Just let me know your preference!"""
 
         with interactive._thread_lock:
             interactive._save_active_questions_locked()
+
+        persisted = json.loads(persistence_file.read_text())
+        assert set(persisted) == {"$question123", "$question456"}
+
+    @pytest.mark.asyncio
+    async def test_handle_reaction_refreshes_from_disk_before_consuming(
+        self,
+        mock_client: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Reactions should not consume questions another process already removed from disk."""
+        interactive.init_persistence(tmp_path)
+        persistence_file = tmp_path / "tracking" / "interactive_questions.json"
+        interactive.register_interactive_question(
+            "$question123",
+            "!room:localhost",
+            "$thread123",
+            {"✅": "yes", "1": "yes"},
+            "test_agent",
+        )
+        persistence_file.write_text("{}")
+
+        event = MagicMock(spec=nio.ReactionEvent)
+        event.sender = "@user:localhost"
+        event.reacts_to = "$question123"
+        event.key = "✅"
+
+        result = await interactive.handle_reaction(
+            mock_client,
+            event,
+            "test_agent",
+            self.config,
+            runtime_paths_for(self.config),
+        )
+
+        assert result is None
+        assert interactive._active_questions == {}
+
+    def test_save_rebuilds_from_in_memory_snapshot_when_file_is_corrupt(self, tmp_path: Path) -> None:
+        """A corrupt persisted file should be rebuilt from the full live in-memory snapshot."""
+        interactive.init_persistence(tmp_path)
+        persistence_file = tmp_path / "tracking" / "interactive_questions.json"
+
+        interactive.register_interactive_question(
+            "$question123",
+            "!room:localhost",
+            "$thread123",
+            {"1": "yes"},
+            "test_agent",
+        )
+
+        persistence_file.write_text("{not valid json")
+
+        interactive.register_interactive_question(
+            "$question456",
+            "!room:localhost",
+            "$thread123",
+            {"2": "no"},
+            "test_agent",
+        )
 
         persisted = json.loads(persistence_file.read_text())
         assert set(persisted) == {"$question123", "$question456"}
