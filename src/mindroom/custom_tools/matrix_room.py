@@ -8,6 +8,7 @@ from threading import Lock
 from typing import Any, ClassVar
 
 import nio
+from aiohttp import ClientError
 from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
@@ -56,6 +57,59 @@ class MatrixRoomTools(Toolkit):
             return cls._DEFAULT_THREAD_LIMIT
         return max(1, min(limit, cls._MAX_THREAD_LIMIT))
 
+    @staticmethod
+    def _bundled_replacement_body(event_source: object) -> str | None:
+        if not isinstance(event_source, dict):
+            return None
+        for container in (
+            event_source.get("unsigned"),
+            event_source,
+        ):
+            if not isinstance(container, dict):
+                continue
+            relations = container.get("m.relations")
+            if not isinstance(relations, dict):
+                continue
+            replacement = relations.get("m.replace")
+            if not isinstance(replacement, dict):
+                continue
+            for candidate in (
+                replacement,
+                replacement.get("event"),
+                replacement.get("latest_event"),
+            ):
+                if not isinstance(candidate, dict):
+                    continue
+                content = candidate.get("content")
+                if not isinstance(content, dict):
+                    continue
+                new_content = content.get("m.new_content")
+                if isinstance(new_content, dict):
+                    body = new_content.get("body")
+                    if isinstance(body, str):
+                        return body
+                body = content.get("body")
+                if isinstance(body, str):
+                    return body
+        return None
+
+    @staticmethod
+    def _thread_reply_count(event: nio.Event) -> int:
+        source = getattr(event, "source", None)
+        if not isinstance(source, dict):
+            return 0
+        unsigned = source.get("unsigned", {})
+        if not isinstance(unsigned, dict):
+            return 0
+        relations = unsigned.get("m.relations", {})
+        if not isinstance(relations, dict):
+            return 0
+        thread_metadata = relations.get("m.thread", {})
+        if not isinstance(thread_metadata, dict):
+            return 0
+        count = thread_metadata.get("count")
+        return count if isinstance(count, int) and not isinstance(count, bool) else 0
+
     @classmethod
     def _check_rate_limit(
         cls,
@@ -71,6 +125,12 @@ class MatrixRoomTools(Toolkit):
             context=context,
             room_id=room_id,
         )
+
+    @staticmethod
+    def _transport_error_message(exc: TimeoutError | ClientError) -> str:
+        detail = str(exc).strip()
+        suffix = f": {detail}" if detail else ""
+        return f"Matrix request failed ({type(exc).__name__}){suffix}."
 
     async def _room_info(
         self,
@@ -101,9 +161,18 @@ class MatrixRoomTools(Toolkit):
             }
 
         creator: str | None = None
-        create_response = await context.client.room_get_state_event(room_id, "m.room.create")
+        try:
+            create_response = await context.client.room_get_state_event(room_id, "m.room.create")
+        except (ClientError, TimeoutError) as exc:
+            return self._payload(
+                "error",
+                action="room-info",
+                room_id=room_id,
+                message=self._transport_error_message(exc),
+            )
         if isinstance(create_response, nio.RoomGetStateEventResponse):
-            creator = create_response.content.get("creator")
+            content = create_response.content
+            creator = content.get("creator") if isinstance(content, dict) else None
 
         return self._payload(
             "ok",
@@ -127,7 +196,15 @@ class MatrixRoomTools(Toolkit):
         *,
         room_id: str,
     ) -> str:
-        response = await context.client.joined_members(room_id)
+        try:
+            response = await context.client.joined_members(room_id)
+        except (ClientError, TimeoutError) as exc:
+            return self._payload(
+                "error",
+                action="members",
+                room_id=room_id,
+                message=self._transport_error_message(exc),
+            )
         if not isinstance(response, nio.JoinedMembersResponse):
             return self._payload(
                 "error",
@@ -184,9 +261,17 @@ class MatrixRoomTools(Toolkit):
             if exc.retry_after_ms is not None:
                 error_payload["retry_after_ms"] = exc.retry_after_ms
             return self._payload("error", **error_payload)
+        except (ClientError, TimeoutError) as exc:
+            return self._payload(
+                "error",
+                action="threads",
+                room_id=room_id,
+                message=self._transport_error_message(exc),
+            )
 
         threads_list: list[dict[str, Any]] = []
         for event in thread_roots:
+            replacement_body = self._bundled_replacement_body(getattr(event, "source", None))
             thread_info: dict[str, Any] = {
                 "thread_id": event.event_id,
                 "sender": event.sender,
@@ -194,14 +279,13 @@ class MatrixRoomTools(Toolkit):
             }
             if isinstance(event, nio.MegolmEvent):
                 thread_info["body_preview"] = "[encrypted]"
+            elif replacement_body is not None:
+                thread_info["body_preview"] = message_preview(replacement_body)
             elif hasattr(event, "body"):
                 thread_info["body_preview"] = message_preview(event.body)
             else:
                 thread_info["body_preview"] = ""
-
-            relations = (event.source or {}).get("unsigned", {}).get("m.relations", {})
-            thread_rel = relations.get("m.thread", {})
-            thread_info["reply_count"] = thread_rel.get("count", 0)
+            thread_info["reply_count"] = self._thread_reply_count(event)
 
             threads_list.append(thread_info)
 
@@ -224,11 +308,21 @@ class MatrixRoomTools(Toolkit):
         state_key: str | None,
     ) -> str:
         if event_type is not None:
-            response = await context.client.room_get_state_event(
-                room_id,
-                event_type,
-                state_key or "",
-            )
+            try:
+                response = await context.client.room_get_state_event(
+                    room_id,
+                    event_type,
+                    state_key or "",
+                )
+            except (ClientError, TimeoutError) as exc:
+                return self._payload(
+                    "error",
+                    action="state",
+                    room_id=room_id,
+                    event_type=event_type,
+                    state_key=state_key or "",
+                    message=self._transport_error_message(exc),
+                )
             if isinstance(response, nio.RoomGetStateEventResponse):
                 return self._payload(
                     "ok",
@@ -247,7 +341,15 @@ class MatrixRoomTools(Toolkit):
                 message=f"Failed to fetch state event: {response}",
             )
 
-        response = await context.client.room_get_state(room_id)
+        try:
+            response = await context.client.room_get_state(room_id)
+        except (ClientError, TimeoutError) as exc:
+            return self._payload(
+                "error",
+                action="state",
+                room_id=room_id,
+                message=self._transport_error_message(exc),
+            )
         if not isinstance(response, nio.RoomGetStateResponse):
             return self._payload(
                 "error",
@@ -310,7 +412,47 @@ class MatrixRoomTools(Toolkit):
         if context is None:
             return self._context_error()
 
+        if not isinstance(action, str):
+            return self._payload(
+                "error",
+                action="invalid",
+                message="action must be a string.",
+            )
+        if room_id is not None and not isinstance(room_id, str):
+            return self._payload(
+                "error",
+                action=action.strip().lower(),
+                message="room_id must be a string when provided.",
+            )
+        if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool)):
+            return self._payload(
+                "error",
+                action=action.strip().lower(),
+                message="limit must be an integer when provided.",
+            )
+        if event_type is not None and not isinstance(event_type, str):
+            return self._payload(
+                "error",
+                action=action.strip().lower(),
+                message="event_type must be a string when provided.",
+            )
+        if state_key is not None and not isinstance(state_key, str):
+            return self._payload(
+                "error",
+                action=action.strip().lower(),
+                message="state_key must be a string when provided.",
+            )
+        if page_token is not None and not isinstance(page_token, str):
+            return self._payload(
+                "error",
+                action=action.strip().lower(),
+                message="page_token must be a string when provided.",
+            )
+
         normalized_action = action.strip().lower()
+        normalized_room_id = room_id.strip() if isinstance(room_id, str) else None
+        normalized_event_type = event_type.strip() if isinstance(event_type, str) else None
+        normalized_page_token = page_token.strip() if isinstance(page_token, str) else None
         if normalized_action not in self._VALID_ACTIONS:
             return self._payload(
                 "error",
@@ -318,7 +460,7 @@ class MatrixRoomTools(Toolkit):
                 message="Unsupported action. Use room-info, members, threads, or state.",
             )
 
-        resolved_room_id = room_id or context.room_id
+        resolved_room_id = normalized_room_id or context.room_id
         if not room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
@@ -344,13 +486,13 @@ class MatrixRoomTools(Toolkit):
                 context,
                 room_id=resolved_room_id,
                 limit=self._thread_limit(limit),
-                page_token=page_token,
+                page_token=normalized_page_token or None,
             )
         if normalized_action == "state":
             return await self._state(
                 context,
                 room_id=resolved_room_id,
-                event_type=event_type,
+                event_type=normalized_event_type or None,
                 state_key=state_key,
             )
         return self._payload(

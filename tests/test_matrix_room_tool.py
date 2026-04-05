@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from aiohttp import ClientError
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
@@ -129,6 +130,32 @@ async def test_matrix_room_rejects_unsupported_action() -> None:
     assert "Unsupported action" in payload["message"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "expected_action", "expected_message"),
+    [
+        ({"action": None}, "invalid", "action must be a string"),
+        ({"action": "threads", "limit": "3"}, "threads", "limit must be an integer"),
+        ({"action": "room-info", "room_id": 123}, "room-info", "room_id must be a string"),
+    ],
+)
+async def test_matrix_room_rejects_malformed_arguments(
+    kwargs: dict[str, object],
+    expected_action: str,
+    expected_message: str,
+) -> None:
+    """Malformed arguments should return structured validation errors."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(**kwargs))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == expected_action
+    assert expected_message in payload["message"]
+
+
 # --- Authorization ---
 
 
@@ -141,6 +168,26 @@ async def test_matrix_room_explicit_room_requires_authorization() -> None:
         payload = json.loads(await tool.matrix_room(action="room-info", room_id="!other:localhost"))
     assert payload["status"] == "error"
     assert "Not authorized" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_room_explicit_cross_room_members_allowed() -> None:
+    """Authorized cross-room member lookups should target the requested room."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    members_resp = MagicMock(spec=nio.JoinedMembersResponse)
+    members_resp.members = []
+    ctx.client.joined_members = AsyncMock(return_value=members_resp)
+
+    with (
+        patch("mindroom.custom_tools.matrix_room.room_access_allowed", return_value=True),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_room(action="members", room_id="!other:localhost"))
+
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == "!other:localhost"
+    ctx.client.joined_members.assert_awaited_once_with("!other:localhost")
 
 
 # --- Rate limiting ---
@@ -198,6 +245,7 @@ async def test_room_info_happy_path() -> None:
     assert payload["canonical_alias"] == "#test:localhost"
     assert payload["creator"] == "@admin:localhost"
     assert payload["power_levels_summary"]["ban"] == 50
+    ctx.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.create")
 
 
 @pytest.mark.asyncio
@@ -232,6 +280,40 @@ async def test_room_info_creator_fallback_when_state_fails() -> None:
     assert payload["creator"] is None
 
 
+@pytest.mark.asyncio
+async def test_room_info_creator_fallback_when_create_content_malformed() -> None:
+    """room-info should ignore malformed m.room.create content instead of crashing."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    cached_room = _make_cached_room()
+    ctx.client.rooms = {"!room:localhost": cached_room}
+    create_resp = MagicMock(spec=nio.RoomGetStateEventResponse)
+    create_resp.content = ["bad-create-content"]
+    ctx.client.room_get_state_event = AsyncMock(return_value=create_resp)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(action="room-info"))
+
+    assert payload["status"] == "ok"
+    assert payload["creator"] is None
+
+
+@pytest.mark.asyncio
+async def test_room_info_transport_error_returns_structured_error() -> None:
+    """room-info should convert transport errors into tool payloads."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    ctx.client.rooms = {"!room:localhost": _make_cached_room()}
+    ctx.client.room_get_state_event = AsyncMock(side_effect=TimeoutError())
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(action="room-info"))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "room-info"
+    assert "Matrix request failed" in payload["message"]
+
+
 # --- members ---
 
 
@@ -262,6 +344,7 @@ async def test_members_happy_path() -> None:
     assert payload["members"][0]["power_level"] == 100
     assert payload["members"][1]["user_id"] == "@user:localhost"
     assert payload["members"][1]["power_level"] == 0
+    ctx.client.joined_members.assert_awaited_once_with("!room:localhost")
 
 
 @pytest.mark.asyncio
@@ -276,6 +359,21 @@ async def test_members_error_response() -> None:
 
     assert payload["status"] == "error"
     assert "Failed to fetch members" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_members_transport_error_returns_structured_error() -> None:
+    """members should convert transport errors into tool payloads."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    ctx.client.joined_members = AsyncMock(side_effect=ClientError("boom"))
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(action="members"))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "members"
+    assert "Matrix request failed" in payload["message"]
 
 
 # --- threads ---
@@ -329,6 +427,34 @@ async def test_threads_happy_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_threads_preview_prefers_bundled_replacement_body() -> None:
+    """Threads should mirror matrix_message by showing bundled edit previews."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    event = _thread_event("$thread1", body="Original body", reply_count=3)
+    event.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 3},
+            "m.replace": {
+                "event": {
+                    "content": {
+                        "m.new_content": {"body": "Edited body"},
+                    },
+                },
+            },
+        },
+    }
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Edited body"
+    assert payload["threads"][0]["reply_count"] == 3
+
+
+@pytest.mark.asyncio
 async def test_threads_respects_limit() -> None:
     """Threads should forward the clamped limit and report has_more when next_token present."""
     tool = MatrixRoomTools()
@@ -369,6 +495,22 @@ async def test_threads_encrypted_event_preview() -> None:
         payload = json.loads(await tool.matrix_room(action="threads"))
 
     assert payload["threads"][0]["body_preview"] == "[encrypted]"
+
+
+@pytest.mark.asyncio
+async def test_threads_malformed_thread_metadata_falls_back_to_zero_reply_count() -> None:
+    """Malformed m.thread metadata should not crash thread serialization."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    event = _thread_event("$thread1", body="Thread root")
+    event.source["unsigned"] = {"m.relations": {"m.thread": []}}
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["reply_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -547,6 +689,21 @@ async def test_state_specific_event_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_state_specific_event_transport_error_returns_structured_error() -> None:
+    """State event lookups should convert transport errors into tool payloads."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    ctx.client.room_get_state_event = AsyncMock(side_effect=ClientError("boom"))
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(action="state", event_type="m.room.name"))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "state"
+    assert "Matrix request failed" in payload["message"]
+
+
+@pytest.mark.asyncio
 async def test_state_full_dump() -> None:
     """State without event_type should return summarized state events."""
     tool = MatrixRoomTools()
@@ -606,6 +763,21 @@ async def test_state_full_dump_error() -> None:
 
     assert payload["status"] == "error"
     assert "Failed to fetch room state" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_state_full_dump_transport_error_returns_structured_error() -> None:
+    """Full state dumps should convert transport errors into tool payloads."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    ctx.client.room_get_state = AsyncMock(side_effect=TimeoutError())
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(action="state"))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "state"
+    assert "Matrix request failed" in payload["message"]
 
 
 # --- Default room_id ---
