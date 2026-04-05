@@ -137,6 +137,7 @@ async def block_secret_reads(ctx):
 | --- | --- | --- | --- | --- |
 | `message:received` | Observer | `MessageReceivedContext` | After authorization, dedup, and voice normalization; before command parsing, routing, and image/file/video attachment registration | `suppress` |
 | `message:enrich` | Collector | `MessageEnrichContext` | After routing resolves target agent/team; before AI generation | `add_metadata()` |
+| `system:enrich` | Collector | `SystemEnrichContext` | After message enrichment; before AI generation | `add_instruction()` |
 | `message:before_response` | Transformer | `BeforeResponseContext` | After AI generation; before Matrix send (streaming: after stream completes, before final edit) | `draft.response_text`, `draft.suppress` |
 | `message:after_response` | Observer | `AfterResponseContext` | After final Matrix send or edit | None (frozen) |
 | `agent:started` | Observer | `AgentLifecycleContext` | After bot starts (Matrix login, presence, callbacks registered) | None (frozen) |
@@ -154,6 +155,7 @@ async def block_secret_reads(ctx):
 | --- | --- |
 | `message:received` | 15000 |
 | `message:enrich` | 2000 |
+| `system:enrich` | 2000 |
 | `message:before_response` | 200 |
 | `message:after_response` | 3000 |
 | `reaction:received` | 500 |
@@ -319,10 +321,67 @@ A slow weather API does not block a fast calendar lookup.
 Total enrichment latency equals max(individual hook latencies), not the sum.
 A bounded semaphore (default 10) prevents one plugin from flooding the event loop.
 
+## System enrichment pipeline
+
+The `system:enrich` event powers a parallel enrichment pipeline for the system prompt.
+Use it when room-scoped or turn-scoped instructions should live in `agent.additional_context` instead of the current user message.
+
+### How it works
+
+1. **Collect**: After `message:enrich` finishes, MindRoom runs `emit_collect("system:enrich")` with a `SystemEnrichContext`, which executes all matching system-enrichment hooks concurrently.
+2. **Render**: Collected `EnrichmentItem` entries are rendered into an XML block for the system prompt:
+
+    ```xml
+    <mindroom_system_context>
+    <item key="room_tags" cache_policy="stable">Existing thread tags in this room: backend, urgent</item>
+    <item key="active_focus" cache_policy="volatile">Current focus: triage the incident thread before suggesting new work.</item>
+    </mindroom_system_context>
+    ```
+
+3. **Apply**: For agent runs, MindRoom renders the block into `agent.additional_context` before AI generation.
+4. **Apply to teams**: For team runs, MindRoom assigns the same rendered block to both `team.additional_context` and each member agent's `additional_context`.
+
+### Adding system enrichment items
+
+Use `ctx.add_instruction()` in any `system:enrich` hook:
+
+```python
+from mindroom.hooks import SystemEnrichContext, hook
+
+
+@hook("system:enrich", priority=40)
+async def inject_room_tags(ctx: SystemEnrichContext) -> None:
+    """Inject existing room thread tags into system prompt."""
+    tags = await get_room_tags(ctx.envelope.room_id)
+    if tags:
+        tag_list = ", ".join(sorted(tags))
+        ctx.add_instruction(
+            "room_tags",
+            f"Existing thread tags in this room: {tag_list}",
+            cache_policy="stable",
+        )
+```
+
+Hooks can also return `EnrichmentItem` objects directly, the same way `message:enrich` hooks can.
+
+### System cache policy
+
+Each item still carries a `cache_policy`, but system enrichment uses it to control deterministic ordering for prompt caching:
+
+- `"stable"`: Sorted first by key so long-lived instructions stay grouped at the front of the block.
+- `"volatile"` (default): Sorted last by key so frequently changing instructions stay grouped at the end of the block.
+
+### Key differences from `message:enrich`
+
+- `system:enrich` injects into the system prompt via `agent.additional_context`, while `message:enrich` injects into the current user turn.
+- `system:enrich` renders `<mindroom_system_context>` blocks, while `message:enrich` renders `<mindroom_message_context>` blocks.
+- `system:enrich` uses `ctx.add_instruction()`, while `message:enrich` uses `ctx.add_metadata()`.
+- `system:enrich` is intended for room- or turn-scoped instructions, while `message:enrich` is intended for user-prompt conversational context.
+
 ## Custom events
 
 Plugins can define and emit namespaced custom events.
-Built-in namespaces (`message:*`, `agent:*`, `bot:*`, `schedule:*`, `reaction:*`, `config:*`, `tool:*`) are reserved.
+Built-in namespaces (`message:*`, `system:*`, `agent:*`, `bot:*`, `schedule:*`, `reaction:*`, `config:*`, `tool:*`) are reserved.
 
 ### Defining a custom event hook
 
@@ -353,7 +412,7 @@ If you are writing internal code or tests and already have an explicit `HookRegi
 
 - Pattern: `^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$`
 - Must contain at least one colon separator
-- Reserved namespaces: `message`, `agent`, `bot`, `schedule`, `reaction`, `config`, `tool`
+- Reserved namespaces: `message`, `system`, `agent`, `bot`, `schedule`, `reaction`, `config`, `tool`
 - Custom events run in observer mode (`emit()`)
 - Recursion guard: nested emissions stop at depth 3
 
