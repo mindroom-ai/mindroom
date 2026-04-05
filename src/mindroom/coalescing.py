@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CoalescedBatch",
+    "COALESCED_SOURCE_EVENT_IDS_CONTENT_KEY",
+    "COALESCED_SOURCE_EVENT_PROMPTS_CONTENT_KEY",
     "CoalescingGate",
     "CoalescingKey",
     "DispatchEvent",
@@ -29,6 +31,7 @@ __all__ = [
     "PendingEvent",
     "SyntheticTextEvent",
     "TextDispatchEvent",
+    "coalesced_prompt",
     "build_batch_dispatch_event",
     "build_coalesced_batch",
     "is_coalescing_exempt_source_kind",
@@ -36,6 +39,8 @@ __all__ = [
 
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
+COALESCED_SOURCE_EVENT_IDS_CONTENT_KEY = "com.mindroom.coalesced_source_event_ids"
+COALESCED_SOURCE_EVENT_PROMPTS_CONTENT_KEY = "com.mindroom.coalesced_source_event_prompts"
 
 
 class GatePhase(enum.Enum):
@@ -103,6 +108,7 @@ class CoalescedBatch:
     source_kind: str
     attachment_ids: list[str]
     source_event_ids: list[str]
+    source_event_prompts: dict[str, str]
     media_events: list[MediaDispatchEvent]
     original_sender: str | None = None
     raw_audio_fallback: bool = False
@@ -171,7 +177,7 @@ def _event_batch_sort_key(pending_event: PendingEvent, enqueue_order: int) -> tu
     return (enqueue_time_ms, enqueue_order)
 
 
-def _coalesced_prompt(message_bodies: list[str]) -> str:
+def coalesced_prompt(message_bodies: list[str]) -> str:
     if len(message_bodies) == 1:
         return message_bodies[0]
     combined_body = "\n".join(message_bodies)
@@ -222,9 +228,19 @@ def _batch_source_kind(ordered_pending_events: list[PendingEvent]) -> str:
         if source_kind == "voice":
             return source_kind
     for source_kind in resolved_source_kinds:
-        if source_kind in {"image", "media"}:
+        if source_kind == "image":
+            return source_kind
+    for source_kind in resolved_source_kinds:
+        if source_kind == "media":
             return source_kind
     return resolved_source_kinds[-1]
+
+
+def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> dict[str, str]:
+    return {
+        pending_event.event.event_id: _dispatch_prompt_for_event(pending_event.event)
+        for pending_event in ordered_pending_events
+    }
 
 
 def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]) -> CoalescedBatch:
@@ -243,7 +259,7 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
         primary_event=primary_pending_event.event,
         requester_user_id=key[2],
         pending_events=tuple(ordered_pending_events),
-        prompt=_coalesced_prompt(
+        prompt=coalesced_prompt(
             [_dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events],
         ),
         source_kind=_batch_source_kind(ordered_pending_events),
@@ -254,6 +270,7 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
             ),
         ),
         source_event_ids=[pending_event.event.event_id for pending_event in ordered_pending_events],
+        source_event_prompts=_batch_source_event_prompts(ordered_pending_events),
         media_events=cast(
             "list[MediaDispatchEvent]",
             [pending_event.event for pending_event in ordered_pending_events if _is_media_event(pending_event.event)],
@@ -313,6 +330,8 @@ def build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
         content[ATTACHMENT_IDS_KEY] = list(batch.attachment_ids)
     else:
         content.pop(ATTACHMENT_IDS_KEY, None)
+    content[COALESCED_SOURCE_EVENT_IDS_CONTENT_KEY] = list(batch.source_event_ids)
+    content[COALESCED_SOURCE_EVENT_PROMPTS_CONTENT_KEY] = dict(batch.source_event_prompts)
     if batch.original_sender is not None:
         content[ORIGINAL_SENDER_KEY] = batch.original_sender
     if batch.raw_audio_fallback:
