@@ -8940,12 +8940,12 @@
         "lxml_html_clean"
       ],
       "description": "Read and extract content from news articles using advanced web scraping",
-      "display_name": "Newspaper4k",
+      "display_name": "Newspaper",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper4k",
       "helper_text": null,
       "icon": "FaNewspaper",
       "icon_color": "text-blue-600",
-      "name": "newspaper4k",
+      "name": "newspaper",
       "setup_type": "none",
       "status": "available"
     },

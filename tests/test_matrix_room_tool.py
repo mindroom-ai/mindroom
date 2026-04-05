@@ -365,7 +365,7 @@ async def test_members_error_response() -> None:
 
 @pytest.mark.asyncio
 async def test_members_transport_error_returns_structured_error() -> None:
-    """members should convert transport errors into tool payloads."""
+    """Members should convert transport errors into tool payloads."""
     tool = MatrixRoomTools()
     ctx = _make_context()
     ctx.client.joined_members = AsyncMock(side_effect=ClientError("boom"))
