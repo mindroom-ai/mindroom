@@ -213,6 +213,20 @@ def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, boo
     return original_sender, raw_audio_fallback
 
 
+def _batch_source_kind(ordered_pending_events: list[PendingEvent]) -> str:
+    resolved_source_kinds = [
+        _effective_source_kind(pending_event.event, pending_event.source_kind) or pending_event.source_kind
+        for pending_event in ordered_pending_events
+    ]
+    for source_kind in resolved_source_kinds:
+        if source_kind == "voice":
+            return source_kind
+    for source_kind in resolved_source_kinds:
+        if source_kind in {"image", "media"}:
+            return source_kind
+    return resolved_source_kinds[-1]
+
+
 def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]) -> CoalescedBatch:
     """Build one normalized dispatch batch from queued pending events."""
     ordered_pending_events = [
@@ -232,8 +246,7 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
         prompt=_coalesced_prompt(
             [_dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events],
         ),
-        source_kind=_effective_source_kind(primary_pending_event.event, primary_pending_event.source_kind)
-        or primary_pending_event.source_kind,
+        source_kind=_batch_source_kind(ordered_pending_events),
         attachment_ids=merge_attachment_ids(
             *(
                 parse_attachment_ids_from_event_source(pending_event.event.source)
@@ -360,13 +373,20 @@ class CoalescingGate:
         if gate is None:
             gate = DispatchGate()
             self._gates[key] = gate
+        if gate.phase is GatePhase.GRACE:
+            if _is_media_event(pending_event.event):
+                gate.pending.append(pending_event)
+                self._schedule_gate_grace(key)
+                return
+            self._cancel_gate_wake(gate)
+            await self.flush(key, bypass_grace=True)
+            gate = self._gates.get(key)
+            if gate is None:
+                gate = DispatchGate()
+                self._gates[key] = gate
         gate.pending.append(pending_event)
         if gate.phase is GatePhase.IN_FLIGHT:
             self._cancel_gate_wake(gate)
-            return
-        if gate.phase is GatePhase.GRACE:
-            if _is_media_event(pending_event.event):
-                self._schedule_gate_grace(key)
             return
         if self._debounce_seconds() <= 0:
             self._cancel_gate_wake(gate)

@@ -366,6 +366,43 @@ async def test_text_first_multiple_images_during_grace_dispatch_once(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_turn(tmp_path: Path) -> None:
+    """Plain text should not join an upload-grace batch meant only for late media."""
+    bot = _make_bot(tmp_path, debounce_ms=40, upload_grace_ms=200)
+    room = _make_room()
+    first = _text_event(event_id="$m1", body="first turn", server_timestamp=1000)
+    second = _text_event(event_id="$m2", body="second turn", server_timestamp=1001)
+    calls: list[tuple[str, list[str]]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        source_event_ids: list[str] | None = None,
+    ) -> None:
+        _ = media_events
+        calls.append((dispatched_event.body, source_event_ids or []))
+
+    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
+        await _wait_for(lambda: _coalescing_phases(bot) == (GatePhase.GRACE,))
+
+        await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
+
+        assert calls == [("first turn", ["$m1"])]
+        assert _coalescing_phases(bot) == (GatePhase.DEBOUNCE,)
+
+        await _wait_for(lambda: len(calls) == 2)
+
+    assert calls == [
+        ("first turn", ["$m1"]),
+        ("second turn", ["$m2"]),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_image_after_grace_expires_dispatches_as_second_batch(tmp_path: Path) -> None:
     """Uploads that arrive after grace expires should remain a later turn."""
     bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=40)
@@ -466,6 +503,49 @@ def test_build_coalesced_batch_sorts_synthetic_events_using_milliseconds() -> No
 
     assert batch.source_event_ids == ["$real", "$synthetic"]
     assert batch.prompt.endswith("real\nsynthetic")
+
+
+def test_build_coalesced_batch_prefers_media_source_kind_over_text_primary() -> None:
+    """Mixed batches should keep media source_kind even when text is the primary event."""
+    room = _make_room()
+    image_event = _image_event(event_id="$img1", server_timestamp=1000)
+    text_event = _text_event(event_id="$m2", body="describe it", server_timestamp=1001)
+
+    batch = build_coalesced_batch(
+        ("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(event=image_event, room=room, source_kind="image"),
+            PendingEvent(event=text_event, room=room, source_kind="message"),
+        ],
+    )
+
+    assert batch.primary_event is text_event
+    assert batch.source_kind == "image"
+
+
+def test_build_coalesced_batch_prefers_voice_source_kind_over_media_and_text() -> None:
+    """Voice should win batch source_kind precedence even when a text event is primary."""
+    room = _make_room()
+    voice_event = SyntheticTextEvent(
+        sender="@user:localhost",
+        event_id="$voice1",
+        body="voice prompt",
+        source={"content": {"body": "voice prompt", "com.mindroom.source_kind": "voice"}},
+    )
+    image_event = _image_event(event_id="$img1", server_timestamp=1000)
+    text_event = _text_event(event_id="$m2", body="follow-up", server_timestamp=1001)
+
+    batch = build_coalesced_batch(
+        ("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(event=voice_event, room=room, source_kind="voice", enqueue_time=0.5),
+            PendingEvent(event=image_event, room=room, source_kind="image"),
+            PendingEvent(event=text_event, room=room, source_kind="message"),
+        ],
+    )
+
+    assert batch.primary_event is text_event
+    assert batch.source_kind == "voice"
 
 
 @pytest.mark.asyncio
