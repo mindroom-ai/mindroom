@@ -4049,7 +4049,11 @@ class AgentBot:
                                 matrix_run_metadata=matrix_run_metadata,
                             )
                 except asyncio.CancelledError:
-                    self.logger.info("Team non-streaming response cancelled by user", message_id=message_id)
+                    self.logger.warning(
+                        "Team non-streaming response cancelled — traceback for diagnosis",
+                        message_id=message_id,
+                        exc_info=True,
+                    )
                     if message_id:
                         await self._edit_message(room_id, message_id, _CANCELLED_RESPONSE_TEXT, delivery_thread_id)
                     raise
@@ -4236,7 +4240,11 @@ class AgentBot:
             try:
                 await task
             except asyncio.CancelledError:
-                self.logger.info("Response cancelled", message_id=message_to_track or tracked_message_id)
+                self.logger.warning(
+                    "Response cancelled — traceback for diagnosis",
+                    message_id=message_to_track or tracked_message_id,
+                    exc_info=True,
+                )
             except Exception as e:
                 self.logger.exception("Error during response generation", error=str(e))
                 raise
@@ -4357,7 +4365,11 @@ class AgentBot:
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
-            self.logger.info("Non-streaming response cancelled by user", message_id=existing_event_id)
+            self.logger.warning(
+                "Non-streaming response cancelled — traceback for diagnosis",
+                message_id=existing_event_id,
+                exc_info=True,
+            )
             if existing_event_id:
                 await self._edit_message(room_id, existing_event_id, _CANCELLED_RESPONSE_TEXT, response_thread_id)
             raise
@@ -4891,7 +4903,11 @@ class AgentBot:
         except asyncio.CancelledError:
             # send_streaming_response already preserves partial text and appends
             # a cancellation marker for the final edit.
-            self.logger.info("Streaming cancelled by user", message_id=existing_event_id)
+            self.logger.warning(
+                "Streaming response cancelled — traceback for diagnosis",
+                message_id=existing_event_id,
+                exc_info=True,
+            )
             raise
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
