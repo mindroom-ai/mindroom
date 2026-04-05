@@ -6,6 +6,7 @@ import asyncio
 import json
 import tempfile
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -53,7 +54,9 @@ def _make_context(
     client = AsyncMock()
     client.room_send = AsyncMock()
     client.room_messages = AsyncMock()
-    client.room_get_event_relations = MagicMock(side_effect=lambda *args, **kwargs: _empty_async_iterator())
+    client.room_get_event_relations = MagicMock(
+        side_effect=lambda *_args, **_kwargs: _empty_async_iterator(),
+    )
     return ToolRuntimeContext(
         agent_name="general",
         room_id=room_id,
@@ -1123,7 +1126,10 @@ async def test_matrix_message_room_threads_skips_malformed_roots() -> None:
     )
 
     class MalformedThreadRoot:
-        source = {"type": "m.room.message", "content": {"msgtype": "m.text", "body": "broken"}}
+        source: ClassVar[dict[str, object]] = {
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "broken"},
+        }
 
     with (
         patch(

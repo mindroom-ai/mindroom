@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 from importlib import util
 from pathlib import Path
-from types import ModuleType  # noqa: TC003
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
@@ -96,7 +96,7 @@ def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
     from mindroom.tool_system.metadata import synchronize_plugin_tools  # noqa: PLC0415
 
     active_tool_modules = [
-        (plugin.name, _module_name(plugin.name, plugin.tools_module_path))
+        (plugin.name, _module_name(plugin.name, plugin.root, plugin.tools_module_path))
         for plugin in plugins
         if plugin.tools_module_path is not None
     ]
@@ -299,9 +299,11 @@ def _materialize_plugin(
     entry_config: PluginEntryConfig,
     plugin_order: int,
 ) -> _Plugin:
-    tools_module = _load_plugin_module(plugin.name, plugin.tools_module_path, kind="tools")
+    tools_module = _load_plugin_module(plugin.name, plugin.root, plugin.tools_module_path, kind="tools")
     hooks_module_path = plugin.hooks_module_path or plugin.tools_module_path
-    hooks_module = _load_plugin_module(plugin.name, hooks_module_path, kind="hooks") if hooks_module_path else None
+    hooks_module = (
+        _load_plugin_module(plugin.name, plugin.root, hooks_module_path, kind="hooks") if hooks_module_path else None
+    )
     if hooks_module is None and plugin.hooks_module_path is None:
         hooks_module = tools_module
     discovered_hooks = tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else ()
@@ -442,6 +444,7 @@ def _restore_failed_plugin_tool_module_reload(
 
 def _load_plugin_module(
     plugin_name: str,
+    plugin_root: Path,
     module_path: Path | None,
     *,
     kind: str,
@@ -455,7 +458,7 @@ def _load_plugin_module(
         logger.exception("Failed to stat plugin module", path=str(module_path), kind=kind, error=str(exc))
         raise PluginValidationError(msg) from exc
 
-    module_name = _module_name(plugin_name, module_path)
+    module_name = _module_name(plugin_name, plugin_root, module_path)
     cached = _MODULE_IMPORT_CACHE.get(module_path)
     if cached is not None and cached.mtime == mtime and cached.module_name == module_name:
         return cached.module
@@ -467,8 +470,11 @@ def _load_plugin_module(
     if cached is not None and cached.module_name != module_name:
         sys.modules.pop(cached.module_name, None)
 
+    previous_packages = _snapshot_plugin_package_chain(plugin_name, plugin_root, module_path)
+    _install_plugin_package_chain(plugin_name, plugin_root, module_path)
     spec = util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
+        _restore_plugin_package_chain(previous_packages)
         msg = f"Failed to load plugin {kind} module: {module_path}"
         logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
         raise PluginValidationError(msg)
@@ -498,6 +504,7 @@ def _load_plugin_module(
                 sys.modules[cached.module_name] = cached.module
             else:
                 _MODULE_IMPORT_CACHE.pop(module_path, None)
+        _restore_plugin_package_chain(previous_packages)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
         logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
         raise PluginValidationError(msg) from exc
@@ -506,7 +513,66 @@ def _load_plugin_module(
     return module
 
 
-def _module_name(plugin_name: str, module_path: Path) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9_]+", "_", plugin_name).strip("_") or "plugin"
-    digest = abs(hash(str(module_path)))
-    return f"mindroom_plugin_{slug}_{digest}"
+def _plugin_slug(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_") or "plugin"
+
+
+def _plugin_package_name(plugin_name: str, plugin_root: Path) -> str:
+    digest = abs(hash(str(plugin_root)))
+    return f"mindroom_plugin_{_plugin_slug(plugin_name)}_{digest}"
+
+
+def _relative_module_name(plugin_root: Path, module_path: Path) -> str:
+    relative_path = module_path.relative_to(plugin_root).with_suffix("")
+    return ".".join(_plugin_slug(part) for part in relative_path.parts)
+
+
+def _module_name(plugin_name: str, plugin_root: Path, module_path: Path) -> str:
+    return f"{_plugin_package_name(plugin_name, plugin_root)}.{_relative_module_name(plugin_root, module_path)}"
+
+
+def _package_chain_names(plugin_name: str, plugin_root: Path, module_path: Path) -> list[tuple[str, Path]]:
+    package_name = _plugin_package_name(plugin_name, plugin_root)
+    chain = [(package_name, plugin_root)]
+    package_root = plugin_root
+    relative_parent = module_path.relative_to(plugin_root).parent
+    parent_package_name = package_name
+    for part in relative_parent.parts:
+        package_root /= part
+        parent_package_name = f"{parent_package_name}.{_plugin_slug(part)}"
+        chain.append((parent_package_name, package_root))
+    return chain
+
+
+def _snapshot_plugin_package_chain(
+    plugin_name: str,
+    plugin_root: Path,
+    module_path: Path,
+) -> dict[str, ModuleType | None]:
+    return {
+        package_name: sys.modules.get(package_name)
+        for package_name, _ in _package_chain_names(plugin_name, plugin_root, module_path)
+    }
+
+
+def _install_plugin_package_chain(
+    plugin_name: str,
+    plugin_root: Path,
+    module_path: Path,
+) -> None:
+    for package_name, package_root in _package_chain_names(plugin_name, plugin_root, module_path):
+        if package_name in sys.modules:
+            continue
+        package = ModuleType(package_name)
+        package.__file__ = str(package_root / "__init__.py")
+        package.__package__ = package_name
+        package.__path__ = [str(package_root)]
+        sys.modules[package_name] = package
+
+
+def _restore_plugin_package_chain(previous_packages: dict[str, ModuleType | None]) -> None:
+    for package_name, previous_module in previous_packages.items():
+        if previous_module is None:
+            sys.modules.pop(package_name, None)
+        else:
+            sys.modules[package_name] = previous_module
