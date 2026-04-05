@@ -182,11 +182,12 @@ def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_confi
         process_env={"MINDROOM_NAMESPACE": "alpha1234"},
     )
     config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+    preserved_runner_token = SANDBOX_TOKEN
     sandbox_runner_module.initialize_sandbox_runner_app(
         sandbox_runner_app,
         runtime_paths,
         config=config,
-        runner_token="preserved-token",
+        runner_token=preserved_runner_token,
     )
     config_path.write_text("agents:\n  broken: [\n", encoding="utf-8")
 
@@ -194,7 +195,7 @@ def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_confi
         response = client.get("/healthz")
 
     assert response.status_code == 200
-    assert sandbox_runner_module._app_runner_token(sandbox_runner_app) == "preserved-token"
+    assert sandbox_runner_module._app_runner_token(sandbox_runner_app) == preserved_runner_token
     assert sandbox_runner_module._app_runtime_config(sandbox_runner_app) == config
 
 

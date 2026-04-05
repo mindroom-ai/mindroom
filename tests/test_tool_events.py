@@ -27,14 +27,14 @@ def _room_threads_result(
     thread_count: int,
     body_len: int,
     has_more: bool = True,
-    cursor: str | None = TEST_CURSOR,
+    next_token: str | None = TEST_CURSOR,
 ) -> tuple[str, list[str]]:
     thread_ids = [f"$thread_{i}_{'X' * 40}:localhost" for i in range(thread_count)]
     payload = {
         "action": "room-threads",
         "count": thread_count,
         "has_more": has_more,
-        "next_token": cursor,
+        "next_token": next_token,
         "status": "ok",
         "tool": "matrix_message",
         "threads": [
@@ -73,7 +73,7 @@ def _exact_limit_room_threads_result() -> tuple[str, list[str]]:
         thread_count=1,
         body_len=0,
         has_more=False,
-        cursor=None,
+        next_token=None,
     )
     body_len = _MAX_TOOL_RESULT_DISPLAY_CHARS - len(base_result)
     assert body_len >= 0
@@ -82,7 +82,7 @@ def _exact_limit_room_threads_result() -> tuple[str, list[str]]:
         thread_count=1,
         body_len=body_len,
         has_more=False,
-        cursor=None,
+        next_token=None,
     )
     assert len(result) == _MAX_TOOL_RESULT_DISPLAY_CHARS
     return result, thread_ids
@@ -170,7 +170,7 @@ def test_format_tool_combined_truncates_body_preview_without_dropping_only_entry
         thread_count=1,
         body_len=400,
         has_more=False,
-        cursor=None,
+        next_token=None,
     )
 
     _text, trace = format_tool_combined("matrix_message", {"action": "room-threads"}, result)

@@ -12,7 +12,7 @@ import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.plugins as plugin_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
@@ -32,7 +32,7 @@ def _bind_runtime_paths(config: Config, config_path: Path) -> Config:
     return bind_runtime_paths(config, runtime_paths)
 
 
-def _minimal_runtime_paths(tmp_path: Path):
+def _minimal_runtime_paths(tmp_path: Path) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     return resolve_runtime_paths(
@@ -53,7 +53,8 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_type_err
     runtime_paths = _minimal_runtime_paths(tmp_path)
 
     def _raise_type_error(_self: Config, _runtime_paths: object) -> None:
-        raise TypeError("unexpected backend type error")
+        message = "unexpected backend type error"
+        raise TypeError(message)
 
     monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_type_error)
 
@@ -76,7 +77,8 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_value_er
     runtime_paths = _minimal_runtime_paths(tmp_path)
 
     def _raise_value_error(_self: Config, _runtime_paths: object) -> None:
-        raise ValueError("unexpected backend value error")
+        message = "unexpected backend value error"
+        raise ValueError(message)
 
     monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_value_error)
 
@@ -717,7 +719,7 @@ def test_validate_with_runtime_rejects_invalid_dedicated_hooks_module(tmp_path: 
         },
     )
 
-    with pytest.raises(ConfigRuntimeValidationError, match="hooks.py"):
+    with pytest.raises(ConfigRuntimeValidationError, match=r"hooks\.py"):
         Config.validate_with_runtime(
             {
                 "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
