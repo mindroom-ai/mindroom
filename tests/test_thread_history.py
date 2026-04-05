@@ -391,7 +391,7 @@ class TestThreadHistory:
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
         assert [message.event_id for message in history] == ["$thread_root", "$notice_reply"]
-        assert history[0].to_dict().get("msgtype") is None
+        assert history[0].to_dict()["msgtype"] == "m.text"
         assert history[1].body == "Compacted 12 messages"
         assert history[1].content["msgtype"] == "m.notice"
 

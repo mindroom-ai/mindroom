@@ -46,8 +46,6 @@ _THREAD_TAGS_POWER_LEVEL = 0
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _THREAD_EDIT_FETCH_CONCURRENCY = 8
 
-type ReadableMessageEvent = nio.RoomMessageText | nio.RoomMessageNotice
-
 
 class _ThreadHistoryFastPathUnavailableError(RuntimeError):
     """Raised when relations-first thread history cannot safely complete."""
@@ -156,7 +154,7 @@ class ResolvedVisibleMessage:
             "latest_event_id": self.latest_event_id,
         }
         msgtype = self.content.get("msgtype")
-        if isinstance(msgtype, str) and msgtype != "m.text":
+        if isinstance(msgtype, str):
             message_data["msgtype"] = msgtype
         if self.stream_status is not None:
             message_data["stream_status"] = self.stream_status
@@ -1133,7 +1131,10 @@ def _record_latest_thread_edit(
     event: nio.RoomMessageText | nio.RoomMessageNotice,
     *,
     event_info: EventInfo,
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
+    latest_edits_by_original_event_id: dict[
+        str,
+        tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None],
+    ],
 ) -> bool:
     """Track latest edit candidate, returning True if event is an edit."""
     if not (event_info.is_edit and event_info.original_event_id):
@@ -1190,7 +1191,10 @@ async def _apply_latest_edits_to_messages(
     client: nio.AsyncClient,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
+    latest_edits_by_original_event_id: dict[
+        str,
+        tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None],
+    ],
     required_thread_id: str | None = None,
 ) -> None:
     """Apply latest edits to message records and synthesize missing originals when allowed."""
@@ -1237,7 +1241,10 @@ async def resolve_latest_visible_messages(
 ) -> dict[str, ResolvedVisibleMessage]:
     """Resolve the latest visible message state by original event ID for a set of message events."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    latest_edits_by_original_event_id: dict[
+        str,
+        tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None],
+    ] = {}
 
     for event in events:
         if sender is not None and event.sender != sender:
@@ -1269,7 +1276,9 @@ async def resolve_latest_visible_messages(
     return messages_by_event_id
 
 
-def _parse_room_message_event(event_source: dict[str, Any]) -> nio.RoomMessageText | nio.RoomMessageNotice | None:
+def _parse_room_message_event(
+    event_source: dict[str, Any],
+) -> nio.RoomMessageText | nio.RoomMessageNotice | None:
     """Parse a raw event dict into a readable message event when possible."""
     try:
         parsed_event = nio.Event.parse_event(event_source)
@@ -1278,7 +1287,9 @@ def _parse_room_message_event(event_source: dict[str, Any]) -> nio.RoomMessageTe
     return parsed_event if isinstance(parsed_event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) else None
 
 
-def _bundled_replacement_event(event_source: dict[str, Any]) -> nio.RoomMessageText | nio.RoomMessageNotice | None:
+def _bundled_replacement_event(
+    event_source: dict[str, Any],
+) -> nio.RoomMessageText | nio.RoomMessageNotice | None:
     """Return bundled replacement event data when the homeserver included it."""
     for container in (
         event_source.get("unsigned"),
@@ -1389,7 +1400,10 @@ async def _resolve_thread_history_edits_via_relations(
 ) -> dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]]:
     """Resolve latest edits for the fetched root/thread events."""
     candidates = [event for event in [root_event, *thread_events] if event is not None]
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    latest_edits_by_original_event_id: dict[
+        str,
+        tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None],
+    ] = {}
     semaphore = asyncio.Semaphore(_THREAD_EDIT_FETCH_CONCURRENCY)
 
     async def resolve_candidate(
@@ -1411,7 +1425,10 @@ async def _finalize_thread_messages(
     content_client: nio.AsyncClient,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
+    latest_edits_by_original_event_id: dict[
+        str,
+        tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None],
+    ],
     thread_id: str,
 ) -> list[ResolvedVisibleMessage]:
     """Apply latest edits and return sorted visible thread messages."""
@@ -1449,7 +1466,10 @@ async def _fetch_thread_history_via_relations(
         event_type="m.room.message",
     )
     thread_events: list[nio.RoomMessageText | nio.RoomMessageNotice] = []
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    latest_edits_by_original_event_id: dict[
+        str,
+        tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None],
+    ] = {}
     for event in relation_events:
         if not isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
             continue
@@ -1513,7 +1533,10 @@ async def _fetch_thread_history_via_room_messages(
 ) -> list[ResolvedVisibleMessage]:
     """Fetch thread history by scanning room messages backward."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    latest_edits_by_original_event_id: dict[
+        str,
+        tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None],
+    ] = {}
     from_token = None
     root_message_found = False
 

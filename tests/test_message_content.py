@@ -414,8 +414,8 @@ class TestExtractAndResolveMessage:
     """Tests for extracted read/thread payload formatting."""
 
     @pytest.mark.asyncio
-    async def test_text_message_omits_msgtype_for_backward_compatibility(self) -> None:
-        """Plain text messages should keep the legacy payload shape."""
+    async def test_text_message_includes_msgtype(self) -> None:
+        """Plain text messages should preserve their Matrix msgtype."""
         event = nio.RoomMessageText.from_dict(
             {
                 "type": "m.room.message",
@@ -434,6 +434,7 @@ class TestExtractAndResolveMessage:
             "timestamp": 1,
             "event_id": "$text",
             "content": {"msgtype": "m.text", "body": "hello"},
+            "msgtype": "m.text",
         }
 
     @pytest.mark.asyncio
