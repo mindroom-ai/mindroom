@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
+from agno.db.base import SessionType
 from agno.models.anthropic import Claude
 from agno.models.cerebras import Cerebras
 from agno.models.deepseek import DeepSeek
 from agno.models.google import Gemini
 from agno.models.groq import Groq
+from agno.models.message import Message
 from agno.models.metrics import Metrics
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
@@ -29,6 +33,9 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.base import RunStatus
+from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 from mindroom.agents import create_agent
 from mindroom.constants import (
@@ -74,9 +81,10 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Generator, Sequence
 
     from agno.agent import Agent
+    from agno.db.sqlite import SqliteDb
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
 
@@ -92,12 +100,251 @@ __all__ = [
     "AIStreamChunk",
     "ai_response",
     "build_prompt_with_thread_history",
+    "cleanup_queued_notice_state",
     "get_model_instance",
+    "install_queued_message_notice_hook",
+    "queued_message_signal_context",
+    "scrub_queued_notice_session_context",
     "stream_agent_response",
 ]
 
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _AI_RUN_METADATA_VERSION = 1
+_QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
+_QUEUED_MESSAGE_NOTICE_HOOK_ATTR = "_mindroom_queued_message_notice_hook_installed"
+QUEUED_MESSAGE_NOTICE_TEXT = (
+    "[SYSTEM NOTICE] A new message from the user has arrived in this thread while you were working. "
+    "You should wrap up your current work and produce a final text response now. "
+    "Avoid further tool calls unless strictly necessary. "
+    "The new message will be handled in your next turn."
+)
+
+
+class _SupportsQueuedMessageState(Protocol):
+    def has_pending_human_messages(self) -> bool: ...
+
+
+@dataclass
+class _QueuedMessageNoticeContext:
+    state: _SupportsQueuedMessageState | None
+    notice_delivered: bool = False
+
+
+_queued_message_notice_context: ContextVar[_QueuedMessageNoticeContext | None] = ContextVar(
+    "queued_message_notice_context",
+    default=None,
+)
+
+
+@contextmanager
+def queued_message_signal_context(signal: _SupportsQueuedMessageState | None) -> Generator[None, None, None]:
+    """Bind one queued-message signal to the current async task."""
+    token = _queued_message_notice_context.set(_QueuedMessageNoticeContext(state=signal))
+    try:
+        yield
+    finally:
+        _queued_message_notice_context.reset(token)
+
+
+def _has_queued_notice_marker(message: Message) -> bool:
+    provider_data = message.provider_data
+    return isinstance(provider_data, dict) and provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY) is True
+
+
+def _is_legacy_queued_notice_message(message: Message) -> bool:
+    return isinstance(message.content, str) and message.content == QUEUED_MESSAGE_NOTICE_TEXT
+
+
+def _is_queued_notice_message(message: Message, *, allow_legacy_text_match: bool = False) -> bool:
+    """Return whether one Agno message is the hidden queued-message notice."""
+    if _has_queued_notice_marker(message):
+        return True
+    return allow_legacy_text_match and _is_legacy_queued_notice_message(message)
+
+
+def _strip_queued_notice_messages(
+    messages: list[Message] | None,
+    *,
+    allow_legacy_text_match: bool = False,
+) -> bool:
+    """Remove queued-message notices from one mutable message list."""
+    if not messages:
+        return False
+    filtered_messages = [
+        message
+        for message in messages
+        if not _is_queued_notice_message(
+            message,
+            allow_legacy_text_match=allow_legacy_text_match,
+        )
+    ]
+    if len(filtered_messages) == len(messages):
+        return False
+    messages[:] = filtered_messages
+    return True
+
+
+def _cleanup_queued_notice_from_run_output(run_output: RunOutput | TeamRunOutput | None) -> bool:
+    """Remove queued-message notices from one returned run output."""
+    if run_output is None:
+        return False
+    return _strip_queued_notice_messages(run_output.messages)
+
+
+def _load_session_for_cleanup(
+    raw_session: AgentSession | TeamSession | dict[str, object],
+    *,
+    session_type: SessionType,
+) -> AgentSession | TeamSession | None:
+    """Deserialize one stored Agno session for queued-notice cleanup."""
+    if isinstance(raw_session, dict):
+        session_mapping = cast("dict[str, Any]", raw_session)
+        return (
+            TeamSession.from_dict(session_mapping)
+            if session_type is SessionType.TEAM
+            else AgentSession.from_dict(session_mapping)
+        )
+    return raw_session
+
+
+def _strip_queued_notice_from_session(
+    session: AgentSession | TeamSession,
+    *,
+    allow_legacy_text_match: bool = False,
+) -> bool:
+    changed = False
+    for run in session.runs or []:
+        if isinstance(run, (RunOutput, TeamRunOutput)):
+            changed = (
+                _strip_queued_notice_messages(
+                    run.messages,
+                    allow_legacy_text_match=allow_legacy_text_match,
+                )
+                or changed
+            )
+    return changed
+
+
+def strip_queued_notice_from_session_storage(
+    storage: SqliteDb,
+    session_id: str,
+    *,
+    session_type: SessionType = SessionType.AGENT,
+    allow_legacy_text_match: bool = False,
+) -> bool:
+    """Remove queued-message notices from one persisted Agno session."""
+    raw_session = storage.get_session(session_id, session_type)
+    if raw_session is None:
+        return False
+    session = _load_session_for_cleanup(
+        cast("AgentSession | TeamSession | dict[str, object]", raw_session),
+        session_type=session_type,
+    )
+    if session is None:
+        return False
+
+    changed = _strip_queued_notice_from_session(
+        session,
+        allow_legacy_text_match=allow_legacy_text_match,
+    )
+    if changed:
+        storage.upsert_session(session)
+    return changed
+
+
+def cleanup_queued_notice_state(
+    *,
+    run_output: RunOutput | TeamRunOutput | None,
+    storage: SqliteDb | None,
+    session_id: str | None,
+    session_type: SessionType,
+    entity_name: str,
+) -> None:
+    """Strip queued-message notices from returned and persisted run state."""
+    _cleanup_queued_notice_from_run_output(run_output)
+    if storage is None or not session_id:
+        return
+    try:
+        strip_queued_notice_from_session_storage(
+            storage,
+            session_id,
+            session_type=session_type,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to strip queued-message notice from session history",
+            entity=entity_name,
+            session_id=session_id,
+            session_type=session_type.value,
+        )
+
+
+def scrub_queued_notice_session_context(
+    *,
+    scope_context: ScopeSessionContext | None,
+    entity_name: str,
+) -> None:
+    """Strip stale queued-message notices from the loaded session before replay."""
+    if scope_context is None or scope_context.session is None:
+        return
+    try:
+        if _strip_queued_notice_from_session(
+            scope_context.session,
+            allow_legacy_text_match=True,
+        ):
+            scope_context.storage.upsert_session(scope_context.session)
+    except Exception:
+        logger.exception(
+            "Failed to strip queued-message notice from loaded session history",
+            entity=entity_name,
+            session_id=scope_context.session.session_id,
+            session_type="team" if isinstance(scope_context.session, TeamSession) else "agent",
+        )
+
+
+def install_queued_message_notice_hook(model: Model) -> None:
+    """Append a hidden notice after tool results when a newer message is queued."""
+    try:
+        original_format_function_call_results = model.format_function_call_results
+        model_dict = vars(model)
+    except (AttributeError, TypeError):
+        return
+    if model_dict.get(_QUEUED_MESSAGE_NOTICE_HOOK_ATTR) is True:
+        return
+    setattr(model, _QUEUED_MESSAGE_NOTICE_HOOK_ATTR, True)
+
+    def _format_function_call_results_with_notice(
+        messages: list[Message],
+        function_call_results: list[Message],
+        compress_tool_results: bool = False,
+        **kwargs: object,
+    ) -> None:
+        original_format_function_call_results(
+            messages=messages,
+            function_call_results=function_call_results,
+            compress_tool_results=compress_tool_results,
+            **kwargs,
+        )
+        if any(message.stop_after_tool_call for message in function_call_results):
+            return
+        notice_context = _queued_message_notice_context.get()
+        if (
+            notice_context is None
+            or notice_context.notice_delivered
+            or notice_context.state is None
+            or not notice_context.state.has_pending_human_messages()
+        ):
+            return
+        messages.append(
+            Message(
+                role="user",
+                content=QUEUED_MESSAGE_NOTICE_TEXT,
+                provider_data={_QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
+            ),
+        )
+        notice_context.notice_delivered = True
+
+    model_dict["format_function_call_results"] = _format_function_call_results_with_notice
 
 
 def _empty_request_metric_totals() -> dict[str, int]:
@@ -736,7 +983,7 @@ async def _prepare_agent_and_prompt(
     return agent, full_prompt, unseen_event_ids, prepared_history
 
 
-async def ai_response(  # noqa: C901
+async def ai_response(  # noqa: C901, PLR0912, PLR0915
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -817,6 +1064,10 @@ async def ai_response(  # noqa: C901
             execution_identity=execution_identity,
         ) as opened_scope_context:
             scope_context = opened_scope_context
+            scrub_queued_notice_session_context(
+                scope_context=scope_context,
+                entity_name=agent_name,
+            )
             try:
                 agent, full_prompt, unseen_event_ids, _prepared_history = await _prepare_agent_and_prompt(
                     agent_name,
@@ -839,6 +1090,8 @@ async def ai_response(  # noqa: C901
             except Exception as e:
                 logger.exception("Error preparing agent", agent=agent_name)
                 return get_user_friendly_error_message(e, agent_name)
+            if agent.model is not None:
+                install_queued_message_notice_hook(agent.model)
 
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
@@ -852,6 +1105,7 @@ async def ai_response(  # noqa: C901
             attempt_run_id = run_id
 
             for retried_without_inline_media in (False, True):
+                response = None
                 try:
                     response = await cached_agent_run(
                         agent,
@@ -899,6 +1153,13 @@ async def ai_response(  # noqa: C901
                 break
 
             assert response is not None
+            cleanup_queued_notice_state(
+                run_output=response,
+                storage=scope_context.storage if scope_context is not None else None,
+                session_id=session_id,
+                session_type=SessionType.AGENT,
+                entity_name=agent_name,
+            )
 
             if tool_trace_collector is not None:
                 tool_trace_collector.extend(_extract_tool_trace(response))
@@ -1093,6 +1354,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             execution_identity=execution_identity,
         ) as opened_scope_context:
             scope_context = opened_scope_context
+            scrub_queued_notice_session_context(
+                scope_context=scope_context,
+                entity_name=agent_name,
+            )
             try:
                 agent, full_prompt, unseen_event_ids, _prepared_history = await _prepare_agent_and_prompt(
                     agent_name,
@@ -1116,6 +1381,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 logger.exception("Error preparing agent for streaming", agent=agent_name)
                 yield get_user_friendly_error_message(e, agent_name)
                 return
+            if agent.model is not None:
+                install_queued_message_notice_hook(agent.model)
 
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
@@ -1128,121 +1395,131 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             attempt_run_id = run_id
             state = _StreamingAttemptState()
 
-            for retried_without_inline_media in (False, True):
-                state = _StreamingAttemptState()
+            try:
+                for retried_without_inline_media in (False, True):
+                    state = _StreamingAttemptState()
 
-                try:
-                    _note_attempt_run_id(run_id_callback, attempt_run_id)
-                    stream_generator = agent.arun(
-                        attempt_prompt,
-                        session_id=session_id,
-                        user_id=user_id,
-                        run_id=attempt_run_id,
-                        audio=attempt_media_inputs.audio,
-                        images=attempt_media_inputs.images,
-                        files=attempt_media_inputs.files,
-                        videos=attempt_media_inputs.videos,
-                        stream=True,
-                        stream_events=True,
-                        metadata=metadata,
-                    )
-                except Exception as e:
-                    if _request_stream_retry(
-                        state,
-                        retried_without_inline_media=retried_without_inline_media,
-                        media_inputs=attempt_media_inputs,
-                        error=e,
-                        log_message="Retrying streaming AI response without inline media after validation error",
+                    try:
+                        _note_attempt_run_id(run_id_callback, attempt_run_id)
+                        stream_generator = agent.arun(
+                            attempt_prompt,
+                            session_id=session_id,
+                            user_id=user_id,
+                            run_id=attempt_run_id,
+                            audio=attempt_media_inputs.audio,
+                            images=attempt_media_inputs.images,
+                            files=attempt_media_inputs.files,
+                            videos=attempt_media_inputs.videos,
+                            stream=True,
+                            stream_events=True,
+                            metadata=metadata,
+                        )
+                    except Exception as e:
+                        if _request_stream_retry(
+                            state,
+                            retried_without_inline_media=retried_without_inline_media,
+                            media_inputs=attempt_media_inputs,
+                            error=e,
+                            log_message="Retrying streaming AI response without inline media after validation error",
+                            agent_name=agent_name,
+                        ):
+                            attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                            attempt_media_inputs = MediaInputs()
+                            attempt_run_id = _next_retry_run_id(run_id)
+                            continue
+                        logger.exception("Error starting streaming AI response")
+                        yield get_user_friendly_error_message(e, agent_name)
+                        return
+
+                    async for stream_chunk in _process_stream_events(
+                        stream_generator,
+                        state=state,
+                        show_tool_calls=show_tool_calls,
                         agent_name=agent_name,
+                        media_inputs=attempt_media_inputs,
+                        retried_without_inline_media=retried_without_inline_media,
                     ):
+                        yield stream_chunk
+
+                    if state.retry_requested:
                         attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
                         attempt_media_inputs = MediaInputs()
                         attempt_run_id = _next_retry_run_id(run_id)
                         continue
-                    logger.exception("Error starting streaming AI response")
-                    yield get_user_friendly_error_message(e, agent_name)
-                    return
 
-                async for stream_chunk in _process_stream_events(
-                    stream_generator,
-                    state=state,
-                    show_tool_calls=show_tool_calls,
-                    agent_name=agent_name,
-                    media_inputs=attempt_media_inputs,
-                    retried_without_inline_media=retried_without_inline_media,
-                ):
-                    yield stream_chunk
+                    if state.user_error is not None:
+                        yield get_user_friendly_error_message(state.user_error, agent_name)
+                        return
 
-                if state.retry_requested:
-                    attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
-                    attempt_media_inputs = MediaInputs()
-                    attempt_run_id = _next_retry_run_id(run_id)
-                    continue
+                    if state.stream_exception is not None:
+                        yield get_user_friendly_error_message(state.stream_exception, agent_name)
+                        return
 
-                if state.user_error is not None:
-                    yield get_user_friendly_error_message(state.user_error, agent_name)
-                    return
+                    if state.cancelled_run_event is not None:
+                        if run_metadata_collector is not None:
+                            fallback_metrics = _build_model_request_metrics_fallback(
+                                state.request_metric_totals,
+                                state.first_token_latency,
+                            )
+                            cancelled_metadata = _build_ai_run_metadata_content(
+                                agent_name=agent_name,
+                                config=config,
+                                runtime_paths=runtime_paths,
+                                run_id=state.cancelled_run_event.run_id,
+                                session_id=state.cancelled_run_event.session_id or session_id,
+                                status=RunStatus.cancelled,
+                                model=state.latest_model_id,
+                                model_provider=state.latest_model_provider,
+                                room_id=room_id,
+                                metrics=fallback_metrics,
+                                context_input_tokens=state.latest_request_input_tokens,
+                                tool_count=state.observed_tool_calls,
+                            )
+                            if cancelled_metadata:
+                                run_metadata_collector.update(cancelled_metadata)
+                        raise asyncio.CancelledError(state.cancelled_run_event.reason or "Run cancelled")
 
-                if state.stream_exception is not None:
-                    yield get_user_friendly_error_message(state.stream_exception, agent_name)
-                    return
+                    break
 
-                if state.cancelled_run_event is not None:
-                    if run_metadata_collector is not None:
-                        fallback_metrics = _build_model_request_metrics_fallback(
-                            state.request_metric_totals,
-                            state.first_token_latency,
-                        )
-                        cancelled_metadata = _build_ai_run_metadata_content(
-                            agent_name=agent_name,
-                            config=config,
-                            runtime_paths=runtime_paths,
-                            run_id=state.cancelled_run_event.run_id,
-                            session_id=state.cancelled_run_event.session_id or session_id,
-                            status=RunStatus.cancelled,
-                            model=state.latest_model_id,
-                            model_provider=state.latest_model_provider,
-                            room_id=room_id,
-                            metrics=fallback_metrics,
-                            context_input_tokens=state.latest_request_input_tokens,
-                            tool_count=state.observed_tool_calls,
-                        )
-                        if cancelled_metadata:
-                            run_metadata_collector.update(cancelled_metadata)
-                    raise asyncio.CancelledError(state.cancelled_run_event.reason or "Run cancelled")
-
-                break
-
-            if run_metadata_collector is not None:
-                fallback_metrics = _build_model_request_metrics_fallback(
-                    state.request_metric_totals,
-                    state.first_token_latency,
+                if run_metadata_collector is not None:
+                    fallback_metrics = _build_model_request_metrics_fallback(
+                        state.request_metric_totals,
+                        state.first_token_latency,
+                    )
+                    run_metadata = _build_ai_run_metadata_content(
+                        agent_name=agent_name,
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
+                        session_id=(
+                            state.completed_run_event.session_id
+                            if state.completed_run_event is not None
+                            and state.completed_run_event.session_id is not None
+                            else session_id
+                        ),
+                        status=RunStatus.completed,
+                        model=state.latest_model_id,
+                        model_provider=state.latest_model_provider,
+                        room_id=room_id,
+                        metrics=state.completed_run_event.metrics if state.completed_run_event is not None else None,
+                        metrics_fallback=fallback_metrics,
+                        context_input_tokens=state.latest_request_input_tokens,
+                        tool_count=(
+                            len(state.completed_run_event.tools)
+                            if state.completed_run_event is not None and state.completed_run_event.tools is not None
+                            else state.observed_tool_calls
+                        ),
+                    )
+                    if run_metadata:
+                        run_metadata_collector.update(run_metadata)
+            finally:
+                cleanup_queued_notice_state(
+                    run_output=None,
+                    storage=scope_context.storage if scope_context is not None else None,
+                    session_id=session_id,
+                    session_type=SessionType.AGENT,
+                    entity_name=agent_name,
                 )
-                run_metadata = _build_ai_run_metadata_content(
-                    agent_name=agent_name,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
-                    session_id=(
-                        state.completed_run_event.session_id
-                        if state.completed_run_event is not None and state.completed_run_event.session_id is not None
-                        else session_id
-                    ),
-                    status=RunStatus.completed,
-                    model=state.latest_model_id,
-                    model_provider=state.latest_model_provider,
-                    room_id=room_id,
-                    metrics=state.completed_run_event.metrics if state.completed_run_event is not None else None,
-                    metrics_fallback=fallback_metrics,
-                    context_input_tokens=state.latest_request_input_tokens,
-                    tool_count=(
-                        len(state.completed_run_event.tools)
-                        if state.completed_run_event is not None and state.completed_run_event.tools is not None
-                        else state.observed_tool_calls
-                    ),
-                )
-                if run_metadata:
-                    run_metadata_collector.update(run_metadata)
     finally:
         close_agent_runtime_sqlite_dbs(
             agent,
