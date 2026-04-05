@@ -45,6 +45,14 @@ def _reset_interactive_state() -> None:
     interactive._persistence_file = None
 
 
+def _empty_async_iterator() -> object:
+    async def iterator() -> object:
+        if False:
+            yield None
+
+    return iterator()
+
+
 def _make_context(
     *,
     room_id: str = "!room:localhost",
