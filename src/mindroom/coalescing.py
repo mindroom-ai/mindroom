@@ -13,6 +13,7 @@ import nio
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .commands.parsing import command_parser
 from .constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from .hooks.ingress import AUTOMATION_SOURCE_KINDS
 from .matrix.media import extract_media_caption
 
 if TYPE_CHECKING:
@@ -33,7 +34,6 @@ __all__ = [
     "is_coalescing_exempt_source_kind",
 ]
 
-_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"scheduled", "hook"})
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 
@@ -131,7 +131,7 @@ def is_coalescing_exempt_source_kind(
     fallback_source_kind: str | None = None,
 ) -> bool:
     """Return True when coalescing should be skipped for this event."""
-    return _effective_source_kind(event, fallback_source_kind) in _COALESCING_EXEMPT_SOURCE_KINDS
+    return _effective_source_kind(event, fallback_source_kind) in AUTOMATION_SOURCE_KINDS
 
 
 def is_command_event(event: DispatchEvent) -> bool:
@@ -162,12 +162,13 @@ def _pending_has_only_text(pending_events: list[PendingEvent]) -> bool:
 
 
 def _event_batch_sort_key(pending_event: PendingEvent, enqueue_order: int) -> tuple[float, int]:
+    enqueue_time_ms = pending_event.enqueue_time * 1000.0
     if isinstance(pending_event.event, SyntheticTextEvent):
-        return (pending_event.enqueue_time, enqueue_order)
+        return (enqueue_time_ms, enqueue_order)
     server_timestamp = pending_event.event.server_timestamp
     if isinstance(server_timestamp, int | float):
         return (float(server_timestamp), enqueue_order)
-    return (pending_event.enqueue_time, enqueue_order)
+    return (enqueue_time_ms, enqueue_order)
 
 
 def _coalesced_prompt(message_bodies: list[str]) -> str:

@@ -2,21 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
-
-
-@dataclass(frozen=True)
-class ResolvedToolConfig:
-    """Resolved authored tool config after defaults and per-agent overrides merge."""
-
-    name: str
-    tool_config_overrides: dict[str, object]
-
 
 AgentLearningMode = Literal["always", "agentic"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
@@ -143,29 +133,6 @@ class ToolConfigEntry(BaseModel):
     def serialize(self) -> object:
         """Preserve the compact YAML form when no overrides are set."""
         return self.name if not self.overrides else {self.name: self.overrides}
-
-
-class ToolkitDefinition(BaseModel):
-    """One dynamically loadable toolkit definition."""
-
-    model_config = ConfigDict(validate_assignment=True)
-
-    description: str = Field(default="", description="Short description shown to agents for this toolkit")
-    tools: list[ToolConfigEntry] = Field(
-        default_factory=list,
-        description="Tool entries dynamically loadable together as one toolkit",
-    )
-
-    @property
-    def tool_names(self) -> list[str]:
-        """Return authored toolkit tool names without inline override details."""
-        return [entry.name for entry in self.tools]
-
-    @field_validator("tools")
-    @classmethod
-    def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
-        """Ensure each toolkit tool appears at most once."""
-        return validate_unique_tool_entries(tools, scope_name="toolkit")
 
 
 def validate_unique_tool_entries(

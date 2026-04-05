@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -3711,6 +3711,45 @@ class TestAgentBot:
         tracker.mark_responded.assert_called_once_with("$img_event_history", "$response")
 
     @pytest.mark.asyncio
+    async def test_build_dispatch_payload_merges_fallback_images_with_registered_attachments(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Fallback image bytes should be appended instead of discarded when some registrations succeed."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        stored_image = MagicMock(spec=Image)
+        fallback_image = MagicMock(spec=Image)
+
+        with (
+            patch("mindroom.bot.resolve_thread_attachment_ids", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "mindroom.bot.resolve_attachment_media",
+                return_value=(["att_image"], [], [stored_image], [], []),
+            ),
+        ):
+            payload = await bot._build_dispatch_payload_with_attachments(
+                room_id="!test:localhost",
+                context=_MessageContext(
+                    am_i_mentioned=False,
+                    is_thread=False,
+                    thread_id=None,
+                    thread_history=[],
+                    mentioned_agents=[],
+                    has_non_agent_mentions=False,
+                ),
+                prompt="describe this",
+                current_attachment_ids=["att_image"],
+                media_thread_id=None,
+                fallback_images=[fallback_image],
+            )
+
+        assert payload.attachment_ids == ["att_image"]
+        assert list(payload.media.images) == [stored_image, fallback_image]
+
+    @pytest.mark.asyncio
     async def test_agent_bot_on_image_message_leaves_event_retryable_when_terminal_error_cannot_be_sent(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -5403,12 +5442,12 @@ class TestAgentBot:
         bot.client.room_get_event.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_dispatch_text_message_hydrates_full_history_only_after_action_selection(
+    async def test_dispatch_text_message_hydrates_full_history_before_resolving_action(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Dispatch should defer full thread hydration until a real reply action exists."""
+        """Dispatch should hydrate full thread history before reply-chain routing decisions."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -5464,6 +5503,7 @@ class TestAgentBot:
 
         async def fake_resolve_action(*_args: object, **_kwargs: object) -> _ResponseAction:
             call_order.append("action")
+            assert dispatch.context.thread_history == full_history
             return _ResponseAction(kind="individual")
 
         async def fake_send_response(*_args: object, **_kwargs: object) -> str:
@@ -5504,7 +5544,7 @@ class TestAgentBot:
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
 
-        assert call_order == ["action", "placeholder", "hydrate", "payload", "generate"]
+        assert call_order == ["hydrate", "action", "placeholder", "payload", "generate"]
         assert dispatch.context.thread_history == full_history
         assert dispatch.context.requires_full_thread_history is False
 
@@ -5514,7 +5554,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Skip paths should not pay for full history hydration."""
+        """Skip paths should stop after required routing hydration and avoid payload work."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -5545,7 +5585,7 @@ class TestAgentBot:
         with (
             patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
             patch.object(bot, "_resolve_dispatch_action", new=AsyncMock(return_value=None)),
-            patch("mindroom.bot.fetch_thread_history", new=AsyncMock()) as mock_fetch_history,
+            patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()) as mock_hydrate,
             patch.object(bot, "_build_dispatch_payload_with_attachments", new=AsyncMock()) as mock_build_payload,
             patch.object(bot, "_execute_dispatch_action", new=AsyncMock()) as mock_execute,
         ):
@@ -5554,9 +5594,108 @@ class TestAgentBot:
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
 
-        mock_fetch_history.assert_not_awaited()
+        mock_hydrate.assert_awaited_once()
+        hydrate_args = mock_hydrate.await_args.args
+        assert hydrate_args[0] is room
+        assert hydrate_args[1].event_id == event.event_id
+        assert hydrate_args[2] is dispatch.context
         mock_build_payload.assert_not_awaited()
         mock_execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_router_dispatch_marks_visible_echo_from_any_coalesced_source_event(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router handoff retries should reconcile visible echoes recorded on non-primary source events."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.get_visible_echo_event_id.side_effect = (
+            lambda event_id: "$voice_echo" if event_id == "$voice" else None
+        )
+        bot.response_tracker.has_responded.return_value = False
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$text"
+        event.sender = "@user:localhost"
+
+        dispatch = _PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=_MessageContext(
+                am_i_mentioned=False,
+                is_thread=True,
+                thread_id="$thread_root",
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            correlation_id="corr-visible-echo",
+            envelope=_hook_envelope(body="hello", source_event_id="$text"),
+        )
+
+        with patch.object(
+            bot,
+            "_handle_router_dispatch",
+            new=AsyncMock(return_value=MagicMock(handled=True, mark_visible_echo_responded=True)),
+        ):
+            action = await bot._resolve_dispatch_action(
+                room,
+                event,
+                dispatch,
+                message_for_decision="hello",
+                source_event_ids=["$voice", "$text"],
+            )
+
+        assert action is None
+        assert bot.response_tracker.mark_responded.call_args_list == [
+            call("$voice", "$voice_echo"),
+            call("$text", "$voice_echo"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_trusted_internal_router_relays_bypass_user_turn_coalescing(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Agent-authored relays with preserved original sender should dispatch immediately."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.canonical_alias = None
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$relay",
+                "sender": "@mindroom_router:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "@mindroom_code:localhost could you help with this?",
+                    ORIGINAL_SENDER_KEY: "@user:localhost",
+                },
+            },
+        )
+
+        with (
+            patch.object(bot, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+        ):
+            await bot._enqueue_for_dispatch(event, room, source_kind="message")
+
+        mock_dispatch.assert_awaited_once_with(room, event, "@user:localhost")
+        mock_enqueue.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_team_reuses_placeholder_event(

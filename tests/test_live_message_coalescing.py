@@ -445,6 +445,29 @@ def test_build_coalesced_batch_keeps_normalized_voice_out_of_media_events() -> N
     assert batch.media_events == []
 
 
+def test_build_coalesced_batch_sorts_synthetic_events_using_milliseconds() -> None:
+    """Normalize synthetic enqueue timestamps to the same millisecond unit as Matrix events."""
+    room = _make_room()
+    real_event = _text_event(event_id="$real", body="real", server_timestamp=2_000)
+    synthetic_event = SyntheticTextEvent(
+        sender="@user:localhost",
+        event_id="$synthetic",
+        body="synthetic",
+        source={"content": {"body": "synthetic", "com.mindroom.source_kind": "voice"}},
+    )
+
+    batch = build_coalesced_batch(
+        ("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(event=synthetic_event, room=room, source_kind="voice", enqueue_time=3.0),
+            PendingEvent(event=real_event, room=room, source_kind="message"),
+        ],
+    )
+
+    assert batch.source_event_ids == ["$real", "$synthetic"]
+    assert batch.prompt.endswith("real\nsynthetic")
+
+
 @pytest.mark.asyncio
 async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path) -> None:
     """Keep coalescing isolated per thread for the same sender."""
@@ -622,7 +645,7 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source_kind", ["scheduled", "hook"])
+@pytest.mark.parametrize("source_kind", ["scheduled", "hook", "hook_dispatch"])
 async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source_kind: str) -> None:
     """Bypass the gate for synthetic scheduled and hook-originated events."""
     bot = _make_bot(tmp_path)

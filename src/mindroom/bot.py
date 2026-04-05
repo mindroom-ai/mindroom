@@ -545,8 +545,6 @@ type _PrecheckedTextDispatchEvent = _PrecheckedEvent[_TextDispatchEvent]
 type _PrecheckedDispatchEvent = _PrecheckedEvent[_DispatchEvent]
 type _PrecheckedMediaDispatchEvent = _PrecheckedEvent[_MediaDispatchEvent]
 
-_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"scheduled", "hook", "hook_dispatch"})
-
 
 def _is_coalescing_exempt_source_kind(event: _DispatchEvent) -> bool:
     """Return True when coalescing should be skipped for this event.
@@ -737,6 +735,17 @@ class AgentBot:
                 self.response_tracker.mark_responded(event_id)
             else:
                 self.response_tracker.mark_responded(event_id, response_event_id)
+
+    def _visible_echo_event_id_for_sources(
+        self,
+        event_ids: list[str] | tuple[str, ...],
+    ) -> str | None:
+        """Return the first tracked visible router echo for one or more source events."""
+        for event_id in event_ids:
+            visible_echo_event_id = self.response_tracker.get_visible_echo_event_id(event_id)
+            if visible_echo_event_id is not None:
+                return visible_echo_event_id
+        return None
 
     def _hook_base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
         """Return shared base fields for hook context construction."""
@@ -1612,6 +1621,14 @@ class AgentBot:
             sender=event.sender,
             source=event.source,
         )
+        if self._is_trusted_internal_relay_event(event):
+            trusted_relay_event = cast("_TextDispatchEvent", event)
+            await self._dispatch_text_message(
+                room,
+                trusted_relay_event,
+                effective_requester_user_id,
+            )
+            return
         key = await self._coalescing_key_for_event(room, event, effective_requester_user_id)
         await self._coalescing_gate.enqueue(
             key,
@@ -1705,6 +1722,7 @@ class AgentBot:
                 requester_user_id=requester_user_id,
             ),
             event_label="message",
+            source_event_ids=tracked_source_event_ids,
         )
         if dispatch is None:
             return
@@ -1727,6 +1745,8 @@ class AgentBot:
                     source_envelope=dispatch.envelope,
                 )
             return
+        if dispatch.context.requires_full_thread_history:
+            await self._hydrate_dispatch_context(room, event, dispatch.context)
         if not media_events and self._has_newer_unresponded_in_scope(event, dispatch.context):
             self._mark_source_events_responded(tracked_source_event_ids)
             return
@@ -1955,8 +1975,8 @@ class AgentBot:
                 thread_id=media_thread_id,
             )
         )
-        if fallback_images is not None and not attachment_images:
-            attachment_images = fallback_images
+        if fallback_images:
+            attachment_images = [*attachment_images, *fallback_images] if attachment_images else list(fallback_images)
         return _DispatchPayload(
             prompt=append_attachment_ids_prompt(prompt, resolved_attachment_ids),
             media=MediaInputs.from_optional(
@@ -2329,6 +2349,18 @@ class AgentBot:
             source=event.source,
         )
 
+    def _is_trusted_internal_relay_event(self, event: _DispatchEvent) -> bool:
+        """Return whether one agent-authored relay should bypass user-turn coalescing."""
+        if not isinstance(event, nio.RoomMessageText | _PreparedTextEvent | _SyntheticTextEvent):
+            return False
+        if extract_agent_name(event.sender, self.config, self.runtime_paths) is None:
+            return False
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        if not isinstance(content, dict):
+            return False
+        original_sender = content.get(ORIGINAL_SENDER_KEY)
+        return isinstance(original_sender, str) and bool(original_sender)
+
     def _precheck_event(
         self,
         room: nio.MatrixRoom,
@@ -2494,6 +2526,7 @@ class AgentBot:
         prechecked_event: _PrecheckedDispatchEvent,
         *,
         event_label: str,
+        source_event_ids: list[str] | None = None,
     ) -> _PreparedDispatch | None:
         """Run common precheck/context/sender-gating for dispatch handlers."""
         event = prechecked_event.event
@@ -2513,7 +2546,7 @@ class AgentBot:
             correlation_id=correlation_id,
             policy=ingress_policy,
         ):
-            self.response_tracker.mark_responded(event.event_id)
+            self._mark_source_events_responded(source_event_ids or [event.event_id])
             return None
 
         sender_agent_name = extract_agent_name(effective_requester_user_id, self.config, self.runtime_paths)
@@ -2533,12 +2566,15 @@ class AgentBot:
         if isinstance(event, _PreparedTextEvent):
             return event
         if isinstance(event, _SyntheticTextEvent):
+            content = event.source.get("content") if isinstance(event.source, dict) else None
+            source_kind_override = content.get("com.mindroom.source_kind") if isinstance(content, dict) else None
             return _PreparedTextEvent(
                 sender=event.sender,
                 event_id=event.event_id,
                 body=event.body,
                 source=event.source,
                 is_synthetic=True,
+                source_kind_override=source_kind_override if isinstance(source_kind_override, str) else None,
             )
 
         assert self.client is not None
@@ -2565,6 +2601,7 @@ class AgentBot:
         router_event: _DispatchEvent | None = None,
     ) -> _ResponseAction | None:
         """Resolve routing + team/individual/skip action for a prepared dispatch."""
+        tracked_source_event_ids = source_event_ids or [event.event_id]
         router_result = await self._handle_router_dispatch(
             room,
             router_event or event,
@@ -2576,13 +2613,16 @@ class AgentBot:
             source_event_ids=source_event_ids,
         )
         if router_result.handled:
-            visible_router_echo_event_id = self.response_tracker.get_visible_echo_event_id(event.event_id)
+            visible_router_echo_event_id = self._visible_echo_event_id_for_sources(tracked_source_event_ids)
             if (
                 router_result.mark_visible_echo_responded
                 and visible_router_echo_event_id is not None
-                and not self.response_tracker.has_responded(event.event_id)
+                and any(
+                    not self.response_tracker.has_responded(source_event_id)
+                    for source_event_id in tracked_source_event_ids
+                )
             ):
-                self._mark_source_events_responded(source_event_ids or [event.event_id], visible_router_echo_event_id)
+                self._mark_source_events_responded(tracked_source_event_ids, visible_router_echo_event_id)
             return None
 
         assert self.client is not None
@@ -2598,7 +2638,7 @@ class AgentBot:
             return None
         return action
 
-    async def _execute_dispatch_action(
+    async def _execute_dispatch_action(  # noqa: C901
         self,
         room: nio.MatrixRoom,
         event: _DispatchEvent,
@@ -2655,7 +2695,8 @@ class AgentBot:
         placeholder_ready_monotonic = time.monotonic()
 
         try:
-            await self._hydrate_dispatch_context(room, event, dispatch.context)
+            if dispatch.context.requires_full_thread_history:
+                await self._hydrate_dispatch_context(room, event, dispatch.context)
             context_ready_monotonic = time.monotonic()
             payload = await payload_builder(dispatch.context)
             prepared_payload = await self._apply_message_enrichment(

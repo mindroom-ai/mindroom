@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
@@ -20,6 +20,7 @@ from mindroom.bot import (
     _PreparedTextEvent,
     _ResponseAction,
 )
+from mindroom.coalescing import SyntheticTextEvent
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -740,6 +741,65 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     assert hook_calls == ["called"]
     bot._handle_command.assert_not_awaited()
     bot.response_tracker.mark_responded.assert_called_once_with(event.event_id)
+
+
+@pytest.mark.asyncio
+async def test_prepare_dispatch_marks_all_source_events_when_hooks_suppress_batch(tmp_path: Path) -> None:
+    """Hook suppression should mark every source event in a coalesced batch as handled."""
+    bot = _agent_bot(tmp_path, agent_name="router")
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$m2",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "hello",
+            },
+        },
+    )
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def received(ctx: MessageReceivedContext) -> None:
+        ctx.suppress = True
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot.response_tracker.mark_responded = MagicMock()
+
+    dispatch = await bot._prepare_dispatch(
+        room,
+        _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+        event_label="message",
+        source_event_ids=["$m1", "$m2"],
+    )
+
+    assert dispatch is None
+    assert bot.response_tracker.mark_responded.call_args_list == [call("$m1"), call("$m2")]
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_dispatch_event_preserves_voice_source_kind_for_synthetic_events(tmp_path: Path) -> None:
+    """Synthetic voice events should keep their source kind through preparation for hooks."""
+    bot = _agent_bot(tmp_path)
+    synthetic_voice = SyntheticTextEvent(
+        sender="@user:localhost",
+        event_id="$voice-event",
+        body="voice text",
+        source={"content": {"body": "voice text", "com.mindroom.source_kind": "voice"}},
+    )
+
+    prepared = await bot._resolve_text_dispatch_event(synthetic_voice)
+    envelope = bot._build_message_envelope(
+        room_id="!room:localhost",
+        event=prepared,
+        requester_user_id="@user:localhost",
+        context=_dispatch_context(bot),
+    )
+
+    assert prepared.source_kind_override == "voice"
+    assert envelope.source_kind == "voice"
 
 
 @pytest.mark.asyncio
