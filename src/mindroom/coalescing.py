@@ -74,6 +74,7 @@ class SyntheticTextEvent:
     event_id: str
     body: str
     source: dict[str, Any]
+    server_timestamp: int | float | None = None
 
 
 @dataclass
@@ -83,7 +84,7 @@ class PendingEvent:
     event: DispatchEvent
     room: nio.MatrixRoom
     source_kind: str
-    enqueue_time: float = field(default_factory=time.monotonic)
+    enqueue_time: float = field(default_factory=time.time)
 
 
 @dataclass
@@ -169,8 +170,6 @@ def _pending_has_only_text(pending_events: list[PendingEvent]) -> bool:
 
 def _event_batch_sort_key(pending_event: PendingEvent, enqueue_order: int) -> tuple[float, int]:
     enqueue_time_ms = pending_event.enqueue_time * 1000.0
-    if isinstance(pending_event.event, SyntheticTextEvent):
-        return (enqueue_time_ms, enqueue_order)
     server_timestamp = pending_event.event.server_timestamp
     if isinstance(server_timestamp, int | float):
         return (float(server_timestamp), enqueue_order)
@@ -342,6 +341,7 @@ def build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
         event_id=batch.primary_event.event_id,
         body=batch.prompt,
         source=source,
+        server_timestamp=batch.primary_event.server_timestamp,
     )
 
 

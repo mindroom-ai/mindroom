@@ -483,20 +483,21 @@ def test_build_coalesced_batch_keeps_normalized_voice_out_of_media_events() -> N
 
 
 def test_build_coalesced_batch_sorts_synthetic_events_using_milliseconds() -> None:
-    """Normalize synthetic enqueue timestamps to the same millisecond unit as Matrix events."""
+    """Sort mixed batches by origin_server_ts even when a synthetic event is present."""
     room = _make_room()
-    real_event = _text_event(event_id="$real", body="real", server_timestamp=2_000)
+    real_event = _text_event(event_id="$real", body="real", server_timestamp=1_712_350_002_000)
     synthetic_event = SyntheticTextEvent(
         sender="@user:localhost",
         event_id="$synthetic",
         body="synthetic",
         source={"content": {"body": "synthetic", "com.mindroom.source_kind": "voice"}},
+        server_timestamp=1_712_350_003_000,
     )
 
     batch = build_coalesced_batch(
         ("!room:localhost", None, "@user:localhost"),
         [
-            PendingEvent(event=synthetic_event, room=room, source_kind="voice", enqueue_time=3.0),
+            PendingEvent(event=synthetic_event, room=room, source_kind="voice", enqueue_time=50_000.0),
             PendingEvent(event=real_event, room=room, source_kind="message"),
         ],
     )

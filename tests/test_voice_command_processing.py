@@ -74,11 +74,13 @@ def _make_voice_event(
     event_id: str = "$voice_event",
     body: str = "voice.ogg",
     source: dict | None = None,
+    server_timestamp: int = 1_712_350_000_000,
 ) -> nio.RoomMessageAudio:
     event = MagicMock(spec=nio.RoomMessageAudio)
     event.sender = sender
     event.event_id = event_id
     event.body = body
+    event.server_timestamp = server_timestamp
     event.source = source or {"content": {"body": body}}
     return event
 

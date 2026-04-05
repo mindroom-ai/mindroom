@@ -2194,6 +2194,7 @@ class AgentBot:
                         "com.mindroom.source_kind": "voice",
                     },
                 },
+                server_timestamp=event.server_timestamp,
             ),
             room,
             source_kind="voice",
