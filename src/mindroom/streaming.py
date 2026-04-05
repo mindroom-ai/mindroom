@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -43,8 +42,6 @@ from mindroom.matrix.client import get_latest_thread_event_id_if_needed
 
 logger = get_logger(__name__)
 
-# Global constant for the in-progress marker
-IN_PROGRESS_MARKER = " ⋯"
 _PROGRESS_PLACEHOLDER = "Thinking..."
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
 _CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
@@ -52,8 +49,6 @@ CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
 _RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
-_IN_PROGRESS_MESSAGE_PATTERN = re.compile(rf"{re.escape(IN_PROGRESS_MARKER)}\.*$")
-IN_PROGRESS_MESSAGE_PATTERN = _IN_PROGRESS_MESSAGE_PATTERN
 
 
 def _format_stream_error_note(error: Exception) -> str:
@@ -64,13 +59,6 @@ def _format_stream_error_note(error: Exception) -> str:
     if len(normalized_error) > 220:
         normalized_error = f"{normalized_error[:219]}…"
     return f"{_STREAM_ERROR_RESPONSE_NOTE}: {normalized_error}]**"
-
-
-def is_in_progress_message(text: object) -> bool:
-    """Return True when a message ends with an in-progress marker."""
-    if not isinstance(text, str):
-        return False
-    return bool(_IN_PROGRESS_MESSAGE_PATTERN.search(text))
 
 
 def is_interrupted_partial_reply(text: object) -> bool:
@@ -89,8 +77,8 @@ def is_interrupted_partial_reply(text: object) -> bool:
 
 
 def clean_partial_reply_text(text: str) -> str:
-    """Strip partial-reply markers and status notes from persisted text."""
-    cleaned = _IN_PROGRESS_MESSAGE_PATTERN.sub("", text).rstrip()
+    """Strip partial-reply status notes from persisted text."""
+    cleaned = text.rstrip()
 
     for marker in (
         " [cancelled]",
@@ -111,7 +99,7 @@ def clean_partial_reply_text(text: str) -> str:
 
 def build_restart_interrupted_body(text: str) -> str:
     """Return restart-note text for a stale in-progress message body."""
-    stripped_text = _IN_PROGRESS_MESSAGE_PATTERN.sub("", text).rstrip()
+    stripped_text = text.rstrip()
     if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
         return _RESTART_INTERRUPTED_RESPONSE_NOTE
     return f"{stripped_text}\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}"
@@ -283,7 +271,7 @@ class StreamingResponse:
             )
 
         # When a placeholder message exists but no real text arrived,
-        # still edit the message to strip the in-progress marker.
+        # still edit the message to finalize the stream status.
         has_placeholder = (
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )

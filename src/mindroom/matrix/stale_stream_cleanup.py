@@ -36,7 +36,6 @@ from mindroom.matrix.message_content import extract_and_resolve_message, extract
 from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
-    is_in_progress_message,
 )
 
 if TYPE_CHECKING:
@@ -1293,9 +1292,7 @@ def _is_cleanup_candidate(state: _MessageState) -> bool:
         return False
     if state.stream_status == STREAM_STATUS_COMPLETED:
         return False
-    if state.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
-        return True
-    return is_in_progress_message(state.latest_body)
+    return state.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
 
 
 def _is_recent_timestamp(timestamp_ms: int, *, now_ms: int | None = None) -> bool:
