@@ -166,7 +166,6 @@ class StreamingResponse:
     extra_content: dict[str, Any] | None = None
     stream_started_at: float | None = None
     chars_since_last_update: int = 0
-    in_progress_update_count: int = 0
     placeholder_progress_sent: bool = False
 
     def __post_init__(self) -> None:
@@ -309,11 +308,7 @@ class StreamingResponse:
         assert self.target is not None
         effective_thread_id = self.target.resolved_thread_id
 
-        # Add in-progress marker during streaming (not on final update)
         text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
-        if not is_final:
-            marker_suffix = "." * (self.in_progress_update_count % 3)
-            text_to_send += f"{IN_PROGRESS_MARKER}{marker_suffix}"
 
         # Format the text (handles interactive questions if present)
         response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=False)
@@ -344,7 +339,6 @@ class StreamingResponse:
             retry_on_failure=is_final,
         )
         if send_succeeded and not is_final:
-            self.in_progress_update_count += 1
             self.placeholder_progress_sent = not self.accumulated_text.strip()
         elif send_succeeded and is_final:
             self.placeholder_progress_sent = False

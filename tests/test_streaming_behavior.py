@@ -24,10 +24,12 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
+    IN_PROGRESS_MARKER,
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingResponse,
     clean_partial_reply_text,
+    is_in_progress_message,
     is_interrupted_partial_reply,
     send_streaming_response,
 )
@@ -203,14 +205,13 @@ class TestStreamingBehavior:
         # Simulate the initial message from helper (with in-progress marker)
         initial_event = MagicMock(spec=nio.RoomMessageText)
         initial_event.sender = "@mindroom_helper:localhost"
-        initial_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?"
+        initial_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ⋯"
         initial_event.event_id = "$helper_response_123"
         initial_event.server_timestamp = 1234567890
         initial_event.source = {
             "content": {
-                "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?",
+                "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ⋯",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-                "io.mindroom.stream_status": "streaming",
             },
         }
 
@@ -481,6 +482,14 @@ class TestStreamingBehavior:
         # Before stream starts, ramp is inactive so steady-state interval is returned
         assert streaming._current_update_interval(999.0) == streaming.update_interval
 
+    def test_is_in_progress_message_detects_animated_suffix(self) -> None:
+        """In-progress detection should handle animated marker suffixes."""
+        assert is_in_progress_message("Thinking... ⋯")
+        assert is_in_progress_message("Thinking... ⋯.")
+        assert is_in_progress_message("Thinking... ⋯..")
+        assert not is_in_progress_message("Thinking...")
+        assert not is_in_progress_message(None)
+
     def test_is_interrupted_partial_reply_detects_terminal_markers(self) -> None:
         """Interrupted partial-reply detection should recognize shared cancelled/error notes."""
         assert is_interrupted_partial_reply(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}")
@@ -494,7 +503,8 @@ class TestStreamingBehavior:
         assert (
             clean_partial_reply_text("Draft answer\n\n**[Response interrupted by an error: boom]**") == "Draft answer"
         )
-        assert clean_partial_reply_text(PROGRESS_PLACEHOLDER) == ""
+        assert clean_partial_reply_text(f"{PROGRESS_PLACEHOLDER} ⋯") == ""
+        assert clean_partial_reply_text("... ⋯") == ""
 
     @pytest.mark.asyncio
     async def test_throttled_send_uses_ramp_interval(self) -> None:
@@ -614,6 +624,7 @@ class TestStreamingBehavior:
         assert mock_edit.await_count == 1
         edit_args = mock_edit.await_args.args
         assert edit_args[3]["body"].startswith(PROGRESS_PLACEHOLDER)
+        assert IN_PROGRESS_MARKER not in edit_args[3]["body"]
 
     @pytest.mark.asyncio
     async def test_progress_hint_creates_initial_message_on_cold_start(self) -> None:
@@ -645,6 +656,7 @@ class TestStreamingBehavior:
         assert streaming.event_id == "$cold_start_1"
         sent_content = mock_client.room_send.call_args[1]["content"]
         assert sent_content["body"].startswith(PROGRESS_PLACEHOLDER)
+        assert IN_PROGRESS_MARKER not in sent_content["body"]
 
     @pytest.mark.asyncio
     async def test_finalize_strips_marker_from_placeholder_only_stream(self) -> None:
@@ -675,6 +687,10 @@ class TestStreamingBehavior:
         assert streaming.event_id == "$placeholder_msg"
         assert mock_client.room_send.call_count == 1
 
+        # Verify the initial message has no in-progress marker (frontend shows animated indicator via stream_status)
+        initial_content = mock_client.room_send.call_args[1]["content"]
+        assert IN_PROGRESS_MARKER not in initial_content["body"]
+
         # Now finalize with no text ever emitted
         with patch(
             "mindroom.streaming.edit_message",
@@ -685,6 +701,7 @@ class TestStreamingBehavior:
         assert mock_edit.await_count == 1
         final_body = mock_edit.await_args.args[3]["body"]
         assert final_body == PROGRESS_PLACEHOLDER
+        assert IN_PROGRESS_MARKER not in final_body
 
     @pytest.mark.asyncio
     async def test_finalize_does_not_overwrite_existing_message_without_placeholder(self) -> None:
@@ -924,6 +941,7 @@ class TestStreamingBehavior:
         first_call = mock_client.room_send.call_args_list[0]
         content = first_call[1]["content"]
         # The body should NOT contain the static in-progress marker (frontend uses stream_status metadata)
+        assert IN_PROGRESS_MARKER not in content["body"]
         assert "Hello world" in content["body"]
 
         # Finalize the message
@@ -932,6 +950,7 @@ class TestStreamingBehavior:
         # Check the final message has no in-progress marker
         final_call = mock_client.room_send.call_args_list[-1]
         final_content = final_call[1]["content"]
+        assert IN_PROGRESS_MARKER not in final_content["body"]
         assert "Hello world" in final_content["body"]
 
     @pytest.mark.asyncio
@@ -972,6 +991,7 @@ class TestStreamingBehavior:
             )
 
         assert len(edited_texts) == 2
+        assert IN_PROGRESS_MARKER not in edited_texts[0]
         assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
 
     @pytest.mark.asyncio
@@ -1013,9 +1033,11 @@ class TestStreamingBehavior:
             )
 
         assert len(edited_texts) == 2
+        assert IN_PROGRESS_MARKER not in edited_texts[0]
         final_text = edited_texts[-1]
         assert final_text.startswith("Partial answer\n\n**[Response interrupted by an error:")
         assert "model backend disconnected" in final_text
+        assert IN_PROGRESS_MARKER not in final_text
 
     @pytest.mark.asyncio
     async def test_stream_error_replaces_placeholder_when_no_text_arrives(self) -> None:
@@ -1060,6 +1082,7 @@ class TestStreamingBehavior:
         final_text = edited_texts[0]
         assert final_text.startswith("**[Response interrupted by an error:")
         assert "provider stream failed" in final_text
+        assert IN_PROGRESS_MARKER not in final_text
 
 
 class TestStreamingConfig:
