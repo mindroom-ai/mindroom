@@ -23,7 +23,6 @@ from mindroom.ai import (
     _prepare_agent_and_prompt,
     ai_response,
     append_inline_media_fallback_prompt,
-    build_matrix_run_metadata,
     should_retry_without_inline_media,
     stream_agent_response,
 )
@@ -31,15 +30,7 @@ from mindroom.bot import AgentBot, _PreparedResponseRuntime
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import (
-    MATRIX_BATCH_PROMPT_METADATA_KEY,
-    MATRIX_EVENT_ID_METADATA_KEY,
-    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
-    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
-    MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
-    RuntimePaths,
-    resolve_runtime_paths,
-)
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.history import PreparedHistoryState
 from mindroom.media_inputs import MediaInputs
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
@@ -985,26 +976,6 @@ class TestUserIdPassthrough:
         assert payload["context"]["window_tokens"] == 2000
         assert "utilization_pct" not in payload["context"]
         assert payload["tools"]["count"] == 0
-
-    def test_build_matrix_run_metadata_merges_coalesced_source_event_ids(self) -> None:
-        """Run metadata should mark every source event in a coalesced batch as seen."""
-        metadata = build_matrix_run_metadata(
-            "$primary",
-            ["$unseen"],
-            extra_metadata={
-                MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],
-                MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$first": "first", "$primary": "primary"},
-                MATRIX_BATCH_PROMPT_METADATA_KEY: "first\nprimary",
-            },
-        )
-
-        assert metadata == {
-            MATRIX_EVENT_ID_METADATA_KEY: "$primary",
-            MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$primary", "$first", "$unseen"],
-            MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],
-            MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$first": "first", "$primary": "primary"},
-            MATRIX_BATCH_PROMPT_METADATA_KEY: "first\nprimary",
-        }
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_collects_run_metadata(self, tmp_path: Path) -> None:

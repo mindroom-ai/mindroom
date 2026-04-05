@@ -659,7 +659,7 @@ def remove_run_by_event_id(
     *,
     session_type: SessionType = SessionType.AGENT,
 ) -> bool:
-    """Remove a run whose Matrix anchor or coalesced source membership matches.
+    """Remove a run whose matrix_event_id matches, save session.
 
     Returns True if a run was removed.
     """
@@ -680,14 +680,7 @@ def remove_run_by_event_id(
         if not (
             isinstance(run, (RunOutput, TeamRunOutput))
             and run.metadata
-            and (
-                run.metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY) == event_id
-                or event_id in (
-                    run.metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-                    if isinstance(run.metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY), list)
-                    else []
-                )
-            )
+            and run.metadata.get("matrix_event_id") == event_id
         )
     ]
     if len(session.runs) == original_len:

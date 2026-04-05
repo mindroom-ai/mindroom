@@ -44,7 +44,7 @@ dependencies = [
   "rich",
   "structlog>=24.1",
   "tenacity>=9.1.2",
-  "typer>=0.16",
+  "typer>=0.24",
   "uvicorn>=0.35",
   "watchfiles>=1",
 ]

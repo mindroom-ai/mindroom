@@ -32,7 +32,7 @@ from mindroom.ai import (
     get_model_instance,
 )
 from mindroom.authorization import get_available_agents_in_room
-from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     build_prompt_with_thread_history,
@@ -979,15 +979,6 @@ def _persist_bound_seen_event_ids(
         scope_context.storage.upsert_session(session)
 
 
-def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[str]:
-    if not isinstance(run_metadata, dict):
-        return []
-    raw_event_ids = run_metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
-    if not isinstance(raw_event_ids, list):
-        return []
-    return [event_id for event_id in raw_event_ids if isinstance(event_id, str) and event_id]
-
-
 def _raise_team_run_cancelled(reason: str | None) -> NoReturn:
     """Raise the canonical team cancellation error."""
     raise asyncio.CancelledError(reason or "Run cancelled")
@@ -1210,7 +1201,6 @@ async def _prepare_materialized_team_execution(
     response_sender_id: str | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None,
     configured_team_name: str | None,
-    matrix_run_metadata: dict[str, Any] | None = None,
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
     assert orchestrator.config is not None
@@ -1260,11 +1250,7 @@ async def _prepare_materialized_team_execution(
     )
     if prepared_execution.replay_plan is not None:
         apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)
-    run_metadata = build_matrix_run_metadata(
-        reply_to_event_id,
-        prepared_execution.unseen_event_ids,
-        extra_metadata=matrix_run_metadata,
-    )
+    run_metadata = build_matrix_run_metadata(reply_to_event_id, prepared_execution.unseen_event_ids)
     return _PreparedMaterializedTeamExecution(
         team=team,
         prepared_prompt=prepared_execution.final_prompt,
@@ -1291,7 +1277,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     configured_team_name: str | None = None,
-    matrix_run_metadata: dict[str, Any] | None = None,
     *,
     reason_prefix: str = "Team request",
 ) -> str:
@@ -1345,10 +1330,10 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 response_sender_id=response_sender_id,
                 compaction_outcomes_collector=compaction_outcomes_collector,
                 configured_team_name=configured_team_name,
-                matrix_run_metadata=matrix_run_metadata,
             )
             team = prepared_execution.team
             prompt = prepared_execution.prepared_prompt
+            unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
             logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
             logger.info(f"TEAM PROMPT: {prompt[:500]}")
@@ -1427,7 +1412,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 _persist_bound_seen_event_ids(
                     scope_context=scope_context,
                     session_id=session_id,
-                    event_ids=_run_metadata_seen_event_ids(run_metadata),
+                    event_ids=[reply_to_event_id, *unseen_event_ids],
                 )
 
             if isinstance(response, TeamRunOutput):
@@ -1536,7 +1521,6 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     configured_team_name: str | None = None,
-    matrix_run_metadata: dict[str, Any] | None = None,
     *,
     reason_prefix: str = "Team request",
 ) -> AsyncIterator[_TeamStreamChunk]:
@@ -1596,10 +1580,10 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 response_sender_id=response_sender_id,
                 compaction_outcomes_collector=compaction_outcomes_collector,
                 configured_team_name=configured_team_name,
-                matrix_run_metadata=matrix_run_metadata,
             )
             team = prepared_execution.team
             prepared_prompt = prepared_execution.prepared_prompt
+            unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
             logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
             media_inputs = media or MediaInputs()
@@ -1763,7 +1747,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             _persist_bound_seen_event_ids(
                                 scope_context=scope_context,
                                 session_id=session_id,
-                                event_ids=_run_metadata_seen_event_ids(run_metadata),
+                                event_ids=[reply_to_event_id, *unseen_event_ids],
                             )
                         yield _get_response_content(event)
                         return
@@ -1794,7 +1778,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             _persist_bound_seen_event_ids(
                                 scope_context=scope_context,
                                 session_id=session_id,
-                                event_ids=_run_metadata_seen_event_ids(run_metadata),
+                                event_ids=[reply_to_event_id, *unseen_event_ids],
                             )
                         parts = format_team_response(event)
                         team_response_text = (
@@ -1890,7 +1874,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     _persist_bound_seen_event_ids(
                         scope_context=scope_context,
                         session_id=session_id,
-                        event_ids=_run_metadata_seen_event_ids(run_metadata),
+                        event_ids=[reply_to_event_id, *unseen_event_ids],
                     )
                 return
     except Exception as e:
