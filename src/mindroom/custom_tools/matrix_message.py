@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from collections import defaultdict, deque
 from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -18,6 +17,7 @@ from mindroom.custom_tools.attachment_helpers import (
     room_access_allowed,
 )
 from mindroom.custom_tools.attachments import send_context_attachments
+from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.interactive import (
     add_reaction_buttons,
     clear_interactive_question,
@@ -142,35 +142,16 @@ class MatrixMessageTools(Toolkit):
         *,
         weight: int = 1,
     ) -> str | None:
-        key = (context.agent_name, context.requester_id, room_id)
-        now = time.monotonic()
-        cutoff = now - cls._RATE_LIMIT_WINDOW_SECONDS
-        action_weight = max(1, weight)
-
-        with cls._rate_limit_lock:
-            history = cls._recent_actions[key]
-            while history and history[0] < cutoff:
-                history.popleft()
-            if len(history) + action_weight > cls._RATE_LIMIT_MAX_ACTIONS:
-                return (
-                    "Rate limit exceeded for matrix_message actions "
-                    f"({cls._RATE_LIMIT_MAX_ACTIONS} per {int(cls._RATE_LIMIT_WINDOW_SECONDS)}s)."
-                )
-            history.extend(now for _ in range(action_weight))
-
-            # Time-prune all keys and remove empty ones to avoid unbounded dict growth
-            stale_keys: list[tuple[str, str, str]] = []
-            for k, v in cls._recent_actions.items():
-                if k == key:
-                    continue  # already pruned above
-                while v and v[0] < cutoff:
-                    v.popleft()
-                if not v:
-                    stale_keys.append(k)
-            for k in stale_keys:
-                del cls._recent_actions[k]
-
-        return None
+        return check_rate_limit(
+            lock=cls._rate_limit_lock,
+            recent_actions=cls._recent_actions,
+            window_seconds=cls._RATE_LIMIT_WINDOW_SECONDS,
+            max_actions=cls._RATE_LIMIT_MAX_ACTIONS,
+            tool_name="matrix_message",
+            context=context,
+            room_id=room_id,
+            weight=weight,
+        )
 
     async def _send_matrix_text(
         self,

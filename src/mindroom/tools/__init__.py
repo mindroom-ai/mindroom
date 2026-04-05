@@ -78,6 +78,7 @@ from mindroom.tools.linear import linear_tools
 from mindroom.tools.linkup import linkup_tools
 from mindroom.tools.lumalabs import lumalabs_tools
 from mindroom.tools.matrix_message import matrix_message_tools
+from mindroom.tools.matrix_room import matrix_room_tools
 from mindroom.tools.mem0 import mem0_tools
 from mindroom.tools.modelslabs import modelslabs_tools
 from mindroom.tools.moviepy_video_tools import moviepy_video_tools
@@ -194,6 +195,7 @@ __all__ = [
     "linkup_tools",
     "lumalabs_tools",
     "matrix_message_tools",
+    "matrix_room_tools",
     "mem0_tools",
     "modelslabs_tools",
     "moviepy_video_tools",

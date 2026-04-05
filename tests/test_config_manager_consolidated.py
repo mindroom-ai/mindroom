@@ -1090,6 +1090,7 @@ class TestGetAgentWorkerTools:
             "subagents",
             "matrix_message",
             "attachments",
+            "matrix_room",
         ]
 
     def test_worker_scope_prefers_agent_override(self) -> None:

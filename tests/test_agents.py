@@ -344,6 +344,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
         "subagents",
         "matrix_message",
         "attachments",
+        "matrix_room",
     ]
 
 
@@ -370,6 +371,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
         "subagents",
         "matrix_message",
         "attachments",
+        "matrix_room",
     ]
 
 
@@ -1183,14 +1185,14 @@ def test_openclaw_compat_implied_matrix_message_does_not_duplicate() -> None:
     assert effective_tools.count("matrix_message") == 1
 
 
-def test_matrix_message_implies_attachments_tool() -> None:
-    """matrix_message should automatically include attachments via implied tools."""
+def test_matrix_message_implies_attachments_and_matrix_room_tools() -> None:
+    """matrix_message should automatically include its implied companion tools."""
     config = _test_config()
     config.agents["summary"].tools = ["matrix_message"]
     config.agents["summary"].include_default_tools = False
 
     effective_tools = config.get_agent_tools("summary")
-    assert effective_tools == ["matrix_message", "attachments"]
+    assert effective_tools == ["matrix_message", "attachments", "matrix_room"]
 
 
 def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
