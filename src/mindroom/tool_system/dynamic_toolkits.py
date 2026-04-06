@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.db.base import SessionType
-from agno.run import RunContext
 from agno.session.agent import AgentSession
 
 from mindroom.config.models import ResolvedToolConfig
@@ -23,7 +22,6 @@ logger = get_logger(__name__)
 
 _MINDROOM_SESSION_KEY = "mindroom"
 _DYNAMIC_TOOLKITS_KEY = "dynamic_toolkits"
-_DYNAMIC_TOOLKITS_SESSION_STATE_KEY = "mindroom_dynamic_toolkits"
 _DYNAMIC_TOOLKITS_VERSION = 1
 
 
@@ -116,57 +114,6 @@ def _ensure_mindroom_session_data(session: AgentSession) -> dict[str, object]:
     return cast("dict[str, object]", mindroom_data)
 
 
-def _ensure_session_state_data(session: AgentSession) -> dict[str, object]:
-    session_data = session.session_data
-    if not isinstance(session_data, dict):
-        session_data = {}
-        session.session_data = session_data
-
-    session_state = session_data.get("session_state")
-    if not isinstance(session_state, dict):
-        session_state = {}
-        session_data["session_state"] = session_state
-    return cast("dict[str, object]", session_state)
-
-
-def _stored_dynamic_toolkits_payload(session: AgentSession) -> dict[str, object] | None:
-    session_data = session.session_data
-    if not isinstance(session_data, dict):
-        return None
-
-    raw_session_state = session_data.get("session_state")
-    if isinstance(raw_session_state, dict):
-        session_state_payload = raw_session_state.get(_DYNAMIC_TOOLKITS_SESSION_STATE_KEY)
-        if isinstance(session_state_payload, dict):
-            return cast("dict[str, object]", session_state_payload)
-
-    raw_mindroom_data = session_data.get(_MINDROOM_SESSION_KEY)
-    if isinstance(raw_mindroom_data, dict):
-        mindroom_payload = raw_mindroom_data.get(_DYNAMIC_TOOLKITS_KEY)
-        if isinstance(mindroom_payload, dict):
-            return cast("dict[str, object]", mindroom_payload)
-
-    return None
-
-
-def _persist_dynamic_toolkits_payload(session: AgentSession, loaded_toolkits: list[str]) -> None:
-    payload = _session_payload(loaded_toolkits)
-    _ensure_mindroom_session_data(session)[_DYNAMIC_TOOLKITS_KEY] = payload
-    _ensure_session_state_data(session)[_DYNAMIC_TOOLKITS_SESSION_STATE_KEY] = payload
-
-
-def update_run_context_loaded_toolkits(
-    run_context: RunContext | None,
-    loaded_toolkits: list[str],
-) -> None:
-    """Mirror dynamic toolkit state into Agno session_state for end-of-run persistence."""
-    if run_context is None:
-        return
-    if run_context.session_state is None:
-        run_context.session_state = {}
-    run_context.session_state[_DYNAMIC_TOOLKITS_SESSION_STATE_KEY] = _session_payload(loaded_toolkits)
-
-
 def _coerce_loaded_toolkits(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -227,14 +174,18 @@ def get_loaded_toolkits_for_session(
     if session is None:
         session = _new_agent_session(session_id=session_id, agent_name=agent_name)
         loaded_toolkits = _initial_loaded_toolkits(config, agent_name)
-        _persist_dynamic_toolkits_payload(session, loaded_toolkits)
+        _ensure_mindroom_session_data(session)[_DYNAMIC_TOOLKITS_KEY] = _session_payload(loaded_toolkits)
         storage.upsert_session(session)
         return loaded_toolkits
 
-    stored_state = _stored_dynamic_toolkits_payload(session)
+    mindroom_data = _ensure_mindroom_session_data(session)
+    stored_state_object = mindroom_data.get(_DYNAMIC_TOOLKITS_KEY)
+    stored_state = (
+        cast("dict[str, object] | None", stored_state_object) if isinstance(stored_state_object, dict) else None
+    )
     if stored_state is None or stored_state.get("version") != _DYNAMIC_TOOLKITS_VERSION:
         loaded_toolkits = _initial_loaded_toolkits(config, agent_name)
-        _persist_dynamic_toolkits_payload(session, loaded_toolkits)
+        mindroom_data[_DYNAMIC_TOOLKITS_KEY] = _session_payload(loaded_toolkits)
         storage.upsert_session(session)
         return loaded_toolkits
 
@@ -252,7 +203,7 @@ def get_loaded_toolkits_for_session(
         )
 
     if stored_state.get("loaded") != loaded_toolkits:
-        _persist_dynamic_toolkits_payload(session, loaded_toolkits)
+        mindroom_data[_DYNAMIC_TOOLKITS_KEY] = _session_payload(loaded_toolkits)
         storage.upsert_session(session)
 
     return loaded_toolkits
@@ -280,7 +231,7 @@ def save_loaded_toolkits_for_session(
     if session is None:
         session = _new_agent_session(session_id=session_id, agent_name=agent_name)
 
-    _persist_dynamic_toolkits_payload(session, sanitized_loaded_toolkits)
+    _ensure_mindroom_session_data(session)[_DYNAMIC_TOOLKITS_KEY] = _session_payload(sanitized_loaded_toolkits)
     storage.upsert_session(session)
     return sanitized_loaded_toolkits
 

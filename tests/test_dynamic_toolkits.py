@@ -16,7 +16,7 @@ from agno.run.base import RunContext, RunStatus
 from agno.session.agent import AgentSession
 
 from mindroom.ai import ai_response
-from mindroom.agents import create_agent, create_session_storage, get_agent_session
+from mindroom.agents import create_agent, create_session_storage
 from mindroom.api.openai_compat import _build_team, _derive_session_id
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -89,35 +89,6 @@ def _validated_config(tmp_path: Path, raw: dict[str, object]) -> Config:
 def _tool_payload(result: str) -> dict[str, object]:
     """Parse one JSON tool result payload."""
     return json.loads(result)
-
-
-def _expected_persisted_dynamic_toolkits_session_data(loaded_toolkits: list[str]) -> dict[str, object]:
-    """Return the canonical persisted session_data shape for loaded toolkits."""
-    payload = {
-        "version": 1,
-        "loaded": loaded_toolkits,
-    }
-    return {
-        "mindroom": {
-            "dynamic_toolkits": payload,
-        },
-        "session_state": {
-            "mindroom_dynamic_toolkits": payload,
-        },
-    }
-
-
-def _simulate_agno_end_of_run_session_save(
-    storage: _FakeSessionStorage | object,
-    session: AgentSession,
-    run_context: RunContext,
-) -> None:
-    """Persist the stale in-memory session object the way Agno does at end-of-run."""
-    next_session_data = dict(session.session_data or {})
-    if run_context.session_state is not None:
-        next_session_data["session_state"] = run_context.session_state
-    session.session_data = next_session_data or None
-    storage.upsert_session(session)  # type: ignore[attr-defined]
 
 
 def _mock_openai_request(headers: dict[str, str] | None = None) -> MagicMock:
@@ -365,9 +336,14 @@ def test_dynamic_toolkit_session_initializes_from_initial_toolkits(tmp_path: Pat
     loaded = get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-1")
 
     assert loaded == ["development"]
-    assert storage.sessions["session-1"].session_data == _expected_persisted_dynamic_toolkits_session_data(
-        ["development"]
-    )
+    assert storage.sessions["session-1"].session_data == {
+        "mindroom": {
+            "dynamic_toolkits": {
+                "version": 1,
+                "loaded": ["development"],
+            },
+        },
+    }
 
 
 def test_dynamic_toolkit_session_isolation_is_per_session_id(tmp_path: Path) -> None:
@@ -435,9 +411,14 @@ def test_dynamic_toolkit_session_reorders_loaded_toolkits_to_allowed_order(tmp_p
     loaded = get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-1")
 
     assert loaded == ["development", "research"]
-    assert storage.sessions["session-1"].session_data == _expected_persisted_dynamic_toolkits_session_data(
-        ["development", "research"]
-    )
+    assert storage.sessions["session-1"].session_data == {
+        "mindroom": {
+            "dynamic_toolkits": {
+                "version": 1,
+                "loaded": ["development", "research"],
+            },
+        },
+    }
 
 
 def test_dynamic_toolkit_session_drops_stale_toolkit_refs(tmp_path: Path) -> None:
@@ -470,9 +451,14 @@ def test_dynamic_toolkit_session_drops_stale_toolkit_refs(tmp_path: Path) -> Non
     loaded = get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-1")
 
     assert loaded == ["research"]
-    assert storage.sessions["session-1"].session_data == _expected_persisted_dynamic_toolkits_session_data(
-        ["research"]
-    )
+    assert storage.sessions["session-1"].session_data == {
+        "mindroom": {
+            "dynamic_toolkits": {
+                "version": 1,
+                "loaded": ["research"],
+            },
+        },
+    }
 
 
 def test_dynamic_toolkit_merge_deduplicates_static_and_dynamic_tools(tmp_path: Path) -> None:
@@ -806,7 +792,6 @@ def test_create_agent_uses_session_loaded_dynamic_toolkits_and_injects_prompt_bl
     with (
         patch("mindroom.ai.get_model_instance", return_value=model),
         patch("mindroom.agents.Agent") as mock_agent_class,
-        patch("mindroom.agents.logger.info") as mock_agent_info,
     ):
         create_agent(
             "code",
@@ -814,18 +799,13 @@ def test_create_agent_uses_session_loaded_dynamic_toolkits_and_injects_prompt_bl
             runtime_paths,
             execution_identity=None,
             session_id="session-1",
-            history_storage=storage,
             include_interactive_questions=False,
         )
         initial_tools = mock_agent_class.call_args.kwargs["tools"]
         initial_instructions = mock_agent_class.call_args.kwargs["instructions"]
-        stale_session = get_agent_session(storage, "session-1")
-        assert stale_session is not None
 
         manager = next(tool for tool in initial_tools if tool.name == "dynamic_tools")
-        run_context = RunContext(run_id="run-1", session_id="session-1", session_state={})
-        assert _tool_payload(manager.load_tools("research", run_context=run_context))["status"] == "loaded"
-        _simulate_agno_end_of_run_session_save(storage, stale_session, run_context)
+        assert _tool_payload(manager.load_tools("research"))["status"] == "loaded"
 
         create_agent(
             "code",
@@ -833,7 +813,6 @@ def test_create_agent_uses_session_loaded_dynamic_toolkits_and_injects_prompt_bl
             runtime_paths,
             execution_identity=None,
             session_id="session-1",
-            history_storage=storage,
             include_interactive_questions=False,
         )
         loaded_tools = mock_agent_class.call_args.kwargs["tools"]
@@ -848,7 +827,6 @@ def test_create_agent_uses_session_loaded_dynamic_toolkits_and_injects_prompt_bl
     assert "unload_tools" in loaded_instruction_text
     assert "next request" in loaded_instruction_text
     assert "each member manages its own toolkit state" in loaded_instruction_text
-    assert mock_agent_info.call_args_list[-1].kwargs["loaded_dynamic_toolkits"] == ["research"]
     assert get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-1") == [
         "research",
     ]
@@ -988,24 +966,15 @@ async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path:
     config = _validated_config(tmp_path, raw)
     runtime_paths = _runtime_paths(tmp_path)
     storage = create_session_storage("code", config, runtime_paths, execution_identity=None)
-    model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-    with patch("mindroom.ai.get_model_instance", return_value=model):
-        initial_agent = create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            session_id="session-1",
-            history_storage=storage,
-            include_interactive_questions=False,
-        )
-    stale_session = get_agent_session(storage, "session-1")
-    assert stale_session is not None
-    manager = next(tool for tool in initial_agent.tools if tool.name == "dynamic_tools")
-    run_context = RunContext(run_id="run-1", session_id="session-1", session_state={})
-    assert _tool_payload(manager.load_tools("research", run_context=run_context))["status"] == "loaded"
-    _simulate_agno_end_of_run_session_save(storage, stale_session, run_context)
+    save_loaded_toolkits_for_session(
+        storage,
+        agent_name="code",
+        config=config,
+        session_id="session-1",
+        loaded_toolkits=["research"],
+    )
     storage.close()
+    model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
     prepared_execution = SimpleNamespace(
         final_prompt="enhanced prompt",
         replay_plan=None,
@@ -1023,7 +992,6 @@ async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path:
         patch("mindroom.ai.prepare_agent_execution_context", new_callable=AsyncMock, return_value=prepared_execution),
         patch("mindroom.ai.get_model_instance", return_value=model),
         patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=run_output) as mock_run,
-        patch("mindroom.agents.logger.info") as mock_agent_info,
     ):
         response = await ai_response(
             agent_name="code",
@@ -1037,10 +1005,6 @@ async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path:
     built_agent = mock_run.call_args.args[0]
 
     assert response == "ok"
-    assert any(
-        call.args == ("Created agent",) and call.kwargs.get("loaded_dynamic_toolkits") == ["research"]
-        for call in mock_agent_info.call_args_list
-    )
     assert [tool.name for tool in built_agent.tools] == ["sleep", "dynamic_tools"]
     assert any("Currently loaded: research" in str(instruction) for instruction in built_agent.instructions)
 
