@@ -4,7 +4,7 @@ icon: lucide/wrench
 
 # Tools
 
-MindRoom includes 100+ tool integrations that agents can use to interact with external services.
+MindRoom includes 100+ built-in tools and presets that agents can use to work with files, services, external APIs, and Matrix-native workflows.
 
 ## Enabling Tools
 
@@ -18,8 +18,8 @@ agents:
     role: A helpful assistant with file and web access
     model: sonnet
     tools:
-      - file                              # plain string, uses defaults
-      - shell:                            # inline config override
+      - file
+      - shell:
           extra_env_passthrough: "DAWARICH_*"
       - github
       - duckduckgo
@@ -33,90 +33,35 @@ defaults:
     - scheduler
 ```
 
-`defaults.tools` are merged into each agent's own `tools` list with duplicates removed. Set `defaults.tools: []` to disable global default tools, or set `agents.<name>.include_default_tools: false` to opt out a specific agent.
-
-When the same tool appears in both `defaults.tools` and an agent's `tools` with inline overrides, the per-agent overrides take priority (with non-overlapping keys merged from both).
+`defaults.tools` are merged into each agent's own `tools` list with duplicates removed.
+Set `defaults.tools: []` to disable global default tools, or set `agents.<name>.include_default_tools: false` to opt out a specific agent.
+When the same tool appears in both `defaults.tools` and an agent's `tools` with inline overrides, the per-agent overrides take priority, with non-overlapping keys merged from both.
 See [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration) for the full override syntax and merge order.
 
-## Tool Categories
+## Browse By Topic
 
-Tools are organized by category:
+- [Execution & Coding](execution-and-coding.md) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
+- [Data & Databases](data-and-databases.md) - SQL, databases, spreadsheets, tabular analysis, and financial/business datasets.
+- [Web Search](web-search.md) - Search engines and search APIs.
+- [Web Scraping & Browser](web-scraping-and-browser.md) - Crawlers, extractors, browser automation, and page-reading tools.
+- [Research Sources](research-sources.md) - ArXiv, Wikipedia, PubMed, and Hacker News.
+- [AI & Generation](ai-and-generation.md) - Image, video, speech, and transcription APIs.
+- [Media & Content](media-and-content.md) - Media processing, brand/media retrieval, and Spotify.
+- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging, thread resolution, and attachment-aware workflows.
+- [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
+- [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, and task managers.
+- [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar APIs and MindRoom scheduling tools.
+- [Memory & Storage](memory-and-storage.md) - Explicit memory tools and external memory providers.
+- [Agent Orchestration](agent-orchestration.md) - Subagents, delegation, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Automation & Platforms](automation-and-platforms.md) - Infrastructure automation, generic APIs, and platform aggregators.
+- [Location, Commerce, & Home](location-commerce-and-home.md) - Maps, weather, commerce, and Home Assistant.
 
-- **File & System** - File operations, shell, Docker, Python, SQL, databases (Postgres, Redshift, Neo4j, DuckDB), Pandas, CSV, coding, self-config, calculator, reasoning, file generation, visualization, sleep
-- **Web Search & Research** - DuckDuckGo, Google Search, Baidu, Tavily, Exa, SerpAPI, Serper, SearXNG, Linkup
-- **Web Scraping & Crawling** - Firecrawl, Crawl4AI, BrowserBase, AgentQL, Spider, ScrapeGraph, Apify, BrightData, Oxylabs, Jina, Website, Trafilatura, Newspaper4k, Web Browser Tools, Browser (OpenClaw)
-- **AI & ML APIs** - OpenAI, Gemini, Groq, Replicate, Fal, DALL-E, Cartesia, ElevenLabs, Desi Vocal, LumaLabs, ModelsLabs
-- **Knowledge & Research** - arXiv, Wikipedia, PubMed, Hacker News
-- **Communication & Social** - Matrix, Gmail, Slack, Discord, Telegram, WhatsApp, Twilio, Webex, Resend, Email (SMTP), X/Twitter, Reddit, Zoom
-- **Project Management** - GitHub, Bitbucket, Jira, Linear, ClickUp, Confluence, Notion, Trello, Todoist, Zendesk
-- **Calendar & Scheduling** - Google Calendar, Cal.com, Scheduler
-- **Data & Business** - Google Sheets, Yahoo Finance, OpenBB, Shopify, Financial Datasets API
-- **Location & Maps** - Google Maps, OpenWeather
-- **DevOps & Infrastructure** - AWS Lambda, AWS SES, Airflow, E2B, Daytona, Claude Agent, Composio, Google BigQuery, [container sandbox proxy](../deployment/sandbox-proxy.md)
-- **Smart Home** - Home Assistant
-- **Media & Entertainment** - YouTube, Spotify, Giphy, MoviePy, Unsplash, Brandfetch
-- **Memory & Storage** - Memory, Mem0, Zep, Attachments
-- **Custom & Config** - Custom API, Config Manager, Context Compaction, Subagents, Delegate
+## Tool Presets And Implied Tools
 
-## Quick Examples
-
-### Research Agent
-
-```yaml
-agents:
-  researcher:
-    display_name: Researcher
-    role: Find and summarize information from the web and academic sources
-    model: sonnet
-    tools:
-      - duckduckgo
-      - arxiv
-      - wikipedia
-      - pubmed
-```
-
-### DevOps Agent
-
-```yaml
-agents:
-  devops:
-    display_name: DevOps
-    role: Manage infrastructure, containers, and deployments
-    model: sonnet
-    tools:
-      - shell
-      - docker
-      - github
-      - aws_lambda
-```
-
-### Communication Agent
-
-```yaml
-agents:
-  notifier:
-    display_name: Notifier
-    role: Send notifications and messages across platforms
-    model: sonnet
-    tools:
-      - slack
-      - telegram
-      - gmail
-```
-
-## Implied Tools
-
-Some tools automatically include companion tools via the `IMPLIED_TOOLS` mapping.
-When `matrix_message` is in an agent's tool list, `attachments` is automatically added.
-This happens during tool name expansion — the effective tool set includes both the explicitly listed tools and any implied tools.
-
-Currently the only implied mapping is:
-
-| Tool | Implies |
-|------|---------|
-| `matrix_message` | `attachments` |
-
-This is why the `openclaw_compat` preset includes `attachments` in its effective tool set even though the preset definition only lists `matrix_message`.
+Some entries are config-only presets rather than runtime toolkits.
+`openclaw_compat` expands to a native bundle of MindRoom tools.
+Some tools also imply companion tools through `Config.IMPLIED_TOOLS`.
+Today `matrix_message` implies `attachments`, so the effective tool set includes both even when only `matrix_message` is configured explicitly.
 
 ## Tool Runtime Context
 
@@ -131,35 +76,27 @@ Tools like `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` use 
 `thread_tags` intentionally replaces the removed experimental `thread_resolution` tool and does not auto-read old `com.mindroom.thread.resolution` markers.
 `matrix_api` defaults `room_id` to the active room, supports authorized cross-room targeting, and never infers event IDs or state keys from thread context.
 
-Attachment IDs from the current conversation are also available in the runtime context.
-Tools that accept `attachment_ids` (such as `matrix_message`) resolve those IDs against the context-scoped attachment registry, preventing one conversation from accessing files uploaded in another.
+## Worker-Routed Execution
+
+Some tools default to running in a sandboxed worker container instead of the primary agent process.
+The current worker-routed defaults are `file`, `shell`, `python`, and `coding`.
+Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for deployment details and worker-scope behavior.
+
+## Shared-Only Integrations
+
+Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
+The current shared-only integrations are `google`, `spotify`, `homeassistant`, `gmail`, `google_calendar`, and `google_sheets`.
 
 ## Automatic Dependency Installation
 
-Each tool declares its Python dependencies as an optional extra in `pyproject.toml`.
-When an agent tries to use a tool whose dependencies aren't installed, MindRoom automatically installs them at runtime:
+Each tool declares its optional Python dependencies in `pyproject.toml`.
+When a tool is enabled but its dependencies are missing, MindRoom can auto-install the required extra at runtime.
+Set `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` to disable that behavior.
 
-1. **Pre-check** — uses `importlib.util.find_spec()` to detect missing packages without importing anything
-2. **Locked install** — runs `uv sync --locked --inexact --no-dev --extra <tool>` to install exact pinned versions from `uv.lock`
-3. **Fallback** — if no lockfile is available, falls back to `uv pip install` or `pip install`
+## Related Docs
 
-This means you don't need to install all 100+ tool dependencies upfront — only the tools your agents actually use get installed.
-
-To disable auto-install, set the environment variable:
-
-```bash
-MINDROOM_NO_AUTO_INSTALL_TOOLS=1
-```
-
-To pre-install specific tool dependencies:
-
-```bash
-uv sync --extra gmail --extra slack --extra github
-```
-
-See the full list in:
-
-- [Built-in Tools](builtin.md) - Complete list of available built-in tools with configuration details
-- [Dynamic Toolkits](dynamic-toolkits.md) - Load and unload tool bundles at runtime to reduce context overhead
-- [MCP (Planned)](mcp.md) - Native MCP status and plugin-based workaround
-- [Plugins](../plugins.md) - Extend MindRoom with custom tools and skills (including MCP via plugin workaround)
+- [MCP](mcp.md) - Native MCP status and plugin-based workaround.
+- [Plugins](../plugins.md) - Extend MindRoom with custom tools and skills.
+- [Attachments](../attachments.md) - Attachment lifecycle and context scoping.
+- [Scheduling](../scheduling.md) - Chat command scheduling and task behavior.
+- [OpenClaw Workspace Import](../openclaw.md) - `openclaw_compat` preset and workspace portability.
