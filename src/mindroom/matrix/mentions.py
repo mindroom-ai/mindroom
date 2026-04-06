@@ -88,8 +88,44 @@ def _process_mention(
     if name.startswith("user_"):
         return None
 
-    # Try to find the agent (case-insensitive), accepting optional namespace suffix.
+    agent_name = _find_matching_agent_name(match, config, runtime_paths)
+    if agent_name is None:
+        return None
+
+    agent_config = config.agents[agent_name]
+    user_id = MatrixID.from_agent(agent_name, sender_domain, runtime_paths).full_id
+    return (original, user_id, agent_config.display_name)
+
+
+def _find_matching_agent_name(
+    match: re.Match,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return the configured agent name matched by one mention, if any."""
+    for candidate_name in _mention_candidate_names(match, runtime_paths):
+        candidate_lower = candidate_name.lower()
+        for config_agent_name in config.agents:
+            if config_agent_name.lower() == candidate_lower:
+                return config_agent_name
+    return None
+
+
+def _mention_candidate_names(match: re.Match, runtime_paths: RuntimePaths) -> list[str]:
+    """Build ordered candidate agent names for one mention match."""
+    name = match.group(2)
+
+    # Try to find the agent (case-insensitive), accepting optional namespace suffix
+    # and reconstructing the full name when the AGENT_PREFIX was stripped by the regex.
     candidate_names = [name]
+
+    # When the regex captured a "mindroom_" prefix (group 1), the original mention
+    # was e.g. "@mindroom_dev" but group(2) is just "dev".  The config key might
+    # be "mindroom_dev", so we must also try the un-stripped form.
+    prefix = match.group(1)
+    if prefix:
+        candidate_names.append(f"{prefix}{name}")
+
     namespace = mindroom_namespace(runtime_paths)
     if namespace:
         suffix = f"_{namespace}"
@@ -97,23 +133,7 @@ def _process_mention(
             stripped = name[: -len(suffix)]
             if stripped:
                 candidate_names.append(stripped)
-
-    agent_name = None
-    for candidate_name in candidate_names:
-        candidate_lower = candidate_name.lower()
-        for config_agent_name in config.agents:
-            if config_agent_name.lower() == candidate_lower:
-                agent_name = config_agent_name
-                break
-        if agent_name:
-            break
-
-    if agent_name:
-        agent_config = config.agents[agent_name]
-        user_id = MatrixID.from_agent(agent_name, sender_domain, runtime_paths).full_id
-        return (original, user_id, agent_config.display_name)
-
-    return None
+    return candidate_names
 
 
 def format_message_with_mentions(

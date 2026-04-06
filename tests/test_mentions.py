@@ -253,6 +253,73 @@ class TestMentionParsing:
         # This is a limitation we should be aware of
         assert "@mindroom_code:localhost" in processed or processed == text
 
+    def test_agent_name_starts_with_mindroom_prefix(self) -> None:
+        """Agent config key starting with 'mindroom_' should be resolved from @mindroom_dev.
+
+        When the config key is ``mindroom_dev`` and the mention is ``@mindroom_dev``,
+        the regex strips the ``mindroom_`` prefix leaving ``dev``.  The code must
+        reconstruct ``mindroom_dev`` and match the config key (ISSUE-098).
+        """
+        runtime_paths = _default_runtime_paths()
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator"),
+                "mindroom_dev": AgentConfig(display_name="DevAgent"),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
+        bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
+        _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
+
+        # @mindroom_dev should resolve to agent "mindroom_dev"
+        text = "@mindroom_dev can you look at this?"
+        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", bound, runtime_paths)
+
+        assert mentions == ["@mindroom_mindroom_dev:localhost"]
+        assert "@mindroom_mindroom_dev:localhost" in processed
+
+    def test_agent_name_starts_with_mindroom_prefix_full_localpart(self) -> None:
+        """Mentioning @mindroom_mindroom_dev (full localpart) should also work."""
+        runtime_paths = _default_runtime_paths()
+        config = Config(
+            agents={
+                "mindroom_dev": AgentConfig(display_name="DevAgent"),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
+        bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
+        _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
+
+        # @mindroom_mindroom_dev should also resolve (prefix stripped → mindroom_dev)
+        text = "@mindroom_mindroom_dev help"
+        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", bound, runtime_paths)
+
+        assert mentions == ["@mindroom_mindroom_dev:localhost"]
+        assert "@mindroom_mindroom_dev:localhost" in processed
+
+    def test_prefixed_mention_prefers_base_agent_when_both_names_exist(self) -> None:
+        """@mindroom_calculator should still resolve to calculator before mindroom_calculator."""
+        runtime_paths = _default_runtime_paths()
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator"),
+                "mindroom_calculator": AgentConfig(display_name="PrefixedCalculator"),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
+        bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
+        _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
+
+        processed, mentions, _markdown = parse_mentions_in_text(
+            "@mindroom_calculator help",
+            "localhost",
+            bound,
+            runtime_paths,
+        )
+
+        assert mentions == ["@mindroom_calculator:localhost"]
+        assert processed == "@mindroom_calculator:localhost help"
+
     def test_case_insensitive_mentions(self) -> None:
         """Test that mentions are case-insensitive."""
         config = _make_config(_default_runtime_paths())
