@@ -695,7 +695,6 @@ class MatrixMessageTools(Toolkit):
         new_text = message.strip() if isinstance(message, str) and message.strip() else None
         if new_text is None:
             return self._payload("error", action="edit", message="message is required for edit.")
-        formatted_text = parse_and_format_interactive(new_text, extract_mapping=False).formatted_text
 
         latest_thread_event_id: str | None = None
         if thread_id is not None:

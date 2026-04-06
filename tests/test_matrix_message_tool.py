@@ -633,7 +633,7 @@ async def test_matrix_message_edit_plain_text_clears_existing_interactive_questi
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id="$ctx-thread:localhost")
     thread_messages = [
-        {"event_id": "$latest", "timestamp": 1, "sender": "@alice:localhost", "body": "latest"},
+        make_visible_message(event_id="$latest", timestamp=1, sender="@alice:localhost", body="latest"),
     ]
     interactive.register_interactive_question(
         "$target",

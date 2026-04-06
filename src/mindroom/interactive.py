@@ -68,13 +68,13 @@ _deleted_question_ids: set[str] = set()
 # Match interactive code blocks
 _INTERACTIVE_MARKERS = frozenset({"interactive", "interactive json"})
 _INTERACTIVE_PATTERN = (
-    r"(?m)^[ \t]*```[ \t]*(?:"
+    r"```[ \t]*(?:"
     r"interactive(?:[ \t]+json)?[ \t]*\r?\n"
     r"|"
     r"\r?\n[ \t]*interactive(?:[ \t]+json)?[ \t]*\r?\n"
-    r")(.*?)\r?\n[ \t]*```[ \t]*$"
+    r")(.*?)\r?\n[ \t]*```[ \t]*(?=\r?\n|$)"
 )
-_INTERACTIVE_PATTERN_FLAGS = re.DOTALL | re.IGNORECASE | re.MULTILINE
+_INTERACTIVE_PATTERN_FLAGS = re.DOTALL | re.IGNORECASE
 _MAX_OPTIONS = 5
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
@@ -337,19 +337,30 @@ def _is_inline_interactive_json(text: str) -> bool:
 
 def _should_warn_unparsed_interactive(response_text: str) -> bool:
     """Return whether the text looks like a malformed interactive fence."""
-    for match in re.finditer(r"```", response_text):
-        fence_body = response_text[match.end() :]
-        fence_lines = fence_body.splitlines()
-        fence_marker = fence_lines[0].strip() if fence_lines else fence_body.strip()
+    lines = response_text.splitlines()
+    for index, line in enumerate(lines):
+        stripped_line = line.lstrip()
+        fence_index = stripped_line.find("```")
+        if fence_index == -1:
+            continue
+
+        fence_marker = stripped_line[fence_index + 3 :].strip()
         if _is_interactive_marker(fence_marker) or _is_inline_interactive_json(fence_marker):
             return True
         if fence_marker:
             continue
 
-        if len(fence_lines) < 2:
+        if index + 1 >= len(lines):
             continue
-        next_line = fence_lines[1]
-        if _is_interactive_marker(next_line) or _is_inline_interactive_json(next_line):
+        next_line = lines[index + 1].strip()
+        if _is_inline_interactive_json(next_line):
+            return True
+        if not _is_interactive_marker(next_line):
+            continue
+        if index + 2 >= len(lines):
+            continue
+        payload_line = lines[index + 2].lstrip()
+        if payload_line.startswith(("{", "[")):
             return True
     return False
 
@@ -540,8 +551,17 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         )
         return _InteractiveResponse(response_text, None, None)
 
-    question = interactive_data.get("question", _DEFAULT_QUESTION)
-    options = interactive_data.get("options", [])
+    if not isinstance(interactive_data, dict):
+        logger.warning(
+            "Interactive JSON payload must be an object",
+            payload_type=type(interactive_data).__name__,
+            preview=_preview_text(first_match.group(1)),
+        )
+        return _InteractiveResponse(response_text, None, None)
+
+    interactive_payload = cast("dict[str, object]", interactive_data)
+    question = interactive_payload.get("question", _DEFAULT_QUESTION)
+    options = cast("list[dict[str, str]]", interactive_payload.get("options", []))
 
     if not options:
         return _InteractiveResponse(response_text, None, None)
