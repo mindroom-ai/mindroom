@@ -69,6 +69,16 @@ def _next_threshold(
     return last_summarized_count + subsequent_interval
 
 
+def _is_thread_summary_message(message: ResolvedVisibleMessage) -> bool:
+    """Return whether a visible thread message is itself a summary notice."""
+    return isinstance(message.content.get("io.mindroom.thread_summary"), dict)
+
+
+def _count_non_summary_messages(thread_history: Sequence[ResolvedVisibleMessage]) -> int:
+    """Count visible thread messages while excluding summary notices."""
+    return sum(1 for message in thread_history if not _is_thread_summary_message(message))
+
+
 async def _recover_last_summary_count(
     client: nio.AsyncClient,
     room_id: str,
@@ -228,12 +238,12 @@ async def maybe_generate_thread_summary(
     runtime_paths: RuntimePaths,
 ) -> None:
     """Generate and send a thread summary if the message count crosses a threshold."""
-    thread_history = await fetch_thread_history(client, room_id, thread_id)
-    message_count = len(thread_history)
     first_threshold = config.defaults.thread_summary_first_threshold
     subsequent_interval = config.defaults.thread_summary_subsequent_interval
 
     async with thread_summary_lock(room_id, thread_id):
+        thread_history = await fetch_thread_history(client, room_id, thread_id)
+        message_count = _count_non_summary_messages(thread_history)
         cache_key = thread_summary_cache_key(room_id, thread_id)
 
         # Recover from existing summary events on cache miss (e.g., after restart)

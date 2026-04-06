@@ -35,6 +35,38 @@ def _make_thread_history(count: int) -> list[ResolvedVisibleMessage]:
     ]
 
 
+def _make_summary_notice_message(
+    thread_id: str,
+    *,
+    message_count: int,
+    event_id: str = "$summary-event",
+) -> ResolvedVisibleMessage:
+    """Build a synthetic thread summary notice for history-counting regressions."""
+    summary = "🧵 Existing thread summary"
+    return ResolvedVisibleMessage.synthetic(
+        sender="@mindroom:localhost",
+        body=summary,
+        event_id=event_id,
+        content={
+            "msgtype": "m.notice",
+            "body": summary,
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": thread_id,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": thread_id},
+            },
+            "io.mindroom.thread_summary": {
+                "version": 1,
+                "summary": summary,
+                "message_count": message_count,
+                "model": "manual",
+            },
+        },
+        thread_id=thread_id,
+    )
+
+
 # -- threshold arithmetic --
 
 
@@ -331,6 +363,71 @@ class TestMaybeGenerateThreadSummary:
         client.room_send.assert_awaited_once()
         assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
 
+    @pytest.mark.parametrize(
+        ("message_count", "should_generate"),
+        [
+            (4, False),
+            (5, True),
+            (6, True),
+        ],
+    )
+    async def test_first_threshold_boundaries(self, message_count: int, should_generate: bool) -> None:
+        """The first-threshold boundary should trigger only at count 5 or above."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary1", room_id="!room:x"))
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+
+        with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_history",
+                return_value=_make_thread_history(message_count),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                return_value="Boundary summary",
+            ) as mock_gen,
+            patch(
+                "mindroom.thread_summary._recover_last_summary_count",
+                return_value=0,
+            ),
+        ):
+            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+
+        assert mock_gen.await_count == int(should_generate)
+        assert client.room_send.await_count == int(should_generate)
+
+    @pytest.mark.parametrize(
+        ("message_count", "should_generate"),
+        [
+            (14, False),
+            (15, True),
+            (16, True),
+        ],
+    )
+    async def test_second_threshold_boundaries(self, message_count: int, should_generate: bool) -> None:
+        """The second-threshold boundary should trigger only at count 15 or above."""
+        update_last_summary_count("!room:x", "$thread1", 5)
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary2", room_id="!room:x"))
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+
+        with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_history",
+                return_value=_make_thread_history(message_count),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                return_value="Boundary summary",
+            ) as mock_gen,
+        ):
+            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+
+        assert mock_gen.await_count == int(should_generate)
+        assert client.room_send.await_count == int(should_generate)
+
     async def test_concurrent_calls_generate_and_send_once_per_thread(self) -> None:
         """Concurrent calls for one thread should share a single generation/send path."""
         client = AsyncMock(spec=nio.AsyncClient)
@@ -541,6 +638,30 @@ class TestMaybeGenerateThreadSummary:
         client.room_send.assert_awaited_once()
         assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 13
 
+    async def test_existing_summary_notice_does_not_advance_threshold(self) -> None:
+        """Existing thread summary notices must not count toward the next automatic threshold."""
+        update_last_summary_count("!room:x", "$thread1", 5)
+        client = AsyncMock(spec=nio.AsyncClient)
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        thread_history = _make_thread_history(14) + [
+            _make_summary_notice_message("$thread1", message_count=5),
+        ]
+
+        with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_history",
+                return_value=thread_history,
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+            ) as mock_gen,
+        ):
+            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+
+        mock_gen.assert_not_awaited()
+        client.room_send.assert_not_awaited()
+
     async def test_generation_failure_no_event(self) -> None:
         """No Matrix event sent when LLM returns None; count is recorded to prevent retries."""
         client = AsyncMock(spec=nio.AsyncClient)
@@ -680,6 +801,51 @@ class TestMaybeGenerateThreadSummary:
 
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
+
+    async def test_concurrent_calls_serialize_history_fetch_inside_lock(self) -> None:
+        """Only one concurrent task should fetch history before the per-thread lock is released."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        fetch_started = asyncio.Event()
+        release_fetch = asyncio.Event()
+        fetch_calls = 0
+
+        async def _blocked_fetch(*_args: object, **_kwargs: object) -> list[ResolvedVisibleMessage]:
+            nonlocal fetch_calls
+            fetch_calls += 1
+            fetch_started.set()
+            await release_fetch.wait()
+            return _make_thread_history(5)
+
+        with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_history",
+                new=AsyncMock(side_effect=_blocked_fetch),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                return_value="Users discussed testing strategies",
+            ),
+            patch(
+                "mindroom.thread_summary.send_thread_summary_event",
+                new=AsyncMock(return_value="$summary1"),
+            ) as mock_send,
+            patch(
+                "mindroom.thread_summary._recover_last_summary_count",
+                return_value=0,
+            ),
+        ):
+            first = asyncio.create_task(maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp))
+            second = asyncio.create_task(maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp))
+            await fetch_started.wait()
+            await asyncio.sleep(0)
+            assert fetch_calls == 1
+            release_fetch.set()
+            await asyncio.gather(first, second)
+
+        assert fetch_calls == 2
+        mock_send.assert_awaited_once()
 
 
 # -- event content structure --
