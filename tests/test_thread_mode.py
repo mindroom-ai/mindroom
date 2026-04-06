@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.thread_utils import create_session_id
 
@@ -464,6 +465,17 @@ class TestCreateSessionIdWithNoneThread:
         """When thread_id is set, session_id should include it."""
         session_id = create_session_id("!room:localhost", "$thread123")
         assert session_id == "!room:localhost:$thread123"
+
+    def test_message_target_room_mode_reuses_room_level_session_format(self) -> None:
+        """Room-mode MessageTarget sessions should match create_session_id(None)."""
+        target = MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id="$thread123",
+            reply_to_event_id="$event456",
+            room_mode=True,
+        )
+        assert target.resolved_thread_id is None
+        assert target.session_id == create_session_id("!room:localhost", None)
 
 
 class TestExtractMessageContextRoomMode:
