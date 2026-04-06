@@ -15,8 +15,6 @@ from mindroom.tool_system.dynamic_toolkits import (
 )
 
 if TYPE_CHECKING:
-    from agno.db.sqlite import SqliteDb
-
     from mindroom.config.main import Config
 
 
@@ -28,12 +26,10 @@ class DynamicToolsToolkit(Toolkit):
         *,
         agent_name: str,
         config: Config,
-        storage: SqliteDb | None,
         session_id: str | None,
     ) -> None:
         self._agent_name = agent_name
         self._config = config
-        self._storage = storage
         self._session_id = session_id
         super().__init__(
             name="dynamic_tools",
@@ -53,7 +49,6 @@ class DynamicToolsToolkit(Toolkit):
 
     def _loaded_toolkits(self) -> list[str]:
         return get_loaded_toolkits_for_session(
-            self._storage,
             agent_name=self._agent_name,
             config=self._config,
             session_id=self._session_id,
@@ -80,7 +75,7 @@ class DynamicToolsToolkit(Toolkit):
 
     def _session_error(self, *, toolkit: str | None = None, loaded_toolkits: list[str] | None = None) -> str:
         payload: dict[str, object] = {
-            "message": "Dynamic toolkit changes require a stable session_id and persistent session storage.",
+            "message": "Dynamic toolkit changes require a stable session_id.",
         }
         if toolkit is not None:
             payload["toolkit"] = toolkit
@@ -145,7 +140,7 @@ class DynamicToolsToolkit(Toolkit):
                 message=f"Toolkit '{toolkit}' is already loaded for this session.",
             )
 
-        if self._storage is None or self._session_id is None:
+        if self._session_id is None:
             return self._session_error(toolkit=toolkit, loaded_toolkits=loaded_toolkits)
 
         return None
@@ -180,13 +175,11 @@ class DynamicToolsToolkit(Toolkit):
                 candidate_overrides=exc.candidate_overrides,
             )
 
-        saved_loaded_toolkits = save_loaded_toolkits_for_session(
-            self._storage,
-            agent_name=self._agent_name,
-            config=self._config,
+        save_loaded_toolkits_for_session(
             session_id=self._session_id,
             loaded_toolkits=candidate_loaded_toolkits,
         )
+        saved_loaded_toolkits = self._loaded_toolkits()
         return self._payload(
             "loaded",
             toolkit=toolkit,
@@ -238,16 +231,14 @@ class DynamicToolsToolkit(Toolkit):
                 message=f"Toolkit '{toolkit}' is not currently loaded for this session.",
             )
 
-        if self._storage is None or self._session_id is None:
+        if self._session_id is None:
             return self._session_error(toolkit=toolkit, loaded_toolkits=loaded_toolkits)
 
-        saved_loaded_toolkits = save_loaded_toolkits_for_session(
-            self._storage,
-            agent_name=self._agent_name,
-            config=self._config,
+        save_loaded_toolkits_for_session(
             session_id=self._session_id,
             loaded_toolkits=[name for name in loaded_toolkits if name != toolkit],
         )
+        saved_loaded_toolkits = self._loaded_toolkits()
         return self._payload(
             "unloaded",
             toolkit=toolkit,

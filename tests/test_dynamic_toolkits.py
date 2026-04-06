@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,8 +14,8 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunContext, RunStatus
 from agno.session.agent import AgentSession
 
-from mindroom.ai import ai_response
 from mindroom.agents import create_agent, create_session_storage
+from mindroom.ai import ai_response
 from mindroom.api.openai_compat import _build_team, _derive_session_id
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -24,15 +23,17 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.teams import _build_agent_from_orchestrator
+from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import (
     DynamicToolkitConflictError,
     get_loaded_toolkits_for_session,
-    resolve_dynamic_toolkit_selection,
+    merge_runtime_tool_configs,
     save_loaded_toolkits_for_session,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
     from pathlib import Path
 
 
@@ -68,17 +69,11 @@ def _base_config_data() -> dict[str, object]:
     }
 
 
-@dataclass
-class _FakeSessionStorage:
-    """Minimal in-memory session storage for dynamic toolkit tests."""
-
-    sessions: dict[str, AgentSession] = field(default_factory=dict)
-
-    def get_session(self, session_id: str, _session_type: object) -> AgentSession | None:
-        return self.sessions.get(session_id)
-
-    def upsert_session(self, session: AgentSession) -> None:
-        self.sessions[session.session_id] = session
+@pytest.fixture(autouse=True)
+def _clear_loaded_toolkits_state() -> Generator[None, None, None]:
+    dynamic_toolkits_module._loaded_toolkits.clear()
+    yield
+    dynamic_toolkits_module._loaded_toolkits.clear()
 
 
 def _validated_config(tmp_path: Path, raw: dict[str, object]) -> Config:
@@ -331,19 +326,10 @@ def test_dynamic_toolkit_session_initializes_from_initial_toolkits(tmp_path: Pat
     raw["agents"]["code"]["allowed_toolkits"] = ["research", "development"]
     raw["agents"]["code"]["initial_toolkits"] = ["development"]
     config = _validated_config(tmp_path, raw)
-    storage = _FakeSessionStorage()
-
-    loaded = get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-1")
+    loaded = get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1")
 
     assert loaded == ["development"]
-    assert storage.sessions["session-1"].session_data == {
-        "mindroom": {
-            "dynamic_toolkits": {
-                "version": 1,
-                "loaded": ["development"],
-            },
-        },
-    }
+    assert dynamic_toolkits_module._loaded_toolkits["session-1"] == ["development"]
 
 
 def test_dynamic_toolkit_session_isolation_is_per_session_id(tmp_path: Path) -> None:
@@ -356,27 +342,20 @@ def test_dynamic_toolkit_session_isolation_is_per_session_id(tmp_path: Path) -> 
     }
     raw["agents"]["code"]["allowed_toolkits"] = ["development", "research"]
     config = _validated_config(tmp_path, raw)
-    storage = _FakeSessionStorage()
 
     save_loaded_toolkits_for_session(
-        storage,
-        agent_name="code",
-        config=config,
         session_id="session-a",
         loaded_toolkits=["research"],
     )
     save_loaded_toolkits_for_session(
-        storage,
-        agent_name="code",
-        config=config,
         session_id="session-b",
         loaded_toolkits=["development"],
     )
 
-    assert get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-a") == [
+    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-a") == [
         "research",
     ]
-    assert get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-b") == [
+    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-b") == [
         "development",
     ]
 
@@ -391,38 +370,19 @@ def test_dynamic_toolkit_session_reorders_loaded_toolkits_to_allowed_order(tmp_p
     }
     raw["agents"]["code"]["allowed_toolkits"] = ["development", "research"]
     config = _validated_config(tmp_path, raw)
-    storage = _FakeSessionStorage(
-        sessions={
-            "session-1": AgentSession(
-                session_id="session-1",
-                agent_id="code",
-                session_data={
-                    "mindroom": {
-                        "dynamic_toolkits": {
-                            "version": 1,
-                            "loaded": ["research", "development"],
-                        },
-                    },
-                },
-            ),
-        },
+    save_loaded_toolkits_for_session(
+        session_id="session-1",
+        loaded_toolkits=["research", "development"],
     )
 
-    loaded = get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-1")
+    loaded = get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1")
 
     assert loaded == ["development", "research"]
-    assert storage.sessions["session-1"].session_data == {
-        "mindroom": {
-            "dynamic_toolkits": {
-                "version": 1,
-                "loaded": ["development", "research"],
-            },
-        },
-    }
+    assert dynamic_toolkits_module._loaded_toolkits["session-1"] == ["development", "research"]
 
 
 def test_dynamic_toolkit_session_drops_stale_toolkit_refs(tmp_path: Path) -> None:
-    """Removed or disallowed toolkit names should be scrubbed from persisted state."""
+    """Removed or disallowed toolkit names should be scrubbed from in-memory state."""
     raw = _base_config_data()
     raw["defaults"] = {"tools": []}
     raw["toolkits"] = {
@@ -431,34 +391,15 @@ def test_dynamic_toolkit_session_drops_stale_toolkit_refs(tmp_path: Path) -> Non
     }
     raw["agents"]["code"]["allowed_toolkits"] = ["development", "research"]
     config = _validated_config(tmp_path, raw)
-    storage = _FakeSessionStorage(
-        sessions={
-            "session-1": AgentSession(
-                session_id="session-1",
-                agent_id="code",
-                session_data={
-                    "mindroom": {
-                        "dynamic_toolkits": {
-                            "version": 1,
-                            "loaded": ["stale", "research"],
-                        },
-                    },
-                },
-            ),
-        },
+    save_loaded_toolkits_for_session(
+        session_id="session-1",
+        loaded_toolkits=["stale", "research"],
     )
 
-    loaded = get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-1")
+    loaded = get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1")
 
     assert loaded == ["research"]
-    assert storage.sessions["session-1"].session_data == {
-        "mindroom": {
-            "dynamic_toolkits": {
-                "version": 1,
-                "loaded": ["research"],
-            },
-        },
-    }
+    assert dynamic_toolkits_module._loaded_toolkits["session-1"] == ["research"]
 
 
 def test_dynamic_toolkit_merge_deduplicates_static_and_dynamic_tools(tmp_path: Path) -> None:
@@ -476,15 +417,14 @@ def test_dynamic_toolkit_merge_deduplicates_static_and_dynamic_tools(tmp_path: P
     }
     config = _validated_config(tmp_path, raw)
 
-    selection = resolve_dynamic_toolkit_selection(
-        None,
+    merged_tool_configs = merge_runtime_tool_configs(
         agent_name="code",
         config=config,
-        session_id=None,
+        loaded_toolkits=["development"],
+        enable_dynamic_tools_manager=False,
     )
 
-    assert selection.loaded_toolkits == ("development",)
-    assert [entry.name for entry in selection.runtime_tool_configs] == [
+    assert [entry.name for entry in merged_tool_configs] == [
         "shell",
         "file",
     ]
@@ -506,11 +446,11 @@ def test_dynamic_toolkit_merge_rejects_conflicting_overrides(tmp_path: Path) -> 
     config = _validated_config(tmp_path, raw)
 
     with pytest.raises(DynamicToolkitConflictError, match="conflicts on tool 'shell'") as exc_info:
-        resolve_dynamic_toolkit_selection(
-            None,
+        merge_runtime_tool_configs(
             agent_name="code",
             config=config,
-            session_id=None,
+            loaded_toolkits=["development"],
+            enable_dynamic_tools_manager=False,
         )
 
     assert exc_info.value.toolkit_name == "development"
@@ -532,15 +472,15 @@ def test_dynamic_toolkit_merge_accepts_equivalent_static_and_dynamic_overrides(t
     }
     config = _validated_config(tmp_path, raw)
 
-    selection = resolve_dynamic_toolkit_selection(
-        None,
+    merged_tool_configs = merge_runtime_tool_configs(
         agent_name="code",
         config=config,
-        session_id=None,
+        loaded_toolkits=["development"],
+        enable_dynamic_tools_manager=False,
     )
 
-    assert [entry.name for entry in selection.runtime_tool_configs] == ["shell"]
-    assert selection.runtime_tool_configs[0].tool_config_overrides == {"shell_path_prepend": "/a, /b"}
+    assert [entry.name for entry in merged_tool_configs] == ["shell"]
+    assert merged_tool_configs[0].tool_config_overrides == {"shell_path_prepend": "/a, /b"}
 
 
 def test_dynamic_toolkit_merge_accepts_equivalent_dynamic_overrides(tmp_path: Path) -> None:
@@ -560,19 +500,19 @@ def test_dynamic_toolkit_merge_accepts_equivalent_dynamic_overrides(tmp_path: Pa
     }
     config = _validated_config(tmp_path, raw)
 
-    selection = resolve_dynamic_toolkit_selection(
-        None,
+    merged_tool_configs = merge_runtime_tool_configs(
         agent_name="code",
         config=config,
-        session_id=None,
+        loaded_toolkits=["first", "second"],
+        enable_dynamic_tools_manager=False,
     )
 
-    assert [entry.name for entry in selection.runtime_tool_configs] == ["shell"]
-    assert selection.runtime_tool_configs[0].tool_config_overrides == {"shell_path_prepend": "/a, /b"}
+    assert [entry.name for entry in merged_tool_configs] == ["shell"]
+    assert merged_tool_configs[0].tool_config_overrides == {"shell_path_prepend": "/a, /b"}
 
 
-def test_team_members_with_same_session_id_keep_separate_dynamic_toolkit_state(tmp_path: Path) -> None:
-    """V1 keeps dynamic toolkit state per agent even when team members share a session id."""
+def test_team_members_with_same_session_id_share_dynamic_toolkit_state(tmp_path: Path) -> None:
+    """In-memory toolkit state is shared by session_id across agent rebuilds."""
     raw = _base_config_data()
     raw["defaults"] = {"tools": []}
     raw["toolkits"] = {"research": {"tools": ["sleep"]}}
@@ -583,35 +523,16 @@ def test_team_members_with_same_session_id_keep_separate_dynamic_toolkit_state(t
         "allowed_toolkits": ["research"],
     }
     config = _validated_config(tmp_path, raw)
-    runtime_paths = _runtime_paths(tmp_path)
-    code_storage = create_session_storage("code", config, runtime_paths, execution_identity=None)
-    worker_storage = create_session_storage("worker", config, runtime_paths, execution_identity=None)
 
     save_loaded_toolkits_for_session(
-        code_storage,
-        agent_name="code",
-        config=config,
         session_id="team-session",
         loaded_toolkits=["research"],
     )
 
-    assert get_loaded_toolkits_for_session(
-        code_storage,
-        agent_name="code",
-        config=config,
-        session_id="team-session",
-    ) == [
+    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="team-session") == ["research"]
+    assert get_loaded_toolkits_for_session(agent_name="worker", config=config, session_id="team-session") == [
         "research",
     ]
-    assert (
-        get_loaded_toolkits_for_session(
-            worker_storage,
-            agent_name="worker",
-            config=config,
-            session_id="team-session",
-        )
-        == []
-    )
 
 
 def test_dynamic_tools_manager_lists_allowed_toolkits_with_loaded_and_sticky_state(tmp_path: Path) -> None:
@@ -628,7 +549,6 @@ def test_dynamic_tools_manager_lists_allowed_toolkits_with_loaded_and_sticky_sta
     manager = DynamicToolsToolkit(
         agent_name="code",
         config=config,
-        storage=_FakeSessionStorage(),
         session_id="session-1",
     )
 
@@ -663,11 +583,9 @@ def test_dynamic_tools_manager_load_and_unload_cycle_returns_structured_statuses
     }
     raw["agents"]["code"]["allowed_toolkits"] = ["research"]
     config = _validated_config(tmp_path, raw)
-    storage = _FakeSessionStorage()
     manager = DynamicToolsToolkit(
         agent_name="code",
         config=config,
-        storage=storage,
         session_id="session-1",
     )
 
@@ -686,7 +604,7 @@ def test_dynamic_tools_manager_load_and_unload_cycle_returns_structured_statuses
     assert unloaded_payload["takes_effect"] == "next_request"
     assert not_loaded_payload["status"] == "not_loaded"
     assert not_loaded_payload["loaded_toolkits"] == []
-    assert get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-1") == []
+    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1") == []
 
 
 def test_dynamic_tools_manager_reports_unknown_not_allowed_and_conflict_statuses(tmp_path: Path) -> None:
@@ -701,11 +619,9 @@ def test_dynamic_tools_manager_reports_unknown_not_allowed_and_conflict_statuses
         "research": {"tools": ["duckduckgo"]},
     }
     config = _validated_config(tmp_path, raw)
-    storage = _FakeSessionStorage()
     manager = DynamicToolsToolkit(
         agent_name="code",
         config=config,
-        storage=storage,
         session_id="session-1",
     )
 
@@ -717,7 +633,7 @@ def test_dynamic_tools_manager_reports_unknown_not_allowed_and_conflict_statuses
     assert not_allowed_payload["status"] == "not_allowed"
     assert conflict_payload["status"] == "conflict"
     assert conflict_payload["conflicting_tool"] == "shell"
-    assert get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-1") == []
+    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1") == []
 
 
 def test_dynamic_tools_manager_rejects_scope_incompatible_toolkit_loads(tmp_path: Path) -> None:
@@ -730,11 +646,9 @@ def test_dynamic_tools_manager_rejects_scope_incompatible_toolkit_loads(tmp_path
     raw["agents"]["code"]["allowed_toolkits"] = ["mail"]
     config = _validated_config(tmp_path, raw)
     config.agents["code"].worker_scope = "user_agent"
-    storage = _FakeSessionStorage()
     manager = DynamicToolsToolkit(
         agent_name="code",
         config=config,
-        storage=storage,
         session_id="session-1",
     )
 
@@ -744,7 +658,7 @@ def test_dynamic_tools_manager_rejects_scope_incompatible_toolkit_loads(tmp_path
     assert payload["scope_label"] == "worker_scope=user_agent"
     assert payload["toolkit"] == "mail"
     assert payload["unsupported_tools"] == ["gmail"]
-    assert get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-1") == []
+    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1") == []
 
 
 def test_dynamic_tools_manager_refuses_to_unload_sticky_initial_toolkits(tmp_path: Path) -> None:
@@ -757,11 +671,9 @@ def test_dynamic_tools_manager_refuses_to_unload_sticky_initial_toolkits(tmp_pat
     raw["agents"]["code"]["allowed_toolkits"] = ["development"]
     raw["agents"]["code"]["initial_toolkits"] = ["development"]
     config = _validated_config(tmp_path, raw)
-    storage = _FakeSessionStorage()
     manager = DynamicToolsToolkit(
         agent_name="code",
         config=config,
-        storage=storage,
         session_id="session-1",
     )
 
@@ -769,7 +681,7 @@ def test_dynamic_tools_manager_refuses_to_unload_sticky_initial_toolkits(tmp_pat
 
     assert payload["status"] == "sticky"
     assert payload["loaded_toolkits"] == ["development"]
-    assert get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-1") == [
+    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1") == [
         "development",
     ]
 
@@ -785,7 +697,6 @@ def test_create_agent_uses_session_loaded_dynamic_toolkits_and_injects_prompt_bl
     }
     config = _validated_config(tmp_path, raw)
     runtime_paths = _runtime_paths(tmp_path)
-    storage = create_session_storage("code", config, runtime_paths, execution_identity=None)
     model = MagicMock()
     model.id = "gpt-4o-mini"
 
@@ -827,7 +738,7 @@ def test_create_agent_uses_session_loaded_dynamic_toolkits_and_injects_prompt_bl
     assert "unload_tools" in loaded_instruction_text
     assert "next request" in loaded_instruction_text
     assert "each member manages its own toolkit state" in loaded_instruction_text
-    assert get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id="session-1") == [
+    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1") == [
         "research",
     ]
 
@@ -864,6 +775,38 @@ def test_create_agent_without_session_id_skips_dynamic_tools_and_prompt_block(tm
     assert not any(
         "## Dynamic Toolkits" in str(instruction) for instruction in mock_agent_class.call_args.kwargs["instructions"]
     )
+
+
+def test_create_agent_reuses_saved_in_memory_toolkits_across_calls(tmp_path: Path) -> None:
+    """Saving one session's loaded toolkits should affect the next create_agent call for that session."""
+    raw = _base_config_data()
+    raw["defaults"] = {"tools": []}
+    raw["agents"]["code"]["include_default_tools"] = False
+    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
+    raw["toolkits"] = {
+        "research": {"tools": ["sleep"]},
+    }
+    config = _validated_config(tmp_path, raw)
+    runtime_paths = _runtime_paths(tmp_path)
+    model = MagicMock()
+    model.id = "gpt-4o-mini"
+
+    save_loaded_toolkits_for_session(session_id="session-1", loaded_toolkits=["research"])
+
+    with (
+        patch("mindroom.ai.get_model_instance", return_value=model),
+        patch("mindroom.agents.Agent") as mock_agent_class,
+    ):
+        create_agent(
+            "code",
+            config,
+            runtime_paths,
+            execution_identity=None,
+            session_id="session-1",
+            include_interactive_questions=False,
+        )
+
+    assert [tool.name for tool in mock_agent_class.call_args.kwargs["tools"]] == ["sleep", "dynamic_tools"]
 
 
 def test_create_agent_uses_dynamic_runtime_worker_routing(tmp_path: Path) -> None:
@@ -919,7 +862,6 @@ def test_create_agent_tool_schema_count_grows_after_loading_toolkit(tmp_path: Pa
     }
     config = _validated_config(tmp_path, raw)
     runtime_paths = _runtime_paths(tmp_path)
-    storage = create_session_storage("code", config, runtime_paths, execution_identity=None)
     before_agent = create_agent(
         "code",
         config,
@@ -929,9 +871,6 @@ def test_create_agent_tool_schema_count_grows_after_loading_toolkit(tmp_path: Pa
         include_interactive_questions=False,
     )
     save_loaded_toolkits_for_session(
-        storage,
-        agent_name="code",
-        config=config,
         session_id="session-1",
         loaded_toolkits=["research"],
     )
@@ -965,15 +904,10 @@ async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path:
     }
     config = _validated_config(tmp_path, raw)
     runtime_paths = _runtime_paths(tmp_path)
-    storage = create_session_storage("code", config, runtime_paths, execution_identity=None)
     save_loaded_toolkits_for_session(
-        storage,
-        agent_name="code",
-        config=config,
         session_id="session-1",
         loaded_toolkits=["research"],
     )
-    storage.close()
     model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
     prepared_execution = SimpleNamespace(
         final_prompt="enhanced prompt",
@@ -1108,26 +1042,20 @@ def test_openai_team_builder_passes_session_id_to_member_agents(tmp_path: Path) 
 
 
 def test_openai_derived_stable_session_id_preserves_dynamic_toolkit_state(tmp_path: Path) -> None:
-    """Stable OpenAI-compatible session ids should reuse the same persisted toolkit state."""
+    """Stable OpenAI-compatible session ids should reuse the same in-memory toolkit state."""
     raw = _base_config_data()
     raw["defaults"] = {"tools": []}
     raw["toolkits"] = {"research": {"tools": ["duckduckgo"]}}
     raw["agents"]["code"]["allowed_toolkits"] = ["research"]
     config = _validated_config(tmp_path, raw)
-    runtime_paths = _runtime_paths(tmp_path)
-    storage = create_session_storage("code", config, runtime_paths, execution_identity=None)
 
     stable_sid = _derive_session_id("code", _mock_openai_request({"X-Session-Id": "chat-1"}))
     save_loaded_toolkits_for_session(
-        storage,
-        agent_name="code",
-        config=config,
         session_id=stable_sid,
         loaded_toolkits=["research"],
     )
 
     assert get_loaded_toolkits_for_session(
-        storage,
         agent_name="code",
         config=config,
         session_id=_derive_session_id("code", _mock_openai_request({"X-Session-Id": "chat-1"})),
@@ -1141,21 +1069,16 @@ def test_openai_ephemeral_fallback_session_ids_do_not_share_dynamic_toolkit_stat
     raw["toolkits"] = {"research": {"tools": ["duckduckgo"]}}
     raw["agents"]["code"]["allowed_toolkits"] = ["research"]
     config = _validated_config(tmp_path, raw)
-    runtime_paths = _runtime_paths(tmp_path)
-    storage = create_session_storage("code", config, runtime_paths, execution_identity=None)
 
     first_sid = _derive_session_id("code", _mock_openai_request())
     second_sid = _derive_session_id("code", _mock_openai_request())
     save_loaded_toolkits_for_session(
-        storage,
-        agent_name="code",
-        config=config,
         session_id=first_sid,
         loaded_toolkits=["research"],
     )
 
     assert first_sid != second_sid
-    assert get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id=first_sid) == [
+    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id=first_sid) == [
         "research",
     ]
-    assert get_loaded_toolkits_for_session(storage, agent_name="code", config=config, session_id=second_sid) == []
+    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id=second_sid) == []

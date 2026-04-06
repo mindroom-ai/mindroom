@@ -2,27 +2,19 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
-
-from agno.db.base import SessionType
-from agno.session.agent import AgentSession
+from typing import TYPE_CHECKING
 
 from mindroom.config.models import ResolvedToolConfig
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from agno.db.sqlite import SqliteDb
-
     from mindroom.config.main import Config
 
 
 logger = get_logger(__name__)
 
-_MINDROOM_SESSION_KEY = "mindroom"
-_DYNAMIC_TOOLKITS_KEY = "dynamic_toolkits"
-_DYNAMIC_TOOLKITS_VERSION = 1
+_loaded_toolkits: dict[str, list[str]] = {}
 
 
 @dataclass(frozen=True)
@@ -72,48 +64,6 @@ def _initial_loaded_toolkits(config: Config, agent_name: str) -> list[str]:
     return _ordered_loaded_toolkits(agent_config.allowed_toolkits, agent_config.initial_toolkits)
 
 
-def _session_payload(loaded_toolkits: list[str]) -> dict[str, object]:
-    return {
-        "version": _DYNAMIC_TOOLKITS_VERSION,
-        "loaded": list(loaded_toolkits),
-    }
-
-
-def _new_agent_session(*, session_id: str, agent_name: str) -> AgentSession:
-    now = int(time.time())
-    return AgentSession(
-        session_id=session_id,
-        agent_id=agent_name,
-        session_data={},
-        created_at=now,
-        updated_at=now,
-    )
-
-
-def _get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | None:
-    raw = storage.get_session(session_id, SessionType.AGENT)
-    if raw is None:
-        return None
-    if isinstance(raw, AgentSession):
-        return raw
-    if isinstance(raw, dict):
-        return AgentSession.from_dict(cast("dict[str, Any]", raw))
-    return None
-
-
-def _ensure_mindroom_session_data(session: AgentSession) -> dict[str, object]:
-    session_data = session.session_data
-    if not isinstance(session_data, dict):
-        session_data = {}
-        session.session_data = session_data
-
-    mindroom_data = session_data.get(_MINDROOM_SESSION_KEY)
-    if not isinstance(mindroom_data, dict):
-        mindroom_data = {}
-        session_data[_MINDROOM_SESSION_KEY] = mindroom_data
-    return cast("dict[str, object]", mindroom_data)
-
-
 def _coerce_loaded_toolkits(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -160,80 +110,55 @@ def _normalize_effective_tool_config_overrides(
 
 
 def get_loaded_toolkits_for_session(
-    storage: SqliteDb | None,
     *,
     agent_name: str,
     config: Config,
     session_id: str | None,
 ) -> list[str]:
-    """Return one session's loaded dynamic toolkits, initializing persisted state when needed."""
-    if storage is None or session_id is None:
-        return _initial_loaded_toolkits(config, agent_name)
+    """Return one session's loaded dynamic toolkits, initializing in-memory state when needed."""
+    if session_id is None:
+        return []
 
-    session = _get_agent_session(storage, session_id)
-    if session is None:
-        session = _new_agent_session(session_id=session_id, agent_name=agent_name)
-        loaded_toolkits = _initial_loaded_toolkits(config, agent_name)
-        _ensure_mindroom_session_data(session)[_DYNAMIC_TOOLKITS_KEY] = _session_payload(loaded_toolkits)
-        storage.upsert_session(session)
-        return loaded_toolkits
-
-    mindroom_data = _ensure_mindroom_session_data(session)
-    stored_state_object = mindroom_data.get(_DYNAMIC_TOOLKITS_KEY)
-    stored_state = (
-        cast("dict[str, object] | None", stored_state_object) if isinstance(stored_state_object, dict) else None
-    )
-    if stored_state is None or stored_state.get("version") != _DYNAMIC_TOOLKITS_VERSION:
-        loaded_toolkits = _initial_loaded_toolkits(config, agent_name)
-        mindroom_data[_DYNAMIC_TOOLKITS_KEY] = _session_payload(loaded_toolkits)
-        storage.upsert_session(session)
-        return loaded_toolkits
+    raw_loaded_toolkits = _loaded_toolkits.get(session_id)
+    if raw_loaded_toolkits is None:
+        raw_loaded_toolkits = _initial_loaded_toolkits(config, agent_name)
+    else:
+        raw_loaded_toolkits = _coerce_loaded_toolkits(raw_loaded_toolkits)
 
     loaded_toolkits, invalid_toolkits = _sanitize_loaded_toolkits(
         config,
         agent_name,
-        _coerce_loaded_toolkits(stored_state.get("loaded")),
+        raw_loaded_toolkits,
     )
     if invalid_toolkits:
         logger.warning(
-            "Dropping invalid dynamic toolkits from session state",
+            "Dropping invalid dynamic toolkits from in-memory session state",
             agent=agent_name,
             session_id=session_id,
             invalid_toolkits=invalid_toolkits,
         )
 
-    if stored_state.get("loaded") != loaded_toolkits:
-        mindroom_data[_DYNAMIC_TOOLKITS_KEY] = _session_payload(loaded_toolkits)
-        storage.upsert_session(session)
+    if session_id not in _loaded_toolkits or _loaded_toolkits[session_id] != loaded_toolkits:
+        _loaded_toolkits[session_id] = list(loaded_toolkits)
 
     return loaded_toolkits
 
 
 def save_loaded_toolkits_for_session(
-    storage: SqliteDb | None,
     *,
-    agent_name: str,
-    config: Config,
     session_id: str | None,
     loaded_toolkits: list[str],
-) -> list[str]:
-    """Persist one session's loaded toolkit set in canonical allowed-toolkit order."""
-    if storage is None or session_id is None:
-        msg = "Dynamic toolkit changes require a stable session_id."
-        raise ValueError(msg)
+) -> None:
+    """Persist one session's loaded toolkit set in memory."""
+    if session_id is None:
+        return
 
-    sanitized_loaded_toolkits, invalid_toolkits = _sanitize_loaded_toolkits(config, agent_name, loaded_toolkits)
-    if invalid_toolkits:
-        msg = f"Cannot persist unknown, disallowed, or scope-incompatible toolkits: {', '.join(invalid_toolkits)}"
-        raise ValueError(msg)
+    _loaded_toolkits[session_id] = _coerce_loaded_toolkits(loaded_toolkits)
 
-    session = _get_agent_session(storage, session_id)
-    if session is None:
-        session = _new_agent_session(session_id=session_id, agent_name=agent_name)
 
-    _ensure_mindroom_session_data(session)[_DYNAMIC_TOOLKITS_KEY] = _session_payload(sanitized_loaded_toolkits)
-    storage.upsert_session(session)
-    return sanitized_loaded_toolkits
+def clear_session_toolkits(session_id: str) -> None:
+    """Clear one session's loaded toolkit state."""
+    _loaded_toolkits.pop(session_id, None)
 
 
 def merge_runtime_tool_configs(
@@ -323,7 +248,6 @@ def _inject_special_tool_configs(
 
 
 def resolve_dynamic_toolkit_selection(
-    storage: SqliteDb | None,
     *,
     agent_name: str,
     config: Config,
@@ -332,7 +256,6 @@ def resolve_dynamic_toolkit_selection(
 ) -> DynamicToolkitSelection:
     """Return the current loaded toolkits and final runtime tool selection for one session."""
     loaded_toolkits = get_loaded_toolkits_for_session(
-        storage,
         agent_name=agent_name,
         config=config,
         session_id=session_id,
@@ -342,7 +265,7 @@ def resolve_dynamic_toolkit_selection(
         config=config,
         loaded_toolkits=loaded_toolkits,
         delegation_depth=delegation_depth,
-        enable_dynamic_tools_manager=storage is not None and session_id is not None,
+        enable_dynamic_tools_manager=session_id is not None,
     )
     return DynamicToolkitSelection(
         loaded_toolkits=tuple(loaded_toolkits),

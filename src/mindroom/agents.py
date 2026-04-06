@@ -409,7 +409,6 @@ def build_agent_toolkit(  # noqa: PLR0911
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_context: AgentToolInitContext,
     execution_identity: ToolExecutionIdentity | None,
-    session_storage: SqliteDb | None = None,
     session_id: str | None = None,
     delegation_depth: int = 0,
 ) -> Toolkit | None:
@@ -484,16 +483,15 @@ def build_agent_toolkit(  # noqa: PLR0911
                 agent_name,
             )
             return None
-        if session_storage is None or session_id is None:
+        if session_id is None:
             logger.warning(
-                "Skipping 'dynamic_tools' tool for agent '%s': no stable session-backed storage is available",
+                "Skipping 'dynamic_tools' tool for agent '%s': no stable session_id is available",
                 agent_name,
             )
             return None
         return DynamicToolsToolkit(
             agent_name=agent_name,
             config=config,
-            storage=session_storage,
             session_id=session_id,
         )
 
@@ -932,11 +930,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             session_table=f"{agent_name}_sessions",
         )
     )
-    # Dynamic toolkit state remains per-agent in V1 because each agent keeps its
-    # own session DB. Team members may share one conversation session_id, but
-    # toolkit loads do not cross agent boundaries yet.
     dynamic_tool_selection = resolve_dynamic_toolkit_selection(
-        storage,
         agent_name=agent_name,
         config=config,
         session_id=session_id,
@@ -964,7 +958,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 worker_tools=worker_tools,
                 tool_config_overrides=resolved_tool_configs.get(tool_name),
                 tool_init_context=tool_init_context,
-                session_storage=storage,
                 session_id=session_id,
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
@@ -1046,7 +1039,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         config,
         agent_name,
         loaded_toolkits=dynamic_tool_selection.loaded_toolkits,
-        enable_dynamic_tools_manager=session_id is not None and storage is not None,
+        enable_dynamic_tools_manager=session_id is not None,
     )
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
