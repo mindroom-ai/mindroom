@@ -997,6 +997,8 @@ def _build_agent_from_orchestrator(
     agent_name: str,
     orchestrator: MultiAgentOrchestrator,
     execution_identity: ToolExecutionIdentity | None,
+    *,
+    session_id: str | None = None,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
 ) -> Agent:
     """Create one exact team member from orchestrator-backed runtime state."""
@@ -1025,6 +1027,11 @@ def _build_agent_from_orchestrator(
         orchestrator.config,
         orchestrator.runtime_paths,
         execution_identity=execution_identity,
+        session_id=session_id
+        if session_id is not None
+        else execution_identity.session_id
+        if execution_identity
+        else None,
         knowledge=knowledge,
         include_interactive_questions=False,
     )
@@ -1040,6 +1047,7 @@ def _materialize_team_members(
     orchestrator: MultiAgentOrchestrator,
     execution_identity: ToolExecutionIdentity | None,
     *,
+    session_id: str | None = None,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     reason_prefix: str = "Team request",
 ) -> ResolvedExactTeamMembers:
@@ -1054,6 +1062,7 @@ def _materialize_team_members(
             name,
             orchestrator,
             execution_identity,
+            session_id=session_id,
             request_knowledge_managers=request_knowledge_managers,
         ),
     )
@@ -1309,6 +1318,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             agent_names,
             orchestrator,
             execution_identity,
+            session_id=session_id,
             request_knowledge_managers=request_knowledge_managers,
             reason_prefix=reason_prefix,
         )
@@ -1561,6 +1571,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             requested_agent_names,
             orchestrator,
             execution_identity,
+            session_id=session_id,
             request_knowledge_managers=request_knowledge_managers,
             reason_prefix=reason_prefix,
         )

@@ -388,6 +388,7 @@ timezone: America/Los_Angeles      # Default: UTC
 - [Agents](agents.md) - Configure individual AI agents
 - [Models](models.md) - Configure AI model providers
 - [Teams](teams.md) - Configure multi-agent collaboration
+- [Toolkits](toolkits.md) - Configure dynamic tool bundles that agents load on demand
 - [Cultures](cultures.md) - Configure shared agent cultures
 - [Router](router.md) - Configure message routing
 - [Memory](../memory.md) - Configure memory providers and behavior

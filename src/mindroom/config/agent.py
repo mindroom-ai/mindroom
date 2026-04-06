@@ -179,6 +179,14 @@ class AgentConfig(BaseModel):
         default=True,
         description="Whether to merge defaults.tools into this agent's tools",
     )
+    allowed_toolkits: list[str] = Field(
+        default_factory=list,
+        description="Dynamic toolkit names this agent may load at runtime",
+    )
+    initial_toolkits: list[str] = Field(
+        default_factory=list,
+        description="Dynamic toolkit names loaded for a new session before any runtime changes",
+    )
     skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
@@ -312,12 +320,6 @@ class AgentConfig(BaseModel):
             if "sandbox_tools" in data:
                 msg = "Agent field 'sandbox_tools' was removed. Use 'worker_tools' instead."
                 raise ValueError(msg)
-            if "allowed_toolkits" in data:
-                msg = "Agent field 'allowed_toolkits' was removed. Use 'tools' instead."
-                raise ValueError(msg)
-            if "initial_toolkits" in data:
-                msg = "Agent field 'initial_toolkits' was removed. Use 'tools' instead."
-                raise ValueError(msg)
         return data
 
     @field_validator("tools")
@@ -325,6 +327,26 @@ class AgentConfig(BaseModel):
     def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
         """Ensure each normalized tool appears at most once."""
         return validate_unique_tool_entries(tools, scope_name="agent")
+
+    @field_validator("allowed_toolkits")
+    @classmethod
+    def validate_unique_allowed_toolkits(cls, toolkits: list[str]) -> list[str]:
+        """Ensure each allowed toolkit is listed at most once."""
+        duplicates = _duplicate_items(toolkits)
+        if duplicates:
+            msg = f"Duplicate allowed_toolkits are not allowed: {', '.join(duplicates)}"
+            raise ValueError(msg)
+        return toolkits
+
+    @field_validator("initial_toolkits")
+    @classmethod
+    def validate_unique_initial_toolkits(cls, toolkits: list[str]) -> list[str]:
+        """Ensure each initial toolkit is listed at most once."""
+        duplicates = _duplicate_items(toolkits)
+        if duplicates:
+            msg = f"Duplicate initial_toolkits are not allowed: {', '.join(duplicates)}"
+            raise ValueError(msg)
+        return toolkits
 
     @field_validator("knowledge_bases")
     @classmethod

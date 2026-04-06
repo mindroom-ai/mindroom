@@ -947,16 +947,16 @@ def _execute_validation_plugin_module(
     return validation_module_name
 
 
-def resolved_tool_metadata_for_runtime(
+def resolved_tool_state_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
-) -> dict[str, ToolMetadata]:
-    """Return tool metadata visible for one runtime config without mutating global state."""
+) -> tuple[dict[str, Callable[[], type[Toolkit]]], dict[str, ToolMetadata]]:
+    """Return registry and metadata visible for one runtime config without mutating global state."""
     import mindroom.tools  # noqa: F401, PLC0415
 
     plugin_entries = config.plugins
     if not plugin_entries:
-        return _BUILTIN_TOOL_METADATA.copy()
+        return _BUILTIN_TOOL_REGISTRY.copy(), _BUILTIN_TOOL_METADATA.copy()
 
     plugin_bases: list[tuple[plugin_module._PluginBase, Any, int]] = []
     for plugin_order, plugin_entry in enumerate(plugin_entries):
@@ -999,7 +999,15 @@ def resolved_tool_metadata_for_runtime(
                 validation_registrations,
             )
 
-    _, desired_metadata = _resolved_tool_state(active_plugins, validation_registrations)
+    return _resolved_tool_state(active_plugins, validation_registrations)
+
+
+def resolved_tool_metadata_for_runtime(
+    runtime_paths: RuntimePaths,
+    config: Config,
+) -> dict[str, ToolMetadata]:
+    """Return tool metadata visible for one runtime config without mutating global state."""
+    _, desired_metadata = resolved_tool_state_for_runtime(runtime_paths, config)
     return desired_metadata
 
 

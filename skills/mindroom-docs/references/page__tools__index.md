@@ -141,5 +141,6 @@ uv sync --extra gmail --extra slack --extra github
 See the full list in:
 
 - [Built-in Tools](https://docs.mindroom.chat/tools/builtin/index.md) - Complete list of available built-in tools with configuration details
+- [Dynamic Toolkits](https://docs.mindroom.chat/tools/dynamic-toolkits/index.md) - Load and unload tool bundles at runtime to reduce context overhead
 - [MCP (Planned)](https://docs.mindroom.chat/tools/mcp/index.md) - Native MCP status and plugin-based workaround
 - [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend MindRoom with custom tools and skills (including MCP via plugin workaround)

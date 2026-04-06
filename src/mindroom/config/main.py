@@ -25,7 +25,15 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
 from mindroom.config.memory import MemoryBackend, MemoryConfig
-from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig, RouterConfig, ToolConfigEntry
+from mindroom.config.models import (
+    CompactionConfig,
+    DefaultsConfig,
+    ModelConfig,
+    ResolvedToolConfig,
+    RouterConfig,
+    ToolConfigEntry,
+    ToolkitDefinition,
+)
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
@@ -69,7 +77,9 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
     "cultures",
     "room_models",
+    "toolkits",
     "knowledge_bases",
+    "mcp_servers",
     "matrix_room_access",
     "matrix_space",
 )
@@ -121,12 +131,7 @@ def format_invalid_config_message(
     return response
 
 
-@dataclass(frozen=True)
-class ResolvedToolConfig:
-    """Resolved authored tool config after defaults and per-agent overrides merge."""
-
-    name: str
-    tool_config_overrides: dict[str, object]
+_RESERVED_DYNAMIC_TOOLKIT_TOOLS = frozenset({"delegate", "dynamic_tools", "self_config"})
 
 
 @dataclass(frozen=True)
@@ -329,12 +334,20 @@ class Config(BaseModel):
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     cultures: dict[str, CultureConfig] = Field(default_factory=dict, description="Culture configurations")
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
+    toolkits: dict[str, ToolkitDefinition] = Field(
+        default_factory=dict,
+        description="Dynamically loadable tool bundles keyed by public toolkit name",
+    )
     plugins: list[PluginEntryConfig] = Field(default_factory=list, description="Plugin entries")
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
     knowledge_bases: dict[str, KnowledgeBaseConfig] = Field(
         default_factory=dict,
         description="Knowledge base configurations keyed by base ID",
+    )
+    mcp_servers: dict[str, Any] = Field(
+        default_factory=dict,
+        description="MCP server configurations keyed by server id",
     )
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
@@ -381,23 +394,15 @@ class Config(BaseModel):
             normalized_plugins.append(plugin_entry)
         return normalized_plugins
 
-    @model_validator(mode="before")
-    @classmethod
-    def reject_legacy_root_fields(cls, data: object) -> object:
-        """Reject removed top-level config fields to prevent silent upgrades."""
-        if isinstance(data, dict) and "mcp_servers" in data:
-            msg = "Top-level field 'mcp_servers' was removed. MCP server configuration is no longer supported."
-            raise ValueError(msg)
-        return data
-
     @model_validator(mode="after")
     def validate_entity_names(self) -> Config:
         """Ensure agent and team names contain only alphanumeric characters and underscores."""
         invalid_agents = [name for name in self.agents if not _AGENT_NAME_PATTERN.fullmatch(name)]
         invalid_teams = [name for name in self.teams if not _AGENT_NAME_PATTERN.fullmatch(name)]
-        invalid = sorted(invalid_agents + invalid_teams)
+        invalid_mcp_servers = [name for name in self.mcp_servers if not _AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid = sorted(invalid_agents + invalid_teams + invalid_mcp_servers)
         if invalid:
-            msg = f"Agent/team names must be alphanumeric/underscore only, got: {', '.join(invalid)}"
+            msg = f"Agent, team, and MCP server names must be alphanumeric/underscore only, got: {', '.join(invalid)}"
             raise ValueError(msg)
         overlapping_names = sorted(set(self.agents) & set(self.teams))
         if overlapping_names:
@@ -427,6 +432,23 @@ class Config(BaseModel):
                 if target not in self.agents:
                     msg = f"Agent '{agent_name}' delegates to unknown agent '{target}'"
                     raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_toolkit_references(self) -> Config:
+        """Ensure agent dynamic toolkit references point at configured toolkits."""
+        for agent_name, agent_config in self.agents.items():
+            for field_name, toolkit_names in (
+                ("allowed_toolkits", agent_config.allowed_toolkits),
+                ("initial_toolkits", agent_config.initial_toolkits),
+            ):
+                for index, toolkit_name in enumerate(toolkit_names):
+                    if toolkit_name not in self.toolkits:
+                        msg = f"agents.{agent_name}.{field_name}[{index}]: Unknown toolkit '{toolkit_name}'."
+                        raise ValueError(msg)
+            if not set(agent_config.initial_toolkits).issubset(agent_config.allowed_toolkits):
+                msg = f"agents.{agent_name}.initial_toolkits: initial_toolkits must be a subset of allowed_toolkits."
+                raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
@@ -546,20 +568,23 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_shared_only_integration_assignments(self) -> Config:
-        """Reject shared-only integrations on isolating worker scopes at config-validation time."""
+        """Reject shared-only integrations on isolating scopes for static and dynamic tool assignments."""
         invalid_assignments: list[str] = []
         for agent_name in sorted(self.agents):
+            scope_label = self.get_agent_scope_label(agent_name)
             execution_scope = self.get_agent_execution_scope(agent_name)
             unsupported_tools = unsupported_shared_only_integration_names(
                 self.get_agent_tools(agent_name),
                 execution_scope,
             )
-            if not unsupported_tools:
-                continue
-            scope_label = self.get_agent_scope_label(agent_name)
             invalid_assignments.extend(
                 f"{agent_name} -> {tool_name} ({scope_label})" for tool_name in unsupported_tools
             )
+            for toolkit_name, incompatible_tools in self.get_agent_scope_incompatible_toolkits(agent_name).items():
+                invalid_assignments.extend(
+                    f"{agent_name} -> toolkit '{toolkit_name}' -> {tool_name} ({scope_label})"
+                    for tool_name in incompatible_tools
+                )
         if invalid_assignments:
             msg = (
                 "Shared-only integrations are supported only for unscoped agents or worker_scope=shared. "
@@ -993,6 +1018,35 @@ class Config(BaseModel):
         model_config = self.models.get(model_name)
         return model_config.context_window if model_config and model_config.context_window else None
 
+    def get_toolkit(self, toolkit_name: str) -> ToolkitDefinition:
+        """Get one dynamic toolkit definition by name."""
+        toolkit = self.toolkits.get(toolkit_name)
+        if toolkit is None:
+            available = ", ".join(sorted(self.toolkits)) or "(none)"
+            msg = f"Unknown toolkit: {toolkit_name}. Available toolkits: {available}"
+            raise ValueError(msg)
+        return toolkit
+
+    def get_toolkit_scope_incompatible_tools(
+        self,
+        agent_name: str,
+        toolkit_name: str,
+    ) -> list[str]:
+        """Return toolkit tools that are invalid for one agent's effective execution scope."""
+        execution_scope = self.get_agent_execution_scope(agent_name)
+        return unsupported_shared_only_integration_names(
+            [entry.name for entry in self.get_toolkit_tool_configs(toolkit_name)],
+            execution_scope,
+        )
+
+    def get_agent_scope_incompatible_toolkits(self, agent_name: str) -> dict[str, list[str]]:
+        """Return allowed toolkits whose contents are invalid for one agent's execution scope."""
+        return {
+            toolkit_name: incompatible_tools
+            for toolkit_name in self.get_agent(agent_name).allowed_toolkits
+            if (incompatible_tools := self.get_toolkit_scope_incompatible_tools(agent_name, toolkit_name))
+        }
+
     def get_agent_worker_tools(
         self,
         agent_name: str,
@@ -1132,9 +1186,9 @@ class Config(BaseModel):
 
     def _validate_authored_tool_entries(self, runtime_paths: RuntimePaths) -> None:
         """Validate defaults and per-agent authored tool overrides with runtime metadata loaded."""
-        from mindroom.tool_system.metadata import resolved_tool_metadata_for_runtime  # noqa: PLC0415
+        from mindroom.tool_system.metadata import resolved_tool_state_for_runtime  # noqa: PLC0415
 
-        tool_metadata = resolved_tool_metadata_for_runtime(runtime_paths, self)
+        tool_registry, tool_metadata = resolved_tool_state_for_runtime(runtime_paths, self)
         for index, entry in enumerate(self.defaults.tools):
             self._validate_authored_tool_entry(
                 entry,
@@ -1148,6 +1202,40 @@ class Config(BaseModel):
                     config_path_prefix=f"agents.{agent_name}.tools[{index}]",
                     tool_metadata=tool_metadata,
                 )
+        for toolkit_name, toolkit in self.toolkits.items():
+            for index, entry in enumerate(toolkit.tools):
+                config_path_prefix = f"toolkits.{toolkit_name}.tools[{index}]"
+                if entry.name in _RESERVED_DYNAMIC_TOOLKIT_TOOLS:
+                    msg = (
+                        f"{config_path_prefix}.{entry.name}: Toolkit definitions cannot include reserved "
+                        f"control-plane tool '{entry.name}'."
+                    )
+                    raise ValueError(msg)
+                if entry.name not in tool_registry:
+                    msg = (
+                        f"{config_path_prefix}.{entry.name}: Toolkit tools must resolve through the normal "
+                        f"tool registry; '{entry.name}' is not supported."
+                    )
+                    raise ValueError(msg)
+                self._validate_authored_tool_entry(
+                    entry,
+                    config_path_prefix=config_path_prefix,
+                    tool_metadata=tool_metadata,
+                )
+
+    def get_toolkit_tool_configs(self, toolkit_name: str) -> list[ResolvedToolConfig]:
+        """Return effective authored tool config entries for one dynamic toolkit."""
+        from mindroom.tool_system.metadata import apply_authored_overrides  # noqa: PLC0415
+
+        toolkit = self.get_toolkit(toolkit_name)
+        merged_overrides = {entry.name: apply_authored_overrides({}, entry.overrides) for entry in toolkit.tools}
+        return [
+            ResolvedToolConfig(
+                name=tool_name,
+                tool_config_overrides=dict(merged_overrides.get(tool_name, {})),
+            )
+            for tool_name in self.expand_tool_names(toolkit.tool_names)
+        ]
 
     def get_agent_tool_configs(self, agent_name: str) -> list[ResolvedToolConfig]:
         """Return effective authored tool config entries for one agent."""

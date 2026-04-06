@@ -30,6 +30,7 @@ from mindroom.runtime_resolution import (
     resolve_agent_runtime,
     resolve_private_requester_scope_root,
 )
+from mindroom.tool_system.dynamic_toolkits import resolve_dynamic_toolkit_selection
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
@@ -408,6 +409,7 @@ def build_agent_toolkit(  # noqa: PLR0911
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_context: AgentToolInitContext,
     execution_identity: ToolExecutionIdentity | None,
+    session_id: str | None = None,
     delegation_depth: int = 0,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
@@ -472,6 +474,27 @@ def build_agent_toolkit(  # noqa: PLR0911
             execution_identity=execution_identity,
         )
 
+    if tool_name == "dynamic_tools":
+        from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit  # noqa: PLC0415
+
+        if not agent_config.allowed_toolkits:
+            logger.warning(
+                "Skipping 'dynamic_tools' tool for agent '%s': allowed_toolkits is empty",
+                agent_name,
+            )
+            return None
+        if session_id is None:
+            logger.warning(
+                "Skipping 'dynamic_tools' tool for agent '%s': no stable session_id is available",
+                agent_name,
+            )
+            return None
+        return DynamicToolsToolkit(
+            agent_name=agent_name,
+            config=config,
+            session_id=session_id,
+        )
+
     return _build_registered_agent_tool(
         tool_name,
         runtime_paths,
@@ -512,7 +535,30 @@ def get_agent_toolkit_names(
     if allow_self_config and "self_config" not in tool_names:
         tool_names.append("self_config")
 
+    if agent_config.allowed_toolkits and "dynamic_tools" not in tool_names:
+        tool_names.append("dynamic_tools")
+
     return tool_names
+
+
+def _resolve_runtime_worker_tools(
+    agent_name: str,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    runtime_tool_names: list[str],
+) -> list[str]:
+    """Return worker-routed tools for one concrete runtime tool selection."""
+    agent_config = config.get_agent(agent_name)
+    configured = agent_config.worker_tools
+    if configured is None:
+        configured = config.defaults.worker_tools
+    if configured is not None:
+        return config.expand_tool_names(list(configured))
+
+    from mindroom.tool_system.metadata import default_worker_routed_tools, ensure_tool_registry_loaded  # noqa: PLC0415
+
+    ensure_tool_registry_loaded(runtime_paths, config)
+    return default_worker_routed_tools(runtime_tool_names)
 
 
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
@@ -551,6 +597,43 @@ def _resolve_agent_learning(
         db=learning_storage,
         user_profile=UserProfileConfig(mode=learning_mode_value),
         user_memory=UserMemoryConfig(mode=learning_mode_value),
+    )
+
+
+def _build_dynamic_tooling_instruction_block(
+    config: Config,
+    agent_name: str,
+    *,
+    loaded_toolkits: tuple[str, ...],
+    enable_dynamic_tools_manager: bool,
+) -> str | None:
+    """Return compact prompt guidance for dynamic toolkit loading."""
+    agent_config = config.get_agent(agent_name)
+    if not enable_dynamic_tools_manager or not agent_config.allowed_toolkits:
+        return None
+
+    toolkit_lines: list[str] = []
+    for toolkit_name in agent_config.allowed_toolkits:
+        description = config.get_toolkit(toolkit_name).description.strip()
+        if description:
+            toolkit_lines.append(f"- {toolkit_name}: {description}")
+        else:
+            toolkit_lines.append(f"- {toolkit_name}")
+
+    current_toolkits = ", ".join(loaded_toolkits) if loaded_toolkits else "(none)"
+    sticky_toolkits = ", ".join(agent_config.initial_toolkits) if agent_config.initial_toolkits else "(none)"
+    toolkit_catalog = "\n".join(toolkit_lines)
+    return (
+        "## Dynamic Toolkits\n"
+        "You may manage optional tool bundles with the `dynamic_tools` tool.\n"
+        "Allowed toolkits:\n"
+        f"{toolkit_catalog}\n"
+        f"Currently loaded: {current_toolkits}\n"
+        f"Sticky initial toolkits that cannot be unloaded: {sticky_toolkits}\n"
+        "Use `list_toolkits()` when unsure which toolkit contains a capability.\n"
+        "Use `load_tools(toolkit)` or `unload_tools(toolkit)` to change the loaded set.\n"
+        "In team conversations, each member manages its own toolkit state, so loading one member does not load the others.\n"
+        "Those changes take effect on the next request in the same session, not later in this run."
     )
 
 
@@ -776,10 +859,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     runtime_paths: constants.RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,
-    history_storage: SqliteDb | None = None,
-    active_model_name: str | None = None,
+    session_id: str | None = None,
     hook_registry: HookRegistry | None = None,
     knowledge: KnowledgeProtocol | None = None,
+    history_storage: SqliteDb | None = None,
+    active_model_name: str | None = None,
     include_interactive_questions: bool = True,
     delegation_depth: int = 0,
 ) -> Agent:
@@ -791,14 +875,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         runtime_paths: Explicit runtime context for paths, env, and credentials.
         execution_identity: Request execution identity used to resolve scoped
             state, workspaces, worker routing, and requester-local storage.
-        history_storage: Optional already-open session storage owned by the
-            caller for this request. When omitted, create_agent opens its own
-            storage and the caller must close it after the run if needed.
-        active_model_name: Optional resolved runtime model name for this run.
-            When omitted, the agent's configured model is used.
+        session_id: Stable Agno session id used to resolve session-scoped
+            dynamic toolkit state.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
+        history_storage: Optional already-open session storage to reuse for this agent.
+        active_model_name: Optional runtime-selected model name overriding the configured model.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
@@ -837,19 +920,35 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         runtime_paths=runtime_paths,
     )
 
-    tool_names = get_agent_toolkit_names(
-        agent_name,
-        config,
+    storage = (
+        history_storage
+        if history_storage is not None
+        else create_state_storage_db(
+            agent_name,
+            agent_runtime.state_root,
+            subdir="sessions",
+            session_table=f"{agent_name}_sessions",
+        )
+    )
+    dynamic_tool_selection = resolve_dynamic_toolkit_selection(
+        agent_name=agent_name,
+        config=config,
+        session_id=session_id,
         delegation_depth=delegation_depth,
     )
     resolved_tool_configs = {
-        entry.name: entry.tool_config_overrides for entry in config.get_agent_tool_configs(agent_name)
+        entry.name: entry.tool_config_overrides for entry in dynamic_tool_selection.runtime_tool_configs
     }
-    worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
+    worker_tools = _resolve_runtime_worker_tools(
+        agent_name,
+        config,
+        runtime_paths,
+        list(resolved_tool_configs),
+    )
     tool_init_context = _tool_init_context_from_runtime(agent_runtime)
     workspace = agent_runtime.workspace
     tools: list[Toolkit] = []
-    for tool_name in tool_names:
+    for tool_name in resolved_tool_configs:
         try:
             if toolkit := build_agent_toolkit(
                 tool_name,
@@ -859,6 +958,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 worker_tools=worker_tools,
                 tool_config_overrides=resolved_tool_configs.get(tool_name),
                 tool_init_context=tool_init_context,
+                session_id=session_id,
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
             ):
@@ -870,13 +970,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 agent=agent_name,
                 error=str(exc),
             )
-
-    storage = history_storage or create_state_storage_db(
-        storage_name=agent_name,
-        state_root=agent_runtime.state_root,
-        subdir="sessions",
-        session_table=f"{agent_name}_sessions",
-    )
     learning_storage = (
         create_state_storage_db(
             storage_name=agent_name,
@@ -941,6 +1034,15 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     skills = build_agent_skills(agent_name, config, runtime_paths)
     if skills and skills.get_skill_names():
         instructions.append(agent_prompts.SKILLS_TOOL_USAGE_PROMPT)
+
+    dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
+        config,
+        agent_name,
+        loaded_toolkits=dynamic_tool_selection.loaded_toolkits,
+        enable_dynamic_tools_manager=session_id is not None,
+    )
+    if dynamic_tooling_block is not None:
+        instructions.append(dynamic_tooling_block)
 
     show_tool_calls = (
         agent_config.show_tool_calls if agent_config.show_tool_calls is not None else defaults.show_tool_calls
@@ -1044,7 +1146,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     if include_all_history:
         enable_all_history_replay(agent)
 
-    logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
+    logger.info(
+        "Created agent",
+        agent=agent_name,
+        display_name=agent_config.display_name,
+        tool_count=len(tools),
+        loaded_dynamic_toolkits=list(dynamic_tool_selection.loaded_toolkits),
+    )
 
     return agent
 

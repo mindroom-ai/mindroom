@@ -145,6 +145,7 @@ optional-dependencies.duckdb = [
 optional-dependencies.duckduckgo = [
   "ddgs",
 ]
+optional-dependencies.dynamic_tools = [  ]
 optional-dependencies.e2b = [
   "e2b-code-interpreter",
 ]
