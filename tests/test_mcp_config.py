@@ -158,6 +158,42 @@ def test_config_tracks_mcp_toolkit_dependencies_for_agents_and_teams(tmp_path: P
     assert config.get_entities_referencing_tools({"mcp_demo"}) == {"code", "dev_team"}
 
 
+def test_config_does_not_treat_allowed_only_mcp_toolkits_as_hard_dependencies(tmp_path: Path) -> None:
+    """Allowed-only toolkits should stay optional for restart and startup dependency tracking."""
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                },
+            },
+            "toolkits": {
+                "browser": {
+                    "tools": ["mcp_demo"],
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "allowed_toolkits": ["browser"],
+                },
+            },
+            "teams": {
+                "dev_team": {
+                    "display_name": "Dev Team",
+                    "role": "Collaborate",
+                    "agents": ["code"],
+                },
+            },
+        },
+        _runtime_paths(tmp_path),
+    )
+
+    assert config.get_entities_referencing_tools({"mcp_demo"}) == set()
+
+
 def test_config_rejects_invalid_mcp_assignment_overrides(tmp_path: Path) -> None:
     """Mirror server-level override validation for per-assignment MCP config."""
     runtime_paths = _runtime_paths(tmp_path)

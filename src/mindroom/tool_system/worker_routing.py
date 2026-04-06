@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Collection, Iterator
 
     from mindroom.constants import RuntimePaths
 
@@ -253,14 +253,22 @@ def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | Non
     return worker_scope in (None, "shared")
 
 
-def requires_shared_only_integration_scope(name: str) -> bool:
+def requires_shared_only_integration_scope(
+    name: str,
+    *,
+    configured_mcp_server_ids: Collection[str] | None = None,
+) -> bool:
     """Return whether a tool or dashboard integration is restricted to shared scope."""
     if name in SHARED_ONLY_INTEGRATION_NAMES:
         return True
 
-    from mindroom.mcp.registry import mcp_server_id_from_tool_name  # noqa: PLC0415
+    from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name  # noqa: PLC0415
 
-    return mcp_server_id_from_tool_name(name) is not None
+    if mcp_server_id_from_tool_name(name) is not None:
+        return True
+    if configured_mcp_server_ids is None:
+        return False
+    return any(name == mcp_tool_name(server_id) for server_id in configured_mcp_server_ids)
 
 
 def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | None) -> bool:
@@ -273,11 +281,20 @@ def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | N
 def unsupported_shared_only_integration_names(
     names: list[str],
     worker_scope: WorkerScope | None,
+    *,
+    configured_mcp_server_ids: Collection[str] | None = None,
 ) -> list[str]:
     """Return shared-only integration names that are invalid for the effective execution scope."""
     if worker_scope_allows_shared_only_integrations(worker_scope):
         return []
-    return [name for name in names if requires_shared_only_integration_scope(name)]
+    return [
+        name
+        for name in names
+        if requires_shared_only_integration_scope(
+            name,
+            configured_mcp_server_ids=configured_mcp_server_ids,
+        )
+    ]
 
 
 def unsupported_shared_only_integration_message(

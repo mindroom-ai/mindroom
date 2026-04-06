@@ -21,11 +21,12 @@ from mindroom.mcp.transports import build_transport_handle
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog, MCPServerState
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from agno.tools.function import ToolResult
     from mcp.client.session import MessageHandlerFnT
 
+    from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -483,73 +484,116 @@ class MCPServerManager:
                 errors_by_server.setdefault(server_id, []).append(message)
         return errors_by_server
 
-    async def _validate_global_function_names(self) -> set[str]:
-        async with self._catalog_validation_lock:
-            server_ids_by_function_name: dict[str, set[str]] = {}
-            for state in self._states.values():
-                if state.catalog is None or state.last_error is not None:
-                    continue
-                for tool in state.catalog.tools:
-                    server_ids_by_function_name.setdefault(tool.function_name, set()).add(state.server_id)
-            if not server_ids_by_function_name:
-                return set()
+    def _connected_catalog_server_ids(self) -> set[str]:
+        """Return MCP servers that currently expose a usable catalog."""
+        return {
+            state.server_id for state in self._states.values() if state.catalog is not None and state.last_error is None
+        }
 
-            configured_local_function_names = self._configured_local_function_names()
-            errors_by_server = self._function_name_collision_messages(
-                server_ids_by_function_name,
-                configured_local_function_names,
-            )
+    def _agent_collision_messages(
+        self,
+        agent_name: str,
+        connected_server_ids: set[str],
+    ) -> dict[str, list[str]]:
+        """Return one agent's MCP function-name collisions against its visible surface."""
+        configured_local_function_names, configured_mcp_server_ids = self._configured_function_surface(agent_name)
+        visible_server_ids = configured_mcp_server_ids & connected_server_ids
+        if not visible_server_ids:
+            return {}
 
-            for server_id, messages in errors_by_server.items():
-                state = self._require_state(server_id)
-                error_message = "\n".join(messages)
-                async with state.lock:
-                    await self._disconnect_state_when_idle(state)
-                    state.catalog = None
-                    state.last_error = MCPProtocolError(server_id, error_message)
-                    state.stale = False
-            return set(errors_by_server)
-
-    def _configured_local_function_names(self) -> set[str]:
-        """Return provider-visible function names from the current non-MCP tool surface."""
-        config = self._config
-        if config is None:
-            return set()
-
-        from mindroom.mcp.registry import _MCP_TOOL_FACTORY_MARKER  # noqa: PLC0415
-        from mindroom.tool_system.metadata import (  # noqa: PLC0415
-            _TOOL_REGISTRY,
-            ensure_tool_registry_loaded,
-            get_tool_by_name,
+        server_ids_by_function_name: dict[str, set[str]] = {}
+        for server_id in visible_server_ids:
+            state = self._states.get(server_id)
+            if state is None or state.catalog is None or state.last_error is not None:
+                continue
+            for tool in state.catalog.tools:
+                server_ids_by_function_name.setdefault(tool.function_name, set()).add(state.server_id)
+        if not server_ids_by_function_name:
+            return {}
+        return self._function_name_collision_messages(
+            server_ids_by_function_name,
+            configured_local_function_names,
         )
 
-        ensure_tool_registry_loaded(self.runtime_paths, config)
-        function_names: set[str] = set()
-        tool_names: set[str] = set()
-        for agent_name, agent_config in config.agents.items():
-            tool_names.update(
-                tool_name
-                for tool_name in config.get_agent_tools(agent_name)
-                if not getattr(_TOOL_REGISTRY.get(tool_name), _MCP_TOOL_FACTORY_MARKER, False)
-            )
-            for toolkit_name in set(agent_config.allowed_toolkits) | set(agent_config.initial_toolkits):
-                tool_names.update(
-                    toolkit_entry.name
-                    for toolkit_entry in config.get_toolkit_tool_configs(toolkit_name)
-                    if not getattr(_TOOL_REGISTRY.get(toolkit_entry.name), _MCP_TOOL_FACTORY_MARKER, False)
-                )
-            if agent_config.delegate_to:
-                function_names.add("delegate_task")
-            allow_self_config = (
-                agent_config.allow_self_config
-                if agent_config.allow_self_config is not None
-                else config.defaults.allow_self_config
-            )
-            if allow_self_config:
-                function_names.update({"get_own_config", "update_own_config"})
-            if agent_config.allowed_toolkits:
-                function_names.update({"list_toolkits", "load_tools", "unload_tools"})
+    async def _apply_function_name_collision_errors(self, errors_by_server: dict[str, set[str]]) -> None:
+        """Disconnect and mark servers that failed provider-visible name validation."""
+        for server_id, messages in errors_by_server.items():
+            state = self._require_state(server_id)
+            error_message = "\n".join(sorted(messages))
+            async with state.lock:
+                await self._disconnect_state_when_idle(state)
+                state.catalog = None
+                state.last_error = MCPProtocolError(server_id, error_message)
+                state.stale = False
 
+    async def _validate_global_function_names(self) -> set[str]:
+        async with self._catalog_validation_lock:
+            connected_server_ids = self._connected_catalog_server_ids()
+            if not connected_server_ids:
+                return set()
+
+            errors_by_server: dict[str, set[str]] = {}
+            for agent_name in sorted(self._config.agents) if self._config is not None else ():
+                for server_id, messages in self._agent_collision_messages(agent_name, connected_server_ids).items():
+                    errors_by_server.setdefault(server_id, set()).update(messages)
+            if not errors_by_server:
+                return set()
+
+            await self._apply_function_name_collision_errors(errors_by_server)
+            return set(errors_by_server)
+
+    def _configured_agent_tool_names(self, agent_name: str) -> list[str]:
+        """Return direct and toolkit-derived tool names that one agent can expose."""
+        config = cast("Config", self._config)
+        agent_config = config.get_agent(agent_name)
+        tool_names = list(config.get_agent_tools(agent_name))
+        for toolkit_name in set(agent_config.allowed_toolkits) | set(agent_config.initial_toolkits):
+            tool_names.extend(toolkit_entry.name for toolkit_entry in config.get_toolkit_tool_configs(toolkit_name))
+        return tool_names
+
+    @staticmethod
+    def _partition_tool_names(
+        tool_names: list[str],
+        *,
+        tool_registry: Mapping[str, object],
+        mcp_tool_factory_marker: str,
+    ) -> tuple[set[str], set[str]]:
+        """Split tool names into local tool names and visible MCP server ids."""
+        local_tool_names: set[str] = set()
+        mcp_server_ids: set[str] = set()
+        for tool_name in tool_names:
+            if server_id := mcp_server_id_from_tool_name(tool_name):
+                mcp_server_ids.add(server_id)
+                continue
+            if not getattr(tool_registry.get(tool_name), mcp_tool_factory_marker, False):
+                local_tool_names.add(tool_name)
+        return local_tool_names, mcp_server_ids
+
+    @staticmethod
+    def _agent_special_function_names(
+        agent_config: AgentConfig,
+        *,
+        default_allow_self_config: bool,
+    ) -> set[str]:
+        """Return provider-visible special functions injected by agent configuration."""
+        function_names: set[str] = set()
+        if agent_config.delegate_to:
+            function_names.add("delegate_task")
+        allow_self_config = agent_config.allow_self_config
+        if allow_self_config if allow_self_config is not None else default_allow_self_config:
+            function_names.update({"get_own_config", "update_own_config"})
+        if agent_config.allowed_toolkits:
+            function_names.update({"list_toolkits", "load_tools", "unload_tools"})
+        return function_names
+
+    def _tool_function_names_for_local_tools(
+        self,
+        tool_names: set[str],
+        *,
+        get_tool_by_name: Callable[..., object],
+    ) -> set[str]:
+        """Return provider-visible function names exposed by one set of local tools."""
+        function_names: set[str] = set()
         for tool_name in sorted(tool_names):
             try:
                 toolkit = get_tool_by_name(tool_name, self.runtime_paths, worker_target=None)
@@ -561,8 +605,39 @@ class MCPServerManager:
                 )
                 continue
             function_names.update(self._toolkit_function_names(toolkit))
-
         return function_names
+
+    def _configured_function_surface(self, agent_name: str) -> tuple[set[str], set[str]]:
+        """Return one agent's provider-visible local functions and MCP servers."""
+        config = self._config
+        if config is None:
+            return set(), set()
+
+        from mindroom.mcp.registry import _MCP_TOOL_FACTORY_MARKER  # noqa: PLC0415
+        from mindroom.tool_system.metadata import (  # noqa: PLC0415
+            _TOOL_REGISTRY,
+            ensure_tool_registry_loaded,
+            get_tool_by_name,
+        )
+
+        ensure_tool_registry_loaded(self.runtime_paths, config)
+        agent_config = config.get_agent(agent_name)
+        local_tool_names, mcp_server_ids = self._partition_tool_names(
+            self._configured_agent_tool_names(agent_name),
+            tool_registry=_TOOL_REGISTRY,
+            mcp_tool_factory_marker=_MCP_TOOL_FACTORY_MARKER,
+        )
+        function_names = self._agent_special_function_names(
+            agent_config,
+            default_allow_self_config=config.defaults.allow_self_config,
+        )
+        function_names.update(
+            self._tool_function_names_for_local_tools(
+                local_tool_names,
+                get_tool_by_name=get_tool_by_name,
+            ),
+        )
+        return function_names, mcp_server_ids
 
     @staticmethod
     def _toolkit_function_names(toolkit: object) -> set[str]:

@@ -504,15 +504,34 @@ async def test_mcp_manager_marks_cross_server_function_name_collisions_as_failed
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Reject colliding function names after combining all discovered server catalogs."""
+    """Reject colliding function names when the same agent can see both MCP servers."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
-    manager = MCPServerManager(_runtime_paths(tmp_path))
-    config = _ConfigStub(
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = MCPServerManager(runtime_paths)
+    config = Config.validate_with_runtime(
         {
-            "demo": MCPServerConfig(transport="stdio", command="npx", tool_prefix="shared"),
-            "other": MCPServerConfig(transport="stdio", command="npx", tool_prefix="shared"),
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "shared",
+                },
+                "other": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "shared",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["mcp_demo", "mcp_other"],
+                },
+            },
         },
+        runtime_paths,
     )
     changed = await manager.sync_servers(config)
     assert changed == set()
@@ -581,6 +600,47 @@ async def test_mcp_manager_marks_local_function_name_collisions_as_failed(
     assert isinstance(error, MCPProtocolError)
     assert "run_shell_command" in str(error)
     assert "existing MindRoom tool function" in str(error)
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_allows_local_function_name_collisions_on_other_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only reject local collisions when the same agent can see both tool surfaces."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("shell_command")]
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "run",
+                },
+            },
+            "agents": {
+                "shell_only": {
+                    "display_name": "Shell Only",
+                    "role": "Run shell commands",
+                    "tools": ["shell"],
+                },
+                "mcp_only": {
+                    "display_name": "MCP Only",
+                    "role": "Use MCP tools",
+                    "tools": ["mcp_demo"],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+
+    changed = await manager.sync_servers(config)
+
+    assert changed == {"demo"}
+    assert manager.failed_server_ids() == set()
 
 
 @pytest.mark.asyncio

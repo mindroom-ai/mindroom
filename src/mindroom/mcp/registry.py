@@ -37,6 +37,9 @@ def mcp_server_id_from_tool_name(tool_name: str) -> str | None:
     """Return the server id for an MCP registry tool name."""
     if not tool_name.startswith(_MCP_TOOL_PREFIX):
         return None
+    factory = _TOOL_REGISTRY.get(tool_name)
+    if tool_name not in _MCP_TOOL_NAMES and not getattr(factory, _MCP_TOOL_FACTORY_MARKER, False):
+        return None
     server_id = tool_name.removeprefix(_MCP_TOOL_PREFIX)
     return server_id or None
 

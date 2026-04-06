@@ -158,6 +158,15 @@ def test_sync_mcp_tool_registry_keeps_non_mcp_prefixed_plugin_tools() -> None:
     assert "mcp_custom_plugin" in _TOOL_REGISTRY
 
 
+def test_mcp_server_id_from_tool_name_ignores_non_mcp_prefixed_plugin_tools() -> None:
+    """Only registry-owned MCP tools should be classified as MCP integrations."""
+    _TOOL_REGISTRY["mcp_custom_plugin"] = _TOOL_REGISTRY["shell"]
+    TOOL_METADATA["mcp_custom_plugin"] = replace(TOOL_METADATA["shell"], name="mcp_custom_plugin")
+
+    assert mcp_server_id_from_tool_name("mcp_custom_plugin") is None
+    assert requires_shared_only_integration_scope("mcp_custom_plugin") is False
+
+
 def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -> None:
     """Reject MCP tool name collisions during config validation, before runtime sync."""
     plugin_root = tmp_path / "plugins" / "demo"
@@ -207,6 +216,51 @@ def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -
         )
 
 
+def test_config_validation_allows_non_mcp_prefixed_plugin_tools_on_isolating_scope(tmp_path: Path) -> None:
+    """Do not reject unrelated plugin tools just because they start with mcp_."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name":"demo_plugin","tools_module":"tools.py","skills":[]}\n',
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='mcp_custom_plugin',\n"
+        "    display_name='Plugin MCP Custom',\n"
+        "    description='Not an MCP server',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+
+    config = Config.validate_with_runtime(
+        {
+            "plugins": ["./plugins/demo"],
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "worker_scope": "user",
+                    "tools": ["mcp_custom_plugin"],
+                },
+            },
+        },
+        _runtime_paths(tmp_path),
+    )
+
+    assert "mcp_custom_plugin" in config.get_agent_tools("code")
+
+
 def test_mcp_tool_registry_returns_empty_toolkit_without_bound_manager(tmp_path: Path) -> None:
     """Direct agent creation paths should not crash when no orchestrator-bound MCP manager exists."""
     config = _config(tmp_path)
@@ -218,7 +272,9 @@ def test_mcp_tool_registry_returns_empty_toolkit_without_bound_manager(tmp_path:
     assert toolkit.async_functions == {}
 
 
-def test_mcp_tool_names_are_shared_only() -> None:
+def test_mcp_tool_names_are_shared_only(tmp_path: Path) -> None:
     """Treat all MCP registry tools as shared-only integrations."""
+    sync_mcp_tool_registry(_config(tmp_path))
+
     assert mcp_server_id_from_tool_name("mcp_demo") == "demo"
     assert requires_shared_only_integration_scope("mcp_demo") is True

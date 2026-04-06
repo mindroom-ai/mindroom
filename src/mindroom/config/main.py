@@ -579,6 +579,7 @@ class Config(BaseModel):
             unsupported_tools = unsupported_shared_only_integration_names(
                 self.get_agent_tools(agent_name),
                 execution_scope,
+                configured_mcp_server_ids=self.mcp_servers,
             )
             invalid_assignments.extend(
                 f"{agent_name} -> {tool_name} ({scope_label})" for tool_name in unsupported_tools
@@ -1040,6 +1041,7 @@ class Config(BaseModel):
         return unsupported_shared_only_integration_names(
             [entry.name for entry in self.get_toolkit_tool_configs(toolkit_name)],
             execution_scope,
+            configured_mcp_server_ids=self.mcp_servers,
         )
 
     def get_agent_scope_incompatible_toolkits(self, agent_name: str) -> dict[str, list[str]]:
@@ -1309,18 +1311,18 @@ class Config(BaseModel):
             agent_name for agent_name, agent_config in self.agents.items() if agent_config.private is not None
         )
 
-    def _agent_referenced_tool_names(self, agent_name: str) -> set[str]:
-        """Return all direct and toolkit-derived tool names referenced by one agent."""
+    def _agent_hard_dependency_tool_names(self, agent_name: str) -> set[str]:
+        """Return tool names that are hard startup dependencies for one agent."""
         agent_config = self.get_agent(agent_name)
         referenced_tool_names = set(self.get_agent_tools(agent_name))
-        for toolkit_name in set(agent_config.allowed_toolkits) | set(agent_config.initial_toolkits):
+        for toolkit_name in agent_config.initial_toolkits:
             referenced_tool_names.update(entry.name for entry in self.get_toolkit_tool_configs(toolkit_name))
         return referenced_tool_names
 
     def get_entities_referencing_tools(self, tool_names: set[str]) -> set[str]:
         """Return agents and teams that depend on any of the given tools."""
         matching_agents = {
-            agent_name for agent_name in self.agents if self._agent_referenced_tool_names(agent_name) & tool_names
+            agent_name for agent_name in self.agents if self._agent_hard_dependency_tool_names(agent_name) & tool_names
         }
         matching_teams = {
             team_name
