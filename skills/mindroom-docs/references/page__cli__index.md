@@ -46,7 +46,6 @@ Show the current MindRoom version.
 
  Show the current version of Mindroom.
 
-
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
@@ -74,7 +73,6 @@ Start MindRoom with your configuration.
 │                                          [default: INFO]                               │
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
-│                                          [default: None]                               │
 │ --api               --no-api             Start the bundled dashboard/API server        │
 │                                          alongside the bot                             │
 │                                          [default: api]                                │
@@ -95,7 +93,6 @@ Generate and sync managed avatar assets.
 
  Generate and sync managed avatar assets.
 
-
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
@@ -115,7 +112,6 @@ Generate missing managed avatar files in the workspace. In a source checkout, ge
 
  Generate missing managed avatar files in the workspace.
 
-
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
@@ -130,7 +126,6 @@ Sync configured room and root-space avatars to Matrix using the initialized rout
 
  Sync configured room and root-space avatars to Matrix using the initialized router
  account.
-
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
@@ -170,7 +165,6 @@ Manage MindRoom configuration files. The `config` subgroup contains commands for
  Usage: root config [OPTIONS] COMMAND [ARGS]...
 
  Manage MindRoom configuration files.
-
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
@@ -294,7 +288,6 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 
  Start local Synapse + MindRoom Cinny using Docker only.
 
-
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --synapse-dir                                 PATH                 Directory           │
 │                                                                    containing Synapse  │
@@ -314,7 +307,6 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 │                                                                    from                │
 │                                                                    --homeserver-url    │
 │                                                                    hostname).          │
-│                                                                    [default: None]     │
 │ --cinny-port                                  INTEGER RANGE        Local host port for │
 │                                               [1<=x<=65535]        the MindRoom Cinny  │
 │                                                                    container.          │

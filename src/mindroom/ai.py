@@ -782,6 +782,8 @@ async def ai_response(  # noqa: C901
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
+        matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
+            for unseen-message tracking, coalesced edit regeneration, and cleanup.
 
     Returns:
         Agent response string
@@ -1051,6 +1053,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
+        matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
+            for unseen-message tracking, coalesced edit regeneration, and cleanup.
 
     Yields:
         Streaming chunks/events as they become available

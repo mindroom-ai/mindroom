@@ -20,9 +20,9 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 __all__ = [
-    "CoalescedBatch",
     "COALESCED_SOURCE_EVENT_IDS_CONTENT_KEY",
     "COALESCED_SOURCE_EVENT_PROMPTS_CONTENT_KEY",
+    "CoalescedBatch",
     "CoalescingGate",
     "CoalescingKey",
     "DispatchEvent",
@@ -31,9 +31,9 @@ __all__ = [
     "PendingEvent",
     "SyntheticTextEvent",
     "TextDispatchEvent",
-    "coalesced_prompt",
     "build_batch_dispatch_event",
     "build_coalesced_batch",
+    "coalesced_prompt",
     "is_coalescing_exempt_source_kind",
 ]
 
@@ -177,6 +177,7 @@ def _event_batch_sort_key(pending_event: PendingEvent, enqueue_order: int) -> tu
 
 
 def coalesced_prompt(message_bodies: list[str]) -> str:
+    """Return the single prompt text used to dispatch one coalesced turn."""
     if len(message_bodies) == 1:
         return message_bodies[0]
     combined_body = "\n".join(message_bodies)

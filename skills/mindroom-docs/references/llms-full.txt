@@ -2380,25 +2380,24 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Communication & Social
 
-| Icon                    | Tool                | Description                                                                                                                          | Config Required                                                                                                                                            |
-| ----------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| :lucide-message-square: | `matrix_message`    | Native Matrix messaging actions (`send`, `reply`, `thread-reply`, `react`, `read`, `room-threads`, `thread-list`, `edit`, `context`) | -                                                                                                                                                          |
-| :lucide-message-square: | `matrix_room`       | Inspect room metadata, members, threads, and state (`room-info`, `members`, `threads`, `state`)                                      | -                                                                                                                                                          |
-| :lucide-tags:           | `thread_tags`       | Tag, untag, and inspect Matrix threads using shared room-state markers (`tag_thread`, `untag_thread`, `list_thread_tags`)            | -                                                                                                                                                          |
-| :lucide-message-square: | `matrix_api`        | Low-level Matrix event and state operations (`send_event`, `get_state`, `put_state`, `redact`, `get_event`)                          | -                                                                                                                                                          |
-
-| :lucide-message-square: | `gmail`             | Read, search, and manage Gmail emails                                                                                                | Google OAuth                                                                                                                                               |
-| :lucide-message-square: | `slack`             | Send messages and manage channels                                                                                                    | `token`                                                                                                                                                    |
-| :lucide-message-square: | `discord`           | Interact with Discord channels and servers                                                                                           | `bot_token`                                                                                                                                                |
-| :lucide-message-square: | `telegram`          | Send messages via Telegram bot                                                                                                       | `token`, `chat_id`                                                                                                                                         |
-| :lucide-message-square: | `whatsapp`          | WhatsApp Business API messaging                                                                                                      | `access_token`, `phone_number_id`, `version` (optional), `recipient_waid` (optional), `async_mode` (optional)                                              |
-| :lucide-message-square: | `twilio`            | SMS and voice                                                                                                                        | `account_sid`, `auth_token`                                                                                                                                |
-| :lucide-message-square: | `webex`             | Webex Teams messaging                                                                                                                | `access_token`, `enable_send_message` (optional), `enable_list_rooms` (optional)                                                                           |
-| :lucide-message-square: | `resend`            | Transactional email                                                                                                                  | `api_key`                                                                                                                                                  |
-| :lucide-message-square: | `email`             | Generic SMTP email                                                                                                                   | SMTP config                                                                                                                                                |
-| :lucide-message-square: | `x`                 | Post tweets, send DMs, and search X/Twitter                                                                                          | `bearer_token` or OAuth (`consumer_key`, `consumer_secret`, `access_token`, `access_token_secret`); optional: `include_post_metrics`, `wait_on_rate_limit` |
-| :lucide-message-square: | `reddit`            | Reddit browsing and interaction                                                                                                      | `client_id`, `client_secret`                                                                                                                               |
-| :lucide-message-square: | `zoom`              | Video conferencing and meetings                                                                                                      | `account_id`, `client_id`, `client_secret`                                                                                                                 |
+| Icon                    | Tool             | Description                                                                                                                          | Config Required                                                                                                                                            |
+| ----------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| :lucide-message-square: | `matrix_message` | Native Matrix messaging actions (`send`, `reply`, `thread-reply`, `react`, `read`, `room-threads`, `thread-list`, `edit`, `context`) | -                                                                                                                                                          |
+| :lucide-message-square: | `matrix_room`    | Inspect room metadata, members, threads, and state (`room-info`, `members`, `threads`, `state`)                                      | -                                                                                                                                                          |
+| :lucide-tags:           | `thread_tags`    | Tag, untag, and inspect Matrix threads using shared room-state markers (`tag_thread`, `untag_thread`, `list_thread_tags`)            | -                                                                                                                                                          |
+| :lucide-message-square: | `matrix_api`     | Low-level Matrix event and state operations (`send_event`, `get_state`, `put_state`, `redact`, `get_event`)                          | -                                                                                                                                                          |
+| :lucide-message-square: | `gmail`          | Read, search, and manage Gmail emails                                                                                                | Google OAuth                                                                                                                                               |
+| :lucide-message-square: | `slack`          | Send messages and manage channels                                                                                                    | `token`                                                                                                                                                    |
+| :lucide-message-square: | `discord`        | Interact with Discord channels and servers                                                                                           | `bot_token`                                                                                                                                                |
+| :lucide-message-square: | `telegram`       | Send messages via Telegram bot                                                                                                       | `token`, `chat_id`                                                                                                                                         |
+| :lucide-message-square: | `whatsapp`       | WhatsApp Business API messaging                                                                                                      | `access_token`, `phone_number_id`, `version` (optional), `recipient_waid` (optional), `async_mode` (optional)                                              |
+| :lucide-message-square: | `twilio`         | SMS and voice                                                                                                                        | `account_sid`, `auth_token`                                                                                                                                |
+| :lucide-message-square: | `webex`          | Webex Teams messaging                                                                                                                | `access_token`, `enable_send_message` (optional), `enable_list_rooms` (optional)                                                                           |
+| :lucide-message-square: | `resend`         | Transactional email                                                                                                                  | `api_key`                                                                                                                                                  |
+| :lucide-message-square: | `email`          | Generic SMTP email                                                                                                                   | SMTP config                                                                                                                                                |
+| :lucide-message-square: | `x`              | Post tweets, send DMs, and search X/Twitter                                                                                          | `bearer_token` or OAuth (`consumer_key`, `consumer_secret`, `access_token`, `access_token_secret`); optional: `include_post_metrics`, `wait_on_rate_limit` |
+| :lucide-message-square: | `reddit`         | Reddit browsing and interaction                                                                                                      | `client_id`, `client_secret`                                                                                                                               |
+| :lucide-message-square: | `zoom`           | Video conferencing and meetings                                                                                                      | `account_id`, `client_id`, `client_secret`                                                                                                                 |
 
 ### `thread_tags`
 
@@ -6992,7 +6991,6 @@ Show the current MindRoom version.
 
  Show the current version of Mindroom.
 
-
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
@@ -7020,7 +7018,6 @@ Start MindRoom with your configuration.
 │                                          [default: INFO]                               │
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
-│                                          [default: None]                               │
 │ --api               --no-api             Start the bundled dashboard/API server        │
 │                                          alongside the bot                             │
 │                                          [default: api]                                │
@@ -7041,7 +7038,6 @@ Generate and sync managed avatar assets.
 
  Generate and sync managed avatar assets.
 
-
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
@@ -7061,7 +7057,6 @@ Generate missing managed avatar files in the workspace. In a source checkout, ge
 
  Generate missing managed avatar files in the workspace.
 
-
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
@@ -7076,7 +7071,6 @@ Sync configured room and root-space avatars to Matrix using the initialized rout
 
  Sync configured room and root-space avatars to Matrix using the initialized router
  account.
-
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
@@ -7116,7 +7110,6 @@ Manage MindRoom configuration files. The `config` subgroup contains commands for
  Usage: root config [OPTIONS] COMMAND [ARGS]...
 
  Manage MindRoom configuration files.
-
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
@@ -7240,7 +7233,6 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 
  Start local Synapse + MindRoom Cinny using Docker only.
 
-
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --synapse-dir                                 PATH                 Directory           │
 │                                                                    containing Synapse  │
@@ -7260,7 +7252,6 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 │                                                                    from                │
 │                                                                    --homeserver-url    │
 │                                                                    hostname).          │
-│                                                                    [default: None]     │
 │ --cinny-port                                  INTEGER RANGE        Local host port for │
 │                                               [1<=x<=65535]        the MindRoom Cinny  │
 │                                                                    container.          │
