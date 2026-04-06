@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from agno.run import RunContext
 from agno.tools import Toolkit
 
 from mindroom.tool_system.dynamic_toolkits import (
@@ -12,6 +13,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     get_loaded_toolkits_for_session,
     merge_runtime_tool_configs,
     save_loaded_toolkits_for_session,
+    update_run_context_loaded_toolkits,
 )
 
 if TYPE_CHECKING:
@@ -150,7 +152,7 @@ class DynamicToolsToolkit(Toolkit):
 
         return None
 
-    def load_tools(self, toolkit: str) -> str:
+    def load_tools(self, toolkit: str, run_context: RunContext | None = None) -> str:
         """Load one allowed toolkit for the current session.
 
         The requested toolkit becomes available on the next request in the same
@@ -187,6 +189,7 @@ class DynamicToolsToolkit(Toolkit):
             session_id=self._session_id,
             loaded_toolkits=candidate_loaded_toolkits,
         )
+        update_run_context_loaded_toolkits(run_context, saved_loaded_toolkits)
         return self._payload(
             "loaded",
             toolkit=toolkit,
@@ -195,7 +198,7 @@ class DynamicToolsToolkit(Toolkit):
             message=f"Toolkit '{toolkit}' will be available on the next request in this session.",
         )
 
-    def unload_tools(self, toolkit: str) -> str:
+    def unload_tools(self, toolkit: str, run_context: RunContext | None = None) -> str:
         """Unload one toolkit from the current session.
 
         The toolkit stops being available on the next request in the same
@@ -248,6 +251,7 @@ class DynamicToolsToolkit(Toolkit):
             session_id=self._session_id,
             loaded_toolkits=[name for name in loaded_toolkits if name != toolkit],
         )
+        update_run_context_loaded_toolkits(run_context, saved_loaded_toolkits)
         return self._payload(
             "unloaded",
             toolkit=toolkit,
