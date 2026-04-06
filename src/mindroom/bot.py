@@ -162,10 +162,11 @@ from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import (
     COALESCED_SOURCE_EVENT_IDS_CONTENT_KEY,
     COALESCED_SOURCE_EVENT_PROMPTS_CONTENT_KEY,
-    CoalescedBatch as _CoalescedBatch,
+    CoalescingGate,
+    coalesced_prompt,
 )
 from .coalescing import (
-    CoalescingGate,
+    CoalescedBatch as _CoalescedBatch,
 )
 from .coalescing import (
     CoalescingKey as _CoalescingKey,
@@ -181,7 +182,6 @@ from .coalescing import (
 )
 from .coalescing import (
     build_batch_dispatch_event as _build_batch_dispatch_event,
-    coalesced_prompt,
 )
 from .commands import config_confirmation
 from .commands.handler import (
@@ -794,7 +794,9 @@ class AgentBot:
                     prompt_map = {
                         event_id: prompt
                         for event_id, prompt in raw_prompt_map.items()
-                        if isinstance(event_id, str) and isinstance(prompt, str) and event_id in normalized_source_event_ids
+                        if isinstance(event_id, str)
+                        and isinstance(prompt, str)
+                        and event_id in normalized_source_event_ids
                     }
                     if prompt_map:
                         metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = prompt_map
@@ -817,9 +819,7 @@ class AgentBot:
             {
                 event_id: prompt
                 for event_id, prompt in raw_prompt_map.items()
-                if isinstance(event_id, str)
-                and isinstance(prompt, str)
-                and event_id in normalized_source_event_ids
+                if isinstance(event_id, str) and isinstance(prompt, str) and event_id in normalized_source_event_ids
             }
             if isinstance(raw_prompt_map, dict)
             else None
@@ -1837,7 +1837,7 @@ class AgentBot:
             requester_user_id=prechecked_event.requester_user_id,
         )
 
-    async def _dispatch_text_message(  # noqa: C901, PLR0912
+    async def _dispatch_text_message(  # noqa: C901, PLR0912, PLR0915
         self,
         room: nio.MatrixRoom,
         event: _TextDispatchEvent | _PrecheckedTextDispatchEvent,
@@ -5046,6 +5046,8 @@ class AgentBot:
                 must be scrubbed from persisted session history after this turn.
             response_envelope: Optional normalized inbound envelope for response hooks.
             correlation_id: Optional request correlation ID propagated to hook logging.
+            matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
+                for unseen-message tracking, coalesced edit regeneration, and cleanup.
 
         Returns:
             Event ID of the response message, or None if failed
@@ -5643,7 +5645,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to route to agent", agent=suggested_agent)
 
-    async def _handle_message_edit(
+    async def _handle_message_edit(  # noqa: C901, PLR0911, PLR0912
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
@@ -5762,10 +5764,9 @@ class AgentBot:
             sender_id=requester_user_id,
         )
 
-        if not should_respond:
-            if turn_metadata is None or not turn_metadata.is_coalesced:
-                self.logger.debug("Agent should not respond to edited message")
-                return
+        if not should_respond and (turn_metadata is None or not turn_metadata.is_coalesced):
+            self.logger.debug("Agent should not respond to edited message")
+            return
 
         self._remove_stale_runs_for_edited_message(
             room=room,

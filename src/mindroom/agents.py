@@ -674,22 +674,22 @@ def remove_run_by_event_id(
     if session is None or not session.runs:
         return False
     original_len = len(session.runs)
-    session.runs = [
-        run
-        for run in session.runs
-        if not (
-            isinstance(run, (RunOutput, TeamRunOutput))
-            and run.metadata
-            and (
-                run.metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY) == event_id
-                or event_id in (
-                    run.metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-                    if isinstance(run.metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY), list)
-                    else []
-                )
-            )
+    filtered_runs: list[Any] = []
+    for run in session.runs:
+        if not isinstance(run, (RunOutput, TeamRunOutput)) or not run.metadata:
+            filtered_runs.append(run)
+            continue
+        raw_source_event_ids = run.metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
+        source_event_ids = (
+            [candidate for candidate in raw_source_event_ids if isinstance(candidate, str)]
+            if isinstance(raw_source_event_ids, list)
+            else []
         )
-    ]
+        matches_event_id = run.metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY) == event_id
+        if matches_event_id or event_id in source_event_ids:
+            continue
+        filtered_runs.append(run)
+    session.runs = filtered_runs
     if len(session.runs) == original_len:
         return False
     storage.upsert_session(session)

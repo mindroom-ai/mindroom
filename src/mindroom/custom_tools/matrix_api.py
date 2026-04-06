@@ -395,7 +395,9 @@ class MatrixApiTools(Toolkit):
         assert normalized_event_type is not None
         assert normalized_content is not None
 
-        if (policy_error := self._send_event_policy_error(room_id=room_id, event_type=normalized_event_type)) is not None:
+        if (
+            policy_error := self._send_event_policy_error(room_id=room_id, event_type=normalized_event_type)
+        ) is not None:
             return policy_error
 
         if dry_run:
@@ -882,7 +884,7 @@ class MatrixApiTools(Toolkit):
             response=response,
         )
 
-    async def matrix_api(  # noqa: PLR0911
+    async def matrix_api(  # noqa: C901, PLR0911
         self,
         action: str = "send_event",
         room_id: str | None = None,
