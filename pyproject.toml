@@ -229,6 +229,7 @@ optional-dependencies.linkup = [
 optional-dependencies.lumalabs = [
   "lumaai",
 ]
+optional-dependencies.matrix_api = [  ]
 optional-dependencies.matrix_message = [  ]
 optional-dependencies.matrix_room = [  ]
 optional-dependencies.mem0 = [
