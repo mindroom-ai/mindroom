@@ -14,6 +14,8 @@ from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 SKIP_CUSTOM = {"homeassistant", "gmail", "google_calendar", "google_sheets", "openclaw_compat"}
 IGNORED_AGNO_PARAMS = {
+    # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
+    "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
     # Agno accepts an SSLContext for Slack, but MindRoom has no safe serialized UI/config path for it.
     "slack": {"ssl"},
     # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.

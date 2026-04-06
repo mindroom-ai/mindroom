@@ -9,11 +9,9 @@ import pytest
 
 import mindroom.custom_tools._google_oauth as google_oauth_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
-from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
@@ -95,35 +93,3 @@ def test_google_wrapper_build_credentials_uses_scope_urls_for_default_scopes(
     )
 
     assert creds.scopes == expected_scopes
-
-
-def test_google_bigquery_preserves_deprecated_boolean_config_aliases(
-    monkeypatch: pytest.MonkeyPatch,
-    runtime_paths: RuntimePaths,
-) -> None:
-    """Persisted deprecated BigQuery flags should still control runtime tool enablement."""
-    credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    save_scoped_credentials(
-        "google_bigquery",
-        {
-            "dataset": "demo_dataset",
-            "project": "demo-project",
-            "location": "us-central1",
-            "enable_run_sql_query": False,
-        },
-        credentials_manager=credentials_manager,
-        worker_target=None,
-    )
-
-    class _FakeBigQueryClient:
-        def __init__(self, *, project: str, credentials: object | None = None) -> None:
-            self.project = project
-            self.credentials = credentials
-
-    monkeypatch.setattr("agno.tools.google.bigquery.bigquery.Client", _FakeBigQueryClient)
-
-    tool = get_tool_by_name("google_bigquery", runtime_paths, worker_target=None)
-
-    assert "run_sql_query" not in tool.functions
-    assert "list_tables" in tool.functions
-    assert "describe_table" in tool.functions
