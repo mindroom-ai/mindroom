@@ -1023,6 +1023,7 @@ async def _edit_stale_message(
         runtime_paths=runtime_paths,
         sender_domain=sender_domain,
         extra_content=extra_content,
+        latest_thread_event_id=latest_thread_event_id,
     )
 
     response_event_id = await edit_message(

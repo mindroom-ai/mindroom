@@ -245,6 +245,7 @@ backups/
 saas-platform/.env.backup
 wgcf-account.toml
 wgcf-profile.conf
+mindroom-test-storage/
 
 # Local AI-agent artifacts
 .claude/LIVE-TEST.md

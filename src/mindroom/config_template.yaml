@@ -51,6 +51,11 @@ matrix_space:
   enabled: true
   name: MindRoom
 
+# Persistent Matrix thread history cache (enabled by default)
+cache:
+  enabled: true
+  db_path: mindroom_data/event_cache.db
+
 # Default local embedder for knowledge indexing.
 memory:
   embedder:

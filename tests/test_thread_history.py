@@ -18,14 +18,18 @@ from mindroom.matrix.client import (
     _fetch_thread_history_via_room_messages,
     _latest_thread_event_id,
     _ThreadHistoryFastPathUnavailableError,
+    attach_event_cache,
     build_threaded_edit_content,
+    detach_event_cache,
     fetch_thread_history,
     fetch_thread_snapshot,
     get_room_threads_page,
 )
+from mindroom.matrix.event_cache import EventCache
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from pathlib import Path
 
 
 class TestThreadHistory:
@@ -45,9 +49,11 @@ class TestThreadHistory:
         event.sender = sender
         event.body = body
         event.server_timestamp = server_timestamp
+        normalized_content = dict(source_content)
+        normalized_content.setdefault("msgtype", "m.text")
         event.source = {
             "type": "m.room.message",
-            "content": source_content,
+            "content": normalized_content,
         }
         return event
 
@@ -411,7 +417,14 @@ class TestThreadHistory:
     @pytest.mark.asyncio
     async def test_fetch_thread_snapshot_marks_room_scan_fallback_as_full_history(self) -> None:
         """Snapshot fallback should go straight to the room-scan helper."""
-        fallback_history = [{"event_id": "$thread_root", "body": "fallback"}]
+        fallback_history = [
+            ResolvedVisibleMessage.synthetic(
+                sender="@user:localhost",
+                body="fallback",
+                event_id="$thread_root",
+                content={"body": "fallback"},
+            ),
+        ]
         client = AsyncMock()
 
         with (
@@ -430,9 +443,10 @@ class TestThreadHistory:
         ):
             snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
 
-        assert snapshot == fallback_history
         assert isinstance(snapshot, ThreadHistoryResult)
         assert snapshot.is_full_history is True
+        assert [message.event_id for message in snapshot] == ["$thread_root"]
+        assert snapshot[0].body == "fallback"
         mock_room_scan.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
         mock_fetch_history.assert_not_awaited()
 
@@ -610,6 +624,7 @@ class TestThreadHistory:
         event_id = await _latest_thread_event_id(client, "!room:localhost", "$thread_root")
 
         assert event_id == "$edit_latest"
+        client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_latest_thread_event_id_returns_edit_relation_when_latest_relation_is_edit(self) -> None:
@@ -1687,3 +1702,363 @@ async def test_get_room_threads_page_wraps_aiohttp_client_errors() -> None:
     assert exc_info.value.response == "ClientPayloadError: payload error"
     assert exc_info.value.errcode is None
     assert exc_info.value.retry_after_ms is None
+
+
+class TestThreadHistoryCache:
+    """Focused tests for the persistent thread-history cache."""
+
+    _make_text_event = staticmethod(TestThreadHistory._make_text_event)
+    _relation_key = staticmethod(TestThreadHistory._relation_key)
+
+    @classmethod
+    def _make_relations_client(cls, **kwargs: object) -> MagicMock:
+        return TestThreadHistory._make_relations_client(**kwargs)
+
+    @staticmethod
+    def _cache_source(event: nio.Event) -> dict[str, object]:
+        source = dict(event.source)
+        content = dict(source.get("content", {}))
+        content.setdefault("msgtype", "m.text")
+        source["content"] = content
+        source.setdefault("event_id", event.event_id)
+        source.setdefault("sender", event.sender)
+        source.setdefault("origin_server_ts", event.server_timestamp)
+        return source
+
+    @staticmethod
+    def _make_redaction_event(
+        *,
+        event_id: str,
+        redacts: str,
+        sender: str = "@user:localhost",
+        server_timestamp: int = 0,
+    ) -> MagicMock:
+        event = MagicMock(spec=nio.RedactionEvent)
+        event.event_id = event_id
+        event.redacts = redacts
+        event.sender = sender
+        event.server_timestamp = server_timestamp
+        event.source = {
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": server_timestamp,
+            "type": "m.room.redaction",
+            "redacts": redacts,
+            "content": {},
+        }
+        return event
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_cache_hit_returns_stored_events(self, tmp_path: Path) -> None:
+        """Cache hits should resolve visible history from SQLite without a homeserver fetch."""
+        cache = EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Cached reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Cached reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        await cache.store_thread_events(
+            "!room:localhost",
+            "$thread_root",
+            [self._cache_source(root_event), self._cache_source(reply_event)],
+        )
+
+        client = MagicMock()
+        client.room_get_event = AsyncMock()
+        client.room_get_event_relations = MagicMock()
+        first_page = MagicMock(spec=nio.RoomMessagesResponse)
+        first_page.chunk = [root_event]
+        first_page.end = None
+        client.room_messages = AsyncMock(return_value=first_page)
+        attach_event_cache(client, cache)
+
+        try:
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+        finally:
+            detach_event_cache(client)
+            await cache.close()
+
+        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert history[1].body == "Cached reply"
+        client.room_get_event.assert_not_called()
+        client.room_get_event_relations.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_cache_miss_populates_cache(self, tmp_path: Path) -> None:
+        """Cache misses should fall through to the homeserver and persist the result."""
+        cache = EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Reply in thread",
+            server_timestamp=2000,
+            source_content={
+                "body": "Reply in thread",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        client = self._make_relations_client(
+            root_event=root_event,
+            relations={
+                self._relation_key("$thread_root", RelationshipType.thread): [reply_event],
+                self._relation_key("$thread_root", RelationshipType.replacement): [],
+                self._relation_key("$reply", RelationshipType.replacement): [],
+            },
+        )
+        attach_event_cache(client, cache)
+
+        try:
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+            cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
+        finally:
+            detach_event_cache(client)
+            await cache.close()
+
+        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert cached_events is not None
+        assert [event["event_id"] for event in cached_events] == ["$thread_root", "$reply"]
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_appends_new_cached_events(self, tmp_path: Path) -> None:
+        """Incremental refreshes should append newer thread events to the cache."""
+        cache = EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="First reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "First reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        new_reply_event = self._make_text_event(
+            event_id="$reply_2",
+            sender="@agent:localhost",
+            body="Second reply",
+            server_timestamp=3000,
+            source_content={
+                "body": "Second reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        await cache.store_thread_events(
+            "!room:localhost",
+            "$thread_root",
+            [self._cache_source(root_event), self._cache_source(reply_event)],
+        )
+
+        client = MagicMock()
+        first_page = MagicMock(spec=nio.RoomMessagesResponse)
+        first_page.chunk = [new_reply_event, reply_event, root_event]
+        first_page.end = None
+        client.room_messages = AsyncMock(return_value=first_page)
+        client.room_get_event = AsyncMock()
+        client.room_get_event_relations = MagicMock()
+        attach_event_cache(client, cache)
+
+        try:
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+            cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
+        finally:
+            detach_event_cache(client)
+            await cache.close()
+
+        assert [message.event_id for message in history] == ["$thread_root", "$reply", "$reply_2"]
+        assert cached_events is not None
+        assert {event["event_id"] for event in cached_events} == {"$thread_root", "$reply", "$reply_2"}
+        client.room_get_event.assert_not_called()
+        client.room_get_event_relations.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_applies_incremental_edit_to_cached_event(self, tmp_path: Path) -> None:
+        """New edit events should update the visible cached message state."""
+        cache = EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Draft",
+            server_timestamp=2000,
+            source_content={
+                "body": "Draft",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        edit_event = self._make_text_event(
+            event_id="$reply_edit",
+            sender="@agent:localhost",
+            body="* Final answer",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Final answer",
+                "m.new_content": {"body": "Final answer"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+            },
+        )
+        await cache.store_thread_events(
+            "!room:localhost",
+            "$thread_root",
+            [self._cache_source(root_event), self._cache_source(reply_event)],
+        )
+
+        client = MagicMock()
+        first_page = MagicMock(spec=nio.RoomMessagesResponse)
+        first_page.chunk = [edit_event, reply_event, root_event]
+        first_page.end = None
+        client.room_messages = AsyncMock(return_value=first_page)
+        client.room_get_event = AsyncMock()
+        client.room_get_event_relations = MagicMock()
+        attach_event_cache(client, cache)
+
+        try:
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+            cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
+        finally:
+            detach_event_cache(client)
+            await cache.close()
+
+        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert history[1].body == "Final answer"
+        assert history[1].visible_event_id == "$reply_edit"
+        assert cached_events is not None
+        assert {event["event_id"] for event in cached_events} == {"$thread_root", "$reply", "$reply_edit"}
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_applies_incremental_redaction_to_cached_event(self, tmp_path: Path) -> None:
+        """Redactions should remove cached events from visible thread history."""
+        cache = EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Reply to redact",
+            server_timestamp=2000,
+            source_content={
+                "body": "Reply to redact",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        redaction_event = self._make_redaction_event(
+            event_id="$redaction",
+            redacts="$reply",
+            server_timestamp=3000,
+        )
+        await cache.store_thread_events(
+            "!room:localhost",
+            "$thread_root",
+            [self._cache_source(root_event), self._cache_source(reply_event)],
+        )
+
+        client = MagicMock()
+        first_page = MagicMock(spec=nio.RoomMessagesResponse)
+        first_page.chunk = [redaction_event]
+        first_page.end = None
+        client.room_messages = AsyncMock(return_value=first_page)
+        client.room_get_event = AsyncMock()
+        client.room_get_event_relations = MagicMock()
+        attach_event_cache(client, cache)
+
+        try:
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+            cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
+        finally:
+            detach_event_cache(client)
+            await cache.close()
+
+        assert [message.event_id for message in history] == ["$thread_root"]
+        assert cached_events is not None
+        assert [event["event_id"] for event in cached_events] == ["$thread_root"]
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_gracefully_degrades_when_cache_read_fails(self) -> None:
+        """Database errors should fall back to the homeserver without failing the call."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Reply in thread",
+            server_timestamp=2000,
+            source_content={
+                "body": "Reply in thread",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        client = self._make_relations_client(
+            root_event=root_event,
+            relations={
+                self._relation_key("$thread_root", RelationshipType.thread): [reply_event],
+                self._relation_key("$thread_root", RelationshipType.replacement): [],
+                self._relation_key("$reply", RelationshipType.replacement): [],
+            },
+        )
+        broken_cache = MagicMock(spec=EventCache)
+        broken_cache.get_thread_events = AsyncMock(side_effect=RuntimeError("db broken"))
+        broken_cache.get_latest_timestamp = AsyncMock()
+        broken_cache.invalidate_thread = AsyncMock()
+        broken_cache.store_thread_events = AsyncMock()
+        attach_event_cache(client, broken_cache)
+
+        try:
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+        finally:
+            detach_event_cache(client)
+
+        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        broken_cache.get_thread_events.assert_awaited_once_with("!room:localhost", "$thread_root")
+        assert broken_cache.invalidate_thread.await_count >= 1
+        broken_cache.store_thread_events.assert_awaited_once()

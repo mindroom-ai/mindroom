@@ -7,9 +7,12 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from mindroom.constants import resolve_config_relative_path
 from mindroom.matrix.identity import managed_room_key_from_alias_localpart, room_alias_localpart
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.constants import RuntimePaths
 
 _RoomAccessMode = Literal["single_user_private", "multi_user"]
@@ -175,3 +178,24 @@ class MatrixRoomAccessConfig(BaseModel):
         if self.is_invite_only_room(room_key, runtime_paths, room_id=room_id, room_alias=room_alias):
             return "private"
         return "public" if self.publish_to_room_directory else "private"
+
+
+class CacheConfig(BaseModel):
+    """Persistent Matrix event cache configuration."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether to persist thread history in SQLite for incremental reuse",
+    )
+    db_path: str | None = Field(
+        default=None,
+        description=(
+            "SQLite database path for the Matrix event cache. Defaults to <storage>/event_cache.db when omitted."
+        ),
+    )
+
+    def resolve_db_path(self, runtime_paths: RuntimePaths) -> Path:
+        """Resolve the configured database path for the active runtime."""
+        if self.db_path is None:
+            return runtime_paths.storage_root / "event_cache.db"
+        return resolve_config_relative_path(self.db_path, runtime_paths)

@@ -23,7 +23,9 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.event_cache import EventCache
 
+from mindroom.matrix.room_cache import cached_room_get_event
 
 type _HistoryMessage = ResolvedVisibleMessage
 
@@ -82,6 +84,8 @@ class _ReplyChainNode:
     parent_event_id: str | None
     thread_root_id: str | None
     has_relations: bool
+    event_source: dict[str, Any] | None = None
+    content_hydrated: bool = True
 
 
 @dataclass
@@ -106,28 +110,74 @@ class ReplyChainCaches:
 # ---------------------------------------------------------------------------
 
 
-async def _event_to_history_message(
-    event: nio.Event,
+async def _history_message_from_event_source(
+    event_source: dict[str, Any],
+    *,
+    sender: str,
+    fallback_body: str,
+    timestamp: int,
+    event_id: str,
     client: nio.AsyncClient,
+    hydrate_sidecars: bool,
 ) -> ResolvedVisibleMessage:
-    """Convert a Matrix event to normalized history message structure."""
+    """Build one normalized history message from raw event source content."""
     from mindroom.matrix.client import ResolvedVisibleMessage  # noqa: PLC0415
 
-    event_source = event.source if isinstance(event.source, dict) else {}
-    resolved_source = await resolve_event_source_content(event_source, client)
+    resolved_source = await resolve_event_source_content(event_source, client) if hydrate_sidecars else event_source
     content = resolved_source.get("content", {})
-    fallback_body = ""
+    event_info = EventInfo.from_event(resolved_source)
+    visible_fallback_body = fallback_body
     if isinstance(content, dict):
         raw_body = content.get("body")
         if isinstance(raw_body, str):
-            fallback_body = raw_body
+            visible_fallback_body = raw_body
     return ResolvedVisibleMessage.synthetic(
+        sender=sender,
+        body=visible_body_from_event_source(resolved_source, visible_fallback_body),
+        timestamp=timestamp,
+        event_id=event_id,
+        content=content if isinstance(content, dict) else {},
+        thread_id=event_info.thread_id,
+    )
+
+
+async def _event_to_history_message(
+    event: nio.Event,
+    client: nio.AsyncClient,
+    *,
+    hydrate_sidecars: bool,
+) -> ResolvedVisibleMessage:
+    """Convert a Matrix event to normalized history message structure."""
+    event_source = event.source if isinstance(event.source, dict) else {}
+    fallback_body = event.body if isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)) else ""
+    return await _history_message_from_event_source(
+        event_source,
         sender=event.sender,
-        body=visible_body_from_event_source(resolved_source, fallback_body),
+        fallback_body=fallback_body,
         timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
         event_id=event.event_id,
-        content=content if isinstance(content, dict) else {},
+        client=client,
+        hydrate_sidecars=hydrate_sidecars,
     )
+
+
+async def _hydrate_cached_node_message(
+    node: _ReplyChainNode,
+    client: nio.AsyncClient,
+) -> None:
+    """Upgrade one cached preview node to hydrated sidecar content in place."""
+    if node.content_hydrated or node.event_source is None:
+        return
+    node.message = await _history_message_from_event_source(
+        node.event_source,
+        sender=node.message.sender,
+        fallback_body=node.message.body,
+        timestamp=node.message.timestamp,
+        event_id=node.message.event_id,
+        client=client,
+        hydrate_sidecars=True,
+    )
+    node.content_hydrated = True
 
 
 def _history_message_event_id(message: _HistoryMessage) -> str | None:
@@ -269,13 +319,18 @@ async def _fetch_node(
     logger: structlog.stdlib.BoundLogger,
     room_id: str,
     event_id: str,
+    *,
+    event_cache: EventCache | None = None,
+    hydrate_sidecars: bool = True,
 ) -> _ReplyChainNode | None:
     """Fetch reply-chain node metadata from cache or Matrix."""
     cached_node = caches.nodes.get(room_id, event_id)
     if cached_node:
+        if hydrate_sidecars:
+            await _hydrate_cached_node_message(cached_node, client)
         return cached_node
 
-    response = await client.room_get_event(room_id, event_id)
+    response = await cached_room_get_event(client, event_cache, room_id, event_id)
     if not isinstance(response, nio.RoomGetEventResponse):
         logger.debug(
             "Failed to resolve reply event for context",
@@ -286,12 +341,15 @@ async def _fetch_node(
         return None
 
     target_event = response.event
+    event_source = target_event.source if isinstance(target_event.source, dict) else {}
     target_info = EventInfo.from_event(target_event.source)
     node = _ReplyChainNode(
-        message=await _event_to_history_message(target_event, client),
+        message=await _event_to_history_message(target_event, client, hydrate_sidecars=hydrate_sidecars),
         parent_event_id=_next_reply_chain_event_id(target_info, event_id),
         thread_root_id=target_info.thread_id,
         has_relations=target_info.has_relations,
+        event_source={key: value for key, value in event_source.items() if isinstance(key, str)},
+        content_hydrated=hydrate_sidecars,
     )
     caches.nodes.put(room_id, event_id, node)
     if node.thread_root_id:
@@ -327,6 +385,8 @@ async def _resolve_direct_thread_root(
             parent_event_id=node.parent_event_id,
             thread_root_id=event_id,
             has_relations=node.has_relations,
+            event_source=node.event_source,
+            content_hydrated=node.content_hydrated,
         ),
     )
     _cache_roots(caches, room_id, visited_event_ids, event_id, points_to_thread=True)
@@ -344,6 +404,7 @@ async def canonicalize_related_event_id(
     event_id: str,
     *,
     caches: ReplyChainCaches | None = None,
+    event_cache: EventCache | None = None,
     traversal_limit: int | None = None,
 ) -> str | None:
     """Resolve one event or relation chain into its canonical conversation root."""
@@ -361,7 +422,14 @@ async def canonicalize_related_event_id(
             break
         seen_event_ids.add(current_event_id)
 
-        node = await _fetch_node(client, effective_caches, logger, room_id, current_event_id)
+        node = await _fetch_node(
+            client,
+            effective_caches,
+            logger,
+            room_id,
+            current_event_id,
+            event_cache=event_cache,
+        )
         if node is None:
             break
 
@@ -411,7 +479,9 @@ async def _resolve_reply_chain(
     room_id: str,
     reply_to_event_id: str,
     *,
+    event_cache: EventCache | None,
     default_history_is_full: bool,
+    hydrate_sidecars: bool,
 ) -> tuple[str, list[_HistoryMessage], bool, bool]:
     """Resolve reply-chain context for clients that don't send thread relations.
 
@@ -447,7 +517,15 @@ async def _resolve_reply_chain(
         seen_event_ids.add(current_event_id)
         visited_event_ids.append(current_event_id)
 
-        node = await _fetch_node(client, caches, logger, room_id, current_event_id)
+        node = await _fetch_node(
+            client,
+            caches,
+            logger,
+            room_id,
+            current_event_id,
+            event_cache=event_cache,
+            hydrate_sidecars=hydrate_sidecars,
+        )
         if node is None:
             break
 
@@ -497,6 +575,8 @@ async def derive_conversation_context(
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
     fetch_history: _FetchThreadHistory,
+    *,
+    event_cache: EventCache | None = None,
 ) -> tuple[bool, str | None, list[_HistoryMessage]]:
     """Derive conversation context from threads or reply chains."""
     thread_root_id = event_info.thread_id
@@ -524,7 +604,9 @@ async def derive_conversation_context(
         fetch_history,
         room_id,
         reply_chain_seed,
+        event_cache=event_cache,
         default_history_is_full=True,
+        hydrate_sidecars=True,
     )
     if points_to_thread:
         if is_full_thread_history:
@@ -547,6 +629,8 @@ async def derive_conversation_target(
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
     fetch_snapshot: _FetchThreadSnapshot,
+    *,
+    event_cache: EventCache | None = None,
 ) -> tuple[bool, str | None, list[_HistoryMessage], bool]:
     """Derive the conversation target with lightweight history for dispatch.
 
@@ -582,7 +666,9 @@ async def derive_conversation_target(
         fetch_snapshot,
         room_id,
         reply_chain_seed,
+        event_cache=event_cache,
         default_history_is_full=False,
+        hydrate_sidecars=False,
     )
     if points_to_thread:
         if is_full_thread_history:

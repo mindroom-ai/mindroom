@@ -88,7 +88,7 @@ from mindroom.matrix.presence import (
     should_use_streaming,
 )
 from mindroom.matrix.reply_chain import ReplyChainCaches, derive_conversation_context, derive_conversation_target
-from mindroom.matrix.room_cache import cached_room
+from mindroom.matrix.room_cache import cached_room, cached_room_get_event
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import (
     is_dm_room,
@@ -227,7 +227,9 @@ from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
     PermanentMatrixStartupError,
     ResolvedVisibleMessage,
+    attach_event_cache,
     build_threaded_edit_content,
+    detach_event_cache,
     edit_message,
     fetch_thread_history,
     fetch_thread_snapshot,
@@ -237,6 +239,7 @@ from .matrix.client import (
     replace_visible_message,
     send_message,
 )
+from .matrix.event_cache import EventCache, normalize_event_source_for_cache
 from .media_inputs import MediaInputs
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
@@ -684,6 +687,7 @@ class AgentBot:
     )
     in_flight_response_count: int = field(default=0, init=False)
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None = field(default=None, init=False)
+    _event_cache: EventCache | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Initialize runtime-only helpers that depend on bound instance methods."""
@@ -1204,7 +1208,12 @@ class AgentBot:
         normalized_target_event_id = event.reacts_to.strip()
         thread_id: str | None = None
         if normalized_target_event_id:
-            response = await self.client.room_get_event(room_id, normalized_target_event_id)
+            response = await cached_room_get_event(
+                self.client,
+                self._event_cache,
+                room_id,
+                normalized_target_event_id,
+            )
             if isinstance(response, nio.RoomGetEventResponse):
                 target_info = EventInfo.from_event(response.event.source)
                 if target_info.thread_id:
@@ -1545,6 +1554,9 @@ class AgentBot:
         if self._sync_shutting_down:
             return
 
+        if isinstance(_response, nio.SyncResponse):
+            await self._cache_sync_timeline_events(_response)
+
         self._first_sync_done = True
 
         if first_sync_response:
@@ -1568,6 +1580,152 @@ class AgentBot:
         await self.join_configured_rooms()
         await self.leave_unconfigured_rooms()
 
+    async def _initialize_event_cache(self) -> None:
+        """Initialize and attach the persistent Matrix event cache when enabled."""
+        assert self.client is not None
+        if not self.config.cache.enabled:
+            return
+
+        event_cache = EventCache(self.config.cache.resolve_db_path(self.runtime_paths))
+        try:
+            await event_cache.initialize()
+        except Exception as exc:
+            self.logger.warning("Failed to initialize event cache", error=str(exc))
+            return
+
+        self._event_cache = event_cache
+        attach_event_cache(self.client, event_cache)
+
+    async def _close_event_cache(self) -> None:
+        """Detach and close the persistent Matrix event cache when present."""
+        if self.client is not None:
+            detach_event_cache(self.client)
+
+        event_cache = self._event_cache
+        self._event_cache = None
+        if event_cache is None:
+            return
+
+        try:
+            await event_cache.close()
+        except Exception as exc:
+            self.logger.warning("Failed to close event cache", error=str(exc))
+
+    async def _cache_thread_event(
+        self,
+        room_id: str,
+        event: nio.RoomMessageText,
+        *,
+        event_info: EventInfo,
+    ) -> None:
+        """Append live thread events to the cache when the thread was already hydrated."""
+        event_cache = self._event_cache
+        if event_cache is None:
+            return
+
+        thread_id = event_info.thread_id
+        if thread_id is None and event_info.is_edit and event_info.original_event_id is not None:
+            thread_id = event_info.thread_id_from_edit or await event_cache.get_thread_id_for_event(
+                room_id,
+                event_info.original_event_id,
+            )
+        if thread_id is None:
+            return
+
+        server_timestamp = event.server_timestamp
+        event_source = normalize_event_source_for_cache(
+            event.source,
+            event_id=event.event_id,
+            sender=event.sender,
+            origin_server_ts=server_timestamp
+            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
+            else None,
+        )
+
+        try:
+            await event_cache.append_event(room_id, thread_id, event_source)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to append live thread event to cache",
+                room_id=room_id,
+                thread_id=thread_id,
+                event_id=event.event_id,
+                error=str(exc),
+            )
+
+    async def _cache_redaction_event(self, room_id: str, event: nio.RedactionEvent) -> None:
+        """Apply live redactions to cached thread history when relevant."""
+        event_cache = self._event_cache
+        if event_cache is None:
+            return
+
+        thread_id = await event_cache.get_thread_id_for_event(room_id, event.redacts)
+        server_timestamp = event.server_timestamp
+        redaction_source = normalize_event_source_for_cache(
+            event.source,
+            event_id=event.event_id,
+            sender=event.sender,
+            origin_server_ts=server_timestamp
+            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
+            else None,
+        )
+
+        try:
+            redacted = await event_cache.redact_event(
+                room_id,
+                event.redacts,
+                thread_id=thread_id,
+                redaction_event=redaction_source,
+            )
+            if not redacted:
+                return
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to apply live redaction to cache",
+                room_id=room_id,
+                thread_id=thread_id,
+                redacted_event_id=event.redacts,
+                error=str(exc),
+            )
+
+    async def _cache_sync_timeline_events(self, response: nio.SyncResponse) -> None:
+        """Persist timeline events from sync so later point lookups can hit SQLite."""
+        event_cache = self._event_cache
+        if event_cache is None:
+            return
+
+        cached_events: list[tuple[str, str, dict[str, Any]]] = []
+        for room_id, room_info in response.rooms.join.items():
+            for event in room_info.timeline.events:
+                if not isinstance(event, nio.Event):
+                    continue
+                if not isinstance(event.source, dict):
+                    continue
+                if not isinstance(event.event_id, str):
+                    continue
+                server_timestamp = event.server_timestamp
+                cached_events.append(
+                    (
+                        event.event_id,
+                        room_id,
+                        normalize_event_source_for_cache(
+                            event.source,
+                            event_id=event.event_id,
+                            sender=event.sender if isinstance(event.sender, str) else None,
+                            origin_server_ts=server_timestamp
+                            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
+                            else None,
+                        ),
+                    ),
+                )
+        if not cached_events:
+            return
+
+        try:
+            await event_cache.store_events_batch(cached_events)
+        except Exception as exc:
+            self.logger.warning("Failed to cache sync timeline events", error=str(exc), events=len(cached_events))
+
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         await self.ensure_user_account()
@@ -1576,6 +1734,7 @@ class AgentBot:
             self.agent_user,
             runtime_paths=self.runtime_paths,
         )
+        await self._initialize_event_cache()
         await self._set_avatar_if_available()
         await self._set_presence_with_model_info()
         interactive.init_persistence(self.runtime_paths.storage_root)
@@ -1584,6 +1743,7 @@ class AgentBot:
         # This ensures the sync loop is never blocked, allowing stop reactions to work
         self.client.add_event_callback(_create_task_wrapper(self._on_invite), nio.InviteEvent)  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
         self.client.add_event_callback(_create_task_wrapper(self._on_message), nio.RoomMessageText)
+        self.client.add_event_callback(_create_task_wrapper(self._on_redaction), nio.RedactionEvent)
         self.client.add_event_callback(_create_task_wrapper(self._on_reaction), nio.ReactionEvent)
 
         # Register media callbacks on all agents (each agent handles its own routing)
@@ -1685,6 +1845,7 @@ class AgentBot:
 
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")
+            await self._close_event_cache()
             await self.client.close()
         self.logger.info("Stopped agent bot")
 
@@ -1881,6 +2042,8 @@ class AgentBot:
         """Handle one text message inside the per-turn thread-history cache scope."""
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
+        event_info = EventInfo.from_event(event.source)
+        await self._cache_thread_event(room.room_id, event, event_info=event_info)
         if not isinstance(event.body, str):
             return
         # Skip messages that are still being streamed (use metadata, not text pattern).
@@ -1891,7 +2054,6 @@ class AgentBot:
         }:
             return
 
-        event_info = EventInfo.from_event(event.source)
         prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
         if prechecked_event is None:
             return
@@ -2076,6 +2238,10 @@ class AgentBot:
             source_event_ids=tracked_source_event_ids,
             matrix_run_metadata=matrix_run_metadata,
         )
+
+    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
+        """Keep cached thread history consistent when Matrix redactions arrive."""
+        await self._cache_redaction_event(room.room_id, event)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
@@ -2548,6 +2714,7 @@ class AgentBot:
             self._reply_chain,
             self.logger,
             self._fetch_thread_history,
+            event_cache=self._event_cache,
         )
         return is_thread, thread_id, thread_history
 
@@ -2565,6 +2732,7 @@ class AgentBot:
             self._reply_chain,
             self.logger,
             fetch_thread_snapshot,
+            event_cache=self._event_cache,
         )
 
     def _requester_user_id(
