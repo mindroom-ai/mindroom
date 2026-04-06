@@ -1272,6 +1272,7 @@ class AgentBot:
         )
         await self._set_avatar_if_available()
         await self._set_presence_with_model_info()
+        interactive.init_persistence(self.runtime_paths.storage_root)
 
         # Register event callbacks - wrap them to run as background tasks
         # This ensures the sync loop is never blocked, allowing stop reactions to work
@@ -3669,7 +3670,7 @@ class AgentBot:
                 room_id,
                 response_target.resolved_thread_id,
                 delivery_result.option_map,
-                "team",
+                self.agent_name,
             )
             await interactive.add_reaction_buttons(
                 self.client,
