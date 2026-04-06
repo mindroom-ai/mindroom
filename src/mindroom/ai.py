@@ -33,8 +33,11 @@ from agno.run.base import RunStatus
 from mindroom.agents import create_agent
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
+    MATRIX_BATCH_PROMPT_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     ROUTER_AGENT_NAME,
     RuntimePaths,
     runtime_env_path,
@@ -462,16 +465,44 @@ def get_model_instance(
     )
 
 
+def _normalized_string_list(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value and value not in normalized:
+            normalized.append(value)
+    return normalized
+
+
 def build_matrix_run_metadata(
     reply_to_event_id: str | None,
     unseen_event_ids: list[str],
+    *,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build metadata dict for a run, tracking consumed Matrix event ids."""
+    if not reply_to_event_id:
+        return dict(extra_metadata) if extra_metadata else None
     metadata = dict(extra_metadata or {})
-    if reply_to_event_id:
-        metadata[MATRIX_EVENT_ID_METADATA_KEY] = reply_to_event_id
-        metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = [reply_to_event_id, *unseen_event_ids]
+    source_event_ids = _normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
+    seen_event_ids = _normalized_string_list(
+        [
+            reply_to_event_id,
+            *source_event_ids,
+            *_normalized_string_list(metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)),
+            *unseen_event_ids,
+        ],
+    )
+    metadata[MATRIX_EVENT_ID_METADATA_KEY] = reply_to_event_id
+    metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = seen_event_ids
+    if MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY in metadata and not isinstance(
+        metadata[MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY],
+        dict,
+    ):
+        metadata.pop(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY, None)
+    if MATRIX_BATCH_PROMPT_METADATA_KEY in metadata and not isinstance(metadata[MATRIX_BATCH_PROMPT_METADATA_KEY], str):
+        metadata.pop(MATRIX_BATCH_PROMPT_METADATA_KEY, None)
     return metadata or None
 
 
@@ -751,8 +782,6 @@ async def ai_response(  # noqa: C901
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
-        matrix_run_metadata: Optional additional Matrix run metadata to merge
-            into the stored Agno run metadata for edit regeneration and batch tracking.
 
     Returns:
         Agent response string
@@ -796,7 +825,7 @@ async def ai_response(  # noqa: C901
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
                 unseen_event_ids,
-                matrix_run_metadata,
+                extra_metadata=matrix_run_metadata,
             )
 
             response: RunOutput | None = None
@@ -1022,8 +1051,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
-        matrix_run_metadata: Optional additional Matrix run metadata to merge
-            into the stored Agno run metadata for edit regeneration and batch tracking.
 
     Yields:
         Streaming chunks/events as they become available
@@ -1069,7 +1096,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
                 unseen_event_ids,
-                matrix_run_metadata,
+                extra_metadata=matrix_run_metadata,
             )
 
             attempt_prompt = full_prompt

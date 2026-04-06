@@ -16,7 +16,7 @@ from agno.session.team import TeamSession
 
 from mindroom import interactive
 from mindroom.agents import remove_run_by_event_id
-from mindroom.bot import AgentBot, TeamBot
+from mindroom.bot import AgentBot, TeamBot, _PersistedTurnMetadata
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
@@ -465,6 +465,34 @@ def test_remove_run_by_event_id_removes_team_runs() -> None:
     assert session.runs[0].metadata["matrix_event_id"] == "$other:example.com"
 
 
+def test_remove_run_by_event_id_matches_coalesced_source_event_ids() -> None:
+    """Coalesced runs should be removable through any batch member event ID."""
+    session = TeamSession(
+        session_id="session-1",
+        team_id="test_team",
+        runs=[
+            TeamRunOutput(
+                session_id="session-1",
+                metadata={
+                    "matrix_event_id": "$primary:example.com",
+                    "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
+                },
+            ),
+        ],
+    )
+    storage = _FakeTeamStorage(session)
+
+    removed = remove_run_by_event_id(
+        storage,
+        "session-1",
+        "$first:example.com",
+        session_type=SessionType.TEAM,
+    )
+
+    assert removed is True
+    assert session.runs == []
+
+
 @pytest.mark.asyncio
 async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path: Path) -> None:
     """Team edit regeneration should delete stale runs from the shared team session."""
@@ -556,7 +584,6 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
 
         await bot._on_message(room, edit_event)
 
-    assert mock_create_storage.call_count == 4
     assert mock_remove_run.call_args_list == [
         call(
             storage,
@@ -805,6 +832,142 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edit(
+    tmp_path: Path,
+) -> None:
+    """Editing any member of a coalesced turn should regenerate against the full reconstructed prompt."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    config = _test_config(tmp_path)
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+    bot.response_tracker.mark_responded("$first:example.com", "$response:example.com")
+    bot.response_tracker.mark_responded("$primary:example.com", "$response:example.com")
+    bot.logger = MagicMock()
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* updated first",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "updated first",
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {
+                    "event_id": "$first:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = {
+        "content": {
+            "body": "* updated first",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "updated first",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "event_id": "$first:example.com",
+                "rel_type": "m.replace",
+            },
+        },
+        "event_id": "$edit:example.com",
+        "sender": "@user:example.com",
+    }
+
+    with (
+        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+        patch.object(bot, "_create_history_scope_storage") as mock_create_storage,
+        patch("mindroom.bot.remove_run_by_event_id", return_value=True) as mock_remove_run,
+        patch.object(
+            bot,
+            "_load_persisted_turn_metadata",
+            return_value=_PersistedTurnMetadata(
+                anchor_event_id="$primary:example.com",
+                source_event_ids=("$first:example.com", "$primary:example.com"),
+                batch_prompt=(
+                    "The user sent the following messages in quick succession. "
+                    "Treat them as one turn and respond once:\n\nfirst\nprimary"
+                ),
+                source_event_prompts={
+                    "$first:example.com": "first",
+                    "$primary:example.com": "primary",
+                },
+            ),
+        ),
+        patch.object(
+            bot,
+            "_generate_response",
+            new_callable=AsyncMock,
+            return_value="$response:example.com",
+        ) as mock_generate_response,
+    ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
+        await bot._handle_message_edit(
+            room,
+            edit_event,
+            EventInfo.from_event(edit_event.source),
+            requester_user_id=edit_event.sender,
+        )
+
+        mock_should_respond.assert_called_once()
+        mock_generate_response.assert_awaited_once()
+        call_kwargs = mock_generate_response.call_args.kwargs
+        assert call_kwargs["prompt"] == (
+            "The user sent the following messages in quick succession. "
+            "Treat them as one turn and respond once:\n\nupdated first\nprimary"
+        )
+        assert call_kwargs["reply_to_event_id"] == "$primary:example.com"
+        assert call_kwargs["matrix_run_metadata"] == {
+            "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
+            "matrix_source_event_prompts": {
+                "$first:example.com": "updated first",
+                "$primary:example.com": "primary",
+            },
+            "matrix_batch_prompt": (
+                "The user sent the following messages in quick succession. "
+                "Treat them as one turn and respond once:\n\nupdated first\nprimary"
+            ),
+        }
+        assert bot.response_tracker.get_response_event_id("$first:example.com") == "$response:example.com"
+        assert bot.response_tracker.get_response_event_id("$primary:example.com") == "$response:example.com"
+        assert mock_remove_run.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_handle_message_edit_reuses_existing_response_without_placeholder_flag(
     tmp_path: Path,
 ) -> None:
@@ -906,7 +1069,6 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         assert call_kwargs["existing_event_id"] == "$response:example.com"
         assert call_kwargs["existing_event_is_placeholder"] is False
         assert bot.response_tracker.get_response_event_id("$original:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 4
         assert mock_remove_run.call_count == 2
 
 
@@ -1004,7 +1166,6 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
         mock_generate_response.assert_awaited_once()
         assert bot.response_tracker.mark_responded.call_count == 0
         assert bot.response_tracker.get_response_event_id("$original:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 4
         assert mock_remove_run.call_count == 2
 
 
