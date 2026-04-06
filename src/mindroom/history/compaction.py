@@ -904,26 +904,22 @@ def _select_runs_to_compact(
     history_settings: ResolvedHistorySettings,
     available_history_budget: int | None,
 ) -> list[RunOutput | TeamRunOutput]:
-    run_count = len(visible_runs)
-    if run_count == 0:
+    if not visible_runs:
         return []
 
-    keep_count = 0
     if state.force_compact_before_next_run:
-        keep_count = 2 if run_count > 2 else 1
-    else:
-        if available_history_budget is None:
-            return []
-        current_tokens = estimate_prompt_visible_history_tokens(
-            session=session,
-            scope=scope,
-            history_settings=history_settings,
-        )
-        if current_tokens <= available_history_budget:
-            return []
-        keep_count = 2 if run_count > 2 else 1 if run_count > 1 else 0
+        return visible_runs
 
-    return visible_runs if keep_count == 0 else visible_runs[:-keep_count]
+    if available_history_budget is None:
+        return []
+    current_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope,
+        history_settings=history_settings,
+    )
+    if current_tokens <= available_history_budget:
+        return []
+    return visible_runs
 
 
 def _history_messages_for_session(
