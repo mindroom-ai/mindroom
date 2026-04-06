@@ -7546,6 +7546,7 @@ class TestMultiAgentOrchestrator:
         plan = SimpleNamespace(
             mindroom_user_changed=False,
             new_config=new_config,
+            changed_mcp_servers=set(),
             entities_to_restart=set(),
             new_entities=set(),
             removed_entities=set(),
@@ -7581,6 +7582,7 @@ class TestMultiAgentOrchestrator:
         plan = SimpleNamespace(
             mindroom_user_changed=True,
             new_config=new_config,
+            changed_mcp_servers=set(),
             entities_to_restart=set(),
             new_entities=set(),
             removed_entities=set(),

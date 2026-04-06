@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
 from mindroom.mcp.config import MCPServerConfig, resolved_mcp_tool_prefix
 
@@ -110,6 +110,105 @@ def test_config_rejects_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> None:
                         "role": "Write code",
                         "worker_scope": "user",
                         "tools": ["mcp_demo"],
+                    },
+                },
+            },
+            runtime_paths,
+        )
+
+
+def test_config_tracks_mcp_toolkit_dependencies_for_agents_and_teams(tmp_path: Path) -> None:
+    """Treat toolkit-contained MCP tools as dependencies for restart planning."""
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                },
+            },
+            "toolkits": {
+                "browser": {
+                    "tools": ["mcp_demo"],
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "allowed_toolkits": ["browser"],
+                    "initial_toolkits": ["browser"],
+                },
+                "plain": {
+                    "display_name": "Plain",
+                    "role": "No MCP",
+                },
+            },
+            "teams": {
+                "dev_team": {
+                    "display_name": "Dev Team",
+                    "role": "Collaborate",
+                    "agents": ["code"],
+                },
+            },
+        },
+        _runtime_paths(tmp_path),
+    )
+
+    assert config.get_entities_referencing_tools({"mcp_demo"}) == {"code", "dev_team"}
+
+
+def test_config_rejects_invalid_mcp_assignment_overrides(tmp_path: Path) -> None:
+    """Mirror server-level override validation for per-assignment MCP config."""
+    runtime_paths = _runtime_paths(tmp_path)
+
+    with pytest.raises(ConfigRuntimeValidationError, match="include_tools and exclude_tools overlap"):
+        Config.validate_with_runtime(
+            {
+                "mcp_servers": {
+                    "demo": {
+                        "transport": "stdio",
+                        "command": "npx",
+                    },
+                },
+                "agents": {
+                    "code": {
+                        "display_name": "Code",
+                        "role": "Write code",
+                        "tools": [
+                            {
+                                "mcp_demo": {
+                                    "include_tools": ["echo"],
+                                    "exclude_tools": ["echo"],
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+            runtime_paths,
+        )
+
+    with pytest.raises(ConfigRuntimeValidationError, match="greater than 0"):
+        Config.validate_with_runtime(
+            {
+                "mcp_servers": {
+                    "demo": {
+                        "transport": "stdio",
+                        "command": "npx",
+                    },
+                },
+                "agents": {
+                    "code": {
+                        "display_name": "Code",
+                        "role": "Write code",
+                        "tools": [
+                            {
+                                "mcp_demo": {
+                                    "call_timeout_seconds": 0,
+                                },
+                            },
+                        ],
                     },
                 },
             },

@@ -56,6 +56,7 @@ from mindroom.matrix.users import (
     create_agent_user,
 )
 from mindroom.mcp.manager import MCPServerManager
+from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import (
@@ -209,6 +210,7 @@ class MultiAgentOrchestrator:
     _config_reload_task: asyncio.Task | None = field(default=None, init=False)
     _config_reload_requested_at: float | None = field(default=None, init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
+    _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
 
     def __post_init__(self) -> None:
@@ -632,7 +634,7 @@ class MultiAgentOrchestrator:
         if not failed_server_ids:
             return set()
         blocked_entities = config.get_entities_referencing_tools(
-            {f"mcp_{server_id}" for server_id in failed_server_ids},
+            {mcp_tool_name(server_id) for server_id in failed_server_ids},
         )
         return blocked_entities & entity_names
 
@@ -1002,12 +1004,39 @@ class MultiAgentOrchestrator:
             if bot is not None:
                 await bot.cleanup()
 
-    async def _restart_changed_entities(self, plan: ConfigUpdatePlan) -> tuple[set[str], list[str], list[str]]:
+    async def _stop_entities_before_mcp_sync(
+        self,
+        current_config: Config,
+        new_config: Config,
+        changed_server_ids: set[str],
+    ) -> set[str]:
+        """Stop MCP-dependent entities before removing or reconfiguring their servers."""
+        if not changed_server_ids:
+            return set()
+
+        affected_entities = current_config.get_entities_referencing_tools(
+            {mcp_tool_name(server_id) for server_id in changed_server_ids},
+        ) | new_config.get_entities_referencing_tools({mcp_tool_name(server_id) for server_id in changed_server_ids})
+        if not affected_entities:
+            return set()
+
+        for entity_name in affected_entities:
+            await self._cancel_bot_start_task(entity_name)
+        await stop_entities(affected_entities, self.agent_bots, self._sync_tasks)
+        return affected_entities
+
+    async def _restart_changed_entities(
+        self,
+        plan: ConfigUpdatePlan,
+        *,
+        already_stopped_entities: set[str] | None = None,
+    ) -> tuple[set[str], list[str], list[str]]:
         """Restart or create entities affected by the config change."""
-        if plan.entities_to_restart:
-            for entity_name in plan.entities_to_restart:
+        entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
+        if entities_to_stop:
+            for entity_name in entities_to_stop:
                 await self._cancel_bot_start_task(entity_name)
-            await stop_entities(plan.entities_to_restart, self.agent_bots, self._sync_tasks)
+            await stop_entities(entities_to_stop, self.agent_bots, self._sync_tasks)
 
         entities_to_recreate = plan.entities_to_restart & plan.all_new_entities
         changed_entities = entities_to_recreate | plan.new_entities
@@ -1026,32 +1055,33 @@ class MultiAgentOrchestrator:
 
     async def _handle_mcp_catalog_change(self, server_id: str) -> None:
         """Restart entities that reference one changed MCP catalog."""
-        if not self.running or self.config is None:
-            return
-        changed_entities = self.config.get_entities_referencing_tools({f"mcp_{server_id}"})
-        if not changed_entities:
-            return
-        logger.info(
-            "Restarting entities after MCP catalog change",
-            server_id=server_id,
-            entities=sorted(changed_entities),
-        )
-        for entity_name in changed_entities:
-            await self._cancel_bot_start_task(entity_name)
-        await stop_entities(changed_entities, self.agent_bots, self._sync_tasks)
-        start_results = await self._create_and_start_entities(
-            changed_entities,
-            self.config,
-            start_sync_tasks=True,
-        )
-        for entity_name in start_results.retryable_entities:
-            await self._schedule_bot_start_retry(entity_name)
-        if start_results.permanently_failed_entities:
-            logger.warning(
-                "MCP catalog restart left some bots disabled",
+        async with self._mcp_catalog_change_lock:
+            if not self.running or self.config is None:
+                return
+            changed_entities = self.config.get_entities_referencing_tools({mcp_tool_name(server_id)})
+            if not changed_entities:
+                return
+            logger.info(
+                "Restarting entities after MCP catalog change",
                 server_id=server_id,
-                entities=start_results.permanently_failed_entities,
+                entities=sorted(changed_entities),
             )
+            for entity_name in changed_entities:
+                await self._cancel_bot_start_task(entity_name)
+            await stop_entities(changed_entities, self.agent_bots, self._sync_tasks)
+            start_results = await self._create_and_start_entities(
+                changed_entities,
+                self.config,
+                start_sync_tasks=True,
+            )
+            for entity_name in start_results.retryable_entities:
+                await self._schedule_bot_start_retry(entity_name)
+            if start_results.permanently_failed_entities:
+                logger.warning(
+                    "MCP catalog restart left some bots disabled",
+                    server_id=server_id,
+                    entities=start_results.permanently_failed_entities,
+                )
 
     async def _reconcile_post_update_rooms(
         self,
@@ -1090,6 +1120,12 @@ class MultiAgentOrchestrator:
         if plan.mindroom_user_changed:
             await self._prepare_user_account(new_config, update_runtime_state=not self.running)
 
+        pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
+            current_config,
+            new_config,
+            plan.changed_mcp_servers,
+        )
+
         # Only apply the new config after validation and account checks succeed.
         self.config = new_config
         self._activate_hook_registry(new_hook_registry)
@@ -1100,7 +1136,7 @@ class MultiAgentOrchestrator:
                 plan,
                 entities_to_restart=plan.entities_to_restart
                 | new_config.get_entities_referencing_tools(
-                    {f"mcp_{server_id}" for server_id in changed_runtime_mcp_servers},
+                    {mcp_tool_name(server_id) for server_id in changed_runtime_mcp_servers},
                 ),
             )
         await self._update_unchanged_bots(plan)
@@ -1116,7 +1152,10 @@ class MultiAgentOrchestrator:
             )
             return False
 
-        changed_entities, retryable_entities, permanently_failed_entities = await self._restart_changed_entities(plan)
+        changed_entities, retryable_entities, permanently_failed_entities = await self._restart_changed_entities(
+            plan,
+            already_stopped_entities=pre_stopped_mcp_entities,
+        )
         await self._reconcile_post_update_rooms(plan, changed_entities)
 
         for entity_name in retryable_entities:

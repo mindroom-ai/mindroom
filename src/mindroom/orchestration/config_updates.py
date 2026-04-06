@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
+from mindroom.mcp.registry import mcp_tool_name
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -176,7 +177,7 @@ def _entities_referencing_mcp_servers(
     changed_server_ids: set[str],
 ) -> set[str]:
     """Return entities that reference any changed MCP server tool."""
-    tool_names = {f"mcp_{server_id}" for server_id in changed_server_ids}
+    tool_names = {mcp_tool_name(server_id) for server_id in changed_server_ids}
     old_entities = set() if config is None else config.get_entities_referencing_tools(tool_names)
     new_entities = new_config.get_entities_referencing_tools(tool_names)
     return old_entities | new_entities

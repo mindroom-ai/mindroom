@@ -45,6 +45,7 @@ class MCPServerManager:
         self._states: dict[str, MCPServerState] = {}
         self._catalog_validation_lock = asyncio.Lock()
         self._on_catalog_change = on_catalog_change
+        self._config: Config | None = None
         self._shutdown = False
 
     def has_server(self, server_id: str) -> bool:
@@ -79,6 +80,7 @@ class MCPServerManager:
 
     async def sync_servers(self, config: Config) -> set[str]:
         """Reconcile live server sessions against the active config."""
+        self._config = config
         changed_server_ids: set[str] = set()
         desired_servers = {
             server_id: server_config for server_id, server_config in config.mcp_servers.items() if server_config.enabled
@@ -114,6 +116,7 @@ class MCPServerManager:
     async def shutdown(self) -> None:
         """Close all tracked sessions and background refresh tasks."""
         self._shutdown = True
+        self._config = None
         for state in list(self._states.values()):
             task = state.refresh_task
             if task is not None:
@@ -162,7 +165,7 @@ class MCPServerManager:
         except MCPError:
             raise
 
-        await self._refresh_server_catalog(state, notify=False, expected_refresh_revision=refresh_revision)
+        await self._refresh_server_catalog(state, notify=True, expected_refresh_revision=refresh_revision)
         self._require_catalog_tool(state, remote_tool_name)
         return await self._call_tool_with_lock(state, remote_tool_name, arguments, timeout_seconds=timeout_seconds)
 
@@ -221,6 +224,7 @@ class MCPServerManager:
             if expected_refresh_revision is not None and state.refresh_revision != expected_refresh_revision:
                 return False
             state.refresh_revision += 1
+            state.stale = False
             async with state.call_lock.write():
                 previous_hash = state.catalog.catalog_hash if state.catalog is not None else None
                 await self._disconnect_state(state)
@@ -230,7 +234,6 @@ class MCPServerManager:
                     state.last_error = exc
                     state.connected = False
                     state.catalog = None
-                    state.stale = False
                     logger.warning(
                         "MCP server discovery failed",
                         server_id=state.server_id,
@@ -241,7 +244,6 @@ class MCPServerManager:
 
                 state.catalog = catalog
                 state.connected = True
-                state.stale = False
                 state.last_error = None
                 changed = previous_hash != catalog.catalog_hash
                 should_notify_catalog_change = notify and changed and self._on_catalog_change is not None
@@ -250,6 +252,8 @@ class MCPServerManager:
             return False
         if should_notify_catalog_change and self._on_catalog_change is not None:
             await self._on_catalog_change(state.server_id)
+        if state.stale and state.refresh_task is None and not self._shutdown:
+            self._schedule_refresh_task(state)
         return changed
 
     async def _connect_and_discover(self, state: MCPServerState) -> MCPServerCatalog:
@@ -275,6 +279,9 @@ class MCPServerManager:
                 open_session_and_discover(),
                 timeout=state.config.startup_timeout_seconds,
             )
+        except asyncio.CancelledError:
+            await exit_stack.aclose()
+            raise
         except Exception as exc:
             await exit_stack.aclose()
             if isinstance(exc, TimeoutError | asyncio.TimeoutError):
@@ -404,6 +411,8 @@ class MCPServerManager:
                 )
             finally:
                 state.refresh_task = None
+                if state.stale:
+                    self._schedule_refresh_task(state)
 
         state.refresh_task = asyncio.create_task(refresh(), name=f"mcp_catalog_refresh:{state.server_id}")
 
@@ -422,9 +431,14 @@ class MCPServerManager:
             await self._disconnect_state(state)
 
     async def _disconnect_state(self, state: MCPServerState) -> None:
+        close_error: BaseException | None = None
         if state.exit_stack is not None:
-            await state.exit_stack.aclose()
-            state.exit_stack = None
+            try:
+                await state.exit_stack.aclose()
+            except BaseException as exc:
+                close_error = exc
+            finally:
+                state.exit_stack = None
         if state.connected:
             logger.info(
                 "MCP server disconnected",
@@ -433,6 +447,8 @@ class MCPServerManager:
             )
         state.session = None
         state.connected = False
+        if close_error is not None:
+            raise close_error
 
     def _require_state(self, server_id: str) -> MCPServerState:
         state = self._states.get(server_id)
@@ -447,23 +463,42 @@ class MCPServerManager:
             msg = f"MCP tool '{remote_tool_name}' is not in the cached catalog for server '{state.server_id}'"
             raise MCPProtocolError(state.server_id, msg)
 
+    @staticmethod
+    def _function_name_collision_messages(
+        server_ids_by_function_name: dict[str, set[str]],
+        configured_local_function_names: set[str],
+    ) -> dict[str, list[str]]:
+        """Build validation errors for conflicting provider-visible function names."""
+        errors_by_server: dict[str, list[str]] = {}
+        for function_name, server_ids in server_ids_by_function_name.items():
+            if function_name in configured_local_function_names:
+                message = f"MCP function name '{function_name}' collides with an existing MindRoom tool function"
+                for server_id in server_ids:
+                    errors_by_server.setdefault(server_id, []).append(message)
+            if len(server_ids) < 2:
+                continue
+            server_list = ", ".join(sorted(server_ids))
+            message = f"MCP function name '{function_name}' collides across servers: {server_list}"
+            for server_id in server_ids:
+                errors_by_server.setdefault(server_id, []).append(message)
+        return errors_by_server
+
     async def _validate_global_function_names(self) -> set[str]:
         async with self._catalog_validation_lock:
-            errors_by_server: dict[str, list[str]] = {}
             server_ids_by_function_name: dict[str, set[str]] = {}
             for state in self._states.values():
                 if state.catalog is None or state.last_error is not None:
                     continue
                 for tool in state.catalog.tools:
                     server_ids_by_function_name.setdefault(tool.function_name, set()).add(state.server_id)
+            if not server_ids_by_function_name:
+                return set()
 
-            for function_name, server_ids in server_ids_by_function_name.items():
-                if len(server_ids) < 2:
-                    continue
-                server_list = ", ".join(sorted(server_ids))
-                message = f"MCP function name '{function_name}' collides across servers: {server_list}"
-                for server_id in server_ids:
-                    errors_by_server.setdefault(server_id, []).append(message)
+            configured_local_function_names = self._configured_local_function_names()
+            errors_by_server = self._function_name_collision_messages(
+                server_ids_by_function_name,
+                configured_local_function_names,
+            )
 
             for server_id, messages in errors_by_server.items():
                 state = self._require_state(server_id)
@@ -474,6 +509,75 @@ class MCPServerManager:
                     state.last_error = MCPProtocolError(server_id, error_message)
                     state.stale = False
             return set(errors_by_server)
+
+    def _configured_local_function_names(self) -> set[str]:
+        """Return provider-visible function names from the current non-MCP tool surface."""
+        config = self._config
+        if config is None:
+            return set()
+
+        from mindroom.mcp.registry import _MCP_TOOL_FACTORY_MARKER  # noqa: PLC0415
+        from mindroom.tool_system.metadata import (  # noqa: PLC0415
+            _TOOL_REGISTRY,
+            ensure_tool_registry_loaded,
+            get_tool_by_name,
+        )
+
+        ensure_tool_registry_loaded(self.runtime_paths, config)
+        function_names: set[str] = set()
+        tool_names: set[str] = set()
+        for agent_name, agent_config in config.agents.items():
+            tool_names.update(
+                tool_name
+                for tool_name in config.get_agent_tools(agent_name)
+                if not getattr(_TOOL_REGISTRY.get(tool_name), _MCP_TOOL_FACTORY_MARKER, False)
+            )
+            for toolkit_name in set(agent_config.allowed_toolkits) | set(agent_config.initial_toolkits):
+                tool_names.update(
+                    toolkit_entry.name
+                    for toolkit_entry in config.get_toolkit_tool_configs(toolkit_name)
+                    if not getattr(_TOOL_REGISTRY.get(toolkit_entry.name), _MCP_TOOL_FACTORY_MARKER, False)
+                )
+            if agent_config.delegate_to:
+                function_names.add("delegate_task")
+            allow_self_config = (
+                agent_config.allow_self_config
+                if agent_config.allow_self_config is not None
+                else config.defaults.allow_self_config
+            )
+            if allow_self_config:
+                function_names.update({"get_own_config", "update_own_config"})
+            if agent_config.allowed_toolkits:
+                function_names.update({"list_toolkits", "load_tools", "unload_tools"})
+
+        for tool_name in sorted(tool_names):
+            try:
+                toolkit = get_tool_by_name(tool_name, self.runtime_paths, worker_target=None)
+            except Exception as exc:
+                logger.debug(
+                    "Skipping local tool during MCP function-name validation",
+                    tool_name=tool_name,
+                    error=str(exc),
+                )
+                continue
+            function_names.update(self._toolkit_function_names(toolkit))
+
+        return function_names
+
+    @staticmethod
+    def _toolkit_function_names(toolkit: object) -> set[str]:
+        """Return provider-visible function names exposed by one toolkit instance."""
+        toolkit_functions = getattr(toolkit, "functions", {})
+        toolkit_async_functions = getattr(toolkit, "async_functions", {})
+        names = {name for name in {*toolkit_functions, *toolkit_async_functions} if isinstance(name, str) and name}
+        if names:
+            return names
+
+        for raw_tool in getattr(toolkit, "tools", ()):
+            function_name = getattr(raw_tool, "name", None)
+            if isinstance(function_name, str) and function_name:
+                names.add(function_name)
+        return names
 
     def _wrap_runtime_exception(self, server_id: str, exc: Exception) -> MCPError:
         if isinstance(exc, MCPError):

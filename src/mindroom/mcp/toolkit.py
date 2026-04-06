@@ -22,13 +22,9 @@ def bind_mcp_server_manager(manager: MCPServerManager | None) -> None:
     _ACTIVE_MCP_SERVER_MANAGER = manager
 
 
-def require_mcp_server_manager() -> MCPServerManager:
-    """Return the active runtime manager or fail fast."""
-    manager = _ACTIVE_MCP_SERVER_MANAGER
-    if manager is None:
-        msg = "MCP server manager is not active"
-        raise RuntimeError(msg)
-    return manager
+def require_mcp_server_manager() -> MCPServerManager | None:
+    """Return the active runtime manager when one is bound."""
+    return _ACTIVE_MCP_SERVER_MANAGER
 
 
 def normalize_tool_name_filter(value: list[str] | str | None) -> list[str] | None:
@@ -49,23 +45,31 @@ class MindRoomMCPToolkit(Toolkit):
         self,
         *,
         server_id: str,
-        manager: MCPServerManager,
-        catalog: MCPServerCatalog,
+        manager: MCPServerManager | None,
+        catalog: MCPServerCatalog | None,
+        tool_name: str | None = None,
         include_tools: list[str] | str | None = None,
         exclude_tools: list[str] | str | None = None,
         call_timeout_seconds: float | None = None,
     ) -> None:
-        super().__init__(name=catalog.tool_name, auto_register=False)
+        super().__init__(
+            name=catalog.tool_name if catalog is not None else (tool_name or server_id),
+            auto_register=False,
+        )
         self.server_id = server_id
         self.manager = manager
         self.catalog = catalog
         self.call_timeout_seconds = float(call_timeout_seconds) if call_timeout_seconds is not None else None
         self.include_tools = normalize_tool_name_filter(include_tools)
         self.exclude_tools = normalize_tool_name_filter(exclude_tools)
+        if self.manager is None or self.catalog is None:
+            return
         filtered_tools = self._filtered_tools()
         self._register_catalog_tools(filtered_tools)
 
     def _filtered_tools(self) -> list[MCPDiscoveredTool]:
+        if self.catalog is None:
+            return []
         filtered: list[MCPDiscoveredTool] = []
         include_tools = set(self.include_tools or [])
         exclude_tools = set(self.exclude_tools or [])
@@ -88,6 +92,7 @@ class MindRoomMCPToolkit(Toolkit):
 
     def _build_function(self, tool: MCPDiscoveredTool) -> Function:
         async def _call_tool(**kwargs: object) -> ToolResult:
+            assert self.manager is not None
             return await self.manager.call_tool(
                 self.server_id,
                 tool.remote_name,

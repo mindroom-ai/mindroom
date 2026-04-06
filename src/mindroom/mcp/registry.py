@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, require_mcp_server_manager
 from mindroom.tool_system.metadata import (
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 _MCP_TOOL_PREFIX = "mcp_"
 _MCP_TOOL_NAMES: set[str] = set()
+_MCP_TOOL_FACTORY_MARKER = "__mindroom_mcp_tool_factory__"
 
 
 def mcp_tool_name(server_id: str) -> str:
@@ -46,11 +47,14 @@ def mcp_registry_tool_names() -> set[str]:
 
 
 def _registered_mcp_tool_names() -> set[str]:
-    """Return all MCP-prefixed tool names currently present in the global registries."""
+    """Return tool names that are actually owned by the dynamic MCP registry."""
     return {
-        tool_name
-        for tool_name in {*_MCP_TOOL_NAMES, *TOOL_METADATA.keys(), *_TOOL_REGISTRY.keys()}
-        if tool_name.startswith(_MCP_TOOL_PREFIX)
+        *_MCP_TOOL_NAMES,
+        *(
+            tool_name
+            for tool_name, factory in _TOOL_REGISTRY.items()
+            if getattr(factory, _MCP_TOOL_FACTORY_MARKER, False)
+        ),
     }
 
 
@@ -83,6 +87,26 @@ def _tool_override_fields() -> list[ConfigField]:
     ]
 
 
+def validate_mcp_agent_overrides(tool_name: str, overrides: dict[str, object]) -> None:
+    """Validate normalized per-agent overrides for one MCP registry tool."""
+    if not overrides:
+        return
+
+    include_tools = cast("list[str]", overrides.get("include_tools", []))
+    exclude_tools = cast("list[str]", overrides.get("exclude_tools", []))
+    overlap = sorted(set(include_tools) & set(exclude_tools))
+    if overlap:
+        msg = f"Invalid per-agent override for '{tool_name}': include_tools and exclude_tools overlap: {', '.join(overlap)}"
+        raise ValueError(msg)
+
+    timeout_seconds = overrides.get("call_timeout_seconds")
+    if timeout_seconds is not None and (
+        not isinstance(timeout_seconds, int | float) or isinstance(timeout_seconds, bool) or float(timeout_seconds) <= 0
+    ):
+        msg = f"Invalid per-agent override for '{tool_name}.call_timeout_seconds': expected a number greater than 0"
+        raise ValueError(msg)
+
+
 def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetadata:
     tool_name = mcp_tool_name(server_id)
     transport_label = server_config.transport.replace("-", " ")
@@ -111,7 +135,8 @@ def _tool_factory(server_id: str) -> Callable[[], type[Toolkit]]:
                 super().__init__(
                     server_id=server_id,
                     manager=manager,
-                    catalog=manager.get_catalog(server_id),
+                    catalog=manager.get_catalog(server_id) if manager is not None else None,
+                    tool_name=mcp_tool_name(server_id),
                     include_tools=include_tools,
                     exclude_tools=exclude_tools,
                     call_timeout_seconds=call_timeout_seconds,
@@ -120,13 +145,14 @@ def _tool_factory(server_id: str) -> Callable[[], type[Toolkit]]:
         BoundMindRoomMCPToolkit.__name__ = f"MindRoomMCPToolkit_{server_id}"
         return BoundMindRoomMCPToolkit
 
+    setattr(factory, _MCP_TOOL_FACTORY_MARKER, True)
     return factory
 
 
 def register_mcp_tool(server_id: str, server_config: MCPServerConfig) -> None:
     """Register one dynamic MCP tool entry."""
     tool_name = mcp_tool_name(server_id)
-    if tool_name not in _MCP_TOOL_NAMES and (tool_name in TOOL_METADATA or tool_name in _TOOL_REGISTRY):
+    if tool_name not in _registered_mcp_tool_names() and (tool_name in TOOL_METADATA or tool_name in _TOOL_REGISTRY):
         msg = f"MCP tool '{tool_name}' conflicts with an existing registered tool"
         raise ValueError(msg)
     TOOL_METADATA[tool_name] = _tool_metadata(server_id, server_config)
@@ -151,12 +177,24 @@ def _desired_server_entries(config: Config | None) -> dict[str, MCPServerConfig]
 
 def sync_mcp_tool_registry(config: Config | None) -> None:
     """Reconcile the dynamic registry entries for configured MCP servers."""
-    desired_entries = _desired_server_entries(config)
-    desired_tool_names = {mcp_tool_name(server_id) for server_id in desired_entries}
-    for tool_name in sorted(_registered_mcp_tool_names() - desired_tool_names):
+    desired_registry, desired_metadata = resolved_mcp_tool_state(config)
+    desired_tool_names = set(desired_registry)
+    registered_mcp_tool_names = _registered_mcp_tool_names()
+    existing_non_mcp_tool_names = {*TOOL_METADATA, *_TOOL_REGISTRY} - registered_mcp_tool_names
+    conflicting_tool_names = sorted(desired_tool_names & existing_non_mcp_tool_names)
+    if conflicting_tool_names:
+        msg = f"MCP tool '{conflicting_tool_names[0]}' conflicts with an existing registered tool"
+        raise ValueError(msg)
+
+    for tool_name in sorted(registered_mcp_tool_names - desired_tool_names):
         unregister_mcp_tool(tool_name)
-    for server_id, server_config in desired_entries.items():
-        register_mcp_tool(server_id, server_config)
+
+    for tool_name in desired_tool_names:
+        TOOL_METADATA[tool_name] = desired_metadata[tool_name]
+        _TOOL_REGISTRY[tool_name] = desired_registry[tool_name]
+
+    _MCP_TOOL_NAMES.clear()
+    _MCP_TOOL_NAMES.update(desired_tool_names)
 
 
 def resolved_mcp_tool_state(

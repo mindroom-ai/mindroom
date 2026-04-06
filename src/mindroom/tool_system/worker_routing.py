@@ -255,7 +255,12 @@ def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | Non
 
 def requires_shared_only_integration_scope(name: str) -> bool:
     """Return whether a tool or dashboard integration is restricted to shared scope."""
-    return name in SHARED_ONLY_INTEGRATION_NAMES or name.startswith("mcp_")
+    if name in SHARED_ONLY_INTEGRATION_NAMES:
+        return True
+
+    from mindroom.mcp.registry import mcp_server_id_from_tool_name  # noqa: PLC0415
+
+    return mcp_server_id_from_tool_name(name) is not None
 
 
 def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | None) -> bool:

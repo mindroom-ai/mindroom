@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
 
 import mindroom.tools  # noqa: F401
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
 from mindroom.mcp.registry import (
     _MCP_TOOL_NAMES,
@@ -16,7 +17,7 @@ from mindroom.mcp.registry import (
     sync_mcp_tool_registry,
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
-from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA
+from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.worker_routing import requires_shared_only_integration_scope
 
 if TYPE_CHECKING:
@@ -144,6 +145,77 @@ def test_sync_mcp_tool_registry_rejects_name_collisions(tmp_path: Path) -> None:
     TOOL_METADATA["mcp_demo"] = TOOL_METADATA["shell"]
     with pytest.raises(ValueError, match="conflicts with an existing registered tool"):
         sync_mcp_tool_registry(_config(tmp_path))
+
+
+def test_sync_mcp_tool_registry_keeps_non_mcp_prefixed_plugin_tools() -> None:
+    """Do not unregister unrelated tools just because their names start with mcp_."""
+    _TOOL_REGISTRY["mcp_custom_plugin"] = _TOOL_REGISTRY["shell"]
+    TOOL_METADATA["mcp_custom_plugin"] = replace(TOOL_METADATA["shell"], name="mcp_custom_plugin")
+
+    sync_mcp_tool_registry(None)
+
+    assert "mcp_custom_plugin" in TOOL_METADATA
+    assert "mcp_custom_plugin" in _TOOL_REGISTRY
+
+
+def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -> None:
+    """Reject MCP tool name collisions during config validation, before runtime sync."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name":"demo_plugin","tools_module":"tools.py","skills":[]}\n',
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='mcp_demo',\n"
+        "    display_name='Plugin MCP Demo',\n"
+        "    description='Should collide',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigRuntimeValidationError, match="conflicts with an existing registered tool"):
+        Config.validate_with_runtime(
+            {
+                "plugins": ["./plugins/demo"],
+                "mcp_servers": {
+                    "demo": {
+                        "transport": "stdio",
+                        "command": "npx",
+                    },
+                },
+                "agents": {
+                    "code": {
+                        "display_name": "Code",
+                        "role": "Write code",
+                        "tools": ["mcp_demo"],
+                    },
+                },
+            },
+            _runtime_paths(tmp_path),
+        )
+
+
+def test_mcp_tool_registry_returns_empty_toolkit_without_bound_manager(tmp_path: Path) -> None:
+    """Direct agent creation paths should not crash when no orchestrator-bound MCP manager exists."""
+    config = _config(tmp_path)
+    sync_mcp_tool_registry(config)
+
+    toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
+
+    assert toolkit.name == "mcp_demo"
+    assert toolkit.async_functions == {}
 
 
 def test_mcp_tool_names_are_shared_only() -> None:
