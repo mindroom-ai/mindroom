@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -189,8 +190,12 @@ def _prepared_dispatch(
         envelope=MessageEnvelope(
             source_event_id=event_id,
             room_id="!room:localhost",
-            thread_id=thread_id,
-            resolved_thread_id=thread_id,
+            target=MessageTarget.resolve(
+                room_id="!room:localhost",
+                thread_id=thread_id,
+                reply_to_event_id=event_id,
+                room_mode=thread_id is None,
+            ),
             requester_id=requester_user_id,
             sender_id=requester_user_id,
             body=body,

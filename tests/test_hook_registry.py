@@ -18,6 +18,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.execution import _eligible_hooks
 from mindroom.logging_config import get_logger
+from mindroom.message_target import MessageTarget
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -74,8 +75,7 @@ def _message_received_context(
         envelope=MessageEnvelope(
             source_event_id="$event",
             room_id=room_id,
-            thread_id=None,
-            resolved_thread_id="$event",
+            target=MessageTarget.resolve(room_id, None, "$event"),
             requester_id="@user:localhost",
             sender_id="@user:localhost",
             body="hello",

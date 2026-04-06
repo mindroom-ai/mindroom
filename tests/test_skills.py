@@ -777,6 +777,65 @@ async def test_skill_command_tool_dispatch_sets_execution_identity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_uses_canonical_runtime_thread_identity() -> None:
+    """Skill tool dispatch should derive session state from the canonical runtime thread root."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: ARG002, N803
+            identity = get_tool_execution_identity()
+            assert identity is not None
+            return f"{identity.resolved_thread_id}:{identity.session_id}"
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["demo_toolkit"]
+        runtime_paths = resolve_runtime_paths()
+        runtime_context = ToolRuntimeContext(
+            agent_name="code",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id="$thread-root",
+            requester_id="@alice:example.org",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            reply_to_event_id="$reply:example.org",
+        )
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name="code",
+            command_tool="demo",
+            skill_name="dispatch",
+            args_text="hello",
+            runtime_context=runtime_context,
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == f"$thread-root:{create_session_id('!room:example.org', '$thread-root')}"
+
+
+@pytest.mark.asyncio
 async def test_skill_command_tool_dispatch_installs_explicit_tool_runtime_context() -> None:
     """Skill tool dispatch should expose the provided ToolRuntimeContext to tool hooks."""
 

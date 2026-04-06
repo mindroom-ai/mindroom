@@ -28,6 +28,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.execution import emit, emit_collect, emit_transform, reset_hook_execution_state
 from mindroom.logging_config import get_logger
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     emit_custom_event,
@@ -70,8 +71,7 @@ def _envelope(*, agent_name: str = "code", body: str = "hello") -> MessageEnvelo
     return MessageEnvelope(
         source_event_id="$event",
         room_id="!room:localhost",
-        thread_id=None,
-        resolved_thread_id="$event",
+        target=MessageTarget.resolve("!room:localhost", None, "$event"),
         requester_id="@user:localhost",
         sender_id="@user:localhost",
         body=body,

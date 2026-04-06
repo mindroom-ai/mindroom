@@ -76,6 +76,7 @@ from mindroom.matrix.client import (
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
+from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import (
     _matrix_homeserver_startup_timeout_seconds_from_env,
     run_with_retry,
@@ -152,8 +153,12 @@ def _hook_envelope(
     return MessageEnvelope(
         source_event_id=source_event_id,
         room_id="!test:localhost",
-        thread_id=None,
-        resolved_thread_id=resolved_thread_id if resolved_thread_id is not None else source_event_id,
+        target=MessageTarget.resolve(
+            room_id="!test:localhost",
+            thread_id=None,
+            reply_to_event_id=source_event_id,
+            safe_thread_root=resolved_thread_id if resolved_thread_id is not None else source_event_id,
+        ),
         requester_id="@user:localhost",
         sender_id="@user:localhost",
         body=body,
@@ -201,8 +206,8 @@ def test_response_lifecycle_lock_uses_resolved_thread_root_for_first_turns(
     config = TestAgentBot.create_mock_config(tmp_path)
     bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
-    first_lock = bot._response_lifecycle_lock("!test:localhost", None, "$event-a")
-    second_lock = bot._response_lifecycle_lock("!test:localhost", None, "$event-b")
+    first_lock = bot._response_lifecycle_lock(MessageTarget.resolve("!test:localhost", None, "$event-a"))
+    second_lock = bot._response_lifecycle_lock(MessageTarget.resolve("!test:localhost", None, "$event-b"))
 
     assert first_lock is not second_lock
 
@@ -215,8 +220,8 @@ def test_response_lifecycle_lock_reuses_same_resolved_thread_root(
     config = TestAgentBot.create_mock_config(tmp_path)
     bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
-    existing_thread_lock = bot._response_lifecycle_lock("!test:localhost", "$root", "$event-a")
-    first_turn_lock = bot._response_lifecycle_lock("!test:localhost", None, "$root")
+    existing_thread_lock = bot._response_lifecycle_lock(MessageTarget.resolve("!test:localhost", "$root", "$event-a"))
+    first_turn_lock = bot._response_lifecycle_lock(MessageTarget.resolve("!test:localhost", None, "$root"))
 
     assert existing_thread_lock is first_turn_lock
 
@@ -243,8 +248,12 @@ def test_response_lifecycle_lock_stays_room_scoped_in_room_mode(
     )
     bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
-    first_lock = bot._response_lifecycle_lock("!test:localhost", None, "$event-a")
-    second_lock = bot._response_lifecycle_lock("!test:localhost", None, "$event-b")
+    first_lock = bot._response_lifecycle_lock(
+        MessageTarget.resolve("!test:localhost", None, "$event-a", room_mode=True),
+    )
+    second_lock = bot._response_lifecycle_lock(
+        MessageTarget.resolve("!test:localhost", None, "$event-b", room_mode=True),
+    )
 
     assert first_lock is second_lock
 
@@ -2264,8 +2273,11 @@ class TestAgentBot:
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
             room_id="!test:localhost",
-            thread_id="$raw_thread:localhost",
-            resolved_thread_id="$canonical_thread:localhost",
+            target=MessageTarget.resolve(
+                room_id="!test:localhost",
+                thread_id="$raw_thread:localhost",
+                reply_to_event_id="$reply_plain:localhost",
+            ).with_thread_root("$canonical_thread:localhost"),
             requester_id="@user:localhost",
             sender_id="@user:localhost",
             body="team prompt",
@@ -2971,8 +2983,12 @@ class TestAgentBot:
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
             room_id="!test:localhost",
-            thread_id=None,
-            resolved_thread_id="$thread_root:localhost",
+            target=MessageTarget.resolve(
+                room_id="!test:localhost",
+                thread_id=None,
+                reply_to_event_id="$reply_plain:localhost",
+                safe_thread_root="$thread_root:localhost",
+            ),
             requester_id="@alice:localhost",
             sender_id="@alice:localhost",
             body="Continue",

@@ -11,8 +11,9 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.tools import Toolkit
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
-from mindroom.matrix.client import send_message
+from mindroom.matrix.client import get_latest_thread_event_id_if_needed, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
@@ -182,12 +183,20 @@ async def _send_matrix_text(
     original_sender: str | None = None,
 ) -> str | None:
     """Send a formatted text message to a Matrix room, optionally in a thread."""
+    latest_thread_event_id = None
+    if thread_id is not None:
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            context.client,
+            room_id,
+            thread_id,
+        )
     content = format_message_with_mentions(
         context.config,
         context.runtime_paths,
         text,
         sender_domain=context.config.get_domain(context.runtime_paths),
         thread_event_id=thread_id,
+        latest_thread_event_id=latest_thread_event_id,
     )
     if original_sender:
         content[ORIGINAL_SENDER_KEY] = original_sender
@@ -318,7 +327,7 @@ class SubAgentsTools(Toolkit):
         if not message.strip():
             return _payload("sessions_send", "error", message="Message cannot be empty.")
 
-        target_session = session_key or create_session_id(context.room_id, context.thread_id)
+        target_session = session_key or MessageTarget.from_runtime_context(context).session_id
         if label and not session_key:
             resolved = await asyncio.to_thread(_resolve_by_label, context, label)
             if resolved:

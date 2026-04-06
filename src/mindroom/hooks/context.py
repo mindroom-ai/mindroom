@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.message_target import MessageTarget
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -114,22 +115,12 @@ async def _put_bound_room_state(
 
 
 @dataclass(frozen=True, slots=True)
-class _EnvelopeTargetView:
-    """Compatibility view exposing thread targeting as one object."""
-
-    room_id: str
-    thread_id: str | None
-    resolved_thread_id: str | None
-
-
-@dataclass(frozen=True, slots=True)
 class MessageEnvelope:
     """Normalized inbound message shape used by message hooks."""
 
     source_event_id: str
     room_id: str
-    thread_id: str | None
-    resolved_thread_id: str | None
+    target: MessageTarget
     requester_id: str
     sender_id: str
     body: str
@@ -140,14 +131,26 @@ class MessageEnvelope:
     hook_source: str | None = None
     message_received_depth: int = 0
 
+    def __post_init__(self) -> None:
+        """Validate the embedded target against the envelope room."""
+        if self.target.room_id != self.room_id:
+            msg = "MessageEnvelope target room does not match envelope room_id"
+            raise ValueError(msg)
+
     @property
-    def target(self) -> _EnvelopeTargetView:
-        """Return a compatibility target view for newer plugin code."""
-        return _EnvelopeTargetView(
-            room_id=self.room_id,
-            thread_id=self.thread_id,
-            resolved_thread_id=self.resolved_thread_id,
-        )
+    def thread_id(self) -> str | None:
+        """Return the raw inbound thread ID, if any."""
+        return self.target.thread_id
+
+    @property
+    def resolved_thread_id(self) -> str | None:
+        """Return the canonical resolved thread root."""
+        return self.target.resolved_thread_id
+
+    @property
+    def session_id(self) -> str:
+        """Return the canonical persisted session ID for this envelope."""
+        return self.target.session_id
 
 
 @dataclass(slots=True)

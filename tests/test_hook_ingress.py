@@ -9,6 +9,7 @@ from mindroom.hooks.ingress import (
     should_handle_interactive_text_response,
     split_hook_source,
 )
+from mindroom.message_target import MessageTarget
 
 
 def _envelope(
@@ -20,8 +21,7 @@ def _envelope(
     return MessageEnvelope(
         source_event_id="$event",
         room_id="!room:localhost",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve("!room:localhost", None, "$event"),
         requester_id="@user:localhost",
         sender_id="@user:localhost",
         body="hello",
