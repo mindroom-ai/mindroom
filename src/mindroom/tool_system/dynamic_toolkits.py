@@ -51,6 +51,14 @@ class DynamicToolkitConflictError(DynamicToolkitMergeError):
         super().__init__(msg)
 
 
+def _toolkit_scope_key(session_id: str) -> str:
+    """Normalize one session id to the toolkit state scope used in memory."""
+    separator = session_id.find(":$")
+    if session_id.startswith("!") and separator != -1:
+        return session_id[:separator]
+    return session_id
+
+
 def _ordered_loaded_toolkits(
     allowed_toolkits: list[str],
     loaded_toolkits: list[str],
@@ -119,7 +127,8 @@ def get_loaded_toolkits_for_session(
     if session_id is None:
         return []
 
-    raw_loaded_toolkits = _loaded_toolkits.get(session_id)
+    scope_key = _toolkit_scope_key(session_id)
+    raw_loaded_toolkits = _loaded_toolkits.get(scope_key)
     if raw_loaded_toolkits is None:
         raw_loaded_toolkits = _initial_loaded_toolkits(config, agent_name)
     else:
@@ -135,11 +144,12 @@ def get_loaded_toolkits_for_session(
             "Dropping invalid dynamic toolkits from in-memory session state",
             agent=agent_name,
             session_id=session_id,
+            scope_key=scope_key,
             invalid_toolkits=invalid_toolkits,
         )
 
-    if session_id not in _loaded_toolkits or _loaded_toolkits[session_id] != loaded_toolkits:
-        _loaded_toolkits[session_id] = list(loaded_toolkits)
+    if scope_key not in _loaded_toolkits or _loaded_toolkits[scope_key] != loaded_toolkits:
+        _loaded_toolkits[scope_key] = list(loaded_toolkits)
 
     return loaded_toolkits
 
@@ -153,12 +163,12 @@ def save_loaded_toolkits_for_session(
     if session_id is None:
         return
 
-    _loaded_toolkits[session_id] = _coerce_loaded_toolkits(loaded_toolkits)
+    _loaded_toolkits[_toolkit_scope_key(session_id)] = _coerce_loaded_toolkits(loaded_toolkits)
 
 
 def clear_session_toolkits(session_id: str) -> None:
     """Clear one session's loaded toolkit state."""
-    _loaded_toolkits.pop(session_id, None)
+    _loaded_toolkits.pop(_toolkit_scope_key(session_id), None)
 
 
 def merge_runtime_tool_configs(

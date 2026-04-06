@@ -23,6 +23,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.teams import _build_agent_from_orchestrator
+from mindroom.thread_utils import create_session_id
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import (
     DynamicToolkitConflictError,
@@ -358,6 +359,29 @@ def test_dynamic_toolkit_session_isolation_is_per_session_id(tmp_path: Path) -> 
     assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-b") == [
         "development",
     ]
+
+
+def test_dynamic_toolkit_room_level_matrix_messages_share_room_scoped_state(tmp_path: Path) -> None:
+    """Room-level Matrix turns should share toolkit state even when event ids differ."""
+    raw = _base_config_data()
+    raw["defaults"] = {"tools": []}
+    raw["toolkits"] = {
+        "research": {"tools": ["duckduckgo"]},
+    }
+    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
+    config = _validated_config(tmp_path, raw)
+    first_session_id = create_session_id("!room:example.org", "$event-a:example.org")
+    second_session_id = create_session_id("!room:example.org", "$event-b:example.org")
+
+    save_loaded_toolkits_for_session(
+        session_id=first_session_id,
+        loaded_toolkits=["research"],
+    )
+
+    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id=second_session_id) == [
+        "research",
+    ]
+    assert dynamic_toolkits_module._loaded_toolkits["!room:example.org"] == ["research"]
 
 
 def test_dynamic_toolkit_session_reorders_loaded_toolkits_to_allowed_order(tmp_path: Path) -> None:
