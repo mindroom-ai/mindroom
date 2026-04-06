@@ -69,6 +69,15 @@ class TestInteractiveFunctions:
         # Should detect - newline format (agent mistake)
         assert interactive.should_create_interactive_question("Here's a question:\n```\ninteractive\n{}\n```")
 
+        # Should detect - common LLM variations
+        assert interactive.should_create_interactive_question("Here's a question:\n``` interactive\n{}\n```")
+        assert interactive.should_create_interactive_question("Here's a question:\n```Interactive\n{}\n```")
+        assert interactive.should_create_interactive_question("Here's a question:\n    ```interactive\n{}\n    ```")
+        assert interactive.should_create_interactive_question("Here's a question:\n```interactive json\n{}\n```")
+        assert interactive.should_create_interactive_question(
+            'Please choose: ```interactive\n{"question": "test"}\n```',
+        )
+
         # Should detect - without checkmark
         assert interactive.should_create_interactive_question("Here's a question:\n```interactive\n{}\n```")
 
@@ -76,6 +85,156 @@ class TestInteractiveFunctions:
         assert not interactive.should_create_interactive_question("Regular message without code block")
 
         assert not interactive.should_create_interactive_question("```python\nprint('hello')\n```")
+        assert not interactive.should_create_interactive_question('```\n{"question": "test"}\n```')
+        assert not interactive.should_create_interactive_question("```interactive.py\nprint('hello')\n```")
+        assert not interactive.should_create_interactive_question("```\ninteractive = True\nprint('hello')\n```")
+
+    @pytest.mark.parametrize(
+        "response_text",
+        [
+            """Please choose.
+
+``` interactive
+{
+    "question": "Which option?",
+    "options": [
+        {"emoji": "✅", "label": "Approve", "value": "approve"}
+    ]
+}
+```""",
+            """Please choose.
+
+```Interactive
+{
+    "question": "Which option?",
+    "options": [
+        {"emoji": "✅", "label": "Approve", "value": "approve"}
+    ]
+}
+```""",
+            """Please choose.
+
+    ```interactive
+{
+    "question": "Which option?",
+    "options": [
+        {"emoji": "✅", "label": "Approve", "value": "approve"}
+    ]
+}
+    ```""",
+            """Please choose.
+
+```interactive json
+{
+    "question": "Which option?",
+    "options": [
+        {"emoji": "✅", "label": "Approve", "value": "approve"}
+    ]
+}
+```""",
+        ],
+    )
+    def test_parse_and_format_interactive_matches_common_variants(self, response_text: str) -> None:
+        """Parser should handle common interactive fence variants."""
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert "Please choose." in response.formatted_text
+        assert "Which option?" in response.formatted_text
+        assert "1. ✅ Approve" in response.formatted_text
+        assert "```" not in response.formatted_text
+        assert response.option_map == {"✅": "approve", "1": "approve"}
+        assert response.options_list == [{"emoji": "✅", "label": "Approve", "value": "approve"}]
+
+    def test_parse_and_format_interactive_accepts_inline_intro_before_fence(self) -> None:
+        """Parser should handle prose immediately before the opening fence."""
+        response_text = """Please choose: ```interactive
+{
+    "question": "Which option?",
+    "options": [
+        {"emoji": "✅", "label": "Approve", "value": "approve"}
+    ]
+}
+```"""
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.formatted_text.startswith("Please choose:")
+        assert "Which option?" in response.formatted_text
+        assert "1. ✅ Approve" in response.formatted_text
+        assert response.option_map == {"✅": "approve", "1": "approve"}
+        assert response.options_list == [{"emoji": "✅", "label": "Approve", "value": "approve"}]
+
+    def test_parse_and_format_interactive_logs_warning_when_block_does_not_match(self) -> None:
+        """Malformed interactive-looking blocks should log a warning."""
+        response_text = 'Malformed block: ```interactive {"question": "test"}```'
+
+        with patch.object(interactive.logger, "warning") as mock_warning:
+            response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.formatted_text == response_text
+        assert response.option_map is None
+        assert response.options_list is None
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.args == ("Interactive block not parsed",)
+        assert "interactive" in mock_warning.call_args.kwargs["preview"].lower()
+
+    @pytest.mark.parametrize(
+        "response_text",
+        [
+            """To make the widget interactive, update the example.
+
+```python
+interactive = True
+print("hello")
+```""",
+            """```interactive.py
+print("hello")
+```""",
+            """```
+interactive = True
+print("hello")
+```""",
+        ],
+    )
+    def test_parse_and_format_interactive_skips_false_positive_warnings(self, response_text: str) -> None:
+        """Non-interactive code blocks should not log interactive warnings."""
+        with patch.object(interactive.logger, "warning") as mock_warning:
+            response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.formatted_text == response_text
+        assert response.option_map is None
+        assert response.options_list is None
+        mock_warning.assert_not_called()
+
+    def test_parse_and_format_interactive_skips_warning_for_closing_fence_followed_by_prose(self) -> None:
+        """Closing fences should not be treated as interactive openings."""
+        response_text = """Docs:
+```
+text
+```
+interactive"""
+
+        with patch.object(interactive.logger, "warning") as mock_warning:
+            response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.formatted_text == response_text
+        assert response.option_map is None
+        assert response.options_list is None
+        mock_warning.assert_not_called()
+
+    @pytest.mark.parametrize("payload", ["[]", "true", "42"])
+    def test_parse_and_format_interactive_rejects_non_object_json_payloads(self, payload: str) -> None:
+        """Interactive payloads must decode to objects."""
+        response_text = f"```Interactive\n{payload}\n```"
+
+        with patch.object(interactive.logger, "warning") as mock_warning:
+            response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.formatted_text == response_text
+        assert response.option_map is None
+        assert response.options_list is None
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.args == ("Interactive JSON payload must be an object",)
 
     @pytest.mark.asyncio
     async def test_handle_interactive_response_valid_json(self, mock_client: AsyncMock) -> None:
@@ -158,14 +317,18 @@ Based on your choice, I'll proceed accordingly."""
 {invalid json}
 ```"""
 
-        # Test the new approach - should return original text when JSON is invalid
-        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
-        formatted_text, option_map, options = response.formatted_text, response.option_map, response.options_list
+        with patch.object(interactive.logger, "warning") as mock_warning:
+            # Test the new approach - should return original text when JSON is invalid
+            response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+            formatted_text, option_map, options = response.formatted_text, response.option_map, response.options_list
 
         # Should return original text unchanged
         assert formatted_text == response_text
         assert option_map is None
         assert options is None
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.args == ("Interactive JSON parse failed",)
+        assert "invalid json" in mock_warning.call_args.kwargs["preview"]
 
         # Should not create any question
         assert len(interactive._active_questions) == 0
