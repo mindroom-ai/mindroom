@@ -1277,6 +1277,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     configured_team_name: str | None = None,
+    matrix_run_metadata: dict[str, Any] | None = None,
     *,
     reason_prefix: str = "Team request",
 ) -> str:
@@ -1334,7 +1335,11 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             team = prepared_execution.team
             prompt = prepared_execution.prepared_prompt
             unseen_event_ids = prepared_execution.unseen_event_ids
-            run_metadata = prepared_execution.run_metadata
+            run_metadata = build_matrix_run_metadata(
+                reply_to_event_id,
+                unseen_event_ids,
+                matrix_run_metadata or prepared_execution.run_metadata,
+            )
             logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
             logger.info(f"TEAM PROMPT: {prompt[:500]}")
 
@@ -1521,6 +1526,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     configured_team_name: str | None = None,
+    matrix_run_metadata: dict[str, Any] | None = None,
     *,
     reason_prefix: str = "Team request",
 ) -> AsyncIterator[_TeamStreamChunk]:
@@ -1584,7 +1590,11 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             team = prepared_execution.team
             prepared_prompt = prepared_execution.prepared_prompt
             unseen_event_ids = prepared_execution.unseen_event_ids
-            run_metadata = prepared_execution.run_metadata
+            run_metadata = build_matrix_run_metadata(
+                reply_to_event_id,
+                unseen_event_ids,
+                matrix_run_metadata or prepared_execution.run_metadata,
+            )
             logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
             media_inputs = media or MediaInputs()
             attempt_prompt = prepared_prompt

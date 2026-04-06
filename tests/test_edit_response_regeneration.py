@@ -556,7 +556,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
 
         await bot._on_message(room, edit_event)
 
-    assert mock_create_storage.call_count == 2
+    assert mock_create_storage.call_count == 4
     assert mock_remove_run.call_args_list == [
         call(
             storage,
@@ -906,7 +906,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         assert call_kwargs["existing_event_id"] == "$response:example.com"
         assert call_kwargs["existing_event_is_placeholder"] is False
         assert bot.response_tracker.get_response_event_id("$original:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 2
+        assert mock_create_storage.call_count == 4
         assert mock_remove_run.call_count == 2
 
 
@@ -1004,7 +1004,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
         mock_generate_response.assert_awaited_once()
         assert bot.response_tracker.mark_responded.call_count == 0
         assert bot.response_tracker.get_response_event_id("$original:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 2
+        assert mock_create_storage.call_count == 4
         assert mock_remove_run.call_count == 2
 
 

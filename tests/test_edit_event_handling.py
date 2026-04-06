@@ -9,8 +9,12 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 @pytest.mark.asyncio
@@ -29,15 +33,15 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     )
 
     # Create the bot
+    config = bind_runtime_paths(
+        Config(models={"default": ModelConfig(provider="ollama", id="test-model")}),
+        test_runtime_paths(tmp_path),
+    )
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=MagicMock(),
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path,
-            process_env={},
-        ),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -118,6 +122,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     # Mock the routing method that would be called for the router
     with (
         patch.object(bot, "_handle_ai_routing", new_callable=AsyncMock) as mock_routing,
+        patch.object(bot, "_handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
         patch.object(bot, "_can_reply_to_sender", return_value=True),
     ):
         # Process the original message - this should trigger routing
@@ -130,6 +135,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
         # Process the edit event - this should NOT trigger routing
         await bot._on_message(room, edit_event)
 
+        mock_handle_edit.assert_awaited_once()
         # The router should NOT have attempted to route the edit
         # This assertion will FAIL with the current code and PASS once fixed
         assert not mock_routing.called, "Router should NOT process edit events as new messages"
@@ -147,15 +153,15 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     )
 
     # Create the bot
+    config = bind_runtime_paths(
+        Config(models={"default": ModelConfig(provider="ollama", id="test-model")}),
+        test_runtime_paths(tmp_path),
+    )
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=MagicMock(),
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path,
-            process_env={},
-        ),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -211,11 +217,15 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
         edit_events.append(edit_event)
 
     # Mock the routing method
-    with patch.object(bot, "_handle_ai_routing", new_callable=AsyncMock) as mock_routing:
+    with (
+        patch.object(bot, "_handle_ai_routing", new_callable=AsyncMock) as mock_routing,
+        patch.object(bot, "_handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
+    ):
         # Process all edit events
         for edit_event in edit_events:
             await bot._on_message(room, edit_event)
 
+        assert mock_handle_edit.await_count == len(edit_events)
         # None of the edits should have triggered routing
         # This will FAIL with current code (it will be called 3 times)
         assert not mock_routing.called, (
@@ -235,15 +245,18 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     )
 
     # Create the bot
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent", rooms=["!test:example.com"])},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        ),
+        test_runtime_paths(tmp_path),
+    )
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=MagicMock(),
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path,
-            process_env={},
-        ),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
