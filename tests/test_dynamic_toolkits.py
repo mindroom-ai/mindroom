@@ -7,13 +7,15 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.models.openai import OpenAIChat
 from agno.run.agent import RunOutput
-from agno.run.base import RunContext
+from agno.run.base import RunContext, RunStatus
 from agno.session.agent import AgentSession
 
+from mindroom.ai import ai_response
 from mindroom.agents import create_agent, create_session_storage
 from mindroom.api.openai_compat import _build_team, _derive_session_id
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -282,6 +284,40 @@ def test_config_round_trips_toolkits_in_authored_dump(tmp_path: Path) -> None:
     config = Config.validate_with_runtime(deepcopy(raw), _runtime_paths(tmp_path))
 
     assert config.authored_model_dump()["toolkits"] == raw["toolkits"]
+
+
+def test_config_accepts_and_round_trips_mcp_servers(tmp_path: Path) -> None:
+    """The config schema should preserve authored MCP server definitions."""
+    raw = _base_config_data()
+    raw["mcp_servers"] = {
+        "filesystem": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+        },
+    }
+
+    config = Config.validate_with_runtime(deepcopy(raw), _runtime_paths(tmp_path))
+
+    assert config.mcp_servers == raw["mcp_servers"]
+    assert config.authored_model_dump()["mcp_servers"] == raw["mcp_servers"]
+
+
+def test_config_rejects_invalid_mcp_server_name(tmp_path: Path) -> None:
+    """MCP server names should follow the same identifier rules as agents and teams."""
+    raw = _base_config_data()
+    raw["mcp_servers"] = {
+        "filesystem-server": {
+            "command": "npx",
+        },
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=r"Agent, team, and MCP server names must be alphanumeric/underscore only",
+    ) as exc_info:
+        Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
+
+    assert "filesystem-server" in str(exc_info.value)
 
 
 def test_dynamic_toolkit_session_initializes_from_initial_toolkits(tmp_path: Path) -> None:
@@ -918,22 +954,80 @@ def test_create_agent_tool_schema_count_grows_after_loading_toolkit(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_create_agent_uses_scope_context_storage(tmp_path: Path) -> None:
-    """The agent constructor should accept scope-backed storage directly."""
+async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path: Path) -> None:
+    """The non-streaming AI path should rebuild agents from the session-scoped toolkit state."""
+    raw = _base_config_data()
+    raw["defaults"] = {"tools": []}
+    raw["agents"]["code"]["include_default_tools"] = False
+    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
+    raw["toolkits"] = {
+        "research": {"description": "Search toolkit", "tools": ["sleep"]},
+    }
+    config = _validated_config(tmp_path, raw)
+    runtime_paths = _runtime_paths(tmp_path)
+    storage = create_session_storage("code", config, runtime_paths, execution_identity=None)
+    save_loaded_toolkits_for_session(
+        storage,
+        agent_name="code",
+        config=config,
+        session_id="session-1",
+        loaded_toolkits=["research"],
+    )
+    storage.close()
+    model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
+    prepared_execution = SimpleNamespace(
+        final_prompt="enhanced prompt",
+        replay_plan=None,
+        unseen_event_ids=[],
+        replays_persisted_history=False,
+        compaction_outcomes=[],
+    )
+    run_output = MagicMock()
+    run_output.content = "ok"
+    run_output.tools = None
+    run_output.status = RunStatus.completed
+
+    with (
+        patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced prompt"),
+        patch("mindroom.ai.prepare_agent_execution_context", new_callable=AsyncMock, return_value=prepared_execution),
+        patch("mindroom.ai.get_model_instance", return_value=model),
+        patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=run_output) as mock_run,
+    ):
+        response = await ai_response(
+            agent_name="code",
+            prompt="Use the toolkit",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            include_interactive_questions=False,
+        )
+
+    built_agent = mock_run.call_args.args[0]
+
+    assert response == "ok"
+    assert [tool.name for tool in built_agent.tools] == ["sleep", "dynamic_tools"]
+    assert any("Currently loaded: research" in str(instruction) for instruction in built_agent.instructions)
+
+
+def test_create_agent_uses_scope_context_storage(tmp_path: Path) -> None:
+    """The agent constructor should reuse the caller-provided history storage."""
     config = _validated_config(tmp_path, _base_config_data())
     runtime_paths = _runtime_paths(tmp_path)
-    scope_context = SimpleNamespace(storage=MagicMock(), session=None)
+    storage = create_session_storage("code", config, runtime_paths, execution_identity=None)
 
-    agent = create_agent(
-        "code",
-        config,
-        runtime_paths,
-        execution_identity=None,
-        history_storage=scope_context.storage,
-        include_interactive_questions=False,
-    )
+    try:
+        agent = create_agent(
+            "code",
+            config,
+            runtime_paths,
+            execution_identity=None,
+            history_storage=storage,
+            include_interactive_questions=False,
+        )
+    finally:
+        storage.close()
 
-    assert agent is not None
+    assert agent.db is storage
 
 
 def test_team_builder_passes_team_session_id_to_create_agent(tmp_path: Path) -> None:

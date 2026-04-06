@@ -642,6 +642,7 @@ async def _prepare_agent_and_prompt(
     prompt: str,
     runtime_paths: RuntimePaths,
     config: Config,
+    session_id: str | None = None,
     scope_context: ScopeSessionContext | None = None,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     room_id: str | None = None,
@@ -676,11 +677,15 @@ async def _prepare_agent_and_prompt(
         room_id=room_id,
         runtime_paths=runtime_paths,
     )
+    resolved_session_id = session_id
+    if resolved_session_id is None and scope_context is not None and scope_context.session is not None:
+        resolved_session_id = scope_context.session.session_id
 
     agent = create_agent(
         agent_name,
         config,
         runtime_paths,
+        session_id=resolved_session_id,
         history_storage=scope_context.storage if scope_context is not None else None,
         active_model_name=runtime_model.model_name,
         knowledge=knowledge,
@@ -809,6 +814,7 @@ async def ai_response(  # noqa: C901
                     prompt,
                     runtime_paths,
                     config,
+                    session_id,
                     scope_context,
                     thread_history,
                     room_id,
@@ -1081,6 +1087,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     prompt,
                     runtime_paths,
                     config,
+                    session_id,
                     scope_context,
                     thread_history,
                     room_id,
