@@ -53,27 +53,6 @@ if TYPE_CHECKING:
             description="Optional Google Cloud credentials object passed directly to the toolkit",
         ),
         ConfigField(
-            name="enable_list_tables",
-            label="Enable List Tables",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_describe_table",
-            label="Enable Describe Table",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_run_sql_query",
-            label="Enable Run SQL Query",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
             name="list_tables",
             label="List Tables",
             type="boolean",

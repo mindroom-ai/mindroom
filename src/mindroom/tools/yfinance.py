@@ -96,13 +96,6 @@ if TYPE_CHECKING:
             required=False,
             default=False,
         ),
-        ConfigField(
-            name="session",
-            label="Session",
-            type="text",
-            required=False,
-            default=None,
-        ),
     ],
     dependencies=["yfinance"],
     docs_url="https://docs.agno.com/tools/toolkits/others/yfinance",

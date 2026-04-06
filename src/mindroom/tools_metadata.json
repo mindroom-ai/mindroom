@@ -3233,42 +3233,6 @@
           "authored_override": true,
           "default": true,
           "description": null,
-          "label": "Enable List Tables",
-          "name": "enable_list_tables",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": true,
-          "description": null,
-          "label": "Enable Describe Table",
-          "name": "enable_describe_table",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": true,
-          "description": null,
-          "label": "Enable Run SQL Query",
-          "name": "enable_run_sql_query",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": true,
-          "description": null,
           "label": "List Tables",
           "name": "list_tables",
           "options": null,
@@ -7502,18 +7466,6 @@
           "required": false,
           "type": "boolean",
           "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Session",
-          "name": "session",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
         }
       ],
       "default_execution_target": "primary",
@@ -9120,7 +9072,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "boolean",
           "validation": null
         },
         {
@@ -9132,7 +9084,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "boolean",
           "validation": null
         },
         {
@@ -9156,7 +9108,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "number",
           "validation": null
         },
         {
@@ -9168,7 +9120,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "url",
           "validation": null
         },
         {
@@ -9180,7 +9132,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "number",
           "validation": null
         },
         {
@@ -9192,7 +9144,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "boolean",
           "validation": null
         },
         {

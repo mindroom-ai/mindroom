@@ -1,4 +1,4 @@
-"""Test tool metadata and generate JSON for dashboard consumption."""
+"""Test tool metadata JSON snapshot for dashboard consumption."""
 
 import inspect
 import json
@@ -40,24 +40,25 @@ def _restore_builtin_tool_metadata_state() -> None:
 
 
 def test_export_tools_metadata_json() -> None:
-    """Export tool metadata to JSON file for dashboard consumption.
-
-    This test generates a JSON file that the dashboard backend can read directly,
-    avoiding the need to import the entire mindroom.tools module at runtime.
-    """
+    """Verify committed tool metadata JSON matches the current registry export."""
     output_path = Path(__file__).parent.parent / "src/mindroom/tools_metadata.json"
     _restore_builtin_tool_metadata_state()
 
+    committed_content = output_path.read_text(encoding="utf-8")
     tools = export_tools_metadata()
+    expected_content = json.dumps({"tools": tools}, indent=2, sort_keys=True) + "\n"
 
-    # Write the JSON file
-    output_path.parent.mkdir(exist_ok=True)
-    content = json.dumps({"tools": tools}, indent=2, sort_keys=True)
-    output_path.write_text(content + "\n", encoding="utf-8")
+    assert committed_content == expected_content, (
+        "tools_metadata.json is out of date, regenerate it with "
+        "./.venv/bin/python -c \"import json; import mindroom.tools; "
+        "from pathlib import Path; "
+        "from mindroom.tool_system.metadata import export_tools_metadata; "
+        "Path('src/mindroom/tools_metadata.json').write_text("
+        "json.dumps({'tools': export_tools_metadata()}, indent=2, sort_keys=True) + '\\n', "
+        "encoding='utf-8')\""
+    )
 
-    # Verify it was created and is valid
-    assert output_path.exists()
-    with output_path.open() as f:
+    with output_path.open(encoding="utf-8") as f:
         data = json.load(f)
         assert "tools" in data
         assert len(data["tools"]) > 0
