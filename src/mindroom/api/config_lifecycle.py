@@ -89,7 +89,10 @@ def _load_config_result(
 ) -> tuple[ConfigLoadResult, dict[str, Any] | None, Config | None]:
     """Load and validate one config file without mutating shared app state."""
     try:
-        runtime_config = load_runtime_config_model(runtime_paths)
+        runtime_config = load_runtime_config_model(
+            runtime_paths,
+            tolerate_plugin_load_errors=True,
+        )
         validated_payload = runtime_config.authored_model_dump()
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         detail = _config_error_detail(exc)
@@ -114,7 +117,13 @@ def _load_config_result(
 def load_runtime_config(runtime_paths: constants.RuntimePaths) -> tuple[Config, constants.RuntimePaths]:
     """Load the current runtime config and raise HTTPException on user-facing failures."""
     try:
-        return load_runtime_config_model(runtime_paths), runtime_paths
+        return (
+            load_runtime_config_model(
+                runtime_paths,
+                tolerate_plugin_load_errors=True,
+            ),
+            runtime_paths,
+        )
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         raise HTTPException(status_code=422, detail=_config_error_detail(exc)) from exc
     except Exception as exc:

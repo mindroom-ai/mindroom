@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.plugins as plugin_module
 import mindroom.tools  # noqa: F401
-from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
@@ -477,6 +478,47 @@ def test_load_plugins_rejects_missing_plugin_directory(tmp_path: Path) -> None:
         _bind_runtime_paths(Config(plugins=["./plugins/missing"]), config_path)
 
 
+def test_load_plugins_skips_missing_plugin_directory_with_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime loading should warn and continue when one plugin path is missing."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    mock_logger = MagicMock()
+    missing_root = (tmp_path / "plugins" / "missing").resolve()
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+
+    monkeypatch.setattr(plugin_module, "logger", mock_logger)
+
+    try:
+        assert load_plugins(Config(plugins=["./plugins/missing"]), runtime_paths) == []
+        mock_logger.warning.assert_any_call("Plugin path does not exist, skipping", path=str(missing_root))
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
 def test_load_plugins_rejects_missing_tools_module(tmp_path: Path) -> None:
     """A declared plugin tools module must exist."""
     plugin_root = tmp_path / "plugins" / "bad-plugin"
@@ -538,8 +580,8 @@ def test_load_plugins_revalidates_skill_dirs_when_manifest_cache_is_warm(tmp_pat
     try:
         assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo-plugin"]
         skill_dir.rmdir()
-        with pytest.raises(ValueError, match="Plugin skill path is not a directory"):
-            load_plugins(config, runtime_paths_for(config))
+        assert load_plugins(config, runtime_paths_for(config)) == []
+        assert _get_plugin_skill_roots() == []
     finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
@@ -1284,8 +1326,11 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
         set_plugin_skill_roots(original_plugin_roots)
 
 
-def test_load_plugins_rolls_back_runtime_tool_state_when_later_plugin_fails(tmp_path: Path) -> None:
-    """A later plugin import failure must not leave earlier plugin tools registered."""
+def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup config loads should skip broken optional plugins and keep valid tools."""
     good_root = tmp_path / "plugins" / "good"
     bad_root = tmp_path / "plugins" / "bad"
     good_root.mkdir(parents=True)
@@ -1316,7 +1361,106 @@ def test_load_plugins_rolls_back_runtime_tool_state_when_later_plugin_fails(tmp_
         "    return DemoTool\n",
         encoding="utf-8",
     )
-    (bad_root / "tools.py").write_text("raise RuntimeError('boom')\n", encoding="utf-8")
+    (bad_root / "tools.py").write_text("from definitely_missing_plugin_dependency import broken\n", encoding="utf-8")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools:\n"
+            "      - good_plugin_tool\n"
+            "plugins:\n"
+            "  - ./plugins/good\n"
+            "  - ./plugins/missing\n"
+            "  - ./plugins/bad\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+    mock_logger = MagicMock()
+
+    monkeypatch.setattr(plugin_module, "logger", mock_logger)
+
+    try:
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+        assert config.get_agent("assistant").tool_names == ["good_plugin_tool"]
+        mock_logger.warning.assert_any_call(
+            "Plugin path does not exist, skipping",
+            path=str((tmp_path / "plugins" / "missing").resolve()),
+        )
+        assert any(
+            call.args == ("Failed to load plugin, skipping",) and call.kwargs["path"] == str(bad_root.resolve())
+            for call in mock_logger.exception.call_args_list
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later plugin failure should not roll back already loaded valid plugins."""
+    good_root = tmp_path / "plugins" / "good"
+    bad_root = tmp_path / "plugins" / "bad"
+    good_root.mkdir(parents=True)
+    bad_root.mkdir(parents=True)
+    (good_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "good_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (bad_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "bad_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (good_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='good_plugin_tool',\n"
+        "    display_name='Good Plugin Tool',\n"
+        "    description='Should stay loaded after a later failure',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+    (bad_root / "tools.py").write_text("from definitely_missing_plugin_dependency import broken\n", encoding="utf-8")
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
@@ -1335,12 +1479,19 @@ def test_load_plugins_rolls_back_runtime_tool_state_when_later_plugin_fails(tmp_
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_plugin_roots = _get_plugin_skill_roots()
+    mock_logger = MagicMock()
+
+    monkeypatch.setattr(plugin_module, "logger", mock_logger)
 
     try:
-        with pytest.raises(ValueError, match="Plugin tools module execution failed"):
-            load_plugins(config, runtime_paths)
-        assert "good_plugin_tool" not in _TOOL_REGISTRY
-        assert "good_plugin_tool" not in TOOL_METADATA
+        plugins = load_plugins(config, runtime_paths)
+        assert [plugin.name for plugin in plugins] == ["good_plugin"]
+        assert "good_plugin_tool" in _TOOL_REGISTRY
+        assert "good_plugin_tool" in TOOL_METADATA
+        assert any(
+            call.args == ("Failed to load plugin, skipping",) and call.kwargs["path"] == str(bad_root.resolve())
+            for call in mock_logger.exception.call_args_list
+        )
     finally:
         _TOOL_REGISTRY.clear()
         _TOOL_REGISTRY.update(original_registry)

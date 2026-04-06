@@ -126,21 +126,23 @@ def load_plugins(
             return []
         plugins: list[_Plugin] = []
         skill_roots: list[Path] = []
-        plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]] = []
+        plugin_bases = _collect_plugin_bases(
+            plugin_entries,
+            runtime_paths,
+            skip_broken_plugins=True,
+        )
         snapshot = _capture_tool_registry_snapshot()
         try:
-            for plugin_order, plugin_entry in enumerate(plugin_entries):
-                if not plugin_entry.enabled:
-                    continue
-
-                root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
-                plugin_base = _load_plugin_base(root)
-                plugin_bases.append((plugin_base, plugin_entry, plugin_order))
-
             _reject_duplicate_plugin_manifest_names(plugin_bases)
 
             for plugin_base, plugin_entry, plugin_order in plugin_bases:
-                plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
+                plugin_snapshot = _capture_tool_registry_snapshot()
+                try:
+                    plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
+                except Exception as exc:
+                    _restore_tool_registry_snapshot(plugin_snapshot)
+                    _log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
+                    continue
                 plugins.append(plugin)
                 skill_roots.extend(plugin.skill_dirs)
 
@@ -156,6 +158,54 @@ def load_plugins(
             raise
 
         return plugins
+
+
+def _collect_plugin_bases(
+    plugin_entries: list[PluginEntryConfig],
+    runtime_paths: RuntimePaths,
+    *,
+    skip_broken_plugins: bool,
+) -> list[tuple[_PluginBase, PluginEntryConfig, int]]:
+    """Resolve plugin roots/manifests for one config snapshot."""
+    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]] = []
+    for plugin_order, plugin_entry in enumerate(plugin_entries):
+        if not plugin_entry.enabled:
+            continue
+
+        root: Path | None = None
+        try:
+            root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
+            plugin_base = _load_plugin_base(root)
+        except Exception as exc:
+            if not skip_broken_plugins:
+                raise
+            _log_skipped_plugin_entry(plugin_entry.path, root, exc)
+            continue
+
+        plugin_bases.append((plugin_base, plugin_entry, plugin_order))
+    return plugin_bases
+
+
+def _log_skipped_plugin_entry(
+    plugin_path: str,
+    root: Path | None,
+    exc: Exception,
+) -> None:
+    """Log one broken plugin entry without aborting the rest of startup."""
+    if root is not None and (not root.exists() or not root.is_dir()):
+        logger.warning("Plugin path does not exist, skipping", path=str(root))
+        return
+
+    if isinstance(exc, PluginValidationError) and str(exc).startswith(
+        "Configured plugin module could not be resolved:",
+    ):
+        logger.warning("Plugin module could not be resolved, skipping", spec=plugin_path)
+        return
+
+    log_kwargs: dict[str, object] = {"plugin_path": plugin_path}
+    if root is not None:
+        log_kwargs["path"] = str(root)
+    logger.exception("Failed to load plugin, skipping", **log_kwargs)
 
 
 def _reject_duplicate_plugin_manifest_names(
@@ -203,11 +253,9 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
     if parsed is None:
         return None
 
-    module_name, subpath, explicit = parsed
+    module_name, subpath, _explicit = parsed
     spec = util.find_spec(module_name)
     if spec is None:
-        if explicit:
-            logger.warning("Plugin module not found", module=module_name, spec=plugin_path)
         return None
 
     if spec.submodule_search_locations:
@@ -215,14 +263,10 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
     elif spec.origin:
         root = Path(spec.origin).parent
     else:
-        if explicit:
-            logger.warning("Plugin module has no filesystem location", module=module_name)
         return None
 
     resolved_root = (root / subpath).resolve() if subpath else root.resolve()
     if not resolved_root.exists() or not resolved_root.is_dir():
-        if explicit:
-            logger.warning("Plugin module path is not a directory", module=module_name, path=str(resolved_root))
         return None
 
     return resolved_root
@@ -254,7 +298,6 @@ def _parse_python_plugin_spec(plugin_path: str) -> tuple[str, str | None, bool] 
 def _load_plugin_base(root: Path) -> _PluginBase:
     if not root.exists() or not root.is_dir():
         msg = f"Configured plugin path does not exist: {root}"
-        logger.error("Plugin path does not exist", path=str(root))
         raise PluginValidationError(msg)
 
     manifest_path = root / _PLUGIN_MANIFEST

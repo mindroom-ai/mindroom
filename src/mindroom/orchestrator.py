@@ -744,7 +744,7 @@ class MultiAgentOrchestrator:
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
-        config = load_config(self.runtime_paths)
+        config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)
         await self._prepare_user_account(config, update_runtime_state=True)
         self.config = config
@@ -1099,7 +1099,7 @@ class MultiAgentOrchestrator:
 
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
-        new_config = load_config(self.runtime_paths)
+        new_config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         new_hook_registry = self._build_hook_registry(new_config)
 
         if not self.config:

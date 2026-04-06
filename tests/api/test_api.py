@@ -432,7 +432,11 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
     allow_finish = threading.Event()
     original_loader = config_lifecycle.load_runtime_config_model
 
-    def _fake_loader(runtime_paths: constants.RuntimePaths) -> Config:
+    def _fake_loader(
+        runtime_paths: constants.RuntimePaths,
+        *,
+        tolerate_plugin_load_errors: bool = False,
+    ) -> Config:
         if runtime_paths == first_runtime:
             started.set()
             allow_finish.wait(timeout=1)
@@ -453,7 +457,10 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
                 },
                 second_runtime,
             )
-        return original_loader(runtime_paths)
+        return original_loader(
+            runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
 
     with patch.object(config_lifecycle, "load_runtime_config_model", side_effect=_fake_loader):
         main.initialize_api_app(fresh_app, first_runtime)
@@ -1425,7 +1432,7 @@ def test_get_tools_uses_one_runtime_snapshot(
         patch("mindroom.api.tools._read_tools_runtime_config", side_effect=_read_tools_runtime_config),
         patch(
             "mindroom.api.tools.resolved_tool_metadata_for_runtime",
-            side_effect=lambda runtime_paths, _config: (captured_runtime_paths.append(runtime_paths), {})[1],
+            side_effect=lambda runtime_paths, _config, **_kwargs: (captured_runtime_paths.append(runtime_paths), {})[1],
         ),
         patch(
             "mindroom.api.tools.export_tools_metadata",
@@ -2383,23 +2390,7 @@ def test_save_config_can_recover_from_invalid_reload(
 ) -> None:
     """Full config replacement should recover from an invalid on-disk config."""
     runtime_paths = main._app_runtime_paths(test_client.app)
-    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
-        encoding="utf-8",
-    )
-    temp_config_file.write_text(
-        yaml.safe_dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
-                "plugins": ["./plugins/bad-name"],
-            },
-        ),
-        encoding="utf-8",
-    )
+    temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
     assert main._load_config_from_file(runtime_paths, main.app) is False
 
     valid_config = {
@@ -2597,7 +2588,11 @@ def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path)
     original_loader = config_lifecycle.load_runtime_config_model
     results: list[tuple[Config, dict[str, Any]] | None] = [None, None]
 
-    def _interleaving_loader(validation_runtime_paths: constants.RuntimePaths) -> Config:
+    def _interleaving_loader(
+        validation_runtime_paths: constants.RuntimePaths,
+        *,
+        tolerate_plugin_load_errors: bool = False,
+    ) -> Config:
         nonlocal call_count
         with call_lock:
             call_count += 1
@@ -2608,7 +2603,10 @@ def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path)
         else:
             assert first_entered.wait(timeout=5)
             second_entered.set()
-        return original_loader(validation_runtime_paths)
+        return original_loader(
+            validation_runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
 
     def _run_validation(index: int, source: str) -> None:
         results[index] = config_lifecycle._validate_raw_config_source(source, runtime_paths)
@@ -2794,35 +2792,29 @@ def test_run_config_write_checks_current_config_load_result_after_acquiring_lock
     assert context.config_data == original_config
 
 
-def test_api_config_load_returns_422_for_runtime_validation_error(temp_config_file: Path) -> None:
-    """API config loads should surface runtime validation failures as user config errors."""
-    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
-        encoding="utf-8",
-    )
+def test_api_config_load_accepts_missing_plugin_path_in_degraded_mode(temp_config_file: Path) -> None:
+    """API config loads should mirror runtime degraded mode for missing plugins."""
     temp_config_file.write_text(
         yaml.safe_dump(
             {
                 "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
-                "plugins": ["./plugins/bad-name"],
+                "plugins": ["./plugins/missing"],
             },
         ),
         encoding="utf-8",
     )
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
-    main._load_config_from_file(runtime_paths, main.app)
+    assert main._load_config_from_file(runtime_paths, main.app) is True
     client = TestClient(main.app)
 
     response = client.post("/api/config/load")
 
-    assert response.status_code == 422
-    assert response.json()["detail"][0]["loc"] == ["config"]
-    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+    assert response.status_code == 200
+    assert response.json()["agents"]["assistant"]["display_name"] == "Assistant"
+    assert response.json()["plugins"] == [{"path": "./plugins/missing"}]
 
 
 def test_api_config_load_returns_422_for_malformed_yaml(temp_config_file: Path) -> None:
@@ -2841,7 +2833,7 @@ def test_api_config_load_returns_422_for_malformed_yaml(temp_config_file: Path) 
 
 
 def test_api_config_load_does_not_serve_stale_cache_after_invalid_reload(temp_config_file: Path) -> None:
-    """API config loads should return the latest validation error instead of stale last-known-good data."""
+    """API config loads should return the latest parse error instead of stale last-known-good data."""
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
     main._load_config_from_file(runtime_paths, main.app)
@@ -2851,30 +2843,14 @@ def test_api_config_load_does_not_serve_stale_cache_after_invalid_reload(temp_co
     assert initial_response.status_code == 200
     assert "test_agent" in initial_response.json()["agents"]
 
-    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
-        encoding="utf-8",
-    )
-    temp_config_file.write_text(
-        yaml.safe_dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
-                "plugins": ["./plugins/bad-name"],
-            },
-        ),
-        encoding="utf-8",
-    )
+    temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
 
     assert main._load_config_from_file(runtime_paths, main.app) is False
 
     response = client.post("/api/config/load")
 
     assert response.status_code == 422
-    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+    assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
     assert "test_agent" in main._app_context(main.app).config_data["agents"]
 
 
@@ -2893,55 +2869,26 @@ def test_api_cached_read_endpoints_refuse_stale_config_after_invalid_reload(
     temp_config_file: Path,
     path: str,
 ) -> None:
-    """Config-backed API reads should return the current validation error instead of stale cache."""
+    """Config-backed API reads should return the current parse error instead of stale cache."""
     runtime_paths = main._app_runtime_paths(api_key_client.app)
-
-    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
-        encoding="utf-8",
-    )
-    temp_config_file.write_text(
-        yaml.safe_dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
-                "plugins": ["./plugins/bad-name"],
-            },
-        ),
-        encoding="utf-8",
-    )
+    temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
 
     assert main._load_config_from_file(runtime_paths, main.app) is False
 
     response = api_key_client.get(path, headers={"Authorization": "Bearer test-key"})
 
     assert response.status_code == 422
-    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+    assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
 
 
 def test_api_cached_write_endpoints_refuse_stale_config_after_invalid_reload(
     api_key_client: TestClient,
     temp_config_file: Path,
 ) -> None:
-    """Config writes should not mutate from stale cache after the current file becomes invalid."""
+    """Config writes should not mutate from stale cache after the current file becomes malformed."""
     runtime_paths = main._app_runtime_paths(api_key_client.app)
-
-    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
-        encoding="utf-8",
-    )
-    invalid_payload = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-        "router": {"model": "default"},
-        "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
-        "plugins": ["./plugins/bad-name"],
-    }
-    temp_config_file.write_text(yaml.safe_dump(invalid_payload), encoding="utf-8")
+    invalid_source = "agents:\n  broken: [\n"
+    temp_config_file.write_text(invalid_source, encoding="utf-8")
 
     assert main._load_config_from_file(runtime_paths, main.app) is False
 
@@ -2952,8 +2899,8 @@ def test_api_cached_write_endpoints_refuse_stale_config_after_invalid_reload(
     )
 
     assert response.status_code == 422
-    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
-    assert yaml.safe_load(temp_config_file.read_text(encoding="utf-8")) == invalid_payload
+    assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
+    assert temp_config_file.read_text(encoding="utf-8") == invalid_source
 
 
 def test_api_key_raw_endpoints_recover_from_invalid_reload(

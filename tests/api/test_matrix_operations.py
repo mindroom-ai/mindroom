@@ -1,12 +1,10 @@
 """Tests for Matrix operations API endpoints."""
 
-import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import yaml
 from fastapi.testclient import TestClient
 
 from mindroom import constants
@@ -405,25 +403,9 @@ def test_matrix_operations_refuse_stale_config_after_invalid_reload(
     path: str,
     payload: dict[str, Any] | list[dict[str, Any]] | None,
 ) -> None:
-    """Matrix operations should surface invalid current config instead of stale cached entities."""
+    """Matrix operations should surface malformed current config instead of stale cached entities."""
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
-    plugin_root = temp_config_file.parent / "plugins" / "bad-name"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
-        encoding="utf-8",
-    )
-    temp_config_file.write_text(
-        yaml.safe_dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
-                "plugins": ["./plugins/bad-name"],
-            },
-        ),
-        encoding="utf-8",
-    )
+    temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
     assert main._load_config_from_file(runtime_paths, main.app) is False
 
     with (
@@ -438,4 +420,4 @@ def test_matrix_operations_refuse_stale_config_after_invalid_reload(
             response = getattr(test_client, method)(path, json=payload)
 
     assert response.status_code == 422
-    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+    assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]

@@ -500,6 +500,8 @@ def config_path_cmd(
 
 def _load_config_quiet(
     runtime_paths: RuntimePaths,
+    *,
+    tolerate_plugin_load_errors: bool = False,
 ) -> Config:
     """Load config while temporarily suppressing structlog output.
 
@@ -518,7 +520,10 @@ def _load_config_quiet(
             logger_factory=structlog.stdlib.LoggerFactory(),
         )
     try:
-        return load_config(runtime_paths)
+        return load_config(
+            runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
     finally:
         if not was_configured:
             structlog.reset_defaults()
