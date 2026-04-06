@@ -30,7 +30,8 @@ from mindroom.runtime_resolution import (
     resolve_agent_runtime,
     resolve_private_requester_scope_root,
 )
-from mindroom.tool_system.dynamic_toolkits import resolve_dynamic_toolkit_selection
+from mindroom.timing import timed
+from mindroom.tool_system.dynamic_toolkits import DynamicToolkitSelection, resolve_dynamic_toolkit_selection
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
@@ -44,8 +45,11 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
+    from agno.skills import Skills
     from agno.team import Team
     from agno.tools.toolkit import Toolkit
 
@@ -53,6 +57,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
     from mindroom.credentials import CredentialsManager
+    from mindroom.tool_system.plugins import _Plugin
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)
@@ -176,16 +181,22 @@ def _load_context_files(
         else:
             resolved_path = constants.resolve_config_relative_path(raw_path, runtime_paths)
         if resolved_path.is_file():
+            body = _read_context_file(resolved_path)
             loaded_parts.append(
                 _AdditionalContextChunk(
                     kind="personality",
                     title=resolved_path.name,
-                    body=resolved_path.read_text(encoding="utf-8").strip(),
+                    body=body,
                 ),
             )
         else:
             logger.warning(f"Context file not found: {resolved_path}")
     return loaded_parts
+
+
+@timed("system_prompt_assembly.agent_create.context_file_read")
+def _read_context_file(resolved_path: Path) -> str:
+    return resolved_path.read_text(encoding="utf-8").strip()
 
 
 def _render_context_chunks(section_heading: str, chunks: list[_AdditionalContextChunk]) -> str:
@@ -274,6 +285,7 @@ def _apply_preload_cap(personality_chunks: list[_AdditionalContextChunk], max_pr
     return rendered.rstrip("\n") + marker_block, omitted_chars
 
 
+@timed("system_prompt_assembly.agent_create.additional_context")
 def _build_additional_context(
     agent_name: str,
     agent_config: AgentConfig,
@@ -399,6 +411,7 @@ def _tool_init_context_from_runtime(agent_runtime: ResolvedAgentRuntime) -> Agen
     )
 
 
+@timed("system_prompt_assembly.agent_create.toolkit_build")
 def build_agent_toolkit(  # noqa: PLR0911
     tool_name: str,
     *,
@@ -804,6 +817,7 @@ def _culture_signature(culture_config: CultureConfig) -> tuple[str, str]:
     return (culture_config.mode, culture_config.description)
 
 
+@timed("system_prompt_assembly.agent_create.culture_manager")
 def _resolve_agent_culture(
     agent_name: str,
     config: Config,
@@ -853,6 +867,73 @@ def _resolve_agent_culture(
     return culture_manager, settings
 
 
+@timed("system_prompt_assembly.agent_create.load_plugins")
+def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -> list[_Plugin]:
+    return load_plugins(config, runtime_paths)
+
+
+@timed("system_prompt_assembly.agent_create.hook_bridge")
+def _build_agent_tool_hook_bridge(
+    *,
+    hook_registry: HookRegistry | None,
+    plugins: list[_Plugin],
+    agent_name: str,
+    execution_identity: ToolExecutionIdentity | None,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+) -> Callable[..., Any] | None:
+    active_hook_registry = hook_registry if hook_registry is not None else HookRegistry.from_plugins(plugins)
+    return build_tool_hook_bridge(
+        active_hook_registry,
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+
+@timed("system_prompt_assembly.agent_create.dynamic_tool_selection")
+def _resolve_agent_dynamic_tool_selection(
+    *,
+    agent_name: str,
+    config: Config,
+    session_id: str | None,
+    delegation_depth: int,
+) -> DynamicToolkitSelection:
+    return resolve_dynamic_toolkit_selection(
+        agent_name=agent_name,
+        config=config,
+        session_id=session_id,
+        delegation_depth=delegation_depth,
+    )
+
+
+@timed("system_prompt_assembly.agent_create.model_instance")
+def _load_agent_model_instance(
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    model_name: str,
+) -> Model:
+    from mindroom.ai import get_model_instance  # noqa: PLC0415
+
+    return get_model_instance(config, runtime_paths, model_name)
+
+
+@timed("system_prompt_assembly.agent_create.skills_load")
+def _load_agent_skills(
+    agent_name: str,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+) -> Skills | None:
+    return build_agent_skills(agent_name, config, runtime_paths)
+
+
+@timed("system_prompt_assembly.agent_create.agent_init")
+def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
+    return Agent(**agent_kwargs)
+
+
+@timed("system_prompt_assembly.agent_create")
 def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent_name: str,
     config: Config,
@@ -866,6 +947,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     active_model_name: str | None = None,
     include_interactive_questions: bool = True,
     delegation_depth: int = 0,
+    timing_scope: str | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -887,6 +969,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             support Matrix reaction-based question flows.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
+        timing_scope: Optional correlated timing scope id for nested
+            `system_prompt_assembly` sub-timers.
 
     Returns:
         Configured Agent instance
@@ -895,8 +979,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         ValueError: If agent_name is not found in configuration
 
     """
-    from mindroom.ai import get_model_instance  # noqa: PLC0415
-
+    del timing_scope
     resolved_storage_path = runtime_paths.storage_root
     agent_runtime = resolve_agent_runtime(
         agent_name,
@@ -910,10 +993,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
-    plugins = load_plugins(config, runtime_paths)
-    active_hook_registry = hook_registry if hook_registry is not None else HookRegistry.from_plugins(plugins)
-    tool_hook_bridge = build_tool_hook_bridge(
-        active_hook_registry,
+    plugins = _load_agent_plugins(config, runtime_paths)
+    tool_hook_bridge = _build_agent_tool_hook_bridge(
+        hook_registry=hook_registry,
+        plugins=plugins,
         agent_name=agent_name,
         execution_identity=execution_identity,
         config=config,
@@ -930,7 +1013,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             session_table=f"{agent_name}_sessions",
         )
     )
-    dynamic_tool_selection = resolve_dynamic_toolkit_selection(
+    # Dynamic toolkit state remains per-agent in V1 because each agent keeps its
+    # own session DB. Team members may share one conversation session_id, but
+    # toolkit loads do not cross agent boundaries yet.
+    dynamic_tool_selection = _resolve_agent_dynamic_tool_selection(
         agent_name=agent_name,
         config=config,
         session_id=session_id,
@@ -950,7 +1036,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     tools: list[Toolkit] = []
     for tool_name in resolved_tool_configs:
         try:
-            if toolkit := build_agent_toolkit(
+            toolkit = build_agent_toolkit(
                 tool_name,
                 agent_name=agent_name,
                 config=config,
@@ -961,7 +1047,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 session_id=session_id,
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
-            ):
+            )
+            if toolkit:
                 tools.append(prepend_tool_hook_bridge(toolkit, tool_hook_bridge))
         except (ValueError, ImportError) as exc:
             logger.warning(
@@ -1028,10 +1115,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
-    model = get_model_instance(config, runtime_paths, model_name)
+    model = _load_agent_model_instance(config, runtime_paths, model_name)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
 
-    skills = build_agent_skills(agent_name, config, runtime_paths)
+    skills = _load_agent_skills(agent_name, config, runtime_paths)
     if skills and skills.get_skill_names():
         instructions.append(agent_prompts.SKILLS_TOOL_USAGE_PROMPT)
 
@@ -1117,7 +1204,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         else defaults.max_tool_calls_from_history
     )
 
-    agent = Agent(
+    agent = _initialize_agent_instance(
         name=agent_config.display_name,
         id=agent_name,
         role=role,

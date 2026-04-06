@@ -5283,7 +5283,7 @@ class TestAgentBot:
                 action,
                 unused_payload_builder,
                 processing_log="processing",
-                dispatch_started_monotonic=0.0,
+                dispatch_started_at=0.0,
             )
 
         mock_send_response.assert_awaited_once()
@@ -5840,7 +5840,7 @@ class TestAgentBot:
                 action,
                 payload_builder,
                 processing_log="processing",
-                dispatch_started_monotonic=0.0,
+                dispatch_started_at=0.0,
             )
 
         team_kwargs = mock_generate_team_response.await_args.kwargs
@@ -6001,7 +6001,7 @@ class TestAgentBot:
                 _ResponseAction(kind="individual"),
                 payload_builder,
                 processing_log="processing",
-                dispatch_started_monotonic=0.0,
+                dispatch_started_at=0.0,
             )
 
         mock_edit.assert_awaited_once()
@@ -6060,7 +6060,7 @@ class TestAgentBot:
                 _ResponseAction(kind="individual"),
                 payload_builder,
                 processing_log="processing",
-                dispatch_started_monotonic=0.0,
+                dispatch_started_at=0.0,
             )
 
         bot.response_tracker.mark_responded.assert_not_called()
@@ -6121,7 +6121,7 @@ class TestAgentBot:
                 _ResponseAction(kind="individual"),
                 payload_builder,
                 processing_log="processing",
-                dispatch_started_monotonic=0.0,
+                dispatch_started_at=0.0,
             )
 
         bot.response_tracker.mark_responded.assert_not_called()
@@ -6178,7 +6178,7 @@ class TestAgentBot:
                 _ResponseAction(kind="individual"),
                 payload_builder,
                 processing_log="processing",
-                dispatch_started_monotonic=0.0,
+                dispatch_started_at=0.0,
             )
 
         bot.response_tracker.mark_responded.assert_not_called()
@@ -6237,7 +6237,7 @@ class TestAgentBot:
                 _ResponseAction(kind="individual"),
                 payload_builder,
                 processing_log="processing",
-                dispatch_started_monotonic=9.5,
+                dispatch_started_at=9.5,
             )
 
         latency_logs = [

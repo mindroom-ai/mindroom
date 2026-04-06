@@ -49,6 +49,7 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
 )
 from mindroom.logging_config import get_logger
+from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens
 
 if TYPE_CHECKING:
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
+    from agno.models.base import Model
     from agno.team import Team
 
     from mindroom.config.main import Config
@@ -120,6 +122,18 @@ def resolve_history_scope(agent: Agent) -> HistoryScope | None:
     return None
 
 
+@timed("system_prompt_assembly.history_prepare.compaction_model_init")
+def _load_compaction_model(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str,
+) -> Model:
+    from mindroom.ai import get_model_instance  # noqa: PLC0415
+
+    return get_model_instance(config, runtime_paths, model_name)
+
+
+@timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_scope_history(
     *,
     agent: Agent,
@@ -138,6 +152,7 @@ async def prepare_scope_history(
     available_history_budget: int | None = None,
     scope: HistoryScope | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
+    timing_scope: str | None = None,
 ) -> PreparedScopeHistory:
     """Prepare durable scope history before final replay planning."""
     resolved_inputs = _resolve_preparation_inputs(
@@ -199,9 +214,7 @@ async def prepare_scope_history(
 
     if should_compact:
         assert execution_plan.summary_input_budget_tokens is not None
-        from mindroom.ai import get_model_instance  # noqa: PLC0415
-
-        summary_model = get_model_instance(
+        summary_model = _load_compaction_model(
             config,
             runtime_paths,
             execution_plan.compaction_model_name,
@@ -222,6 +235,7 @@ async def prepare_scope_history(
                 threshold_tokens=execution_plan.trigger_threshold_tokens,
                 reserve_tokens=execution_plan.reserve_tokens,
                 notify=resolved_inputs.compaction_config.notify,
+                timing_scope=timing_scope,
             )
         except Exception:
             clear_force_compaction_state(session, scope_context.scope, state)
@@ -420,6 +434,7 @@ async def prepare_history_for_run(
     )
 
 
+@timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_bound_scope_history(
     *,
     agents: list[Agent],

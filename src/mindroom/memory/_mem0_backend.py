@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from mindroom.logging_config import get_logger
+from mindroom.timing import timed
 
 from ._policy import (
     agent_scope_user_id,
@@ -19,11 +19,13 @@ from ._policy import (
 from ._shared import MEM0_REPLICA_KEY, MemoryNotFoundError, MemoryResult, ScopedMemoryCrud, ScopedMemoryWriter
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-_MemoryFactory = Callable[[Path, "Config"], Awaitable[ScopedMemoryCrud]]
+_MemoryFactory = Callable[..., Awaitable[ScopedMemoryCrud]]
 
 logger = get_logger(__name__)
 
@@ -52,6 +54,36 @@ def _primary_mem0_storage_path(
         runtime_paths,
         execution_identity=execution_identity,
     )[0]
+
+
+@timed("system_prompt_assembly.memory_search.mem0.create_memory_instance")
+async def _create_mem0_memory_instance(
+    resolved_storage_path: Path,
+    config: Config,
+    create_memory: _MemoryFactory,
+    timing_scope: str | None,
+) -> ScopedMemoryCrud:
+    return await create_memory(resolved_storage_path, config, timing_scope=timing_scope)
+
+
+@timed("system_prompt_assembly.memory_search.mem0.agent_search")
+async def _search_mem0_agent_scope(
+    memory: ScopedMemoryCrud,
+    query: str,
+    agent_name: str,
+    limit: int,
+) -> list[MemoryResult]:
+    return _mem0_results(await memory.search(query, user_id=agent_scope_user_id(agent_name), limit=limit))
+
+
+@timed("system_prompt_assembly.memory_search.mem0.team_search")
+async def _search_mem0_team_scope(
+    memory: ScopedMemoryCrud,
+    query: str,
+    team_id: str,
+    limit: int,
+) -> list[MemoryResult]:
+    return _mem0_results(await memory.search(query, user_id=team_id, limit=limit))
 
 
 async def _get_scoped_memory_by_id(
@@ -268,6 +300,7 @@ async def search_mem0_agent_memories(
     *,
     limit: int,
     create_memory: _MemoryFactory,
+    timing_scope: str | None = None,
 ) -> list[MemoryResult]:
     """Search mem0 memories visible to an agent."""
     resolved_storage_path = _primary_mem0_storage_path(
@@ -277,16 +310,21 @@ async def search_mem0_agent_memories(
         runtime_paths,
         execution_identity=execution_identity,
     )
-    memory = await create_memory(resolved_storage_path, config)
-
-    results = _mem0_results(await memory.search(query, user_id=agent_scope_user_id(agent_name), limit=limit))
+    memory = await _create_mem0_memory_instance(
+        resolved_storage_path,
+        config,
+        create_memory,
+        timing_scope,
+    )
+    results = await _search_mem0_agent_scope(memory, query, agent_name, limit)
+    existing_memories = {result.get("memory", "") for result in results}
 
     for team_id in get_team_ids_for_agent(agent_name, config):
-        team_memories = _mem0_results(await memory.search(query, user_id=team_id, limit=limit))
-        existing_memories = {result.get("memory", "") for result in results}
+        team_memories = await _search_mem0_team_scope(memory, query, team_id, limit)
         for memory_result in team_memories:
             if memory_result.get("memory", "") not in existing_memories:
                 results.append(memory_result)
+                existing_memories.add(memory_result.get("memory", ""))
         logger.debug("Team memories found", team_id=team_id, count=len(team_memories))
 
     logger.debug("Total memories found", count=len(results), agent=agent_name)
