@@ -69,6 +69,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
 
     event = MagicMock(spec=nio.RoomMessageText)
     event.event_id = "$test_event"
+    event.server_timestamp = 1000
     event.sender = "@user:localhost"
     event.body = "!unknown_command"
     event.server_timestamp = 1234567890
@@ -169,6 +170,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     # Create an event that's already in a thread
     event = MagicMock(spec=nio.RoomMessageText)
     event.event_id = "$test_event"
+    event.server_timestamp = 1000
     event.sender = "@user:localhost"
     event.body = "!schedule"  # Incomplete schedule command
     event.server_timestamp = 1234567890
@@ -290,6 +292,7 @@ async def test_unknown_command_with_reply(tmp_path: Path) -> None:
     # Create an event that's a reply to another message
     event = MagicMock(spec=nio.RoomMessageText)
     event.event_id = "$test_event"
+    event.server_timestamp = 1000
     event.sender = "@user:localhost"
     event.body = "!invalid"
     event.server_timestamp = 1234567890

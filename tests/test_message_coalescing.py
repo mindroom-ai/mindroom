@@ -449,9 +449,39 @@ class TestCoalescingInDispatch:
             patch.object(bot, "_build_dispatch_payload_with_attachments", return_value=MagicMock()),
             patch.object(bot, "_execute_dispatch_action") as mock_execute,
         ):
-            await bot._dispatch_text_message(
-                room,
-                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
-            )
+            await bot._dispatch_text_message(room, event, "@user:localhost")
+        mock_execute.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_media_dispatch_bypasses_newer_message_skip(self, tmp_path: Path) -> None:
+        """Direct media dispatch should not be skipped by the text-only ISSUE-046 coalescing check."""
+        bot = _make_bot(tmp_path)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = _make_event(event_id="$img1", server_timestamp=1000)
+        event.body = "[Attached image]"
+        media_event = MagicMock(spec=nio.RoomMessageImage)
+        media_event.event_id = "$img1"
+        media_event.sender = "@user:localhost"
+        media_event.body = "photo.jpg"
+        media_event.source = {"content": {"msgtype": "m.image", "body": "photo.jpg"}}
+
+        thread_history = [
+            {"sender": "@user:localhost", "event_id": "$img1", "timestamp": 1000, "body": "photo.jpg"},
+            {"sender": "@user:localhost", "event_id": "$m2", "timestamp": 2000, "body": "follow-up text"},
+        ]
+        context = _make_context(thread_history)
+        dispatch = MagicMock()
+        dispatch.context = context
+        dispatch.requester_user_id = "@user:localhost"
+
+        action = MagicMock()
+
+        with (
+            patch.object(bot, "_emit_message_received_hooks", return_value=False),
+            patch.object(bot, "_prepare_dispatch", return_value=dispatch),
+            patch.object(bot, "_resolve_dispatch_action", return_value=action),
+            patch.object(bot, "_execute_dispatch_action") as mock_execute,
+        ):
+            await bot._dispatch_text_message(room, event, "@user:localhost", media_events=[media_event])
         mock_execute.assert_called_once()

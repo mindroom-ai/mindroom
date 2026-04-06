@@ -28,6 +28,25 @@ class StreamingConfig(BaseModel):
     )
 
 
+class CoalescingConfig(BaseModel):
+    """Live dispatch coalescing configuration."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether to debounce rapid inbound messages into one dispatch per sender/thread scope",
+    )
+    debounce_ms: int = Field(
+        default=300,
+        ge=0,
+        description="Sliding debounce window in milliseconds for live message coalescing",
+    )
+    upload_grace_ms: int = Field(
+        default=500,
+        ge=0,
+        description="Upload grace window in milliseconds for late media joining a text-first live batch",
+    )
+
+
 def _normalize_tool_entry_overrides(
     overrides: object,
     *,
@@ -236,6 +255,10 @@ class DefaultsConfig(BaseModel):
     enable_streaming: bool = Field(
         default=True,
         description="Enable streaming responses via progressive message edits",
+    )
+    coalescing: CoalescingConfig = Field(
+        default_factory=CoalescingConfig,
+        description="Live message coalescing settings for rapid same-sender turns",
     )
     show_stop_button: bool = Field(default=True, description="Whether to automatically show stop button on messages")
     auto_resume_after_restart: bool = Field(

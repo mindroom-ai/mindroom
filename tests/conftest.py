@@ -137,6 +137,11 @@ def bind_runtime_paths(
 ) -> Config:
     """Return a runtime-bound copy of a test config."""
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
+    authored_coalescing = config.defaults.coalescing
+    if "debounce_ms" not in authored_coalescing.model_fields_set:
+        bound.defaults.coalescing.debounce_ms = 0
+    if "upload_grace_ms" not in authored_coalescing.model_fields_set:
+        bound.defaults.coalescing.upload_grace_ms = 0
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
     return bound
 

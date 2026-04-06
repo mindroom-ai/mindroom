@@ -33,6 +33,11 @@ from agno.run.base import RunStatus
 from mindroom.agents import create_agent
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
+    MATRIX_BATCH_PROMPT_METADATA_KEY,
+    MATRIX_EVENT_ID_METADATA_KEY,
+    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     ROUTER_AGENT_NAME,
     RuntimePaths,
     runtime_env_path,
@@ -460,14 +465,45 @@ def get_model_instance(
     )
 
 
-def build_matrix_run_metadata(reply_to_event_id: str | None, unseen_event_ids: list[str]) -> dict[str, Any] | None:
+def _normalized_string_list(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value and value not in normalized:
+            normalized.append(value)
+    return normalized
+
+
+def build_matrix_run_metadata(
+    reply_to_event_id: str | None,
+    unseen_event_ids: list[str],
+    *,
+    extra_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Build metadata dict for a run, tracking consumed Matrix event ids."""
     if not reply_to_event_id:
-        return None
-    return {
-        "matrix_event_id": reply_to_event_id,
-        "matrix_seen_event_ids": [reply_to_event_id, *unseen_event_ids],
-    }
+        return dict(extra_metadata) if extra_metadata else None
+    metadata = dict(extra_metadata or {})
+    source_event_ids = _normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
+    seen_event_ids = _normalized_string_list(
+        [
+            reply_to_event_id,
+            *source_event_ids,
+            *_normalized_string_list(metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)),
+            *unseen_event_ids,
+        ],
+    )
+    metadata[MATRIX_EVENT_ID_METADATA_KEY] = reply_to_event_id
+    metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = seen_event_ids
+    if MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY in metadata and not isinstance(
+        metadata[MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY],
+        dict,
+    ):
+        metadata.pop(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY, None)
+    if MATRIX_BATCH_PROMPT_METADATA_KEY in metadata and not isinstance(metadata[MATRIX_BATCH_PROMPT_METADATA_KEY], str):
+        metadata.pop(MATRIX_BATCH_PROMPT_METADATA_KEY, None)
+    return metadata or None
 
 
 def _request_stream_retry(
@@ -710,6 +746,7 @@ async def ai_response(  # noqa: C901
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
+    matrix_run_metadata: dict[str, Any] | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -785,7 +822,11 @@ async def ai_response(  # noqa: C901
                 logger.exception("Error preparing agent", agent=agent_name)
                 return get_user_friendly_error_message(e, agent_name)
 
-            metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
+            metadata = build_matrix_run_metadata(
+                reply_to_event_id,
+                unseen_event_ids,
+                extra_metadata=matrix_run_metadata,
+            )
 
             response: RunOutput | None = None
             attempt_prompt = full_prompt
@@ -976,6 +1017,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
+    matrix_run_metadata: dict[str, Any] | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -1051,7 +1093,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 yield get_user_friendly_error_message(e, agent_name)
                 return
 
-            metadata = build_matrix_run_metadata(reply_to_event_id, unseen_event_ids)
+            metadata = build_matrix_run_metadata(
+                reply_to_event_id,
+                unseen_event_ids,
+                extra_metadata=matrix_run_metadata,
+            )
 
             attempt_prompt = full_prompt
             attempt_media_inputs = media_inputs

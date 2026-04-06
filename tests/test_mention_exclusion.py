@@ -64,6 +64,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
     # The message content has mentions for ResearchAgent
     event = Mock(spec=nio.RoomMessageText)
     event.event_id = "$test_event"
+    event.server_timestamp = 1000
     event.sender = "@user:localhost"  # User, not an agent
     event.body = "@research find the latest news"
     event.server_timestamp = 1234567890
@@ -140,6 +141,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
     # Create a message where user mentions BOTH agents
     event = Mock(spec=nio.RoomMessageText)
     event.event_id = "$test_event"
+    event.server_timestamp = 1000
     event.sender = "@user:localhost"  # User, not an agent
     event.body = "@general @research help me with this"
     event.server_timestamp = 1234567890
