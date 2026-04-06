@@ -63,28 +63,24 @@ def _make_outcome(**overrides: object) -> CompactionOutcome:
 class TestCompactionOutcome:
     """Tests for CompactionOutcome dataclass."""
 
-    def test_format_notice_without_breakdown(self) -> None:
-        outcome = _make_outcome()
+    def test_format_notice_keeps_basic_format_without_breakdown(self) -> None:
+        outcome = _make_outcome(window_tokens=128_000)
         notice = outcome.format_notice()
-        assert "~30,000" in notice
-        assert "~12,000" in notice
-        assert "100,000" in notice
-        assert "12 runs summarized" in notice
-        assert "role/instructions" not in notice
-        assert "tools" not in notice
+        assert notice == "Conversation compacted (~30,000 → ~12,000 / 128,000 tokens; 12 runs summarized)."
 
-    def test_format_notice_with_full_breakdown(self) -> None:
+    def test_format_notice_uses_enriched_token_breakdown(self) -> None:
         outcome = _make_outcome(
             role_instructions_tokens=35_000,
             tool_definition_tokens=15_000,
-            current_prompt_tokens=500,
+            current_prompt_tokens=62_000,
+            window_tokens=128_000,
         )
         notice = outcome.format_notice()
-        assert "role/instructions ~35,000" in notice
-        assert "tools ~15,000" in notice
-        assert "12 runs summarized" in notice
-        assert notice.startswith("Conversation compacted (")
-        assert notice.endswith(").")
+        assert notice == (
+            "Conversation compacted (~30,000 → ~12,000 / 128,000 tokens; "
+            "role/instructions ~35,000; tools ~15,000; current prompt ~62,000; "
+            "12 runs summarized)."
+        )
 
     def test_format_notice_with_partial_breakdown(self) -> None:
         outcome = _make_outcome(role_instructions_tokens=8_000)

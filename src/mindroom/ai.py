@@ -723,11 +723,18 @@ async def _prepare_agent_and_prompt(
 
     if prepared_history.compaction_outcomes:
         breakdown = compute_prompt_token_breakdown(agent=agent, full_prompt=full_prompt)
+        enriched_outcomes = [replace(o, **breakdown) for o in prepared_history.compaction_outcomes]
         prepared_history = PreparedHistoryState(
-            compaction_outcomes=[replace(o, **breakdown) for o in prepared_history.compaction_outcomes],
+            compaction_outcomes=enriched_outcomes,
             replay_plan=prepared_history.replay_plan,
             replays_persisted_history=prepared_history.replays_persisted_history,
         )
+        if compaction_outcomes_collector is not None:
+            compaction_outcomes_collector.clear()
+            compaction_outcomes_collector.extend(enriched_outcomes)
+        if compaction_outcomes_collector is not None:
+            compaction_outcomes_collector.clear()
+            compaction_outcomes_collector.extend(enriched_outcomes)
 
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
     return agent, full_prompt, unseen_event_ids, prepared_history
