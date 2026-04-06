@@ -3267,6 +3267,42 @@
         },
         {
           "authored_override": true,
+          "default": null,
+          "description": "Deprecated alias for List Tables. Preserved for stored config compatibility.",
+          "label": "Enable List Tables",
+          "name": "enable_list_tables",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Deprecated alias for Describe Table. Preserved for stored config compatibility.",
+          "label": "Enable Describe Table",
+          "name": "enable_describe_table",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Deprecated alias for Run SQL Query. Preserved for stored config compatibility.",
+          "label": "Enable Run Sql Query",
+          "name": "enable_run_sql_query",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",

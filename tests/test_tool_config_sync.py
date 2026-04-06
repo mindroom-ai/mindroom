@@ -16,8 +16,6 @@ SKIP_CUSTOM = {"homeassistant", "gmail", "google_calendar", "google_sheets", "op
 IGNORED_AGNO_PARAMS = {
     # Agno accepts an SSLContext for Slack, but MindRoom has no safe serialized UI/config path for it.
     "slack": {"ssl"},
-    # Agno still accepts deprecated aliases, but MindRoom only exposes canonical BigQuery flags.
-    "google_bigquery": {"enable_describe_table", "enable_list_tables", "enable_run_sql_query"},
     # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.
     "yfinance": {"session"},
 }
