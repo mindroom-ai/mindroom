@@ -8,7 +8,12 @@ from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id, room_access_allowed
 from mindroom.matrix.client import fetch_thread_history
-from mindroom.thread_summary import send_thread_summary_event, thread_summary_lock, update_last_summary_count
+from mindroom.thread_summary import (
+    _count_non_summary_messages,
+    send_thread_summary_event,
+    thread_summary_lock,
+    update_last_summary_count,
+)
 from mindroom.thread_tags import normalize_thread_root_event_id
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -121,7 +126,7 @@ class ThreadSummaryTools(Toolkit):
                             error_thread_id = normalized_thread_id
                             error_message = "Failed to fetch thread history for the target thread."
                         else:
-                            message_count = len(thread_history)
+                            message_count = _count_non_summary_messages(thread_history)
                             try:
                                 event_id = await send_thread_summary_event(
                                     context.client,

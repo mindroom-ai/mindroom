@@ -14,6 +14,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_summary import ThreadSummaryTools
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.thread_summary import (
     _last_summary_counts,
     _thread_locks,
@@ -58,16 +59,33 @@ def _clear_summary_counts() -> None:
     _thread_locks.clear()
 
 
-def _thread_history(count: int) -> list[dict[str, object]]:
+def _thread_history(
+    count: int,
+    *,
+    summary_count: int = 0,
+) -> list[ResolvedVisibleMessage]:
     """Build a fake thread history with a fixed number of messages."""
-    return [
-        {
-            "sender": f"@user{i}:localhost",
-            "body": f"Message {i}",
-            "event_id": f"$event{i}:localhost",
-        }
+    messages = [
+        ResolvedVisibleMessage.synthetic(
+            sender=f"@user{i}:localhost",
+            body=f"Message {i}",
+            event_id=f"$event{i}:localhost",
+        )
         for i in range(count)
     ]
+    messages.extend(
+        ResolvedVisibleMessage.synthetic(
+            sender="@mindroom:localhost",
+            body=f"Summary {i}",
+            event_id=f"$summary{i}:localhost",
+            content={
+                "body": f"Summary {i}",
+                "io.mindroom.thread_summary": {"version": 1},
+            },
+        )
+        for i in range(summary_count)
+    )
+    return messages
 
 
 def test_thread_summary_tool_registered_and_instantiates() -> None:
@@ -344,6 +362,41 @@ async def test_set_thread_summary_send_failure_leaves_cache_unchanged() -> None:
     assert payload["status"] == "error"
     assert payload["thread_id"] == "$ctx-thread:localhost"
     assert _last_summary_counts[thread_summary_cache_key(context.room_id, "$ctx-thread:localhost")] == 2
+
+
+@pytest.mark.asyncio
+async def test_set_thread_summary_excludes_existing_summary_notices_from_message_count() -> None:
+    """Manual summaries should not count prior summary notices toward the baseline."""
+    tool = ThreadSummaryTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_summary.normalize_thread_root_event_id",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_summary.fetch_thread_history",
+            new=AsyncMock(return_value=_thread_history(3, summary_count=2)),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_summary.send_thread_summary_event",
+            new=AsyncMock(return_value="$summary-event:localhost"),
+        ) as mock_send,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.set_thread_summary("done"))
+
+    assert payload["status"] == "ok"
+    assert payload["message_count"] == 3
+    mock_send.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$ctx-thread:localhost",
+        "done",
+        3,
+        "manual",
+    )
 
 
 @pytest.mark.asyncio
