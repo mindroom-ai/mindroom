@@ -17,6 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.matrix.identity import MatrixID
+from mindroom.message_target import MessageTarget
 from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
@@ -107,6 +108,30 @@ class TestScheduledWorkflow:
         )
         assert workflow.schedule_type == "cron"
         assert workflow.cron_schedule.to_cron_string() == "0 9 * * *"
+
+    def test_message_target_for_scheduled_task_uses_persisted_thread_id(self) -> None:
+        """Scheduled workflows should honor the persisted thread even if live routing is room mode."""
+        config = MagicMock()
+        config.get_entity_thread_mode.return_value = "room"
+        workflow = ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=datetime.now(UTC),
+            message="Check the queue depth",
+            description="Queue check",
+            room_id="!room:server",
+            thread_id="$thread-root",
+            new_thread=False,
+        )
+
+        target = MessageTarget.for_scheduled_task(
+            workflow,
+            config=config,
+            runtime_paths=MagicMock(),
+        )
+
+        assert target.resolved_thread_id == "$thread-root"
+        assert target.session_id == "!room:server:$thread-root"
+        config.get_entity_thread_mode.assert_not_called()
 
 
 @pytest.mark.asyncio

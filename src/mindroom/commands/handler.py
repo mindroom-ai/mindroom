@@ -14,6 +14,7 @@ from mindroom.commands.parsing import Command, CommandType, get_command_help
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
+from mindroom.message_target import MessageTarget
 from mindroom.scheduling import (
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,
@@ -21,7 +22,7 @@ from mindroom.scheduling import (
     list_scheduled_tasks,
     schedule_task,
 )
-from mindroom.thread_utils import check_agent_mentioned, create_session_id, get_configured_agents_for_room
+from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.skills import resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import (
@@ -446,17 +447,22 @@ async def _run_skill_command_tool(
     thread_id: str | None = None,
     runtime_context: ToolRuntimeContext | None = None,
 ) -> str:
-    resolved_requester_user_id = runtime_context.requester_id if runtime_context is not None else requester_user_id
-    resolved_room_id = runtime_context.room_id if runtime_context is not None else room_id
-    resolved_thread_id = runtime_context.thread_id if runtime_context is not None else thread_id
-    resolved_reply_thread_id = runtime_context.resolved_thread_id if runtime_context is not None else resolved_thread_id
-    session_id = (
-        runtime_context.session_id
-        if runtime_context is not None and runtime_context.session_id is not None
-        else create_session_id(resolved_room_id, resolved_thread_id)
-        if resolved_room_id is not None
+    target = (
+        MessageTarget.from_runtime_context(runtime_context)
+        if runtime_context is not None
+        else MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=None,
+        )
+        if room_id is not None
         else None
     )
+    resolved_requester_user_id = runtime_context.requester_id if runtime_context is not None else requester_user_id
+    resolved_room_id = target.room_id if target is not None else room_id
+    resolved_thread_id = target.thread_id if target is not None else thread_id
+    resolved_reply_thread_id = target.resolved_thread_id if target is not None else thread_id
+    session_id = target.session_id if target is not None else None
     execution_identity = build_tool_execution_identity(
         channel="matrix",
         agent_name=agent_name,

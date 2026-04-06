@@ -5,12 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ROUTER_AGENT_NAME
-
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.scheduling import ScheduledWorkflow
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 @dataclass(frozen=True)
@@ -28,6 +27,11 @@ class MessageTarget:
         """Return whether the target resolves to room-level delivery."""
         return self.resolved_thread_id is None
 
+    @staticmethod
+    def _build_session_id(room_id: str, resolved_thread_id: str | None) -> str:
+        """Build the canonical persisted session ID for one target."""
+        return room_id if resolved_thread_id is None else f"{room_id}:{resolved_thread_id}"
+
     @classmethod
     def for_scheduled_task(
         cls,
@@ -41,19 +45,23 @@ class MessageTarget:
             msg = "Scheduled workflows require room_id to resolve a MessageTarget"
             raise ValueError(msg)
 
-        room_mode = workflow.new_thread or (
-            config.get_entity_thread_mode(
-                ROUTER_AGENT_NAME,
-                runtime_paths,
-                room_id=workflow.room_id,
-            )
-            == "room"
-        )
+        del config, runtime_paths
         return cls.resolve(
             room_id=workflow.room_id,
-            thread_id=workflow.thread_id,
+            thread_id=None if workflow.new_thread else workflow.thread_id,
             reply_to_event_id=None,
-            room_mode=room_mode,
+            room_mode=workflow.new_thread or workflow.thread_id is None,
+        )
+
+    @classmethod
+    def from_runtime_context(cls, context: ToolRuntimeContext) -> MessageTarget:
+        """Build the canonical target represented by one tool runtime context."""
+        return cls(
+            room_id=context.room_id,
+            thread_id=context.thread_id,
+            resolved_thread_id=context.resolved_thread_id,
+            reply_to_event_id=context.reply_to_event_id,
+            session_id=context.session_id or cls._build_session_id(context.room_id, context.resolved_thread_id),
         )
 
     def with_thread_root(self, resolved_thread_id: str | None) -> MessageTarget:
@@ -65,7 +73,7 @@ class MessageTarget:
             thread_id=self.thread_id,
             resolved_thread_id=resolved_thread_id,
             reply_to_event_id=self.reply_to_event_id,
-            session_id=self.room_id if resolved_thread_id is None else f"{self.room_id}:{resolved_thread_id}",
+            session_id=self._build_session_id(self.room_id, resolved_thread_id),
         )
 
     @classmethod
@@ -85,5 +93,5 @@ class MessageTarget:
             thread_id=thread_id,
             resolved_thread_id=resolved_thread_id,
             reply_to_event_id=reply_to_event_id,
-            session_id=room_id if resolved_thread_id is None else f"{room_id}:{resolved_thread_id}",
+            session_id=cls._build_session_id(room_id, resolved_thread_id),
         )

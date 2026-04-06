@@ -543,7 +543,7 @@ async def send_streaming_response(
     else:
         latest_thread_event_id = await get_latest_thread_event_id_if_needed(
             client,
-            room_id,
+            resolved_target.room_id,
             resolved_target.resolved_thread_id,
             resolved_target.reply_to_event_id,
             existing_event_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -163,6 +164,33 @@ async def test_sessions_send_relays_original_sender(
         room_id=ctx.room_id,
         text="hello",
         thread_id=ctx.thread_id,
+        original_sender=ctx.requester_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sessions_send_defaults_to_resolved_thread_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_send should keep first-turn follow-ups in the canonical reply thread."""
+    send_mock = AsyncMock(return_value="$evt")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    ctx = replace(
+        _make_context(tmp_path, thread_id=None),
+        resolved_thread_id="$resolved-thread:localhost",
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().sessions_send(message="hello"))
+
+    assert payload["status"] == "ok"
+    assert payload["session_key"] == create_session_id(ctx.room_id, "$resolved-thread:localhost")
+    send_mock.assert_awaited_once_with(
+        ctx,
+        room_id=ctx.room_id,
+        text="hello",
+        thread_id="$resolved-thread:localhost",
         original_sender=ctx.requester_id,
     )
 

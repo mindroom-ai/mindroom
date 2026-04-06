@@ -13,6 +13,7 @@ from agno.tools import Toolkit
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.matrix.client import get_latest_thread_event_id_if_needed, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
@@ -326,7 +327,7 @@ class SubAgentsTools(Toolkit):
         if not message.strip():
             return _payload("sessions_send", "error", message="Message cannot be empty.")
 
-        target_session = session_key or create_session_id(context.room_id, context.thread_id)
+        target_session = session_key or MessageTarget.from_runtime_context(context).session_id
         if label and not session_key:
             resolved = await asyncio.to_thread(_resolve_by_label, context, label)
             if resolved:
