@@ -408,8 +408,8 @@ async def _refresh_node_visible_state(
     if not isinstance(parsed_event, (nio.RoomMessageText, nio.RoomMessageNotice)):
         return node
 
-    visible_event_source = node.event_source
-    latest_event_id = node.event_id
+    visible_event_source = node.visible_event_source
+    latest_event_id = node.latest_event_id
     thread_root_id = node.thread_root_id
 
     try:

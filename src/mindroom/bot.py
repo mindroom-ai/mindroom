@@ -1108,10 +1108,11 @@ class AgentBot:
         reply_to_event_id: str | None,
         event_source: dict[str, Any] | None = None,
         thread_mode_override: Literal["thread", "room"] | None = None,
+        agent_name: str | None = None,
     ) -> MessageTarget:
         """Build the canonical delivery target for one outbound response."""
         effective_thread_mode = thread_mode_override or self.config.get_entity_thread_mode(
-            self.agent_name,
+            agent_name or self.agent_name,
             self.runtime_paths,
             room_id=room_id,
         )
@@ -4291,6 +4292,7 @@ class AgentBot:
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
+            agent_name=agent_name,
         )
         lifecycle_lock = self._response_lifecycle_lock(target)
         async with lifecycle_lock:
@@ -4333,6 +4335,7 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             event_source=reply_to_event.source if reply_to_event is not None else None,
+            agent_name=agent_name,
         )
         session_id = resolved_target.session_id
         model_prompt = self._append_matrix_prompt_context(
@@ -5806,9 +5809,17 @@ class AgentBot:
                     thread_id=thread_id,
                     reply_to_event_id=event.event_id,
                     event_source=event.source,
+                    agent_name=agent_name,
+                )
+                runtime_target = MessageTarget(
+                    room_id=resolved_target.room_id,
+                    thread_id=resolved_target.resolved_thread_id,
+                    resolved_thread_id=resolved_target.resolved_thread_id,
+                    reply_to_event_id=resolved_target.reply_to_event_id,
+                    session_id=resolved_target.session_id,
                 )
                 runtime_context = self._build_tool_runtime_context(
-                    resolved_target,
+                    runtime_target,
                     user_id=requester_user_id,
                     agent_name=agent_name,
                     source_envelope=source_envelope,

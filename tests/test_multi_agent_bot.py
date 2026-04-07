@@ -2518,6 +2518,75 @@ class TestAgentBot:
         assert mock_reprioritize.call_args.kwargs["active_session_id"] == "!test:localhost"
 
     @pytest.mark.asyncio
+    async def test_router_skill_command_uses_target_agent_room_mode_session_id(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router-owned skill dispatch should resolve sessions using the selected agent thread mode."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        def discard_background_task(coro: object, *, _name: str) -> None:
+            if asyncio.iscoroutine(coro):
+                coro.close()
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!test:localhost"],
+                        thread_mode="room",
+                    ),
+                },
+                defaults=DefaultsConfig(show_tool_calls=False),
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(
+            AgentMatrixUser(
+                agent_name="router",
+                password=TEST_PASSWORD,
+                display_name="Router",
+                user_id="@mindroom_router:localhost",
+            ),
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response")
+
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.bot.reprioritize_auto_flush_sessions") as mock_reprioritize,
+            patch("mindroom.bot.mark_auto_flush_dirty_session"),
+            patch("mindroom.bot.create_background_task", side_effect=discard_background_task),
+        ):
+            mock_ai.return_value = "Skill response"
+            await bot._send_skill_command_response(
+                room_id="!test:localhost",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                prompt="Use room mode skill",
+                agent_name="general",
+                user_id="@user:localhost",
+                reply_to_event=None,
+            )
+
+        assert mock_ai.call_args.kwargs["session_id"] == "!test:localhost"
+        assert mock_reprioritize.call_args.kwargs["active_session_id"] == "!test:localhost"
+
+    @pytest.mark.asyncio
     async def test_generate_response_prefixes_user_turns_with_local_datetime(
         self,
         mock_agent_user: AgentMatrixUser,

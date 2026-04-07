@@ -1639,14 +1639,20 @@ async def test_hook_dispatch_skill_tool_command_reuses_resolved_command_target(t
     )
     bot.client.rooms = {}
     bot._send_response = AsyncMock(return_value="$response")
-    expected_target = MessageTarget.resolve(
+    router_target = MessageTarget.resolve(
         room_id="!room:localhost",
         thread_id=None,
         reply_to_event_id="$hook-skill-tool",
         room_mode=True,
     )
+    expected_target = MessageTarget.resolve(
+        room_id="!room:localhost",
+        thread_id=None,
+        reply_to_event_id="$hook-skill-tool",
+    )
     bot._build_message_target = MagicMock(
         side_effect=[
+            router_target,
             expected_target,
             MessageTarget.resolve(
                 room_id="!room:localhost",
@@ -1685,8 +1691,24 @@ async def test_hook_dispatch_skill_tool_command_reuses_resolved_command_target(t
 
     assert captured_runtime_context is not None
     assert captured_runtime_context.reply_to_event_id == expected_target.reply_to_event_id
+    assert captured_runtime_context.thread_id == expected_target.resolved_thread_id
     assert captured_runtime_context.resolved_thread_id == expected_target.resolved_thread_id
-    assert bot._build_message_target.call_count == 1
+    assert bot._build_message_target.call_args_list[:2] == [
+        call(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$hook-skill-tool",
+            event_source=event.source,
+        ),
+        call(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$hook-skill-tool",
+            event_source=event.source,
+            agent_name="code",
+        ),
+    ]
+    assert bot._build_message_target.call_count == 2
 
 
 @pytest.mark.asyncio

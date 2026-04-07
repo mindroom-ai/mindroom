@@ -633,6 +633,14 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 response_text = error
             else:
                 assert target_agent is not None
+                command_target = context.build_message_target(
+                    room_id=room.room_id,
+                    thread_id=thread_id,
+                    reply_to_event_id=event.event_id,
+                    event_source=event.source,
+                    agent_name=target_agent,
+                )
+                effective_thread_id = command_target.resolved_thread_id
                 spec = resolve_skill_command_spec(skill_name, context.config, context.runtime_paths, target_agent)
                 if spec is None:
                     response_text = f"❌ Skill '{skill_name}' not found or not enabled for agent '{target_agent}'."
