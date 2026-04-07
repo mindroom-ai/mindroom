@@ -730,11 +730,7 @@ async def _prepare_agent_and_prompt(
             replays_persisted_history=prepared_history.replays_persisted_history,
         )
         if compaction_outcomes_collector is not None:
-            compaction_outcomes_collector.clear()
-            compaction_outcomes_collector.extend(enriched_outcomes)
-        if compaction_outcomes_collector is not None:
-            compaction_outcomes_collector.clear()
-            compaction_outcomes_collector.extend(enriched_outcomes)
+            compaction_outcomes_collector[:] = enriched_outcomes
 
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
     return agent, full_prompt, unseen_event_ids, prepared_history

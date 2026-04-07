@@ -2342,21 +2342,8 @@ async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_repla
     assert full_prompt == build_prompt_with_thread_history("Current prompt", thread_history)
 
 
-@pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_syncs_enriched_compaction_outcomes_back_to_collector(
-    tmp_path: Path,
-) -> None:
-    config, runtime_paths = _make_config(tmp_path)
-
-    def search_docs(query: str) -> str:
-        return query
-
-    live_agent = _agent()
-    live_agent.role = "Engineer"
-    live_agent.instructions = ["Keep the response concise."]
-    live_agent.tools = [Function.from_callable(search_docs)]
-
-    original_outcome = CompactionOutcome(
+def _make_test_compaction_outcome() -> CompactionOutcome:
+    return CompactionOutcome(
         mode="auto",
         session_id="session-1",
         scope="agent:test_agent",
@@ -2373,6 +2360,23 @@ async def test_prepare_agent_and_prompt_syncs_enriched_compaction_outcomes_back_
         compacted_at="2026-01-01T00:00:00Z",
         notify=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_syncs_enriched_compaction_outcomes_back_to_collector(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+
+    def search_docs(query: str) -> str:
+        return query
+
+    live_agent = _agent()
+    live_agent.role = "Engineer"
+    live_agent.instructions = ["Keep the response concise."]
+    live_agent.tools = [Function.from_callable(search_docs)]
+
+    original_outcome = _make_test_compaction_outcome()
     collector = [original_outcome]
     prepared_execution = PreparedExecutionContext(
         final_prompt="Current prompt",
@@ -2403,6 +2407,87 @@ async def test_prepare_agent_and_prompt_syncs_enriched_compaction_outcomes_back_
     assert collector[0].role_instructions_tokens is not None
     assert collector[0].tool_definition_tokens is not None
     assert collector[0].current_prompt_tokens is not None
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_enriches_compaction_outcomes_without_collector(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+
+    def search_docs(query: str) -> str:
+        return query
+
+    live_agent = _agent()
+    live_agent.role = "Engineer"
+    live_agent.instructions = ["Keep the response concise."]
+    live_agent.tools = [Function.from_callable(search_docs)]
+
+    original_outcome = _make_test_compaction_outcome()
+    prepared_execution = PreparedExecutionContext(
+        final_prompt="Current prompt",
+        replay_plan=None,
+        unseen_event_ids=[],
+        replays_persisted_history=False,
+        compaction_outcomes=[original_outcome],
+    )
+
+    with (
+        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch(
+            "mindroom.ai.prepare_agent_execution_context",
+            new=AsyncMock(return_value=prepared_execution),
+        ),
+    ):
+        _prepared_agent, _full_prompt, _unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+            "test_agent",
+            "Current prompt",
+            runtime_paths,
+            config,
+            compaction_outcomes_collector=None,
+        )
+
+    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_outcomes[0] is not original_outcome
+    assert prepared.compaction_outcomes[0].role_instructions_tokens is not None
+    assert prepared.compaction_outcomes[0].tool_definition_tokens is not None
+    assert prepared.compaction_outcomes[0].current_prompt_tokens is not None
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_keeps_empty_collector_when_no_compaction_outcomes(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    live_agent = _agent()
+    collector: list[CompactionOutcome] = []
+    prepared_execution = PreparedExecutionContext(
+        final_prompt="Current prompt",
+        replay_plan=None,
+        unseen_event_ids=[],
+        replays_persisted_history=False,
+        compaction_outcomes=[],
+    )
+
+    with (
+        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch(
+            "mindroom.ai.prepare_agent_execution_context",
+            new=AsyncMock(return_value=prepared_execution),
+        ),
+    ):
+        _prepared_agent, _full_prompt, _unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+            "test_agent",
+            "Current prompt",
+            runtime_paths,
+            config,
+            compaction_outcomes_collector=collector,
+        )
+
+    assert collector == []
+    assert prepared.compaction_outcomes == []
 
 
 @pytest.mark.asyncio
