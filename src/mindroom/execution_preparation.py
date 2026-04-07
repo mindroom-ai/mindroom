@@ -29,7 +29,7 @@ from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     replace_visible_message,
 )
-from mindroom.streaming import clean_partial_reply_text, is_in_progress_message, is_interrupted_partial_reply
+from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Sequence
@@ -142,8 +142,6 @@ def _classify_partial_reply(
             return None
         if is_interrupted_partial_reply(body):
             partial_kind = _PartialReplyKind.INTERRUPTED
-        elif is_in_progress_message(body):
-            partial_kind = _PartialReplyKind.IN_PROGRESS
 
     return partial_kind
 

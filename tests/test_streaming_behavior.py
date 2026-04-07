@@ -17,19 +17,17 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
-from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY
+from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
-    IN_PROGRESS_MARKER,
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingResponse,
     clean_partial_reply_text,
-    is_in_progress_message,
     is_interrupted_partial_reply,
     send_streaming_response,
 )
@@ -37,6 +35,8 @@ from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for,
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+IN_PROGRESS_MARKER = " ⋯"
 
 
 async def _aiter(*events: object) -> AsyncIterator[object]:
@@ -202,20 +202,21 @@ class TestStreamingBehavior:
         # Verify helper bot sent initial message and edit
         assert helper_bot.client.room_send.call_count >= 1  # At least initial message
 
-        # Simulate the initial message from helper (with in-progress marker)
+        # Simulate the initial message from helper while the stream is still active.
         initial_event = MagicMock(spec=nio.RoomMessageText)
         initial_event.sender = "@mindroom_helper:localhost"
-        initial_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ⋯"
+        initial_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?"
         initial_event.event_id = "$helper_response_123"
         initial_event.server_timestamp = 1234567890
         initial_event.source = {
             "content": {
-                "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ⋯",
+                "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
             },
         }
 
-        # Process initial message - calculator should NOT respond (has in-progress marker)
+        # Process initial message - calculator should NOT respond while the stream is active.
         with patch("mindroom.bot.check_agent_mentioned") as mock_check:
             mock_check.return_value = ([MatrixID.parse("@mindroom_calculator:localhost")], True, False)
 
@@ -482,14 +483,6 @@ class TestStreamingBehavior:
         # Before stream starts, ramp is inactive so steady-state interval is returned
         assert streaming._current_update_interval(999.0) == streaming.update_interval
 
-    def test_is_in_progress_message_detects_animated_suffix(self) -> None:
-        """In-progress detection should handle animated marker suffixes."""
-        assert is_in_progress_message("Thinking... ⋯")
-        assert is_in_progress_message("Thinking... ⋯.")
-        assert is_in_progress_message("Thinking... ⋯..")
-        assert not is_in_progress_message("Thinking...")
-        assert not is_in_progress_message(None)
-
     def test_is_interrupted_partial_reply_detects_terminal_markers(self) -> None:
         """Interrupted partial-reply detection should recognize shared cancelled/error notes."""
         assert is_interrupted_partial_reply(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}")
@@ -503,8 +496,8 @@ class TestStreamingBehavior:
         assert (
             clean_partial_reply_text("Draft answer\n\n**[Response interrupted by an error: boom]**") == "Draft answer"
         )
-        assert clean_partial_reply_text(f"{PROGRESS_PLACEHOLDER} ⋯") == ""
-        assert clean_partial_reply_text("... ⋯") == ""
+        assert clean_partial_reply_text(PROGRESS_PLACEHOLDER) == ""
+        assert clean_partial_reply_text("...") == ""
 
     @pytest.mark.asyncio
     async def test_throttled_send_uses_ramp_interval(self) -> None:
@@ -624,7 +617,7 @@ class TestStreamingBehavior:
         assert mock_edit.await_count == 1
         edit_args = mock_edit.await_args.args
         assert edit_args[3]["body"].startswith(PROGRESS_PLACEHOLDER)
-        assert IN_PROGRESS_MARKER in edit_args[3]["body"]
+        assert IN_PROGRESS_MARKER not in edit_args[3]["body"]
 
     @pytest.mark.asyncio
     async def test_progress_hint_creates_initial_message_on_cold_start(self) -> None:
@@ -656,7 +649,7 @@ class TestStreamingBehavior:
         assert streaming.event_id == "$cold_start_1"
         sent_content = mock_client.room_send.call_args[1]["content"]
         assert sent_content["body"].startswith(PROGRESS_PLACEHOLDER)
-        assert IN_PROGRESS_MARKER in sent_content["body"]
+        assert IN_PROGRESS_MARKER not in sent_content["body"]
 
     @pytest.mark.asyncio
     async def test_finalize_strips_marker_from_placeholder_only_stream(self) -> None:
@@ -687,9 +680,9 @@ class TestStreamingBehavior:
         assert streaming.event_id == "$placeholder_msg"
         assert mock_client.room_send.call_count == 1
 
-        # Verify the initial message has the in-progress marker
+        # Verify the initial message has no in-progress marker (frontend shows animated indicator via stream_status)
         initial_content = mock_client.room_send.call_args[1]["content"]
-        assert IN_PROGRESS_MARKER in initial_content["body"]
+        assert IN_PROGRESS_MARKER not in initial_content["body"]
 
         # Now finalize with no text ever emitted
         with patch(
@@ -940,8 +933,8 @@ class TestStreamingBehavior:
         # Check that the sent message includes the in-progress marker
         first_call = mock_client.room_send.call_args_list[0]
         content = first_call[1]["content"]
-        # The body should contain the in-progress marker
-        assert IN_PROGRESS_MARKER in content["body"]
+        # The body should NOT contain the static in-progress marker (frontend uses stream_status metadata)
+        assert IN_PROGRESS_MARKER not in content["body"]
         assert "Hello world" in content["body"]
 
         # Finalize the message
@@ -991,7 +984,7 @@ class TestStreamingBehavior:
             )
 
         assert len(edited_texts) == 2
-        assert IN_PROGRESS_MARKER in edited_texts[0]
+        assert IN_PROGRESS_MARKER not in edited_texts[0]
         assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
 
     @pytest.mark.asyncio
@@ -1033,7 +1026,7 @@ class TestStreamingBehavior:
             )
 
         assert len(edited_texts) == 2
-        assert IN_PROGRESS_MARKER in edited_texts[0]
+        assert IN_PROGRESS_MARKER not in edited_texts[0]
         final_text = edited_texts[-1]
         assert final_text.startswith("Partial answer\n\n**[Response interrupted by an error:")
         assert "model backend disconnected" in final_text

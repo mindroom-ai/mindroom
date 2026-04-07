@@ -18,7 +18,6 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState
-from mindroom.streaming import IN_PROGRESS_MARKER
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1273,7 +1272,7 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
         thinking_message="Thinking...",
     )
 
-    assert captured_send["response_text"] == f"Thinking... {IN_PROGRESS_MARKER}"
+    assert captured_send["response_text"] == "Thinking..."
     assert captured_send["extra_content"] == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
 
 

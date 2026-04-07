@@ -170,7 +170,7 @@ class TestClassifyPartialReply:
             _classify_partial_reply(
                 _make_visible_message(
                     event_id="e_streaming",
-                    body="Partial answer ⋯",
+                    body="Partial answer",
                     stream_status=STREAM_STATUS_STREAMING,
                 ),
                 active_event_ids={"e_streaming"},
@@ -184,7 +184,7 @@ class TestClassifyPartialReply:
             _classify_partial_reply(
                 _make_visible_message(
                     event_id="e1",
-                    body="Partial answer ⋯",
+                    body="Partial answer",
                     stream_status=STREAM_STATUS_STREAMING,
                     timestamp=1_000,
                 ),
@@ -199,7 +199,7 @@ class TestClassifyPartialReply:
             _classify_partial_reply(
                 _make_visible_message(
                     event_id="e1",
-                    body="Partial answer ⋯",
+                    body="Partial answer",
                     stream_status=STREAM_STATUS_STREAMING,
                     timestamp=599_000,
                 ),
@@ -212,20 +212,20 @@ class TestClassifyPartialReply:
         """Prefer persisted completion metadata over stale visible marker text."""
         assert (
             _classify_partial_reply(
-                _make_visible_message(body="Finished text ⋯", stream_status=STREAM_STATUS_COMPLETED),
+                _make_visible_message(body="Finished text", stream_status=STREAM_STATUS_COMPLETED),
                 active_event_ids=set(),
             )
             is None
         )
 
-    def test_trailing_marker_without_metadata_is_in_progress(self) -> None:
-        """Fallback to body-marker detection for pre-upgrade messages."""
+    def test_trailing_marker_without_metadata_is_not_partial(self) -> None:
+        """Messages without stream_status metadata are not classified as partial."""
         assert (
             _classify_partial_reply(
-                _make_visible_message(body="Legacy partial ⋯"),
+                _make_visible_message(body="Legacy partial"),
                 active_event_ids=set(),
             )
-            is _PartialReplyKind.IN_PROGRESS
+            is None
         )
 
     @pytest.mark.parametrize(
@@ -265,23 +265,21 @@ class TestCleanPartialReplyBody:
     @pytest.mark.parametrize(
         ("body", "expected"),
         [
-            ("Hello world ⋯", "Hello world"),
-            ("Hello world ⋯..", "Hello world"),
             (f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}", "Partial answer"),
             (f"Partial answer\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}", "Partial answer"),
             ("Partial answer [cancelled]", "Partial answer"),
             ("Partial answer [error]", "Partial answer"),
             ("Partial answer\n\n**[Response interrupted by an error: boom]**", "Partial answer"),
-            (f"{_PROGRESS_PLACEHOLDER} ⋯", ""),
+            (_PROGRESS_PLACEHOLDER, ""),
         ],
     )
     def test_clean_partial_reply_body_strips_markers(self, body: str, expected: str) -> None:
-        """Remove streaming markers and terminal status notes from preserved text."""
+        """Remove terminal status notes from preserved text."""
         assert _clean_partial_reply_body(body) == expected
 
     def test_clean_partial_reply_body_preserves_long_content(self) -> None:
         """Keep long partial-reply content once markers are removed."""
-        result = _clean_partial_reply_body(f"{'x' * 5000} ⋯")
+        result = _clean_partial_reply_body("x" * 5000)
         assert result == "x" * 5000
 
 
@@ -313,7 +311,7 @@ class TestUnseenMessagesPartialReplies:
             _make_visible_message(
                 event_id="e2",
                 sender=agent_id,
-                body="Partial reply ⋯",
+                body="Partial reply",
                 stream_status=STREAM_STATUS_STREAMING,
             ),
             _make_visible_message(event_id="e3", sender="@user:localhost", body="New question"),
@@ -384,7 +382,7 @@ class TestUnseenMessagesPartialReplies:
                 _make_visible_message(
                     event_id="e1",
                     sender=agent_id,
-                    body="Partial reply ⋯",
+                    body="Partial reply",
                     stream_status=STREAM_STATUS_STREAMING,
                 ),
                 _make_visible_message(event_id="e2", sender="@user:localhost", body="Question"),
@@ -441,7 +439,7 @@ class TestUnseenMessagesPartialReplies:
                 _make_visible_message(
                     event_id="e1",
                     sender=agent_id,
-                    body=f"{_PROGRESS_PLACEHOLDER} ⋯",
+                    body=_PROGRESS_PLACEHOLDER,
                     stream_status=STREAM_STATUS_STREAMING,
                 ),
                 _make_visible_message(event_id="e2", sender="@user:localhost", body="Question"),
@@ -525,7 +523,7 @@ class TestUnseenMessagesPartialReplies:
                 _make_visible_message(
                     event_id="e1",
                     sender=agent_id,
-                    body="Partial reply ⋯",
+                    body="Partial reply",
                     stream_status=STREAM_STATUS_STREAMING,
                 ),
                 _make_visible_message(event_id="e2", sender="@user:localhost", body="Question"),
@@ -594,10 +592,10 @@ class TestThreadHistoryStreamStatus:
         partial_event = _make_text_event(
             event_id="$agent_msg",
             sender="@agent:localhost",
-            body="Partial answer ⋯",
+            body="Partial answer",
             server_timestamp=2000,
             source_content={
-                "body": "Partial answer ⋯",
+                "body": "Partial answer",
                 STREAM_STATUS_KEY: STREAM_STATUS_PENDING,
                 "m.relates_to": {
                     "rel_type": "m.thread",

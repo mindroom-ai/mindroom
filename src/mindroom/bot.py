@@ -104,10 +104,8 @@ from mindroom.memory.auto_flush import (
 from mindroom.message_target import MessageTarget
 from mindroom.stop import StopManager
 from mindroom.streaming import (
-    IN_PROGRESS_MARKER,
     ReplacementStreamingResponse,
     StreamingResponse,
-    is_in_progress_message,
     send_streaming_response,
 )
 from mindroom.team_runtime_resolution import resolve_live_shared_agent_names
@@ -200,6 +198,7 @@ from .constants import (
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
     resolve_avatar_path,
@@ -1824,7 +1823,14 @@ class AgentBot:
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
-        if not isinstance(event.body, str) or is_in_progress_message(event.body):
+        if not isinstance(event.body, str):
+            return
+        # Skip messages that are still being streamed (use metadata, not text pattern).
+        event_content = event.source.get("content") if isinstance(event.source, dict) else None
+        if isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in {
+            STREAM_STATUS_PENDING,
+            STREAM_STATUS_STREAMING,
+        }:
             return
 
         event_info = EventInfo.from_event(event.source)
@@ -2871,7 +2877,7 @@ class AgentBot:
         placeholder_event_id = await self._send_response(
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
-            response_text=f"{placeholder_text} {IN_PROGRESS_MARKER}",
+            response_text=placeholder_text,
             thread_id=response_target.delivery_thread_id,
             extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
         )
@@ -4189,7 +4195,7 @@ class AgentBot:
                 initial_message_id = await self._send_response(
                     room_id,
                     reply_to_event_id,
-                    f"{thinking_message} {IN_PROGRESS_MARKER}",
+                    thinking_message,
                     response_thread_id,
                     extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
                 )

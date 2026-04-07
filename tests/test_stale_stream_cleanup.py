@@ -200,8 +200,9 @@ async def test_relations_api_filters_reactions_and_unions_history_ids(tmp_path: 
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$message",
-            body="Needs cleanup ⋯",
+            body="Needs cleanup",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
         _make_reaction_event(
             event_id="$history-stop",
@@ -261,8 +262,9 @@ async def test_relations_api_error_falls_back_to_history_scan_ids(tmp_path: Path
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$message",
-            body="Needs cleanup ⋯",
+            body="Needs cleanup",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
         _make_reaction_event(
             event_id="$history-stop",
@@ -299,7 +301,7 @@ async def test_relations_lookup_uses_original_event_id_not_latest_edit(tmp_path:
         body="* New answer",
         timestamp_ms=NOW_MS - STALE_AGE_MS,
         relates_to={"rel_type": "m.replace", "event_id": "$original"},
-        new_content={"body": "New answer ⋯", "msgtype": "m.text"},
+        new_content={"body": "New answer", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
     )
     client.room_messages.return_value = _room_messages_response(original, edit)
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -357,8 +359,9 @@ async def test_cleanup_scans_until_history_end_for_deep_stale_messages(tmp_path:
     client = AsyncMock(spec=nio.AsyncClient)
     stale_message = _make_message_event(
         event_id="$page12-stale",
-        body="Deep history partial ⋯",
+        body="Deep history partial",
         timestamp_ms=NOW_MS - STALE_AGE_MS,
+        extra_content={STREAM_STATUS_KEY: "streaming"},
     )
     history_pages = [
         _room_messages_response(
@@ -396,9 +399,10 @@ async def test_cleanup_skips_messages_older_than_restart_window(tmp_path: Path) 
     client = AsyncMock(spec=nio.AsyncClient)
     old_thread_message = _make_message_event(
         event_id="$ancient-stale",
-        body="Ancient partial ⋯",
+        body="Ancient partial",
         timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
         relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+        extra_content={STREAM_STATUS_KEY: "streaming"},
     )
     client.room_messages.return_value = _room_messages_response(old_thread_message)
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -422,15 +426,17 @@ async def test_cleanup_returns_interrupted_thread_per_cleaned_threaded_message(t
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$older",
-            body="First partial ⋯",
+            body="First partial",
             timestamp_ms=NOW_MS - (STALE_AGE_MS + 5_000),
             relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
         _make_message_event(
             event_id="$newer",
-            body="Second partial ⋯",
+            body="Second partial",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
             relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -607,9 +613,10 @@ async def test_cleanup_skips_recent_in_progress_message_on_startup(tmp_path: Pat
         ),
         _make_message_event(
             event_id="$message",
-            body="Needs cleanup ⋯",
+            body="Needs cleanup",
             timestamp_ms=NOW_MS - 1_000,
             relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -642,9 +649,10 @@ async def test_cleanup_returns_thread_requester_for_auto_resume(tmp_path: Path) 
         ),
         _make_message_event(
             event_id="$message",
-            body="Needs cleanup ⋯",
+            body="Needs cleanup",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
             relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -705,9 +713,10 @@ async def test_cleanup_uses_exact_replied_to_requester_not_latest_thread_speaker
         ),
         _make_message_event(
             event_id="$original",
-            body="Needs cleanup ⋯",
+            body="Needs cleanup",
             timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
             relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
         _make_message_event(
             event_id="$other-user-message",
@@ -721,7 +730,7 @@ async def test_cleanup_uses_exact_replied_to_requester_not_latest_thread_speaker
             body="* Needs cleanup",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
             relates_to={"rel_type": "m.replace", "event_id": "$original"},
-            new_content={"body": "Needs cleanup ⋯", "msgtype": "m.text"},
+            new_content={"body": "Needs cleanup", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
         ),
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -761,16 +770,17 @@ async def test_cleanup_uses_scanned_history_when_edited_bot_message_lacks_visibl
         ),
         _make_message_event(
             event_id="$original",
-            body="Needs cleanup ⋯",
+            body="Needs cleanup",
             timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
             relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
         _make_message_event(
             event_id="$latest-edit",
             body="* Needs cleanup",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
             relates_to={"rel_type": "m.replace", "event_id": "$original"},
-            new_content={"body": "Needs cleanup ⋯", "msgtype": "m.text"},
+            new_content={"body": "Needs cleanup", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
         ),
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -805,16 +815,17 @@ async def test_cleanup_follows_agent_reply_chain_outside_scanned_history(tmp_pat
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$original",
-            body="Needs cleanup ⋯",
+            body="Needs cleanup",
             timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
             relates_to=_thread_reply_relation("$thread-root", "$agent-a"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
         _make_message_event(
             event_id="$latest-edit",
             body="* Needs cleanup",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
             relates_to={"rel_type": "m.replace", "event_id": "$original"},
-            new_content={"body": "Needs cleanup ⋯", "msgtype": "m.text"},
+            new_content={"body": "Needs cleanup", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
         ),
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -872,16 +883,17 @@ async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Pa
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$original",
-            body="Needs cleanup ⋯",
+            body="Needs cleanup",
             timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
             relates_to=_thread_reply_relation("$thread-root", "$agent-a-edit"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
         _make_message_event(
             event_id="$latest-edit",
             body="* Needs cleanup",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
             relates_to={"rel_type": "m.replace", "event_id": "$original"},
-            new_content={"body": "Needs cleanup ⋯", "msgtype": "m.text"},
+            new_content={"body": "Needs cleanup", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
         ),
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -954,16 +966,17 @@ async def test_cleanup_fetches_exact_scanned_edit_ancestor_for_requester_resolut
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$original",
-            body="Needs cleanup ⋯",
+            body="Needs cleanup",
             timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
             relates_to=_thread_reply_relation("$thread-root", "$agent-a-edit"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
         _make_message_event(
             event_id="$latest-edit",
             body="* Needs cleanup",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
             relates_to={"rel_type": "m.replace", "event_id": "$original"},
-            new_content={"body": "Needs cleanup ⋯", "msgtype": "m.text"},
+            new_content={"body": "Needs cleanup", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
         ),
         _make_message_event(
             event_id="$agent-a-edit",
@@ -1124,9 +1137,10 @@ async def test_cleanup_preserves_tool_trace_and_ai_run_metadata(tmp_path: Path) 
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$message",
-            body="Partial answer ⋯",
+            body="Partial answer",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
             extra_content={
+                STREAM_STATUS_KEY: "streaming",
                 "io.mindroom.tool_trace": {"version": 1, "events": [{"tool": "shell"}]},
                 "io.mindroom.ai_run": {"version": 1, "run_id": "run-123"},
             },
@@ -1253,10 +1267,10 @@ async def test_cleanup_sets_terminal_stream_status(tmp_path: Path) -> None:
     client2.rooms = {}
     client2.room_messages.return_value = _room_messages_response(
         _make_message_event(
-            event_id="$msg-no-status",
-            body="Still typing ⋯",
+            event_id="$msg-pending",
+            body="Still typing",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
-            extra_content={"io.mindroom.tool_trace": {"version": 2}},
+            extra_content={STREAM_STATUS_KEY: "pending", "io.mindroom.tool_trace": {"version": 2}},
         ),
     )
     client2.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -1283,16 +1297,18 @@ async def test_cleanup_preserves_tool_trace_from_v2_sidecar(tmp_path: Path) -> N
     sidecar_tool_trace = {"version": 1, "events": [{"tool": "web_search"}]}
     sidecar_payload = {
         "msgtype": "m.text",
-        "body": "A very long response with tool traces ⋯",
+        "body": "A very long response with tool traces",
+        "io.mindroom.stream_status": "streaming",
         "io.mindroom.tool_trace": sidecar_tool_trace,
         "io.mindroom.ai_run": {"version": 1, "run_id": "run-sidecar"},
     }
 
     preview_event = _make_message_event(
         event_id="$message",
-        body="Preview of long text ⋯",
+        body="Preview of long text",
         timestamp_ms=NOW_MS - STALE_AGE_MS,
         extra_content={
+            STREAM_STATUS_KEY: "streaming",
             "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
             "url": "mxc://example.com/sidecar123",
         },
@@ -1340,8 +1356,9 @@ async def test_cleanup_does_not_hydrate_sidecars_for_unrelated_user_messages(tmp
     )
     stale_bot_message = _make_message_event(
         event_id="$bot-message",
-        body="Bot partial ⋯",
+        body="Bot partial",
         timestamp_ms=NOW_MS - STALE_AGE_MS,
+        extra_content={STREAM_STATUS_KEY: "streaming"},
     )
     client.room_messages.return_value = _room_messages_response(user_sidecar_event, stale_bot_message)
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -1368,9 +1385,10 @@ async def test_cleanup_sidecar_hydration_failure_falls_back_gracefully(tmp_path:
 
     preview_event = _make_message_event(
         event_id="$message",
-        body="Preview text ⋯",
+        body="Preview text",
         timestamp_ms=NOW_MS - STALE_AGE_MS,
         extra_content={
+            STREAM_STATUS_KEY: "streaming",
             "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
             "io.mindroom.ai_run": {"version": 1, "run_id": "run-preview"},
             "url": "mxc://example.com/broken",
@@ -1410,12 +1428,13 @@ async def test_cleanup_preserves_sidecar_tool_trace_from_edit_chain(tmp_path: Pa
     sidecar_tool_trace = {"version": 1, "events": [{"tool": "shell"}, {"tool": "file"}]}
     sidecar_inner = {
         "msgtype": "m.text",
-        "body": "Full response text with streaming indicator ⋯",
+        "body": "Full response text with streaming indicator",
+        "io.mindroom.stream_status": "streaming",
         "io.mindroom.tool_trace": sidecar_tool_trace,
     }
     sidecar_payload = {
         "msgtype": "m.text",
-        "body": "* Full response text with streaming indicator ⋯",
+        "body": "* Full response text with streaming indicator",
         "m.new_content": sidecar_inner,
         "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
     }
@@ -1431,9 +1450,10 @@ async def test_cleanup_preserves_sidecar_tool_trace_from_edit_chain(tmp_path: Pa
         timestamp_ms=NOW_MS - STALE_AGE_MS,
         relates_to={"rel_type": "m.replace", "event_id": "$original"},
         new_content={
-            "body": "Preview of long edit ⋯",
+            "body": "Preview of long edit",
             "msgtype": "m.file",
             "url": "mxc://example.com/edit-sidecar",
+            STREAM_STATUS_KEY: "streaming",
             "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
         },
     )
@@ -1775,9 +1795,10 @@ async def test_requester_resolution_exception_degrades_gracefully(tmp_path: Path
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$message",
-            body="Needs cleanup ⋯",
+            body="Needs cleanup",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
             relates_to=_thread_reply_relation("$thread-root", "$external-user-msg"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
@@ -1803,16 +1824,17 @@ async def test_requester_resolution_respects_max_depth(tmp_path: Path) -> None:
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$original",
-            body="Needs cleanup ⋯",
+            body="Needs cleanup",
             timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
             relates_to=_thread_reply_relation("$thread-root", "$agent-hop-0"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
         ),
         _make_message_event(
             event_id="$latest-edit",
             body="* Needs cleanup",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
             relates_to={"rel_type": "m.replace", "event_id": "$original"},
-            new_content={"body": "Needs cleanup ⋯", "msgtype": "m.text"},
+            new_content={"body": "Needs cleanup", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
         ),
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
