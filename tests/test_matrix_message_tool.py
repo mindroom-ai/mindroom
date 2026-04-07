@@ -6,7 +6,7 @@ import asyncio
 import json
 import tempfile
 from pathlib import Path
-from typing import AsyncIterator, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -24,6 +24,9 @@ from mindroom.matrix.client import RoomThreadsPageError
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +46,8 @@ def _empty_async_iterator() -> AsyncIterator[object]:
 def _reset_interactive_state() -> None:
     interactive._active_questions.clear()
     interactive._persistence_file = None
+
+
 def _make_context(
     *,
     room_id: str = "!room:localhost",
