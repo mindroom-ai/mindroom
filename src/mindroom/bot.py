@@ -3721,6 +3721,9 @@ class AgentBot:
 
         async def generate_team_response(message_id: str | None) -> None:
             nonlocal delivery_result
+            editing_placeholder = message_id is not None and (
+                existing_event_is_placeholder or existing_event_id is None
+            )
 
             def _note_attempt_run_id(current_run_id: str) -> None:
                 self.stop_manager.update_run_id(message_id, current_run_id)
@@ -3768,8 +3771,7 @@ class AgentBot:
                             header=None,
                             show_tool_calls=self.show_tool_calls,
                             existing_event_id=message_id,
-                            adopt_existing_placeholder=message_id is not None
-                            and (existing_event_is_placeholder or existing_event_id is None),
+                            adopt_existing_placeholder=editing_placeholder,
                             target=delivery_target,
                             room_mode=room_mode,
                         )
@@ -3791,7 +3793,7 @@ class AgentBot:
                     extra_content=None,
                 )
                 if draft.suppress:
-                    if existing_event_is_placeholder or existing_event_id is None:
+                    if editing_placeholder or existing_event_id is None:
                         delivery_result = await self._cleanup_suppressed_streamed_response(
                             room_id=room_id,
                             event_id=event_id,
@@ -3821,7 +3823,7 @@ class AgentBot:
                         thread_id=thread_id,
                         target=delivery_target,
                         existing_event_id=event_id,
-                        existing_event_is_placeholder=existing_event_is_placeholder,
+                        existing_event_is_placeholder=editing_placeholder,
                         response_text=draft.response_text,
                         response_kind="team",
                         response_envelope=resolved_response_envelope,
@@ -3893,7 +3895,7 @@ class AgentBot:
                     thread_id=thread_id,
                     target=delivery_target,
                     existing_event_id=message_id,
-                    existing_event_is_placeholder=existing_event_is_placeholder,
+                    existing_event_is_placeholder=editing_placeholder,
                     response_text=response_text,
                     response_kind="team",
                     response_envelope=resolved_response_envelope,
@@ -4985,6 +4987,9 @@ class AgentBot:
         # Create async function for generation that takes message_id as parameter
         async def generate(message_id: str | None) -> None:
             nonlocal delivery_result
+            editing_placeholder = message_id is not None and (
+                existing_event_is_placeholder or existing_event_id is None
+            )
             if use_streaming:
                 delivery_result = await self._process_and_respond_streaming(
                     room_id,
@@ -4993,8 +4998,7 @@ class AgentBot:
                     thread_id,
                     model_thread_history,
                     message_id,  # Edit the thinking message or existing
-                    adopt_existing_placeholder=message_id is not None
-                    and (existing_event_is_placeholder or existing_event_id is None),
+                    adopt_existing_placeholder=editing_placeholder,
                     target=resolved_target,
                     user_id=user_id,
                     run_id=response_run_id,
@@ -5014,7 +5018,7 @@ class AgentBot:
                     thread_id,
                     model_thread_history,
                     message_id,  # Edit the thinking message or existing
-                    existing_event_is_placeholder=existing_event_is_placeholder,
+                    existing_event_is_placeholder=editing_placeholder,
                     target=resolved_target,
                     user_id=user_id,
                     run_id=response_run_id,
@@ -5766,16 +5770,18 @@ class AgentBot:
             requester_user_id: str | None = None,
             room_id: str | None = None,
             thread_id: str | None = None,
+            target: MessageTarget | None = None,
         ) -> str:
             runtime_context = None
             if room_id is not None:
+                resolved_target = target or self._build_message_target(
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    reply_to_event_id=event.event_id,
+                    event_source=event.source,
+                )
                 runtime_context = self._build_tool_runtime_context(
-                    self._build_message_target(
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        reply_to_event_id=event.event_id,
-                        event_source=event.source,
-                    ),
+                    resolved_target,
                     user_id=requester_user_id,
                     agent_name=agent_name,
                     source_envelope=source_envelope,

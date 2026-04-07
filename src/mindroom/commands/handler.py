@@ -483,12 +483,13 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     # Commands/tools that persist conversation context should use the same
     # thread-root policy as outgoing replies.
-    effective_thread_id = context.build_message_target(
+    command_target = context.build_message_target(
         room_id=room.room_id,
         thread_id=thread_id,
         reply_to_event_id=event.event_id,
         event_source=event.source,
-    ).resolved_thread_id
+    )
+    effective_thread_id = command_target.resolved_thread_id
 
     response_text = ""
 
@@ -646,6 +647,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                         requester_user_id=requester_user_id,
                         room_id=room.room_id,
                         thread_id=effective_thread_id,
+                        target=command_target,
                     )
                 elif spec.disable_model_invocation:
                     response_text = (

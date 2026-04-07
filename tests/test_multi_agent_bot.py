@@ -1714,6 +1714,67 @@ class TestAgentBot:
         assert after_results == [("$response", "chunk [hooked]", "edited", "ai")]
 
     @pytest.mark.asyncio
+    async def test_generate_response_redacts_suppressed_thinking_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Suppressed non-streaming responses should redact the provisional thinking event."""
+
+        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+        async def before_hook(ctx: BeforeResponseContext) -> None:
+            ctx.draft.suppress = True
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function("$placeholder")
+            return "$placeholder"
+
+        def discard_background_task(
+            coro: object,
+            *,
+            name: str,  # noqa: ARG001
+            error_handler: object | None = None,  # noqa: ARG001
+        ) -> None:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
+        bot._redact_message_event = AsyncMock(return_value=True)
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
+
+        with (
+            patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=False)),
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock, return_value="Handled"),
+            patch("mindroom.bot.mark_auto_flush_dirty_session"),
+            patch("mindroom.bot.create_background_task", side_effect=discard_background_task),
+        ):
+            event_id = await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Please send an update",
+                reply_to_event_id="$event123",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+                response_envelope=_hook_envelope(body="Please send an update", source_event_id="$event123"),
+                correlation_id="corr-suppress-ai",
+            )
+
+        assert event_id is None
+        bot._redact_message_event.assert_awaited_once_with(
+            room_id="!test:localhost",
+            event_id="$placeholder",
+            reason="Suppressed placeholder response",
+        )
+
+    @pytest.mark.asyncio
     async def test_process_and_respond_streaming_passes_active_response_event_ids(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -1806,6 +1867,7 @@ class TestAgentBot:
             patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
             patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.bot.team_response", new_callable=AsyncMock, return_value="Team reply"),
+            patch("mindroom.bot.create_background_task"),
         ):
             event_id = await bot._generate_team_response_helper(
                 room_id="!test:localhost",
@@ -1824,6 +1886,73 @@ class TestAgentBot:
         assert event_id == "$team"
         assert bot._edit_message.await_args.args[2] == "Team reply [hooked]"
         assert after_results == [("$team", "Team reply [hooked]", "edited", "team")]
+
+    @pytest.mark.asyncio
+    async def test_generate_team_response_helper_redacts_suppressed_thinking_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Suppressed non-streaming team replies should redact the provisional thinking event."""
+
+        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+        async def before_hook(ctx: BeforeResponseContext) -> None:
+            ctx.draft.suppress = True
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function("$placeholder")
+            return "$placeholder"
+
+        def discard_background_task(
+            coro: object,
+            *,
+            name: str,  # noqa: ARG001
+            error_handler: object | None = None,  # noqa: ARG001
+        ) -> None:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
+        bot._redact_message_event = AsyncMock(return_value=True)
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        matrix_ids = config.get_ids(runtime_paths_for(config))
+
+        with (
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.team_response", new_callable=AsyncMock, return_value="Team reply"),
+            patch("mindroom.bot.create_background_task", side_effect=discard_background_task),
+        ):
+            event_id = await bot._generate_team_response_helper(
+                room_id="!test:localhost",
+                reply_to_event_id="$team-root",
+                thread_id=None,
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+                thread_history=[],
+                requester_user_id="@user:localhost",
+                payload=_DispatchPayload(prompt="team prompt"),
+                response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                correlation_id="corr-team-suppress",
+            )
+
+        assert event_id is None
+        bot._redact_message_event.assert_awaited_once_with(
+            room_id="!test:localhost",
+            event_id="$placeholder",
+            reason="Suppressed placeholder response",
+        )
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_strips_enrichment_from_shared_team_session(

@@ -1614,6 +1614,82 @@ async def test_hook_dispatch_skill_tool_command_builds_full_tool_runtime_context
 
 
 @pytest.mark.asyncio
+async def test_hook_dispatch_skill_tool_command_reuses_resolved_command_target(tmp_path: Path) -> None:
+    """Tool-dispatched !skill commands should reuse the command target already resolved by the handler."""
+    bot = _hook_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$hook-skill-tool",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "!skill demo summarize",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:message:received",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
+            },
+        },
+    )
+    command = Command(
+        type=CommandType.SKILL,
+        args={"skill_name": "demo", "args_text": "summarize"},
+        raw_text="!skill demo summarize",
+    )
+    bot.client.rooms = {}
+    bot._send_response = AsyncMock(return_value="$response")
+    expected_target = MessageTarget.resolve(
+        room_id="!room:localhost",
+        thread_id=None,
+        reply_to_event_id="$hook-skill-tool",
+        room_mode=True,
+    )
+    bot._build_message_target = MagicMock(
+        side_effect=[
+            expected_target,
+            MessageTarget.resolve(
+                room_id="!room:localhost",
+                thread_id="$wrong-thread",
+                reply_to_event_id="$hook-skill-tool",
+            ),
+        ],
+    )
+    captured_runtime_context = None
+
+    async def fake_run_skill_command_tool(**kwargs: object) -> str:
+        nonlocal captured_runtime_context
+        captured_runtime_context = kwargs["runtime_context"]
+        return "tool-result"
+
+    spec = _SkillCommandSpec(
+        name="demo",
+        description="demo",
+        source_path=tmp_path / "demo" / "SKILL.md",
+        user_invocable=True,
+        disable_model_invocation=False,
+        dispatch=_SkillCommandDispatch(tool_name="shell.demo"),
+    )
+
+    with (
+        patch("mindroom.commands.handler._resolve_skill_command_agent", return_value=("code", None)),
+        patch("mindroom.commands.handler.resolve_skill_command_spec", return_value=spec),
+        patch("mindroom.bot._run_skill_command_tool", new=AsyncMock(side_effect=fake_run_skill_command_tool)),
+    ):
+        await bot._handle_command(
+            room,
+            _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+            command,
+            source_envelope=_synthetic_envelope(agent_name="router"),
+        )
+
+    assert captured_runtime_context is not None
+    assert captured_runtime_context.reply_to_event_id == expected_target.reply_to_event_id
+    assert captured_runtime_context.resolved_thread_id == expected_target.resolved_thread_id
+    assert bot._build_message_target.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_path: Path) -> None:
     """Plain hook messages from agents without mentions should still be filtered."""
     bot = _agent_bot(tmp_path)
