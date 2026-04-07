@@ -644,7 +644,8 @@ class TestMaybeGenerateThreadSummary:
         client = AsyncMock(spec=nio.AsyncClient)
         config = _mock_config()
         rp = _mock_runtime_paths()
-        thread_history = _make_thread_history(14) + [
+        thread_history = [
+            *_make_thread_history(14),
             _make_summary_notice_message("$thread1", message_count=5),
         ]
 

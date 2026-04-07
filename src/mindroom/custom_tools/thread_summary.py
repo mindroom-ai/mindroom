@@ -43,7 +43,7 @@ class ThreadSummaryTools(Toolkit):
             message="Thread summary tool context is unavailable in this runtime path.",
         )
 
-    async def set_thread_summary(
+    async def set_thread_summary(  # noqa: C901, PLR0911, PLR0912
         self,
         summary: str,
         thread_id: str | None = None,
