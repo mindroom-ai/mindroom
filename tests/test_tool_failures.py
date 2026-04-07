@@ -45,6 +45,12 @@ class _BadRepr:
         raise RuntimeError(msg)
 
 
+class _BrokenException(RuntimeError):
+    def __str__(self) -> str:
+        msg = "str disabled"
+        raise RuntimeError(msg)
+
+
 def test_build_tool_failure_record_redacts_nested_arguments_and_urls() -> None:
     """Nested mappings, tokens, and URL credentials should be sanitized in persisted records."""
     error = RuntimeError("payload={'api_key': 'secret-value'}")
@@ -107,6 +113,23 @@ def test_sanitize_failure_text_redacts_signed_url_query_credentials() -> None:
         "https://alice:***@example.com/private?"
         "sig=***redacted***&X-Amz-Signature=***redacted***&X-Amz-Credential=***redacted***"
         "&X-Amz-Security-Token=***redacted***&api_key=***redacted***&keep=1"
+    )
+
+
+def test_sanitize_failure_text_redacts_gcs_signed_url_query_credentials() -> None:
+    """Google Cloud Storage signed URL query credentials should be redacted."""
+    sanitized = tool_failures.sanitize_failure_text(
+        "fetch failed for "
+        "https://storage.googleapis.com/bucket/object?"
+        "X-Goog-Credential=gcs-credential&X-Goog-Signature=gcs-signature"
+        "&GoogleAccessId=service-account@example.com&X-Goog-Algorithm=GOOG4-RSA-SHA256",
+    )
+
+    assert sanitized == (
+        "fetch failed for "
+        "https://storage.googleapis.com/bucket/object?"
+        "X-Goog-Credential=***redacted***&X-Goog-Signature=***redacted***"
+        "&GoogleAccessId=***redacted***&X-Goog-Algorithm=GOOG4-RSA-SHA256"
     )
 
 
@@ -230,6 +253,26 @@ def test_sanitize_failure_value_replaces_non_finite_floats() -> None:
     }
 
 
+@pytest.mark.parametrize("duration_ms", [float("nan"), float("inf"), float("-inf")])
+def test_build_tool_failure_record_normalizes_non_finite_duration(duration_ms: float) -> None:
+    """Non-finite durations should not break JSON serialization."""
+    record = build_tool_failure_record(
+        tool_name="demo",
+        arguments={},
+        error=RuntimeError("boom"),
+        duration_ms=duration_ms,
+        agent_name="code",
+        channel="matrix",
+        room_id="!room:localhost",
+        thread_id="$resolved-thread",
+        requester_id="@user:localhost",
+        session_id="session-1",
+        correlation_id="corr-duration",
+    )
+
+    assert record.duration_ms == 0.0
+
+
 def test_sanitize_failure_value_handles_unrepresentable_keys_and_values() -> None:
     """Custom objects with broken __str__ or __repr__ should not abort sanitization."""
     sanitized = tool_failures.sanitize_failure_value(
@@ -243,6 +286,31 @@ def test_sanitize_failure_value_handles_unrepresentable_keys_and_values() -> Non
         "<unrepresentable: _BadStr>": "kept",
         "value": "<unrepresentable: _BadRepr>",
     }
+
+
+def test_build_tool_failure_record_handles_unrepresentable_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exceptions with broken __str__ should still produce a durable record."""
+    monkeypatch.setattr(tool_failures.traceback, "format_exception", lambda *_args: (_ for _ in ()).throw(RuntimeError))
+    error = _BrokenException()
+    record = build_tool_failure_record(
+        tool_name="explode",
+        arguments={},
+        error=error,
+        duration_ms=1.0,
+        agent_name="code",
+        channel="matrix",
+        room_id="!room:localhost",
+        thread_id="$resolved-thread",
+        requester_id="@user:localhost",
+        session_id="session-1",
+        correlation_id="corr-broken-exception",
+    )
+
+    assert record.error_type == "_BrokenException"
+    assert record.error_message == "<unrepresentable: _BrokenException>"
+    assert record.traceback == "<unrepresentable: _BrokenException>"
 
 
 def test_build_tool_failure_record_truncates_tracebacks(monkeypatch: pytest.MonkeyPatch) -> None:

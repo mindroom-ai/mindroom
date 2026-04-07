@@ -73,10 +73,14 @@ _SECRET_KEY_VARIANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = tuple(
 )
 _URL_QUERY_SECRET_KEYS: frozenset[str] = frozenset(
     {
+        "google_access_id",
+        "googleaccessid",
         "sig",
         "x_amz_credential",
         "x_amz_security_token",
         "x_amz_signature",
+        "x_goog_credential",
+        "x_goog_signature",
     },
 )
 _NEXT_ASSIGNMENT_PATTERN = r"\s+[\"']?[A-Za-z0-9_.-]+[\"']?\s*[:=]"
@@ -286,6 +290,24 @@ def sanitize_failure_value(value: object, *, depth: int = 0) -> JsonValue:
     return sanitize_failure_text(_safe_repr(value))
 
 
+def _sanitize_duration_ms(duration_ms: float) -> float:
+    if not math.isfinite(duration_ms):
+        return 0.0
+    return round(duration_ms, 2)
+
+
+def _safe_error_message(error: BaseException) -> str:
+    return sanitize_failure_text(_safe_str(error))
+
+
+def _safe_traceback(error: BaseException) -> str:
+    try:
+        formatted_traceback = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    except Exception:
+        formatted_traceback = _unrepresentable_placeholder(error)
+    return sanitize_failure_text(formatted_traceback, max_length=_MAX_TRACEBACK_LENGTH)
+
+
 def build_tool_failure_record(
     *,
     tool_name: str,
@@ -311,14 +333,11 @@ def build_tool_failure_record(
         requester_id=requester_id,
         session_id=session_id,
         correlation_id=correlation_id,
-        duration_ms=round(duration_ms, 2),
+        duration_ms=_sanitize_duration_ms(duration_ms),
         arguments=sanitize_failure_value(arguments),
         error_type=type(error).__name__,
-        error_message=sanitize_failure_text(str(error)),
-        traceback=sanitize_failure_text(
-            "".join(traceback.format_exception(type(error), error, error.__traceback__)),
-            max_length=_MAX_TRACEBACK_LENGTH,
-        ),
+        error_message=_safe_error_message(error),
+        traceback=_safe_traceback(error),
     )
 
 
