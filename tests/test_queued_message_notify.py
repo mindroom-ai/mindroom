@@ -527,7 +527,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
             _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
         )
 
-    assert bot.response_tracker.has_responded("$older")
+    assert bot.handled_turn_ledger.has_responded("$older")
     mock_resolve_action.assert_not_awaited()
     assert bot._thread_queued_signals == {}
 

@@ -381,7 +381,7 @@ class TestRouterHandoffThreadMode:
         """Router should send handoff in-room when the suggested agent is room-mode."""
         bot = _agent_bot(config=room_mode_config, agent_user=router_user, storage_path=tmp_path)
         bot.client = AsyncMock()
-        bot.response_tracker = MagicMock()
+        bot.handled_turn_ledger = MagicMock()
         captured_content: dict[str, object] = {}
 
         async def mock_send(_client: object, _room_id: str, content: dict) -> str:
@@ -420,7 +420,7 @@ class TestRouterHandoffThreadMode:
         """Router should keep thread replies when the suggested agent is thread-mode."""
         bot = _agent_bot(config=room_mode_config, agent_user=router_user, storage_path=tmp_path)
         bot.client = AsyncMock()
-        bot.response_tracker = MagicMock()
+        bot.handled_turn_ledger = MagicMock()
         captured_content: dict[str, object] = {}
 
         async def mock_send(_client: object, _room_id: str, content: dict) -> str:
@@ -763,7 +763,7 @@ class TestCommandThreadContextRoomMode:
         )
         bot = _agent_bot(config=config, agent_user=router_user, storage_path=tmp_path)
         bot.client = AsyncMock()
-        bot.response_tracker = MagicMock()
+        bot.handled_turn_ledger = MagicMock()
         bot._send_response = AsyncMock(return_value="$reply")
         bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
 

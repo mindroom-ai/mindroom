@@ -373,9 +373,9 @@ class TestDMIntegration:
             if "researcher" in config.get_ids(runtime_paths_for(config))
             else "@mindroom_researcher:localhost"
         )
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
-        bot.response_tracker.has_responded = MagicMock(return_value=False)
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
+        bot.handled_turn_ledger.has_responded = MagicMock(return_value=False)
         bot.orchestrator = orchestrator
 
         # Mock helper functions
@@ -470,9 +470,9 @@ class TestDMIntegration:
 
         bot.client = AsyncMock()
         bot.client.user_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
-        bot.response_tracker.has_responded = MagicMock(return_value=False)
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
+        bot.handled_turn_ledger.has_responded = MagicMock(return_value=False)
         bot.logger = MagicMock()
 
         async def mock_handle(*args: object, **kwargs: object) -> None:

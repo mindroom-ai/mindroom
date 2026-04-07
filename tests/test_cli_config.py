@@ -25,8 +25,8 @@ from mindroom.cli.main import _load_active_config_or_exit, app
 from mindroom.config.main import Config
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
+from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixState
-from mindroom.response_tracker import ResponseTracker
 from tests.conftest import normalize_console_output
 
 runner = CliRunner()
@@ -1050,7 +1050,7 @@ class TestRunApiFlags:
             assert constants_module.tracking_dir(runtime_paths) == runtime_storage.resolve() / "tracking"
             assert constants_module.matrix_state_file(runtime_paths) == runtime_storage.resolve() / "matrix_state.yaml"
             assert (
-                ResponseTracker("agent", base_path=runtime_storage.resolve() / "tracking").base_path
+                HandledTurnLedger("agent", base_path=runtime_storage.resolve() / "tracking").base_path
                 == runtime_storage.resolve() / "tracking"
             )
             MatrixState().save(runtime_paths=runtime_paths)

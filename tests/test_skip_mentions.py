@@ -62,7 +62,7 @@ async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
     bot.matrix_id.domain = "localhost"
     bot.client = AsyncMock()
     bot.logger = MagicMock()
-    bot.response_tracker = AsyncMock()
+    bot.handled_turn_ledger = AsyncMock()
     bot.runtime_paths = test_runtime_paths(tmp_path)
 
     # Mock the format_message_with_mentions to return a dict we can check

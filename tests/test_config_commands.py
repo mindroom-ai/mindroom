@@ -24,6 +24,7 @@ from mindroom.commands.config_commands import (
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.constants import resolve_runtime_paths
+from mindroom.handled_turns import HandledTurnState
 from mindroom.message_target import MessageTarget
 
 
@@ -239,7 +240,7 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
         storage_path=tmp_path,
         logger=MagicMock(),
-        response_tracker=MagicMock(),
+        handled_turn_ledger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
@@ -268,6 +269,200 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         )
 
     mock_handle_config_command.assert_awaited_once_with("show", runtime_paths=context.runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_handle_command_records_response_event_id_for_standard_reply(tmp_path: Path) -> None:
+    """Standard command replies should record the emitted Matrix response event ID."""
+    context = CommandHandlerContext(
+        client=AsyncMock(),
+        config=MagicMock(),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        storage_path=tmp_path,
+        logger=MagicMock(),
+        handled_turn_ledger=MagicMock(),
+        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
+        requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
+        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        send_response=AsyncMock(return_value="$reply"),
+        send_skill_command_response=AsyncMock(return_value=None),
+        run_skill_command_tool=AsyncMock(return_value=""),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        sender="@alice:example.org",
+        event_id="$event",
+        source={"content": {"body": "!help"}},
+    )
+    command = Command(type=CommandType.HELP, args={"topic": None}, raw_text="!help")
+
+    await handle_command(
+        context=context,
+        room=room,
+        event=event,
+        command=command,
+        requester_user_id="@alice:example.org",
+    )
+
+    context.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        HandledTurnState.from_source_event_id(
+            "$event",
+            response_event_id="$reply",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_command_config_set_confirmation_records_preview_event_id(tmp_path: Path) -> None:
+    """Config preview replies should persist confirmation state and record the preview event ID."""
+    context = CommandHandlerContext(
+        client=AsyncMock(),
+        config=MagicMock(),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        storage_path=tmp_path,
+        logger=MagicMock(),
+        handled_turn_ledger=MagicMock(),
+        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
+        requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
+        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        send_response=AsyncMock(return_value="$preview"),
+        send_skill_command_response=AsyncMock(return_value=None),
+        run_skill_command_tool=AsyncMock(return_value=""),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        sender="@alice:example.org",
+        event_id="$event",
+        source={"content": {"body": "!config set defaults.markdown false"}},
+    )
+    command = Command(
+        type=CommandType.CONFIG,
+        args={"args_text": "set defaults.markdown false"},
+        raw_text="!config set defaults.markdown false",
+    )
+    change_info = {
+        "config_path": "defaults.markdown",
+        "old_value": True,
+        "new_value": False,
+    }
+    pending_change = SimpleNamespace()
+
+    with (
+        patch(
+            "mindroom.commands.handler.handle_config_command",
+            AsyncMock(return_value=("preview", change_info)),
+        ),
+        patch("mindroom.commands.handler.config_confirmation.register_pending_change") as mock_register,
+        patch(
+            "mindroom.commands.handler.config_confirmation.get_pending_change",
+            return_value=pending_change,
+        ) as mock_get_pending,
+        patch(
+            "mindroom.commands.handler.config_confirmation.store_pending_change_in_matrix",
+            new_callable=AsyncMock,
+        ) as mock_store_pending,
+        patch(
+            "mindroom.commands.handler.config_confirmation.add_confirmation_reactions",
+            new_callable=AsyncMock,
+        ) as mock_add_reactions,
+    ):
+        await handle_command(
+            context=context,
+            room=room,
+            event=event,
+            command=command,
+            requester_user_id="@alice:example.org",
+        )
+
+    mock_register.assert_called_once_with(
+        event_id="$preview",
+        room_id="!room:example.org",
+        thread_id="$event",
+        config_path="defaults.markdown",
+        old_value=True,
+        new_value=False,
+        requester="@alice:example.org",
+    )
+    mock_get_pending.assert_called_once_with("$preview")
+    mock_store_pending.assert_awaited_once_with(context.client, "$preview", pending_change)
+    mock_add_reactions.assert_awaited_once_with(context.client, "!room:example.org", "$preview")
+    context.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        HandledTurnState.from_source_event_id(
+            "$event",
+            response_event_id="$preview",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_command_config_set_records_preview_before_post_send_failure(tmp_path: Path) -> None:
+    """Preview sends should still be recorded if later confirmation setup fails."""
+    context = CommandHandlerContext(
+        client=AsyncMock(),
+        config=MagicMock(),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        storage_path=tmp_path,
+        logger=MagicMock(),
+        handled_turn_ledger=MagicMock(),
+        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
+        requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
+        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        send_response=AsyncMock(return_value="$preview"),
+        send_skill_command_response=AsyncMock(return_value=None),
+        run_skill_command_tool=AsyncMock(return_value=""),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        sender="@alice:example.org",
+        event_id="$event",
+        source={"content": {"body": "!config set defaults.markdown false"}},
+    )
+    command = Command(
+        type=CommandType.CONFIG,
+        args={"args_text": "set defaults.markdown false"},
+        raw_text="!config set defaults.markdown false",
+    )
+    change_info = {
+        "config_path": "defaults.markdown",
+        "old_value": True,
+        "new_value": False,
+    }
+
+    with (
+        patch(
+            "mindroom.commands.handler.handle_config_command",
+            AsyncMock(return_value=("preview", change_info)),
+        ),
+        patch("mindroom.commands.handler.config_confirmation.register_pending_change"),
+        patch(
+            "mindroom.commands.handler.config_confirmation.get_pending_change",
+            return_value=SimpleNamespace(),
+        ),
+        patch(
+            "mindroom.commands.handler.config_confirmation.store_pending_change_in_matrix",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "mindroom.commands.handler.config_confirmation.add_confirmation_reactions",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("reaction failure"),
+        ),
+        pytest.raises(RuntimeError, match="reaction failure"),
+    ):
+        await handle_command(
+            context=context,
+            room=room,
+            event=event,
+            command=command,
+            requester_user_id="@alice:example.org",
+        )
+
+    context.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        HandledTurnState.from_source_event_id(
+            "$event",
+            response_event_id="$preview",
+        ),
+    )
 
 
 @pytest.mark.asyncio

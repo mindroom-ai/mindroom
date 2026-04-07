@@ -26,6 +26,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
+from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_MESSAGE_RECEIVED,
@@ -553,12 +554,13 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot.response_tracker.mark_responded = MagicMock()
+    bot.handled_turn_ledger.record_handled_turn = MagicMock()
 
     dispatch = await bot._prepare_dispatch(
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
         event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     assert dispatch is not None
@@ -568,7 +570,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
     assert dispatch.envelope.hook_source == "hook-plugin:message:received"
     assert dispatch.envelope.message_received_depth == 1
     assert dispatch.envelope.mentioned_agents == ("code",)
-    bot.response_tracker.mark_responded.assert_not_called()
+    bot.handled_turn_ledger.record_handled_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -734,7 +736,7 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._handle_command = AsyncMock()
-    bot.response_tracker.mark_responded = MagicMock()
+    bot.handled_turn_ledger.record_handled_turn = MagicMock()
 
     await bot._dispatch_text_message(
         room,
@@ -743,7 +745,9 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
 
     assert hook_calls == ["called"]
     bot._handle_command.assert_not_awaited()
-    bot.response_tracker.mark_responded.assert_called_once_with(event.event_id)
+    bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        HandledTurnState.from_source_event_id(event.event_id),
+    )
 
 
 @pytest.mark.asyncio
@@ -769,17 +773,19 @@ async def test_prepare_dispatch_marks_all_source_events_when_hooks_suppress_batc
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot.response_tracker.mark_responded = MagicMock()
+    bot.handled_turn_ledger.record_handled_turn = MagicMock()
 
     dispatch = await bot._prepare_dispatch(
         room,
         _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
         event_label="message",
-        source_event_ids=["$m1", "$m2"],
+        handled_turn=HandledTurnState.create(["$m1", "$m2"]),
     )
 
     assert dispatch is None
-    assert bot.response_tracker.mark_responded.call_args_list == [call("$m1"), call("$m2")]
+    assert bot.handled_turn_ledger.record_handled_turn.call_args_list == [
+        call(HandledTurnState.create(["$m1", "$m2"])),
+    ]
 
 
 @pytest.mark.asyncio
@@ -824,8 +830,8 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
             ).encode("utf-8"),
         ),
     )
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._resolve_dispatch_action = AsyncMock(return_value=_ResponseAction(kind="individual"))
     bot._build_dispatch_payload_with_attachments = AsyncMock(return_value=_DispatchPayload(prompt="unused"))
@@ -973,6 +979,7 @@ async def test_prepare_dispatch_allows_hook_dispatch_without_mention(tmp_path: P
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
         event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     # Should NOT be filtered despite sender being an agent and no mention
@@ -1022,6 +1029,7 @@ async def test_prepare_dispatch_reruns_message_received_for_hook_dispatch_from_n
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
         event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     assert dispatch is not None
@@ -1078,6 +1086,7 @@ async def test_hook_dispatch_from_message_received_reenters_once_and_skips_origi
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
         event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     assert dispatch is not None
@@ -1136,6 +1145,7 @@ async def test_hook_dispatch_from_message_received_stops_reentry_after_first_syn
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
         event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     assert dispatch is not None
@@ -1647,6 +1657,7 @@ async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_pat
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
         event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     # Plain hook messages without mention should still be filtered
@@ -1688,7 +1699,12 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
     assert prechecked is not None
     assert prechecked.requester_user_id == "@mindroom_router:localhost"
 
-    dispatch = await bot._prepare_dispatch(room, prechecked, event_label="message")
+    dispatch = await bot._prepare_dispatch(
+        room,
+        prechecked,
+        event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+    )
 
     assert dispatch is not None
     assert dispatch.requester_user_id == "@mindroom_router:localhost"
@@ -1699,8 +1715,8 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
 async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(tmp_path: Path) -> None:
     """hook_dispatch should enforce room authorization against the preserved requester."""
     bot = _hook_bot(tmp_path)
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
     room.canonical_alias = None
     event = nio.RoomMessageText.from_dict(
@@ -1722,4 +1738,6 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
         prechecked = bot._precheck_dispatch_event(room, event)
 
     assert prechecked is None
-    bot.response_tracker.mark_responded.assert_called_once_with(event.event_id)
+    bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        HandledTurnState.from_source_event_id(event.event_id),
+    )

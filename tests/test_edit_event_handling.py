@@ -46,9 +46,9 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     bot.client.user_id = "@router:example.com"
 
     # Mock other dependencies
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
-    bot.response_tracker.get_response_event_id.return_value = None
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
+    bot.handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
 
     # Create a room
@@ -120,6 +120,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     with (
         patch.object(bot, "_handle_ai_routing", new_callable=AsyncMock) as mock_routing,
         patch.object(bot, "_can_reply_to_sender", return_value=True),
+        patch.object(bot, "_load_persisted_turn_metadata", return_value=None),
     ):
         # Process the original message - this should trigger routing
         await bot._on_message(room, original_event)
@@ -163,9 +164,9 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     # Mock the client and dependencies
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@router:example.com"
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
-    bot.response_tracker.get_response_event_id.return_value = None
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
+    bot.handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
@@ -213,7 +214,10 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
         edit_events.append(edit_event)
 
     # Mock the routing method
-    with patch.object(bot, "_handle_ai_routing", new_callable=AsyncMock) as mock_routing:
+    with (
+        patch.object(bot, "_handle_ai_routing", new_callable=AsyncMock) as mock_routing,
+        patch.object(bot, "_load_persisted_turn_metadata", return_value=None),
+    ):
         # Process all edit events
         for edit_event in edit_events:
             await bot._on_message(room, edit_event)
@@ -252,9 +256,9 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     # Mock the client and dependencies
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
-    bot.response_tracker.get_response_event_id.return_value = None
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
+    bot.handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
@@ -299,7 +303,10 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     }
 
     # Mock the generate_response method
-    with patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate:
+    with (
+        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate,
+        patch.object(bot, "_load_persisted_turn_metadata", return_value=None),
+    ):
         # Process the edit event
         await bot._on_message(room, edit_event)
 
