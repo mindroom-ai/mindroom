@@ -6,7 +6,7 @@ import asyncio
 import json
 import tempfile
 from pathlib import Path
-from typing import ClassVar
+from typing import AsyncIterator, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -31,8 +31,8 @@ def _reset_matrix_message_rate_limit() -> None:
     MatrixMessageTools._recent_actions.clear()
 
 
-def _empty_async_iterator() -> object:
-    async def iterator() -> object:
+def _empty_async_iterator() -> AsyncIterator[object]:
+    async def iterator() -> AsyncIterator[object]:
         if False:
             yield None
 
@@ -43,16 +43,6 @@ def _empty_async_iterator() -> object:
 def _reset_interactive_state() -> None:
     interactive._active_questions.clear()
     interactive._persistence_file = None
-
-
-def _empty_async_iterator() -> object:
-    async def iterator() -> object:
-        if False:
-            yield None
-
-    return iterator()
-
-
 def _make_context(
     *,
     room_id: str = "!room:localhost",
