@@ -563,6 +563,11 @@ async def send_streaming_response(
     try:
         await _consume_streaming_chunks(client, response_stream, streaming)
     except asyncio.CancelledError:
+        logger.warning(
+            "Streaming response cancelled — traceback for diagnosis",
+            message_id=streaming.event_id,
+            exc_info=True,
+        )
         await streaming.finalize(client, cancelled=True)
         raise
     except Exception as e:
