@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, Literal
@@ -360,9 +361,124 @@ async def test_emit_gate_fails_open_on_errors_and_timeouts(tmp_path: Path) -> No
     assert context.decline_reason == ""
 
 
-def test_build_tool_hook_bridge_returns_none_without_tool_hooks() -> None:
-    """The hot path should stay a no-op when no tool hooks are registered."""
-    assert build_tool_hook_bridge(HookRegistry.empty(), agent_name="code") is None
+def test_build_tool_hook_bridge_returns_bridge_without_tool_hooks() -> None:
+    """Failure logging should keep the bridge installed even without plugin hooks."""
+    assert build_tool_hook_bridge(HookRegistry.empty(), agent_name="code") is not None
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_path: Path) -> None:
+    """The bridge should durably record failures and re-raise the original exception."""
+    runtime_context = _tool_runtime_context(tmp_path)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        execution_identity=_execution_identity(),
+        runtime_paths=runtime_context.runtime_paths,
+    )
+    error = ValueError("boom {'api_key': 'secret'} https://alice:secret@example.com/private")
+
+    async def explode(**kwargs: object) -> object:
+        del kwargs
+        raise error
+
+    assert bridge is not None
+    with (
+        tool_runtime_context(runtime_context),
+        tool_execution_identity(_execution_identity()),
+        pytest.raises(ValueError, match="boom") as exc_info,
+    ):
+        await bridge(
+            "explode",
+            explode,
+            {
+                "api_key": "secret",
+                "nested": [{"refresh_token": "refresh-secret"}],
+                "url": "https://alice:secret@example.com/private",
+            },
+        )
+
+    assert exc_info.value is error
+
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_failures.jsonl"
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+
+    assert len(records) == 1
+    assert set(records[0]) == {
+        "timestamp",
+        "tool_name",
+        "agent_name",
+        "channel",
+        "room_id",
+        "thread_id",
+        "requester_id",
+        "session_id",
+        "correlation_id",
+        "duration_ms",
+        "arguments",
+        "error_type",
+        "error_message",
+        "traceback",
+    }
+    assert records[0]["tool_name"] == "explode"
+    assert records[0]["agent_name"] == "code"
+    assert records[0]["channel"] == "matrix"
+    assert records[0]["room_id"] == "!room:localhost"
+    assert records[0]["thread_id"] == "$resolved-thread"
+    assert records[0]["requester_id"] == "@user:localhost"
+    assert records[0]["session_id"] == "session-1"
+    assert records[0]["correlation_id"] == "corr-runtime"
+    assert records[0]["error_type"] == "ValueError"
+    assert records[0]["arguments"] == {
+        "api_key": "***redacted***",
+        "nested": [{"refresh_token": "***redacted***"}],
+        "url": "https://alice:***@example.com/private",
+    }
+    assert "secret" not in records[0]["error_message"]
+    assert "secret" not in records[0]["traceback"]
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_bridge_preserves_original_error_when_failure_recording_breaks(tmp_path: Path) -> None:
+    """Secondary logging failures should not mask the original tool exception."""
+    seen_errors: list[BaseException | None] = []
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        seen_errors.append(ctx.error)
+
+    runtime_context = _tool_runtime_context(tmp_path)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.from_plugins([_plugin("tool-policy", [after])]),
+        agent_name="code",
+        execution_identity=_execution_identity(),
+        runtime_paths=runtime_context.runtime_paths,
+    )
+    error = ValueError("boom")
+
+    async def explode(**kwargs: object) -> object:
+        del kwargs
+        raise error
+
+    assert bridge is not None
+    with (
+        patch("mindroom.tool_system.tool_hooks.record_tool_failure", side_effect=RuntimeError("disk full")),
+        patch("mindroom.tool_system.tool_hooks.logger.exception") as mock_logger_exception,
+        tool_runtime_context(runtime_context),
+        tool_execution_identity(_execution_identity()),
+        pytest.raises(ValueError, match="boom") as exc_info,
+    ):
+        await bridge("explode", explode, {"api_key": "secret"})
+
+    assert exc_info.value is error
+    assert len(seen_errors) == 1
+    assert isinstance(seen_errors[0], ValueError)
+    assert str(seen_errors[0]) == "boom"
+    mock_logger_exception.assert_called_once_with(
+        "Failed to record tool failure",
+        tool_name="explode",
+        correlation_id="corr-runtime",
+    )
 
 
 def test_sync_function_call_execute_runs_tool_hooks(tmp_path: Path) -> None:

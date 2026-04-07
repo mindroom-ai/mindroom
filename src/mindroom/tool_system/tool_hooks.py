@@ -23,7 +23,9 @@ from mindroom.hooks import (
     emit_gate,
 )
 from mindroom.hooks.types import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL
+from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
+from mindroom.tool_system.tool_failures import record_tool_failure
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -35,6 +37,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks.registry import HookRegistry
+    from mindroom.hooks.types import HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -48,6 +51,7 @@ _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakK
 ToolHookResult = Any
 _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC = FunctionCall._build_nested_execution_chain_async
 _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -77,10 +81,49 @@ def _resolved_thread_id(
     return default_thread_id
 
 
-def _build_context_kwargs(  # noqa: C901
+@dataclass(frozen=True, slots=True)
+class _ResolvedToolContext:
+    agent_name: str
+    room_id: str | None
+    thread_id: str | None
+    requester_id: str | None
+    session_id: str | None
+    channel: str | None
+    config: Config | None
+    runtime_paths: RuntimePaths | None
+    correlation_id: str
+    message_sender: HookMessageSender | None
+    room_state_querier: HookRoomStateQuerier | None
+    room_state_putter: HookRoomStatePutter | None
+    message_received_depth: int
+
+    def hook_context_kwargs(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "arguments": arguments,
+            "agent_name": self.agent_name,
+            "room_id": self.room_id,
+            "thread_id": self.thread_id,
+            "requester_id": self.requester_id,
+            "session_id": self.session_id,
+            "config": self.config,
+            "runtime_paths": self.runtime_paths,
+            "correlation_id": self.correlation_id,
+            "message_sender": self.message_sender,
+            "room_state_querier": self.room_state_querier,
+            "room_state_putter": self.room_state_putter,
+            "message_received_depth": self.message_received_depth,
+        }
+
+
+def _coalesce(*values: str | None) -> str | None:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _resolve_tool_context(
     *,
-    tool_name: str,
-    arguments: dict[str, Any],
     agent_name: str | None,
     room_id: str | None,
     thread_id: str | None,
@@ -89,59 +132,53 @@ def _build_context_kwargs(  # noqa: C901
     execution_identity: ToolExecutionIdentity | None,
     config: Config | None,
     runtime_paths: RuntimePaths | None,
-) -> dict[str, Any]:
+) -> _ResolvedToolContext:
     runtime_context = get_tool_runtime_context()
     request_execution_identity = active_tool_execution_identity(None)
 
-    resolved_agent_name = agent_name
-    if not resolved_agent_name and runtime_context is not None:
-        resolved_agent_name = runtime_context.agent_name
-    elif not resolved_agent_name and execution_identity is not None:
-        resolved_agent_name = execution_identity.agent_name
-
-    resolved_room_id = room_id
-    if runtime_context is not None:
-        resolved_room_id = runtime_context.room_id
-    elif execution_identity is not None and execution_identity.room_id is not None:
-        resolved_room_id = execution_identity.room_id
-    elif request_execution_identity is not None and request_execution_identity.room_id is not None:
-        resolved_room_id = request_execution_identity.room_id
-
-    resolved_requester_id = requester_id
-    if runtime_context is not None:
-        resolved_requester_id = runtime_context.requester_id
-    elif execution_identity is not None and execution_identity.requester_id is not None:
-        resolved_requester_id = execution_identity.requester_id
-    elif request_execution_identity is not None and request_execution_identity.requester_id is not None:
-        resolved_requester_id = request_execution_identity.requester_id
-
-    resolved_session_id = session_id
-    if execution_identity is not None and execution_identity.session_id is not None:
-        resolved_session_id = execution_identity.session_id
-    elif request_execution_identity is not None and request_execution_identity.session_id is not None:
-        resolved_session_id = request_execution_identity.session_id
-
-    correlation_id = "tool-hook:" + uuid4().hex
-    if runtime_context is not None and runtime_context.correlation_id:
-        correlation_id = runtime_context.correlation_id
+    resolved_execution_identity = execution_identity or request_execution_identity
     bindings = resolve_tool_runtime_hook_bindings(runtime_context) if runtime_context is not None else None
-
-    return {
-        "tool_name": tool_name,
-        "arguments": deepcopy(arguments),
-        "agent_name": resolved_agent_name or "",
-        "room_id": resolved_room_id,
-        "thread_id": _resolved_thread_id(thread_id, execution_identity, request_execution_identity, runtime_context),
-        "requester_id": resolved_requester_id,
-        "session_id": resolved_session_id,
-        "config": runtime_context.config if runtime_context is not None else config,
-        "runtime_paths": runtime_context.runtime_paths if runtime_context is not None else runtime_paths,
-        "correlation_id": correlation_id,
-        "message_sender": bindings.message_sender if bindings is not None else None,
-        "room_state_querier": bindings.room_state_querier if bindings is not None else None,
-        "room_state_putter": bindings.room_state_putter if bindings is not None else None,
-        "message_received_depth": bindings.message_received_depth if bindings is not None else 0,
-    }
+    return _ResolvedToolContext(
+        agent_name=(
+            _coalesce(
+                agent_name,
+                runtime_context.agent_name if runtime_context is not None else None,
+                resolved_execution_identity.agent_name if resolved_execution_identity is not None else None,
+            )
+            or ""
+        ),
+        room_id=_coalesce(
+            room_id,
+            runtime_context.room_id if runtime_context is not None else None,
+            execution_identity.room_id if execution_identity is not None else None,
+            request_execution_identity.room_id if request_execution_identity is not None else None,
+        ),
+        thread_id=_resolved_thread_id(thread_id, execution_identity, request_execution_identity, runtime_context),
+        requester_id=_coalesce(
+            requester_id,
+            runtime_context.requester_id if runtime_context is not None else None,
+            execution_identity.requester_id if execution_identity is not None else None,
+            request_execution_identity.requester_id if request_execution_identity is not None else None,
+        ),
+        session_id=_coalesce(
+            session_id,
+            execution_identity.session_id if execution_identity is not None else None,
+            request_execution_identity.session_id if request_execution_identity is not None else None,
+            runtime_context.session_id if runtime_context is not None else None,
+        ),
+        channel=resolved_execution_identity.channel if resolved_execution_identity is not None else None,
+        config=runtime_context.config if runtime_context is not None else config,
+        runtime_paths=runtime_context.runtime_paths if runtime_context is not None else runtime_paths,
+        correlation_id=(
+            runtime_context.correlation_id
+            if runtime_context is not None and runtime_context.correlation_id
+            else "tool-hook:" + uuid4().hex
+        ),
+        message_sender=bindings.message_sender if bindings is not None else None,
+        room_state_querier=bindings.room_state_querier if bindings is not None else None,
+        room_state_putter=bindings.room_state_putter if bindings is not None else None,
+        message_received_depth=bindings.message_received_depth if bindings is not None else 0,
+    )
 
 
 def _format_declined_result(tool_name: str, reason: str) -> str:
@@ -235,9 +272,7 @@ async def _execute_bridge(
     has_after_hooks: bool,
 ) -> ToolHookResult:
     started_at = time.perf_counter()
-    context_kwargs = _build_context_kwargs(
-        tool_name=tool_name,
-        arguments=args,
+    resolved_context = _resolve_tool_context(
         agent_name=agent_name,
         room_id=room_id,
         thread_id=thread_id,
@@ -247,15 +282,22 @@ async def _execute_bridge(
         config=config,
         runtime_paths=runtime_paths,
     )
+    hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks else None
 
     if has_before_hooks:
-        before_context = ToolBeforeCallContext(**context_kwargs)
+        before_context = ToolBeforeCallContext(
+            **resolved_context.hook_context_kwargs(hook_arguments if hook_arguments is not None else deepcopy(args)),
+            tool_name=tool_name,
+        )
         await emit_gate(hook_registry, EVENT_TOOL_BEFORE_CALL, before_context)
         if before_context.declined:
             result = _format_declined_result(tool_name, before_context.decline_reason)
             if has_after_hooks:
                 after_context = ToolAfterCallContext(
-                    **context_kwargs,
+                    **resolved_context.hook_context_kwargs(
+                        hook_arguments if hook_arguments is not None else deepcopy(args),
+                    ),
+                    tool_name=tool_name,
                     result=result,
                     error=None,
                     blocked=True,
@@ -270,20 +312,56 @@ async def _execute_bridge(
         result = await _call_tool(func, args)
     except BaseException as exc:
         error = exc
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        try:
+            failure_record = record_tool_failure(
+                tool_name=tool_name,
+                arguments=args,
+                error=error,
+                duration_ms=duration_ms,
+                agent_name=resolved_context.agent_name or None,
+                room_id=resolved_context.room_id,
+                thread_id=resolved_context.thread_id,
+                requester_id=resolved_context.requester_id,
+                session_id=resolved_context.session_id,
+                correlation_id=resolved_context.correlation_id,
+                execution_identity=execution_identity or active_tool_execution_identity(None),
+                runtime_paths=resolved_context.runtime_paths,
+            )
+            logger.warning(
+                "Tool call failed",
+                tool_name=tool_name,
+                agent_name=resolved_context.agent_name or None,
+                error_type=failure_record.error_type,
+                error_message=failure_record.error_message,
+                duration_ms=failure_record.duration_ms,
+                correlation_id=resolved_context.correlation_id,
+                channel=resolved_context.channel,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to record tool failure",
+                tool_name=tool_name,
+                correlation_id=resolved_context.correlation_id,
+            )
         if has_after_hooks:
             after_context = ToolAfterCallContext(
-                **context_kwargs,
+                **resolved_context.hook_context_kwargs(
+                    hook_arguments if hook_arguments is not None else deepcopy(args),
+                ),
+                tool_name=tool_name,
                 result=None,
                 error=error,
                 blocked=False,
-                duration_ms=(time.perf_counter() - started_at) * 1000,
+                duration_ms=duration_ms,
             )
             await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
         raise
 
     if has_after_hooks:
         after_context = ToolAfterCallContext(
-            **context_kwargs,
+            **resolved_context.hook_context_kwargs(hook_arguments if hook_arguments is not None else deepcopy(args)),
+            tool_name=tool_name,
             result=result,
             error=error,
             blocked=False,
@@ -303,12 +381,10 @@ def build_tool_hook_bridge(
     execution_identity: ToolExecutionIdentity | None = None,
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
-) -> Callable[..., Any] | None:
-    """Return one Agno-compatible tool hook bridge when any tool hooks are registered."""
+) -> Callable[..., Any]:
+    """Return one Agno-compatible tool hook bridge."""
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
-    if not has_before_hooks and not has_after_hooks:
-        return None
 
     async def bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
         return await _execute_bridge(
