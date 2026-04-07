@@ -2788,7 +2788,7 @@ class AgentBot:
             response_event_id = await self._finalize_dispatch_failure(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
-                thread_id=dispatch.context.thread_id,
+                thread_id=dispatch.target.resolved_thread_id,
                 placeholder_event_id=placeholder_event_id,
                 error=error,
             )
@@ -4111,6 +4111,7 @@ class AgentBot:
         resolved_thread_id: str | None = None,
         response_kind: str = "ai",
         target: MessageTarget | None = None,
+        delivery_target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
     ) -> _ResponseDispatchResult:
         """Process a message and send a response (non-streaming)."""
@@ -4128,10 +4129,10 @@ class AgentBot:
             )
         )
         response_thread_id = (
-            resolved_target.resolved_thread_id
-            if target is not None
+            delivery_target.resolved_thread_id
+            if delivery_target is not None
             else thread_id
-            if existing_event_id is not None and not existing_event_is_placeholder
+            if existing_event_id is not None and not existing_event_is_placeholder and thread_id is not None
             else resolved_thread_id
             if resolved_thread_id is not None
             else self._resolve_response_thread_root(
@@ -4141,7 +4142,7 @@ class AgentBot:
                 response_envelope=response_envelope,
             )
         )
-        resolved_target = resolved_target.with_thread_root(response_thread_id)
+        delivery_target = delivery_target or resolved_target.with_thread_root(response_thread_id)
         media_inputs = media or MediaInputs()
         session_id = resolved_target.session_id
         model_prompt = self._append_matrix_prompt_context(
@@ -4211,7 +4212,12 @@ class AgentBot:
             # Handle cancellation - send a message showing it was stopped
             self.logger.info("Non-streaming response cancelled by user", message_id=existing_event_id)
             if existing_event_id:
-                await self._edit_message(room_id, existing_event_id, _CANCELLED_RESPONSE_TEXT, response_thread_id)
+                await self._edit_message(
+                    room_id,
+                    existing_event_id,
+                    _CANCELLED_RESPONSE_TEXT,
+                    delivery_target.resolved_thread_id,
+                )
             raise
         except Exception as e:
             self.logger.exception("Error in non-streaming response", error=str(e))
@@ -4222,7 +4228,7 @@ class AgentBot:
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
-            target=resolved_target,
+            target=delivery_target,
             existing_event_id=existing_event_id,
             existing_event_is_placeholder=existing_event_is_placeholder,
             response_text=response_text,
@@ -4251,7 +4257,7 @@ class AgentBot:
             interactive.register_interactive_question(
                 delivery.event_id,
                 room_id,
-                resolved_target.resolved_thread_id,
+                delivery_target.resolved_thread_id,
                 delivery.option_map,
                 self.agent_name,
             )
@@ -4608,6 +4614,7 @@ class AgentBot:
         resolved_thread_id: str | None = None,
         response_kind: str = "ai",
         target: MessageTarget | None = None,
+        delivery_target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
     ) -> _ResponseDispatchResult:
         """Process a message and send a response (streaming)."""
@@ -4625,10 +4632,10 @@ class AgentBot:
             )
         )
         response_thread_id = (
-            resolved_target.resolved_thread_id
-            if target is not None
+            delivery_target.resolved_thread_id
+            if delivery_target is not None
             else thread_id
-            if existing_event_id is not None and not adopt_existing_placeholder
+            if existing_event_id is not None and not adopt_existing_placeholder and thread_id is not None
             else resolved_thread_id
             if resolved_thread_id is not None
             else self._resolve_response_thread_root(
@@ -4638,7 +4645,7 @@ class AgentBot:
                 response_envelope=response_envelope,
             )
         )
-        resolved_target = resolved_target.with_thread_root(response_thread_id)
+        delivery_target = delivery_target or resolved_target.with_thread_root(response_thread_id)
         media_inputs = media or MediaInputs()
         session_id = resolved_target.session_id
         room_mode = self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room_id) == "room"
@@ -4718,7 +4725,7 @@ class AgentBot:
                         streaming_cls=StreamingResponse,
                         existing_event_id=existing_event_id,
                         adopt_existing_placeholder=adopt_existing_placeholder,
-                        target=resolved_target,
+                        target=delivery_target,
                         room_mode=room_mode,
                         show_tool_calls=self.show_tool_calls,
                         extra_content=response_extra_content,
@@ -4744,7 +4751,7 @@ class AgentBot:
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
-                    resolved_target.resolved_thread_id,
+                    delivery_target.resolved_thread_id,
                     interactive_response.option_map,
                     self.agent_name,
                 )
@@ -4802,7 +4809,7 @@ class AgentBot:
                 room_id=room_id,
                 reply_to_event_id=reply_to_event_id,
                 thread_id=thread_id,
-                target=resolved_target,
+                target=delivery_target,
                 existing_event_id=event_id,
                 existing_event_is_placeholder=adopt_existing_placeholder,
                 response_text=draft.response_text,
@@ -4835,7 +4842,7 @@ class AgentBot:
             interactive.register_interactive_question(
                 delivery.event_id,
                 room_id,
-                resolved_target.resolved_thread_id,
+                delivery_target.resolved_thread_id,
                 delivery.option_map,
                 self.agent_name,
             )
@@ -4947,19 +4954,11 @@ class AgentBot:
                 reply_to_event_id=reply_to_event_id,
             )
         )
-        delivery_thread_id = (
-            resolved_target.resolved_thread_id
-            if target is not None
-            else self._resolve_response_thread_root(
-                thread_id,
-                reply_to_event_id,
-                room_id=room_id,
-                response_envelope=response_envelope,
-            )
-            if existing_event_id is None or existing_event_is_placeholder
-            else thread_id
+        delivery_target = (
+            resolved_target
+            if existing_event_id is None or existing_event_is_placeholder or thread_id is None
+            else resolved_target.with_thread_root(thread_id)
         )
-        resolved_target = resolved_target.with_thread_root(delivery_thread_id)
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             self._prepare_memory_and_model_context(
                 prompt,
@@ -5020,6 +5019,7 @@ class AgentBot:
                     message_id,  # Edit the thinking message or existing
                     adopt_existing_placeholder=editing_placeholder,
                     target=resolved_target,
+                    delivery_target=delivery_target,
                     user_id=user_id,
                     run_id=response_run_id,
                     media=media_inputs,
@@ -5027,7 +5027,7 @@ class AgentBot:
                     model_prompt=model_prompt_text,
                     response_envelope=response_envelope,
                     correlation_id=correlation_id,
-                    resolved_thread_id=delivery_thread_id,
+                    resolved_thread_id=resolved_target.resolved_thread_id,
                     matrix_run_metadata=matrix_run_metadata,
                 )
             else:
@@ -5040,6 +5040,7 @@ class AgentBot:
                     message_id,  # Edit the thinking message or existing
                     existing_event_is_placeholder=editing_placeholder,
                     target=resolved_target,
+                    delivery_target=delivery_target,
                     user_id=user_id,
                     run_id=response_run_id,
                     media=media_inputs,
@@ -5047,7 +5048,7 @@ class AgentBot:
                     model_prompt=model_prompt_text,
                     response_envelope=response_envelope,
                     correlation_id=correlation_id,
-                    resolved_thread_id=delivery_thread_id,
+                    resolved_thread_id=resolved_target.resolved_thread_id,
                     matrix_run_metadata=matrix_run_metadata,
                 )
 
@@ -5061,7 +5062,7 @@ class AgentBot:
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
-            target=resolved_target,
+            target=delivery_target,
             response_function=generate,
             thinking_message=thinking_msg,
             existing_event_id=existing_event_id,

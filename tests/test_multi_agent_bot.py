@@ -1653,6 +1653,52 @@ class TestAgentBot:
             await asyncio.gather(running_task, other_room_task, return_exceptions=True)
 
     @pytest.mark.asyncio
+    async def test_process_and_respond_keeps_canonical_session_for_non_placeholder_edits(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Edits should deliver into the original thread while keeping canonical session scope."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._edit_message = AsyncMock(return_value=True)
+
+        canonical_target = MessageTarget.resolve(
+            room_id="!test:localhost",
+            thread_id=None,
+            reply_to_event_id="$edit-source",
+        )
+        delivery_target = canonical_target.with_thread_root("$original-thread")
+
+        with (
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock, return_value="Handled") as mock_ai,
+        ):
+            delivery = await bot._process_and_respond(
+                room_id="!test:localhost",
+                prompt="Please regenerate",
+                reply_to_event_id="$edit-source",
+                thread_id="$original-thread",
+                thread_history=[],
+                existing_event_id="$existing-response",
+                existing_event_is_placeholder=False,
+                target=canonical_target,
+                delivery_target=delivery_target,
+                user_id="@user:localhost",
+            )
+
+        assert delivery.event_id == "$existing-response"
+        assert delivery.delivery_kind == "edited"
+        assert mock_ai.call_args.kwargs["session_id"] == canonical_target.session_id
+        edit_args = bot._edit_message.await_args.args
+        assert edit_args[0] == "!test:localhost"
+        assert edit_args[1] == "$existing-response"
+        assert edit_args[2] == "Handled"
+        assert edit_args[3] == "$original-thread"
+
+    @pytest.mark.asyncio
     async def test_process_and_respond_streaming_applies_before_and_after_hooks_once(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -5946,6 +5992,69 @@ class TestAgentBot:
             "$thread_root",
             extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
         )
+
+    @pytest.mark.asyncio
+    async def test_execute_dispatch_action_uses_resolved_thread_root_for_first_turn_failure_cleanup(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """First-turn failures should finalize placeholders with the canonical thread root."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot.logger = MagicMock()
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$event"
+        dispatch = _PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=_MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+                requires_full_thread_history=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=event.event_id,
+            ),
+            correlation_id="corr-first-turn-failure",
+            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+        )
+        failure_message = "setup failed"
+
+        async def payload_builder(_context: _MessageContext) -> _DispatchPayload:
+            raise RuntimeError(failure_message)
+
+        with (
+            patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
+            patch.object(
+                bot,
+                "_finalize_dispatch_failure",
+                new=AsyncMock(return_value="$placeholder"),
+            ) as mock_finalize,
+        ):
+            await bot._execute_dispatch_action(
+                room,
+                event,
+                dispatch,
+                _ResponseAction(kind="individual"),
+                payload_builder,
+                processing_log="processing",
+                dispatch_started_monotonic=0.0,
+            )
+
+        assert dispatch.context.thread_id is None
+        assert dispatch.target.resolved_thread_id == "$event"
+        assert mock_finalize.await_args.kwargs["thread_id"] == dispatch.target.resolved_thread_id
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_marks_new_error_event_when_placeholder_edit_fails(
