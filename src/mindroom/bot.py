@@ -3927,11 +3927,14 @@ class AgentBot:
                     team_agents=team_agents,
                     execution_identity=execution_identity,
                 )
-                strip_enrichment_from_session_storage(
-                    storage,
-                    session_id,
-                    session_type=SessionType.TEAM,
-                )
+                try:
+                    strip_enrichment_from_session_storage(
+                        storage,
+                        session_id,
+                        session_type=SessionType.TEAM,
+                    )
+                finally:
+                    storage.close()
         except Exception:
             self.logger.exception(
                 "Failed to strip hook enrichment from team session history",
@@ -4981,6 +4984,15 @@ class AgentBot:
             requester_user_id=user_id,
             enable_streaming=self.enable_streaming,
         )
+        if (
+            use_streaming
+            and existing_event_id is not None
+            and not existing_event_is_placeholder
+            and response_envelope is not None
+            and correlation_id is not None
+            and self.hook_registry.has_hooks(EVENT_MESSAGE_BEFORE_RESPONSE)
+        ):
+            use_streaming = False
         delivery_result: _ResponseDispatchResult | None = None
         response_run_id = str(uuid4())
 
@@ -5052,11 +5064,14 @@ class AgentBot:
         try:
             if strip_transient_enrichment_after_run:
                 storage = self._create_history_scope_storage(execution_identity)
-                strip_enrichment_from_session_storage(
-                    storage,
-                    session_id,
-                    session_type=self._history_session_type(),
-                )
+                try:
+                    strip_enrichment_from_session_storage(
+                        storage,
+                        session_id,
+                        session_type=self._history_session_type(),
+                    )
+                finally:
+                    storage.close()
         except Exception:
             self.logger.exception(
                 "Failed to strip hook enrichment from session history",
