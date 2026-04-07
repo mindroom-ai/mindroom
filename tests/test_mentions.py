@@ -26,19 +26,29 @@ def _default_runtime_paths() -> constants_mod.RuntimePaths:
     )
 
 
-def _make_config(runtime_paths: constants_mod.RuntimePaths) -> Config:
+def _bind_config(
+    runtime_paths: constants_mod.RuntimePaths,
+    agents: dict[str, AgentConfig],
+) -> Config:
     config = Config(
-        agents={
-            "calculator": AgentConfig(display_name="Calculator"),
-            "general": AgentConfig(display_name="General"),
-            "code": AgentConfig(display_name="Code"),
-            "email": AgentConfig(display_name="Email"),
-        },
+        agents=agents,
         models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound
+
+
+def _make_config(runtime_paths: constants_mod.RuntimePaths) -> Config:
+    return _bind_config(
+        runtime_paths,
+        {
+            "calculator": AgentConfig(display_name="Calculator"),
+            "general": AgentConfig(display_name="General"),
+            "code": AgentConfig(display_name="Code"),
+            "email": AgentConfig(display_name="Email"),
+        },
+    )
 
 
 def _runtime_paths_for(config: Config) -> constants_mod.RuntimePaths:
@@ -261,61 +271,86 @@ class TestMentionParsing:
         reconstruct ``mindroom_dev`` and match the config key (ISSUE-098).
         """
         runtime_paths = _default_runtime_paths()
-        config = Config(
-            agents={
+        config = _bind_config(
+            runtime_paths,
+            {
                 "calculator": AgentConfig(display_name="Calculator"),
                 "mindroom_dev": AgentConfig(display_name="DevAgent"),
             },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
-        bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
-        _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
 
         # @mindroom_dev should resolve to agent "mindroom_dev"
         text = "@mindroom_dev can you look at this?"
-        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", bound, runtime_paths)
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
         assert mentions == ["@mindroom_mindroom_dev:localhost"]
-        assert "@mindroom_mindroom_dev:localhost" in processed
+        assert processed == "@mindroom_mindroom_dev:localhost can you look at this?"
 
     def test_agent_name_starts_with_mindroom_prefix_full_localpart(self) -> None:
         """Mentioning @mindroom_mindroom_dev (full localpart) should also work."""
         runtime_paths = _default_runtime_paths()
-        config = Config(
-            agents={
+        config = _bind_config(
+            runtime_paths,
+            {
                 "mindroom_dev": AgentConfig(display_name="DevAgent"),
             },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
-        bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
-        _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
 
         # @mindroom_mindroom_dev should also resolve (prefix stripped → mindroom_dev)
         text = "@mindroom_mindroom_dev help"
-        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", bound, runtime_paths)
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
         assert mentions == ["@mindroom_mindroom_dev:localhost"]
-        assert "@mindroom_mindroom_dev:localhost" in processed
+        assert processed == "@mindroom_mindroom_dev:localhost help"
+
+    def test_namespaced_prefixed_agent_name_with_namespace_suffix(self, tmp_path: Path) -> None:
+        """Namespaced mentions for prefixed config keys should try prefix + stripped candidates."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            process_env={
+                "MATRIX_HOMESERVER": "http://localhost:8008",
+                "MINDROOM_NAMESPACE": "a1b2c3d4",
+            },
+        )
+        config = _bind_config(
+            runtime_paths,
+            {
+                "mindroom_dev": AgentConfig(display_name="DevAgent"),
+            },
+        )
+
+        processed, mentions, _markdown = _parse_mentions_in_text(
+            "@mindroom_dev_a1b2c3d4 help",
+            "localhost",
+            config,
+        )
+
+        assert mentions == ["@mindroom_mindroom_dev_a1b2c3d4:localhost"]
+        assert processed == "@mindroom_mindroom_dev_a1b2c3d4:localhost help"
 
     def test_prefixed_mention_prefers_base_agent_when_both_names_exist(self) -> None:
         """@mindroom_calculator should still resolve to calculator before mindroom_calculator."""
         runtime_paths = _default_runtime_paths()
-        config = Config(
-            agents={
+        config = _bind_config(
+            runtime_paths,
+            {
                 "calculator": AgentConfig(display_name="Calculator"),
                 "mindroom_calculator": AgentConfig(display_name="PrefixedCalculator"),
             },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
-        bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
-        _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
 
-        processed, mentions, _markdown = parse_mentions_in_text(
-            "@mindroom_calculator help",
-            "localhost",
-            bound,
-            runtime_paths,
-        )
+        processed, mentions, _markdown = _parse_mentions_in_text("@mindroom_calculator help", "localhost", config)
+
+        assert mentions == ["@mindroom_calculator:localhost"]
+        assert processed == "@mindroom_calculator:localhost help"
+
+    def test_uppercase_prefixed_mentions_are_case_insensitive(self) -> None:
+        """Uppercase @MINDROOM_ prefixes should resolve like lowercase ones."""
+        config = _make_config(_default_runtime_paths())
+
+        processed, mentions, _markdown = _parse_mentions_in_text("@MINDROOM_calculator help", "localhost", config)
 
         assert mentions == ["@mindroom_calculator:localhost"]
         assert processed == "@mindroom_calculator:localhost help"

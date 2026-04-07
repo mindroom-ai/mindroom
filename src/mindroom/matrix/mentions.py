@@ -31,13 +31,13 @@ def parse_mentions_in_text(
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
 
     """
-    # Pattern to match @agent_name (with optional @mindroom_ prefix or domain)
+    # Pattern to match @agent_name (with optional case-insensitive @mindroom_ prefix or domain)
     # Matches: @calculator, @mindroom_calculator, @mindroom_calculator:localhost
     pattern = r"@(mindroom_)?(\w+)(?::[^\s]+)?"
 
     # Find all mentions and process them
     mentions_data = []
-    for match in re.finditer(pattern, text):
+    for match in re.finditer(pattern, text, flags=re.IGNORECASE):
         mention_info = _process_mention(match, config, sender_domain, runtime_paths)
         if mention_info:
             mentions_data.append(mention_info)
@@ -85,7 +85,7 @@ def _process_mention(
     name = match.group(2)
 
     # Skip user-like mentions (e.g. mindroom_user_*)
-    if name.startswith("user_"):
+    if name.lower().startswith("user_"):
         return None
 
     agent_name = _find_matching_agent_name(match, config, runtime_paths)
@@ -114,25 +114,31 @@ def _find_matching_agent_name(
 def _mention_candidate_names(match: re.Match, runtime_paths: RuntimePaths) -> list[str]:
     """Build ordered candidate agent names for one mention match."""
     name = match.group(2)
-
-    # Try to find the agent (case-insensitive), accepting optional namespace suffix
-    # and reconstructing the full name when the AGENT_PREFIX was stripped by the regex.
-    candidate_names = [name]
-
-    # When the regex captured a "mindroom_" prefix (group 1), the original mention
-    # was e.g. "@mindroom_dev" but group(2) is just "dev".  The config key might
-    # be "mindroom_dev", so we must also try the un-stripped form.
     prefix = match.group(1)
-    if prefix:
-        candidate_names.append(f"{prefix}{name}")
+
+    # Prefer exact/base forms first, then prefix-reconstructed variants.
+    candidate_names = [name]
+    stripped_name: str | None = None
 
     namespace = mindroom_namespace(runtime_paths)
     if namespace:
         suffix = f"_{namespace}"
         if name.lower().endswith(suffix):
-            stripped = name[: -len(suffix)]
-            if stripped:
-                candidate_names.append(stripped)
+            stripped_name = name[: -len(suffix)]
+            if stripped_name:
+                candidate_names.append(stripped_name)
+            else:
+                stripped_name = None
+
+    # When the regex captured a "mindroom_" prefix (group 1), the original mention
+    # was e.g. "@mindroom_dev" but group(2) is just "dev". The config key might
+    # be "mindroom_dev", so we must also try the un-stripped form. For namespaced
+    # mentions like "@mindroom_dev_ns123", we also need the combined
+    # prefix-plus-namespace-stripped candidate "mindroom_dev".
+    if prefix:
+        candidate_names.append(f"{prefix}{name}")
+        if stripped_name:
+            candidate_names.append(f"{prefix}{stripped_name}")
     return candidate_names
 
 
