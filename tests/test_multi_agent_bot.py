@@ -2823,6 +2823,70 @@ class TestAgentBot:
         assert send_kwargs["adopt_existing_placeholder"] is True
 
     @pytest.mark.asyncio
+    async def test_generate_team_response_helper_redacts_suppressed_streamed_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming team suppression should not preserve the provisional placeholder id."""
+
+        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+        async def before_hook(ctx: BeforeResponseContext) -> None:
+            ctx.draft.suppress = True
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function("$placeholder")
+            return "$placeholder"
+
+        async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+            yield "stream chunk"
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock()
+        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
+        bot._redact_message_event = AsyncMock(return_value=True)
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
+
+        with (
+            patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=True)),
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.team_response_stream", new=fake_team_response_stream),
+            patch(
+                "mindroom.bot.send_streaming_response",
+                new=AsyncMock(return_value=("$placeholder", "stream chunk")),
+            ),
+        ):
+            event_id = await bot._generate_team_response_helper(
+                room_id="!test:localhost",
+                reply_to_event_id="$event",
+                thread_id="$thread_root",
+                payload=_DispatchPayload(prompt="Continue"),
+                team_agents=[bot.matrix_id],
+                team_mode="coordinate",
+                thread_history=[],
+                requester_user_id="@alice:localhost",
+                existing_event_id="$placeholder",
+                existing_event_is_placeholder=True,
+                response_envelope=_hook_envelope(body="Continue", source_event_id="$event"),
+                correlation_id="corr-team-stream-suppress",
+            )
+
+        assert event_id is None
+        bot._redact_message_event.assert_awaited_once_with(
+            room_id="!test:localhost",
+            event_id="$placeholder",
+            reason="Suppressed streamed response",
+        )
+
+    @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test agent bot not responding when not mentioned."""
         config = self._config_for_storage(tmp_path)

@@ -1824,20 +1824,27 @@ async def _latest_thread_event_id(
             rel_type=RelationshipType.thread,
             event_type="m.room.message",
             direction=nio.MessageDirection.back,
-            limit=1,
-            max_events=1,
+            limit=2,
+            max_events=2,
         )
     except _ThreadHistoryFastPathUnavailableError:
         latest_relation_events = []
 
-    for event in latest_relation_events:
-        if not isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
-            continue
-        event_info = EventInfo.from_event(event.source)
-        if not event_info.is_edit and event_info.thread_id == thread_id:
-            return event.event_id
+    visible_relation_events = [
+        event for event in latest_relation_events if isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice))
+    ]
+    if len(visible_relation_events) == 1:
+        candidate_event = visible_relation_events[0]
+        candidate_info = EventInfo.from_event(candidate_event.source)
+        if not candidate_info.is_edit and candidate_info.thread_id == thread_id:
+            candidate_replacement = await _fetch_latest_message_replacement(client, room_id, candidate_event)
+            if candidate_replacement is None:
+                return candidate_event.event_id
 
-    thread_msgs = await fetch_thread_history(client, room_id, thread_id)
+    try:
+        thread_msgs = await fetch_thread_history(client, room_id, thread_id)
+    except Exception:
+        return thread_id
     if thread_msgs:
         last_event_id = visible_message_visible_event_id(thread_msgs[-1])
         return last_event_id or thread_id
@@ -1893,11 +1900,9 @@ async def build_threaded_edit_content(
     """Build edit content that preserves thread fallback semantics when needed."""
     latest_thread_event_id = None
     if thread_id:
-        thread_msgs = await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
-        if thread_msgs:
-            latest_thread_event_id = visible_message_visible_event_id(thread_msgs[-1]) or thread_id
-        else:
-            latest_thread_event_id = event_id
+        latest_thread_event_id = await _latest_thread_event_id(client, room_id, thread_id)
+    elif event_id:
+        latest_thread_event_id = event_id
 
     return format_message_with_mentions(
         config,

@@ -720,7 +720,7 @@ async def test_cleanup_uses_exact_replied_to_requester_not_latest_thread_speaker
             original_sender_id=USER_ID,
         ),
     ]
-    client.room_get_event.assert_not_called()
+    client.room_get_event.assert_awaited_once_with(ROOM_ID, "$thread-root")
 
 
 @pytest.mark.asyncio
@@ -769,7 +769,7 @@ async def test_cleanup_uses_scanned_history_when_edited_bot_message_lacks_visibl
             original_sender_id=USER_ID,
         ),
     ]
-    client.room_get_event.assert_not_called()
+    client.room_get_event.assert_awaited_once_with(ROOM_ID, "$thread-root")
 
 
 @pytest.mark.asyncio
@@ -833,10 +833,11 @@ async def test_cleanup_follows_agent_reply_chain_outside_scanned_history(tmp_pat
             original_sender_id=USER_ID,
         ),
     ]
-    assert [call.args[1] for call in client.room_get_event.await_args_list] == [
+    assert [call.args[1] for call in client.room_get_event.await_args_list[:-1]] == [
         "$agent-a",
         "$user-root",
     ]
+    assert client.room_get_event.await_args_list[-1].args[1] == "$thread-root"
 
 
 @pytest.mark.asyncio
@@ -998,10 +999,11 @@ async def test_cleanup_fetches_exact_scanned_edit_ancestor_for_requester_resolut
             original_sender_id=USER_ID,
         ),
     ]
-    assert [call.args[1] for call in client.room_get_event.await_args_list] == [
+    assert [call.args[1] for call in client.room_get_event.await_args_list[:-1]] == [
         "$agent-a-edit",
         "$user-root",
     ]
+    assert client.room_get_event.await_args_list[-1].args[1] == "$thread-root"
 
 
 @pytest.mark.asyncio
