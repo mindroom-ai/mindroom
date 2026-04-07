@@ -73,9 +73,12 @@ _SECRET_KEY_VARIANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = tuple(
 )
 _URL_QUERY_SECRET_KEYS: frozenset[str] = frozenset(
     {
+        "aws_access_key_id",
+        "awsaccesskeyid",
         "google_access_id",
         "googleaccessid",
         "sig",
+        "signature",
         "x_amz_credential",
         "x_amz_security_token",
         "x_amz_signature",
@@ -146,14 +149,14 @@ def _unrepresentable_placeholder(value: object) -> str:
 def _safe_str(value: object) -> str:
     try:
         return str(value)
-    except Exception:
+    except BaseException:
         return _unrepresentable_placeholder(value)
 
 
 def _safe_repr(value: object) -> str:
     try:
         return repr(value)
-    except Exception:
+    except BaseException:
         return _unrepresentable_placeholder(value)
 
 
@@ -303,7 +306,7 @@ def _safe_error_message(error: BaseException) -> str:
 def _safe_traceback(error: BaseException) -> str:
     try:
         formatted_traceback = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-    except Exception:
+    except BaseException:
         formatted_traceback = _unrepresentable_placeholder(error)
     return sanitize_failure_text(formatted_traceback, max_length=_MAX_TRACEBACK_LENGTH)
 

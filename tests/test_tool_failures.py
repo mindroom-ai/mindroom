@@ -134,6 +134,28 @@ def test_sanitize_failure_text_redacts_gcs_signed_url_query_credentials() -> Non
 
 
 @pytest.mark.parametrize(
+    ("url", "expected_query"),
+    [
+        (
+            "https://storage.googleapis.com/bucket/object?"
+            "GoogleAccessId=service-account@example.com&Expires=123&Signature=gcs-v2-signature",
+            "GoogleAccessId=***redacted***&Expires=123&Signature=***redacted***",
+        ),
+        (
+            "https://example-bucket.s3.amazonaws.com/object?"
+            "AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Expires=123&Signature=s3-v2-signature",
+            "AWSAccessKeyId=***redacted***&Expires=123&Signature=***redacted***",
+        ),
+    ],
+)
+def test_sanitize_failure_text_redacts_v2_signed_url_query_credentials(url: str, expected_query: str) -> None:
+    """Legacy GCS and S3 V2 signed URL query credentials should be redacted."""
+    sanitized = tool_failures.sanitize_failure_text(f"fetch failed for {url}")
+
+    assert sanitized == f"fetch failed for {url.split('?', 1)[0]}?{expected_query}"
+
+
+@pytest.mark.parametrize(
     ("raw", "expected"),
     [
         ("Incorrect API key provided: sk-secret123", "Incorrect API key provided: ***redacted***"),
