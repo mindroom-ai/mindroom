@@ -31,13 +31,13 @@ def parse_mentions_in_text(
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
 
     """
-    # Pattern to match @agent_name (with optional @mindroom_ prefix or domain)
+    # Pattern to match @agent_name (with optional case-insensitive @mindroom_ prefix or domain)
     # Matches: @calculator, @mindroom_calculator, @mindroom_calculator:localhost
     pattern = r"@(mindroom_)?(\w+)(?::[^\s]+)?"
 
     # Find all mentions and process them
     mentions_data = []
-    for match in re.finditer(pattern, text):
+    for match in re.finditer(pattern, text, flags=re.IGNORECASE):
         mention_info = _process_mention(match, config, sender_domain, runtime_paths)
         if mention_info:
             mentions_data.append(mention_info)
@@ -85,35 +85,61 @@ def _process_mention(
     name = match.group(2)
 
     # Skip user-like mentions (e.g. mindroom_user_*)
-    if name.startswith("user_"):
+    if name.lower().startswith("user_"):
         return None
 
-    # Try to find the agent (case-insensitive), accepting optional namespace suffix.
+    agent_name = _find_matching_agent_name(match, config, runtime_paths)
+    if agent_name is None:
+        return None
+
+    agent_config = config.agents[agent_name]
+    user_id = MatrixID.from_agent(agent_name, sender_domain, runtime_paths).full_id
+    return (original, user_id, agent_config.display_name)
+
+
+def _find_matching_agent_name(
+    match: re.Match,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return the configured agent name matched by one mention, if any."""
+    for candidate_name in _mention_candidate_names(match, runtime_paths):
+        candidate_lower = candidate_name.lower()
+        for config_agent_name in config.agents:
+            if config_agent_name.lower() == candidate_lower:
+                return config_agent_name
+    return None
+
+
+def _mention_candidate_names(match: re.Match, runtime_paths: RuntimePaths) -> list[str]:
+    """Build ordered candidate agent names for one mention match."""
+    name = match.group(2)
+    prefix = match.group(1)
+
+    # Prefer exact/base forms first, then prefix-reconstructed variants.
     candidate_names = [name]
+    stripped_name: str | None = None
+
     namespace = mindroom_namespace(runtime_paths)
     if namespace:
         suffix = f"_{namespace}"
         if name.lower().endswith(suffix):
-            stripped = name[: -len(suffix)]
-            if stripped:
-                candidate_names.append(stripped)
+            stripped_name = name[: -len(suffix)]
+            if stripped_name:
+                candidate_names.append(stripped_name)
+            else:
+                stripped_name = None
 
-    agent_name = None
-    for candidate_name in candidate_names:
-        candidate_lower = candidate_name.lower()
-        for config_agent_name in config.agents:
-            if config_agent_name.lower() == candidate_lower:
-                agent_name = config_agent_name
-                break
-        if agent_name:
-            break
-
-    if agent_name:
-        agent_config = config.agents[agent_name]
-        user_id = MatrixID.from_agent(agent_name, sender_domain, runtime_paths).full_id
-        return (original, user_id, agent_config.display_name)
-
-    return None
+    # When the regex captured a "mindroom_" prefix (group 1), the original mention
+    # was e.g. "@mindroom_dev" but group(2) is just "dev". The config key might
+    # be "mindroom_dev", so we must also try the un-stripped form. For namespaced
+    # mentions like "@mindroom_dev_ns123", we also need the combined
+    # prefix-plus-namespace-stripped candidate "mindroom_dev".
+    if prefix:
+        candidate_names.append(f"{prefix}{name}")
+        if stripped_name:
+            candidate_names.append(f"{prefix}{stripped_name}")
+    return candidate_names
 
 
 def format_message_with_mentions(
