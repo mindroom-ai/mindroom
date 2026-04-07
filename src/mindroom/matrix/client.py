@@ -1837,9 +1837,13 @@ async def _latest_thread_event_id(
         candidate_event = visible_relation_events[0]
         candidate_info = EventInfo.from_event(candidate_event.source)
         if not candidate_info.is_edit and candidate_info.thread_id == thread_id:
-            candidate_replacement = await _fetch_latest_message_replacement(client, room_id, candidate_event)
-            if candidate_replacement is None:
-                return candidate_event.event_id
+            try:
+                candidate_replacement = await _fetch_latest_message_replacement(client, room_id, candidate_event)
+            except _ThreadHistoryFastPathUnavailableError:
+                pass
+            else:
+                if candidate_replacement is None:
+                    return candidate_event.event_id
 
     try:
         thread_msgs = await fetch_thread_history(client, room_id, thread_id)

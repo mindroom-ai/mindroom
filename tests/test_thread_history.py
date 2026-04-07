@@ -492,6 +492,48 @@ class TestThreadHistory:
         client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_latest_thread_event_id_falls_back_when_replacement_lookup_fails(self) -> None:
+        """Replacement lookup failures after a single-child hit should degrade to full history."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        newest_thread_event = self._make_text_event(
+            event_id="$reply_latest",
+            sender="@agent:localhost",
+            body="Newest reply",
+            server_timestamp=3000,
+            source_content={
+                "body": "Newest reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        client = self._make_relations_client(
+            root_event=root_event,
+            relations={
+                self._relation_key(
+                    "$thread_root",
+                    RelationshipType.thread,
+                    direction=nio.MessageDirection.back,
+                    limit=2,
+                ): [newest_thread_event],
+                self._relation_key("$reply_latest", RelationshipType.replacement): RuntimeError("unsupported"),
+            },
+        )
+
+        with patch(
+            "mindroom.matrix.client.fetch_thread_history",
+            new=AsyncMock(return_value=[{"event_id": "$reply_latest"}]),
+        ) as mock_fetch_history:
+            event_id = await _latest_thread_event_id(client, "!room:localhost", "$thread_root")
+
+        assert event_id == "$reply_latest"
+        mock_fetch_history.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
+
+    @pytest.mark.asyncio
     async def test_latest_thread_event_id_returns_later_edit_of_older_child(self) -> None:
         """Later edits of older replies should still become the visible thread tail."""
         root_event = self._make_text_event(
