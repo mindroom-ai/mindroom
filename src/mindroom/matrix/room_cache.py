@@ -11,12 +11,11 @@ if TYPE_CHECKING:
 def cached_rooms(client: nio.AsyncClient) -> dict[str, nio.MatrixRoom]:
     """Return the client room cache when nio has initialized it.
 
-    Uses ``vars()`` to read the ``rooms`` dict directly from the instance
-    without triggering ``__getattr__``. This is intentional: in tests the
-    client is often an ``AsyncMock`` whose attribute protocol would return a
-    coroutine-mock instead of the plain dict that was assigned.
+    ``AsyncClient.rooms`` is the source of truth. Non-dict values are treated
+    as an empty cache so simple test doubles can opt in by assigning a real
+    ``rooms`` dict.
     """
-    rooms = vars(client).get("rooms")
+    rooms = client.rooms
     return rooms if isinstance(rooms, dict) else {}
 
 

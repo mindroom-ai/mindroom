@@ -103,37 +103,23 @@ async def is_user_online(
         False if offline or presence check fails
 
     """
-    if room_id is not None:
-        room = cached_room(client, room_id)
-        if room is not None and user_id in room.users:
-            cached_user = room.users[user_id]
-            if cached_user.presence in ("online", "unavailable"):
-                is_online = True
-                logger.debug(
-                    "User presence check from room cache",
-                    user_id=user_id,
-                    room_id=room_id,
-                    presence=cached_user.presence,
-                    is_online=is_online,
-                    last_active_ago=cached_user.last_active_ago,
-                )
-                return is_online
-    else:
-        for room in cached_rooms(client).values():
-            if user_id not in room.users:
-                continue
-            cached_user = room.users[user_id]
-            if cached_user.presence in ("online", "unavailable"):
-                is_online = True
-                logger.debug(
-                    "User presence check from room cache",
-                    user_id=user_id,
-                    room_id=room.room_id,
-                    presence=cached_user.presence,
-                    is_online=is_online,
-                    last_active_ago=cached_user.last_active_ago,
-                )
-                return is_online
+    candidate_rooms = [cached_room(client, room_id)] if room_id is not None else cached_rooms(client).values()
+    for room in candidate_rooms:
+        if room is None or user_id not in room.users:
+            continue
+        cached_user = room.users[user_id]
+        if cached_user.presence not in ("online", "unavailable"):
+            continue
+        is_online = True
+        logger.debug(
+            "User presence check from room cache",
+            user_id=user_id,
+            room_id=room.room_id,
+            presence=cached_user.presence,
+            is_online=is_online,
+            last_active_ago=cached_user.last_active_ago,
+        )
+        return is_online
 
     try:
         response = await client.get_presence(user_id)

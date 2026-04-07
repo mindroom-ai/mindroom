@@ -19,13 +19,20 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _mock_client() -> AsyncMock:
+    """Return an AsyncClient mock with an explicit empty room cache."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+    return client
+
+
 class TestPresenceDetection:
     """Test presence detection functionality."""
 
     @pytest.mark.asyncio
     async def test_is_user_online_when_online(self) -> None:
         """Test that is_user_online returns True when user is online."""
-        mock_client = AsyncMock(spec=nio.AsyncClient)
+        mock_client = _mock_client()
 
         # Mock successful presence response - user is online
         mock_response = Mock(spec=nio.PresenceGetResponse)
@@ -41,7 +48,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_prefers_cached_room_user_presence(self) -> None:
         """Cached room membership presence should avoid an extra `/presence` lookup."""
-        mock_client = AsyncMock(spec=nio.AsyncClient)
+        mock_client = _mock_client()
         mock_client.rooms = {
             "!room:example.com": Mock(
                 users={
@@ -61,7 +68,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_falls_back_when_cached_room_user_presence_is_offline_default(self) -> None:
         """A cached room user with nio's offline default should still fall back to `/presence`."""
-        mock_client = AsyncMock(spec=nio.AsyncClient)
+        mock_client = _mock_client()
         mock_client.rooms = {
             "!room:example.com": Mock(
                 users={
@@ -85,7 +92,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_when_unavailable(self) -> None:
         """Test that is_user_online returns True when user is unavailable (idle but client open)."""
-        mock_client = AsyncMock(spec=nio.AsyncClient)
+        mock_client = _mock_client()
 
         # Mock successful presence response - user is unavailable (idle)
         mock_response = Mock(spec=nio.PresenceGetResponse)
@@ -101,7 +108,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_when_offline(self) -> None:
         """Test that is_user_online returns False when user is offline."""
-        mock_client = AsyncMock(spec=nio.AsyncClient)
+        mock_client = _mock_client()
 
         # Mock successful presence response - user is offline
         mock_response = Mock(spec=nio.PresenceGetResponse)
@@ -117,7 +124,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_on_error(self) -> None:
         """Test that is_user_online returns False on presence check error."""
-        mock_client = AsyncMock(spec=nio.AsyncClient)
+        mock_client = _mock_client()
 
         # Mock error response - create instance properly
         mock_error = nio.PresenceGetError.from_dict({"errcode": "M_FORBIDDEN", "error": "Forbidden"})
@@ -130,7 +137,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_on_exception(self) -> None:
         """Test that is_user_online returns False when exception is raised."""
-        mock_client = AsyncMock(spec=nio.AsyncClient)
+        mock_client = _mock_client()
 
         # Mock exception
         mock_client.get_presence.side_effect = Exception("Network error")
