@@ -45,7 +45,7 @@ class _BadRepr:
         raise RuntimeError(msg)
 
 
-class _BrokenException(RuntimeError):
+class _BrokenError(RuntimeError):
     def __str__(self) -> str:
         msg = "str disabled"
         raise RuntimeError(msg)
@@ -180,9 +180,7 @@ def test_sanitize_failure_text_redacts_additional_provider_secret_formats() -> N
         "sk_live_secret rk_live_secret ghp_secret github_pat_secret AIzaSySecret",
     )
 
-    assert sanitized == (
-        "***redacted*** ***redacted*** ***redacted*** ***redacted*** ***redacted***"
-    )
+    assert sanitized == ("***redacted*** ***redacted*** ***redacted*** ***redacted*** ***redacted***")
 
 
 @pytest.mark.parametrize(
@@ -315,7 +313,7 @@ def test_build_tool_failure_record_handles_unrepresentable_exception_text(
 ) -> None:
     """Exceptions with broken __str__ should still produce a durable record."""
     monkeypatch.setattr(tool_failures.traceback, "format_exception", lambda *_args: (_ for _ in ()).throw(RuntimeError))
-    error = _BrokenException()
+    error = _BrokenError()
     record = build_tool_failure_record(
         tool_name="explode",
         arguments={},
@@ -330,9 +328,9 @@ def test_build_tool_failure_record_handles_unrepresentable_exception_text(
         correlation_id="corr-broken-exception",
     )
 
-    assert record.error_type == "_BrokenException"
-    assert record.error_message == "<unrepresentable: _BrokenException>"
-    assert record.traceback == "<unrepresentable: _BrokenException>"
+    assert record.error_type == "_BrokenError"
+    assert record.error_message == "<unrepresentable: _BrokenError>"
+    assert record.traceback == "<unrepresentable: _BrokenError>"
 
 
 def test_build_tool_failure_record_truncates_tracebacks(monkeypatch: pytest.MonkeyPatch) -> None:

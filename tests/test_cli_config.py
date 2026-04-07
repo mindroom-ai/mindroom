@@ -347,7 +347,7 @@ class TestConfigInit:
         assert "\nOPENAI_API_KEY=" not in env_content
         assert "\nOPENROUTER_API_KEY=" not in env_content
 
-        output = _strip_ansi(result.output)
+        output = _unwrap_console_output(result.output)
         assert "mindroom connect --pair-code" in output
         assert "Vertex AI project/region" in output
         assert "Google" in output
@@ -1773,10 +1773,11 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "could not reach embeddings" in result.output
-        assert "endpoint (http://llama.local/v1)" in result.output
-        assert "reachable LAN" in result.output
-        assert "instead of .local" in result.output
+        output = _unwrap_console_output(result.output)
+        assert "could not reach embeddings" in output
+        assert "endpoint (http://llama.local/v1)" in output
+        assert "reachable LAN" in output
+        assert "instead of .local" in output
 
     def test_memory_sentence_transformers_embedder_runs_local_smoke_test(
         self,

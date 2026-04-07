@@ -139,7 +139,7 @@ class ToolFailureRecord:
 
     def as_dict(self) -> ToolFailureRecordDict:
         """Return the record in JSON-serializable dictionary form."""
-        return cast(ToolFailureRecordDict, {field.name: getattr(self, field.name) for field in fields(self)})
+        return cast("ToolFailureRecordDict", {field.name: getattr(self, field.name) for field in fields(self)})
 
 
 def _unrepresentable_placeholder(value: object) -> str:
@@ -265,7 +265,7 @@ def sanitize_failure_text(value: str, *, max_length: int = _MAX_STRING_LENGTH) -
     return _truncate_text(sanitized, max_length)
 
 
-def sanitize_failure_value(value: object, *, depth: int = 0) -> JsonValue:
+def sanitize_failure_value(value: object, *, depth: int = 0) -> JsonValue:  # noqa: PLR0911
     """Recursively redact and bound one arbitrary value for durable failure logging."""
     if depth >= _MAX_REDACTION_DEPTH:
         return _TRUNCATED
@@ -371,7 +371,9 @@ def _failure_logger(path: Path) -> logging.Logger:
 
 
 def _append_failure_record(record: ToolFailureRecord, runtime_paths: RuntimePaths) -> None:
-    _failure_logger(_failure_log_path(runtime_paths)).info(json.dumps(record.as_dict(), sort_keys=True, allow_nan=False))
+    _failure_logger(_failure_log_path(runtime_paths)).info(
+        json.dumps(record.as_dict(), sort_keys=True, allow_nan=False),
+    )
 
 
 def record_tool_failure(
