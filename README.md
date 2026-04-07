@@ -283,6 +283,19 @@ defaults:
   #   notify: false
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   num_history_runs: null             # Number of prior runs to include (null = all)
+  thread_summary_first_threshold: 5  # First automatic summary after 5 thread messages
+  thread_summary_subsequent_interval: 10  # Re-summarize after each additional 10 messages
+```
+
+Add the `thread_summary` tool to an agent when you want it to write or refresh the one-line summary shown for a Matrix thread.
+`set_thread_summary` uses the current thread by default and also works from a room-level reply to a thread root.
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - matrix_message
+      - thread_summary
 ```
 
 Auto-compaction is destructive inside the active session.

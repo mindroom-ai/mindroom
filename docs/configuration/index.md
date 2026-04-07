@@ -254,6 +254,8 @@ defaults:
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
+  thread_summary_first_threshold: 5  # Default: 5 (first automatic thread summary)
+  thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
@@ -266,6 +268,8 @@ defaults:
 # Use __MINDROOM_INHERIT__ inside a tool override to clear one inherited authored field
 # while keeping the rest of defaults.tools for that agent.
 # See agents.md for the full per-agent tool configuration syntax.
+# These thresholds only affect automatic thread summaries; manual `set_thread_summary`
+# tool calls write immediately and reset the automatic baseline from the new message count.
 
 # Memory system configuration (optional)
 memory:
