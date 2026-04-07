@@ -217,20 +217,35 @@ async def _rewrite_working_session_for_compaction(
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     total_compacted_run_count = 0
+    pending_selected_run_ids: set[str] | None = None
 
     while True:
         working_visible_runs = runs_for_scope(completed_top_level_runs(working_session), scope)
-        selection_state = (
-            state if total_compacted_run_count == 0 else replace(state, force_compact_before_next_run=False)
-        )
-        compactable_runs = _select_runs_to_compact(
-            visible_runs=working_visible_runs,
-            session=working_session,
-            scope=scope,
-            state=selection_state,
-            history_settings=history_settings,
-            available_history_budget=available_history_budget,
-        )
+        if pending_selected_run_ids:
+            # Once a pass selects "all visible runs", keep compacting that original
+            # set even if the remaining raw history now fits the replay budget.
+            compactable_runs = [
+                run
+                for run in working_visible_runs
+                if isinstance(run.run_id, str) and run.run_id in pending_selected_run_ids
+            ]
+        else:
+            selection_state = (
+                state if total_compacted_run_count == 0 else replace(state, force_compact_before_next_run=False)
+            )
+            compactable_runs = _select_runs_to_compact(
+                visible_runs=working_visible_runs,
+                session=working_session,
+                scope=scope,
+                state=selection_state,
+                history_settings=history_settings,
+                available_history_budget=available_history_budget,
+            )
+            selected_run_ids = {
+                run.run_id for run in compactable_runs if isinstance(run.run_id, str) and run.run_id
+            }
+            if compactable_runs and len(selected_run_ids) == len(compactable_runs):
+                pending_selected_run_ids = selected_run_ids
         if not compactable_runs:
             break
 
@@ -260,6 +275,11 @@ async def _rewrite_working_session_for_compaction(
             update_scope_seen_event_ids(working_session, scope, compacted_seen_event_ids)
         working_session.runs = _remove_runs_by_id(working_session.runs or [], compacted_run_ids)
         total_compacted_run_count += len(included_runs)
+        if pending_selected_run_ids is not None:
+            pending_selected_run_ids.difference_update(compacted_run_ids)
+
+        if pending_selected_run_ids:
+            continue
 
         if available_history_budget is None:
             break

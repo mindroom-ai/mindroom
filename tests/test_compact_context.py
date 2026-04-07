@@ -465,6 +465,52 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(tmp_path: Path) -> None:
+    """Forced compaction clears itself when the scope has no visible runs to compact."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1")
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(
+        session,
+        scope,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
+    storage.upsert_session(session)
+
+    summary_mock = AsyncMock()
+    with (
+        patch(
+            "mindroom.ai.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=summary_mock,
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(),
+            agent_name="test_agent",
+            full_prompt="Current question",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    state = read_scope_state(persisted, scope)
+    assert state.force_compact_before_next_run is False
+    assert prepared.compaction_outcomes == []
+    summary_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp_path: Path) -> None:
     """Forced compaction of a single run produces a summary and clears the flag."""
     config, runtime_paths = _make_config(tmp_path)
