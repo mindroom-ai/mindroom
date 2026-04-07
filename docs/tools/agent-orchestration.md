@@ -42,8 +42,11 @@ For [`openclaw_compat`], that means `matrix_message` is added directly and `atta
 `subagents` exposes `agents_list()`, `sessions_spawn()`, `sessions_send()`, and `list_sessions()`.
 All four calls return JSON strings with a `status` field, a `tool` field, and operation-specific payload data.
 `agents_list()` returns the configured agent IDs and the current agent name.
+`sessions_spawn(task, summary, tag, label=None, agent_id=None)` requires a non-empty task plus a normalized summary and tag.
 `sessions_spawn()` posts a fresh room-level Matrix message that mentions the target agent, then treats the resulting event ID as the root of a new isolated session thread.
-If you pass a `label` and the current `(agent_name, room_id, requester_id)` scope already has a matching tracked session, `sessions_spawn()` reuses that session instead of creating a new one.
+After the spawn succeeds, it writes the requested thread summary and tag through the lower-level thread summary and thread tag APIs.
+If you pass a `label` and the current `(agent_name, room_id, requester_id)` scope already has a matching tracked session, `sessions_spawn()` reuses that session instead of creating a new one and still applies the requested summary and tag to the existing thread.
+If the post-spawn summary or tag write fails, the spawn still succeeds and the response includes a `warnings` list describing the follow-up failure.
 `sessions_send()` sends a follow-up message into an existing tracked session.
 If you omit `session_key`, `sessions_send()` defaults to the current room or thread session key from `create_session_id(room_id, thread_id)`.
 If you pass `label` without `session_key`, `sessions_send()` resolves the most recent in-scope session with that label.
@@ -73,6 +76,8 @@ agents:
 agents_list()
 sessions_spawn(
     task="Review the failing deployment and propose a rollback plan.",
+    summary="Investigate the failing deployment and propose a safe rollback plan.",
+    tag="incident-rollback",
     label="incident-42",
     agent_id="ops",
 )
@@ -86,6 +91,7 @@ list_sessions(limit=20)
 ### Notes
 
 - Session tracking is scoped to the current `agent_name`, `room_id`, and `requester_id`, so labels are not global across unrelated conversations.
+- `sessions_spawn()` returns normalized `summary` and `tag` values in the success payload and may include `warnings` if the follow-up summary or tag write fails after the session is created.
 - Use [`subagents`] when you want a continuing Matrix thread that other agents or humans can revisit later.
 - Use [`delegate`] instead when you want a one-shot specialist answer returned directly as the tool result.
 

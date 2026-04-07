@@ -28,6 +28,8 @@ EXPECTED_SUBAGENT_TOOL_NAMES = {
     "sessions_spawn",
     "list_sessions",
 }
+TEST_SUMMARY = "test summary"
+TEST_TAG = "test-tag"
 
 
 def _make_config(*, thread_mode: str = "thread") -> MagicMock:
@@ -64,6 +66,18 @@ def _make_context(
         reply_to_event_id=None,
         storage_path=tmp_path,
     )
+
+
+def _stub_spawn_followups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[AsyncMock, AsyncMock, MagicMock]:
+    summary_mock = AsyncMock(return_value="$summary:localhost")
+    tag_mock = AsyncMock(return_value=SimpleNamespace())
+    update_mock = MagicMock()
+    monkeypatch.setattr(subagents_module, "send_thread_summary_event", summary_mock)
+    monkeypatch.setattr(subagents_module, "set_thread_tag", tag_mock)
+    monkeypatch.setattr(subagents_module, "update_last_summary_count", update_mock)
+    return summary_mock, tag_mock, update_mock
 
 
 def test_subagents_tool_registered_and_instantiates() -> None:
@@ -313,7 +327,7 @@ async def test_sessions_send_label_resolves_to_tracked_session(
 @pytest.mark.asyncio
 async def test_sessions_spawn_requires_runtime_context() -> None:
     """sessions_spawn should return a structured context-unavailable error outside runtime scope."""
-    payload = json.loads(await SubAgentsTools().sessions_spawn(task="do this"))
+    payload = json.loads(await SubAgentsTools().sessions_spawn(task="do this", summary=TEST_SUMMARY, tag=TEST_TAG))
     assert payload["status"] == "error"
     assert payload["tool"] == "sessions_spawn"
     assert "context" in payload["message"]
@@ -325,7 +339,7 @@ async def test_sessions_spawn_rejects_empty_task(tmp_path: Path) -> None:
     ctx = _make_context(tmp_path)
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await SubAgentsTools().sessions_spawn(task="  "))
+        payload = json.loads(await SubAgentsTools().sessions_spawn(task="  ", summary=TEST_SUMMARY, tag=TEST_TAG))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "sessions_spawn"
@@ -343,7 +357,9 @@ async def test_sessions_spawn_returns_error_when_matrix_send_fails(
     ctx = _make_context(tmp_path)
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await SubAgentsTools().sessions_spawn(task="do thing"))
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag=TEST_TAG),
+        )
 
     assert payload["status"] == "error"
     assert payload["tool"] == "sessions_spawn"
@@ -358,14 +374,19 @@ async def test_sessions_spawn_relays_original_sender(
     """sessions_spawn should preserve original requester identity for relayed events."""
     send_mock = AsyncMock(return_value="$event")
     monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    _stub_spawn_followups(monkeypatch)
     ctx = _make_context(tmp_path, requester_id="@user:localhost")
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await SubAgentsTools().sessions_spawn(task="do thing"))
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag=TEST_TAG),
+        )
 
     assert payload["status"] == "ok"
     assert payload["target_agent"] == "openclaw"
     assert payload["event_id"] == "$event"
+    assert payload["summary"] == TEST_SUMMARY
+    assert payload["tag"] == TEST_TAG
     send_mock.assert_awaited_once_with(
         ctx,
         room_id=ctx.room_id,
@@ -386,12 +407,218 @@ async def test_sessions_spawn_rejects_room_mode_target_agent(
     ctx = _make_context(tmp_path, config=_make_config(thread_mode="room"))
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await SubAgentsTools().sessions_spawn(task="do thing"))
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag=TEST_TAG),
+        )
 
     assert payload["status"] == "error"
     assert payload["tool"] == "sessions_spawn"
     assert "thread_mode=room" in payload["message"]
     send_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_rejects_blank_summary(tmp_path: Path) -> None:
+    """sessions_spawn should reject blank summaries before spawning."""
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().sessions_spawn(task="do thing", summary="   ", tag=TEST_TAG))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "sessions_spawn"
+    assert "summary must be a non-empty string" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_rejects_overlong_summary(tmp_path: Path) -> None:
+    """sessions_spawn should reject summaries longer than the normalized 500-char limit."""
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary="x" * 501, tag=TEST_TAG),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "sessions_spawn"
+    assert "500 characters or fewer" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_rejects_invalid_tag(tmp_path: Path) -> None:
+    """sessions_spawn should reject invalid tag names before spawning."""
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag="INVALID TAG!"),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "sessions_spawn"
+    assert "lowercase letters, digits, or hyphens" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_validates_before_matrix_send(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should validate required spawn metadata before any Matrix call."""
+    send_mock = AsyncMock(return_value="$event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag="INVALID TAG!"),
+        )
+
+    assert payload["status"] == "error"
+    send_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_sets_summary_after_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should write the requested thread summary after creating the thread."""
+    send_mock = AsyncMock(return_value="$event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    summary_mock, _, update_mock = _stub_spawn_followups(monkeypatch)
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag=TEST_TAG),
+        )
+
+    assert payload["status"] == "ok"
+    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 1, "manual")
+    update_mock.assert_called_once_with(ctx.room_id, "$event", 1)
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_sets_tag_after_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should write the requested thread tag after creating the thread."""
+    send_mock = AsyncMock(return_value="$event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    _, tag_mock, _ = _stub_spawn_followups(monkeypatch)
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag=TEST_TAG),
+        )
+
+    assert payload["status"] == "ok"
+    tag_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_TAG,
+        set_by=ctx.requester_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_returns_warnings_on_summary_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should still succeed when setting the summary fails."""
+    send_mock = AsyncMock(return_value="$event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    summary_mock, tag_mock, update_mock = _stub_spawn_followups(monkeypatch)
+    summary_mock.side_effect = RuntimeError("boom")
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag=TEST_TAG),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["warnings"] == ["Failed to set thread summary: boom"]
+    tag_mock.assert_awaited_once()
+    update_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_returns_warnings_when_summary_event_id_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should warn when summary send returns no event id."""
+    send_mock = AsyncMock(return_value="$event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    summary_mock, tag_mock, update_mock = _stub_spawn_followups(monkeypatch)
+    summary_mock.return_value = None
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag=TEST_TAG),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["warnings"] == ["Failed to set thread summary."]
+    tag_mock.assert_awaited_once()
+    update_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_returns_warnings_on_tag_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should still succeed when setting the tag fails."""
+    send_mock = AsyncMock(return_value="$event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    summary_mock, tag_mock, update_mock = _stub_spawn_followups(monkeypatch)
+    tag_mock.side_effect = RuntimeError("no power")
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag=TEST_TAG),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["warnings"] == ["Failed to set thread tag: no power"]
+    summary_mock.assert_awaited_once()
+    update_mock.assert_called_once_with(ctx.room_id, "$event", 1)
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_response_includes_summary_and_tag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should return normalized summary and tag values in the success payload."""
+    send_mock = AsyncMock(return_value="$event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    _stub_spawn_followups(monkeypatch)
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary="  test   summary  ",
+                tag="Test-Tag",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["summary"] == TEST_SUMMARY
+    assert payload["tag"] == TEST_TAG
+    assert "warnings" not in payload
 
 
 @pytest.mark.asyncio
@@ -474,25 +701,64 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
     """sessions_spawn should return existing session when label already exists in scope."""
     send_mock = AsyncMock(return_value="$event")
     monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    summary_mock, tag_mock, update_mock = _stub_spawn_followups(monkeypatch)
     ctx = _make_context(tmp_path)
 
     # First spawn creates the session
     with tool_runtime_context(ctx):
-        first = json.loads(await SubAgentsTools().sessions_spawn(task="do thing", label="work"))
+        first = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary=TEST_SUMMARY,
+                tag=TEST_TAG,
+                label="work",
+            ),
+        )
     assert first["status"] == "ok"
     assert "reused" not in first
     send_mock.assert_awaited_once()
+    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 1, "manual")
+    tag_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_TAG,
+        set_by=ctx.requester_id,
+    )
+    update_mock.assert_called_once_with(ctx.room_id, "$event", 1)
 
     send_mock.reset_mock()
+    summary_mock.reset_mock()
+    tag_mock.reset_mock()
+    update_mock.reset_mock()
 
     # Second spawn with same label should reuse, no Matrix message sent
     with tool_runtime_context(ctx):
-        second = json.loads(await SubAgentsTools().sessions_spawn(task="do thing again", label="work"))
+        second = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing again",
+                summary=TEST_SUMMARY,
+                tag=TEST_TAG,
+                label="work",
+            ),
+        )
     assert second["status"] == "ok"
     assert second["reused"] is True
     assert second["session_key"] == first["session_key"]
     assert second["target_agent"] == first["target_agent"]
+    assert second["event_id"] == first["event_id"]
+    assert second["summary"] == TEST_SUMMARY
+    assert second["tag"] == TEST_TAG
     send_mock.assert_not_awaited()
+    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 1, "manual")
+    tag_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_TAG,
+        set_by=ctx.requester_id,
+    )
+    update_mock.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -503,16 +769,21 @@ async def test_sessions_spawn_no_label_skips_dedup(
     """sessions_spawn should always spawn new session when label is None."""
     send_mock = AsyncMock(return_value="$event1")
     monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    _stub_spawn_followups(monkeypatch)
     ctx = _make_context(tmp_path)
 
     with tool_runtime_context(ctx):
-        first = json.loads(await SubAgentsTools().sessions_spawn(task="do thing"))
+        first = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag=TEST_TAG),
+        )
     assert first["status"] == "ok"
 
     send_mock.return_value = "$event2"
 
     with tool_runtime_context(ctx):
-        second = json.loads(await SubAgentsTools().sessions_spawn(task="do thing again"))
+        second = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing again", summary=TEST_SUMMARY, tag=TEST_TAG),
+        )
     assert second["status"] == "ok"
     assert "reused" not in second
     assert send_mock.await_count == 2
@@ -526,17 +797,32 @@ async def test_sessions_spawn_dedup_scoped_by_context(
     """sessions_spawn with same label but different scope should spawn new session."""
     send_mock = AsyncMock(return_value="$event1")
     monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    _stub_spawn_followups(monkeypatch)
     ctx1 = _make_context(tmp_path, requester_id="@alice:localhost")
 
     with tool_runtime_context(ctx1):
-        first = json.loads(await SubAgentsTools().sessions_spawn(task="do thing", label="work"))
+        first = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary=TEST_SUMMARY,
+                tag=TEST_TAG,
+                label="work",
+            ),
+        )
     assert first["status"] == "ok"
 
     send_mock.return_value = "$event2"
     ctx2 = _make_context(tmp_path, requester_id="@bob:localhost")
 
     with tool_runtime_context(ctx2):
-        second = json.loads(await SubAgentsTools().sessions_spawn(task="do thing", label="work"))
+        second = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary=TEST_SUMMARY,
+                tag=TEST_TAG,
+                label="work",
+            ),
+        )
     assert second["status"] == "ok"
     assert "reused" not in second
     assert second["session_key"] != first["session_key"]
@@ -551,17 +837,32 @@ async def test_sessions_spawn_dedup_scoped_by_room(
     """sessions_spawn with same label but different room should spawn new session."""
     send_mock = AsyncMock(return_value="$event1")
     monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    _stub_spawn_followups(monkeypatch)
     ctx1 = _make_context(tmp_path, room_id="!room_a:localhost")
 
     with tool_runtime_context(ctx1):
-        first = json.loads(await SubAgentsTools().sessions_spawn(task="do thing", label="work"))
+        first = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary=TEST_SUMMARY,
+                tag=TEST_TAG,
+                label="work",
+            ),
+        )
     assert first["status"] == "ok"
 
     send_mock.return_value = "$event2"
     ctx2 = _make_context(tmp_path, room_id="!room_b:localhost")
 
     with tool_runtime_context(ctx2):
-        second = json.loads(await SubAgentsTools().sessions_spawn(task="do thing", label="work"))
+        second = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary=TEST_SUMMARY,
+                tag=TEST_TAG,
+                label="work",
+            ),
+        )
     assert second["status"] == "ok"
     assert "reused" not in second
     assert second["session_key"] != first["session_key"]
