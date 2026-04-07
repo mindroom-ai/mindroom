@@ -1237,7 +1237,7 @@ def _snapshot_message_dict(event: nio.RoomMessageText | nio.RoomMessageNotice) -
     message: dict[str, Any] = {
         "sender": visible_event.sender,
         "body": visible_body_from_event_source(visible_event_source, visible_event.body),
-        "timestamp": visible_event.server_timestamp,
+        "timestamp": event.server_timestamp,
         "event_id": event.event_id,
         "content": visible_content,
         "latest_event_id": visible_event.event_id,
@@ -1275,23 +1275,21 @@ async def _fetch_thread_context_via_relations(
         raise _ThreadHistoryFastPathUnavailableError(msg)
 
     thread_events: list[nio.RoomMessageText | nio.RoomMessageNotice] = []
-    try:
-        async for event in client.room_get_event_relations(
-            room_id,
-            thread_id,
-            rel_type=RelationshipType.thread,
-            event_type="m.room.message",
-        ):
-            if not isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
-                continue
-            event_info = EventInfo.from_event(event.source)
-            if event_info.is_edit:
-                continue
-            if event_info.thread_id == thread_id:
-                thread_events.append(event)
-    except Exception as exc:
-        msg = f"relations lookup failed for {thread_id}"
-        raise _ThreadHistoryFastPathUnavailableError(msg) from exc
+    relation_events = await _collect_related_events(
+        client,
+        room_id,
+        thread_id,
+        rel_type=RelationshipType.thread,
+        event_type="m.room.message",
+    )
+    for event in relation_events:
+        if not isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
+            continue
+        event_info = EventInfo.from_event(event.source)
+        if event_info.is_edit:
+            continue
+        if event_info.thread_id == thread_id:
+            thread_events.append(event)
 
     if not thread_events:
         msg = f"no direct thread children returned for {thread_id}"

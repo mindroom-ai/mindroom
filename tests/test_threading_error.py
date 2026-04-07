@@ -1144,7 +1144,7 @@ class TestThreadingBehavior:
 
         assert context.is_thread is True
         assert context.thread_id == "$root:localhost"
-        assert context.requires_full_thread_history is False
+        assert context.requires_full_thread_history is True
         assert [message["event_id"] for message in context.thread_history] == [
             "$root:localhost",
             "$plain1:localhost",

@@ -17,6 +17,7 @@ import nio
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import (
+    is_v2_sidecar_text_preview,
     resolve_event_source_content,
     visible_body_from_event_source,
     visible_content_from_event_source,
@@ -188,6 +189,16 @@ def _thread_history_is_full(thread_history: Sequence[_HistoryMessage], *, defaul
     if isinstance(thread_history, ThreadHistoryResult):
         return thread_history.is_full_history
     return default
+
+
+def _snapshot_history_requires_full_hydration(thread_history: Sequence[_HistoryMessage]) -> bool:
+    """Return whether lightweight reply-chain snapshots need a later full hydration pass."""
+    return any(
+        isinstance(message, dict)
+        and isinstance(message.get("content"), dict)
+        and is_v2_sidecar_text_preview({"content": message["content"]})
+        for message in thread_history
+    )
 
 
 def _unique_history_event_ids(messages: Sequence[_HistoryMessage]) -> list[str]:
@@ -651,4 +662,4 @@ async def derive_conversation_target(
             thread_history = _merge_thread_and_chain_history(thread_history, chain_history)
         return True, context_root_id, list(thread_history), requires_full_thread_history
 
-    return True, context_root_id, list(chain_history), False
+    return True, context_root_id, list(chain_history), _snapshot_history_requires_full_hydration(chain_history)

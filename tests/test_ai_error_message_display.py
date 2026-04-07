@@ -44,7 +44,7 @@ def _mock_bot(tmp_path: Path) -> MagicMock:
     bot._build_tool_runtime_context = MagicMock(return_value=None)
     bot._build_tool_execution_identity = MagicMock(return_value=None)
     bot._build_message_target = MagicMock(
-        return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
+        return_value=MessageTarget.resolve("!test:localhost", None, None, room_mode=True),
     )
     bot._apply_before_response_hooks = AgentBot._apply_before_response_hooks.__get__(bot, AgentBot)
     bot._emit_after_response_hooks = AgentBot._emit_after_response_hooks.__get__(bot, AgentBot)

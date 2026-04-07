@@ -131,6 +131,10 @@ class MessageEnvelope:
     hook_source: str | None = None
     message_received_depth: int = 0
 
+    def __post_init__(self) -> None:
+        """Ensure envelope and target room identities stay aligned."""
+        assert self.target.room_id == self.room_id
+
 
 @dataclass(slots=True)
 class ResponseDraft:

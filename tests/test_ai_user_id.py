@@ -42,6 +42,7 @@ from mindroom.constants import (
 )
 from mindroom.history import PreparedHistoryState
 from mindroom.media_inputs import MediaInputs
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from tests.conftest import bind_runtime_paths
 
@@ -105,6 +106,9 @@ class TestUserIdPassthrough:
                 storage_path=tmp_path,
             ),
         )
+        bot._build_message_target = MagicMock(
+            return_value=MessageTarget.resolve("!test:localhost", None, "$user_msg"),
+        )
 
         process_method = AgentBot._process_and_respond
 
@@ -165,6 +169,9 @@ class TestUserIdPassthrough:
                 runtime_paths=runtime_paths,
                 storage_path=tmp_path,
             ),
+        )
+        bot._build_message_target = MagicMock(
+            return_value=MessageTarget.resolve("!test:localhost", None, "$user_msg"),
         )
 
         streaming_method = AgentBot._process_and_respond_streaming

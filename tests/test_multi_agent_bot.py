@@ -5325,6 +5325,67 @@ class TestAgentBot:
         bot.response_tracker.mark_responded.assert_called_once_with("$event", "$reply")
 
     @pytest.mark.asyncio
+    async def test_execute_dispatch_action_keeps_rejection_retryable_when_send_fails(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Rejected requests should remain retryable when no rejection event is sent."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.response_tracker = MagicMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$event"
+        dispatch = _PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=_MessageContext(
+                am_i_mentioned=True,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[bot.matrix_id],
+                has_non_agent_mentions=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=event.event_id,
+            ),
+            correlation_id="$event",
+            envelope=_hook_envelope(body="help me", source_event_id="$event"),
+        )
+        action = _ResponseAction(
+            kind="reject",
+            rejection_message="Team request includes private agent 'mind'; private agents cannot participate in teams yet",
+        )
+
+        with patch.object(bot, "_send_response", new=AsyncMock(return_value=None)):
+
+            async def unused_payload_builder(_context: _MessageContext) -> _DispatchPayload:
+                return _DispatchPayload(prompt="help me")
+
+            await bot._execute_dispatch_action(
+                room,
+                event,
+                dispatch,
+                action,
+                unused_payload_builder,
+                processing_log="processing",
+                dispatch_started_monotonic=0.0,
+            )
+
+        bot.response_tracker.mark_responded.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_extract_dispatch_context_uses_thread_snapshot_without_full_history(
         self,
         mock_agent_user: AgentMatrixUser,

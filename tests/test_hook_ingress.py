@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from mindroom.hooks.context import MessageEnvelope
 from mindroom.hooks.ingress import (
     hook_ingress_policy,
@@ -87,3 +89,20 @@ def test_automation_source_kinds_do_not_answer_interactive_prompts() -> None:
     assert not should_handle_interactive_text_response(_envelope(source_kind="hook_dispatch"))
     assert not should_handle_interactive_text_response(_envelope(source_kind="scheduled"))
     assert should_handle_interactive_text_response(_envelope(source_kind="message"))
+
+
+def test_message_envelope_rejects_mismatched_target_room_id() -> None:
+    """Envelopes should fail fast when the target points at a different room."""
+    with pytest.raises(AssertionError):
+        MessageEnvelope(
+            source_event_id="$event",
+            room_id="!room:localhost",
+            target=MessageTarget.resolve("!other:localhost", None, "$event"),
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="code",
+            source_kind="message",
+        )

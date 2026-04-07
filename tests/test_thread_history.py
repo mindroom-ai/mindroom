@@ -15,6 +15,7 @@ from nio.responses import RoomThreadsError, RoomThreadsResponse
 from mindroom.matrix.client import (
     RoomThreadsPageError,
     ThreadHistoryResult,
+    _fetch_thread_context_via_relations,
     _fetch_thread_history_via_room_messages,
     _latest_thread_event_id,
     _ThreadHistoryFastPathUnavailableError,
@@ -497,7 +498,49 @@ class TestThreadHistory:
             "m.mentions": {"user_ids": ["@mindroom_general:localhost"]},
             "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
         }
+        assert reply_snapshot["timestamp"] == 2000
         assert reply_snapshot["latest_event_id"] == "$reply_edit"
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_snapshot_relations_path_uses_relation_collector(self) -> None:
+        """Thread snapshot fast path should collect relation events through the shared helper."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        thread_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Reply in thread",
+            server_timestamp=2000,
+            source_content={
+                "body": "Reply in thread",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        client = MagicMock()
+        client.room_get_event = AsyncMock(return_value=self._make_room_get_event_response(root_event))
+        client.room_get_event_relations = MagicMock(
+            side_effect=AssertionError("should use _collect_related_events"),
+        )
+
+        with patch(
+            "mindroom.matrix.client._collect_related_events",
+            new=AsyncMock(return_value=[thread_event]),
+        ) as mock_collect:
+            snapshot = await _fetch_thread_context_via_relations(client, "!room:localhost", "$thread_root")
+
+        assert [message["event_id"] for message in snapshot] == ["$thread_root", "$reply"]
+        mock_collect.assert_awaited_once_with(
+            client,
+            "!room:localhost",
+            "$thread_root",
+            rel_type=RelationshipType.thread,
+            event_type="m.room.message",
+        )
 
     @pytest.mark.asyncio
     async def test_latest_thread_event_id_uses_relations_fast_path(self) -> None:

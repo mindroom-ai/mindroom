@@ -782,22 +782,25 @@ class AgentBot:
     ) -> _PersistedTurnMetadata | None:
         """Load persisted run metadata for one edited turn when available."""
         session_type = self._history_session_type()
+        canonical_target = self._build_message_target(
+            room_id=room.room_id,
+            thread_id=thread_id,
+            reply_to_event_id=original_event_id,
+        )
+        room_target = self._build_message_target(
+            room_id=room.room_id,
+            thread_id=None,
+            reply_to_event_id=original_event_id,
+        ).with_thread_root(None)
         session_contexts = [
-            (thread_id, create_session_id(room.room_id, thread_id)),
-            (None, create_session_id(room.room_id, None)),
+            (canonical_target, create_session_id(room.room_id, canonical_target.resolved_thread_id)),
+            (room_target, create_session_id(room.room_id, None)),
         ]
         checked_session_ids: set[str] = set()
-        for candidate_thread_id, session_id in session_contexts:
+        for candidate_target, session_id in session_contexts:
             if session_id in checked_session_ids:
                 continue
             checked_session_ids.add(session_id)
-            candidate_target = self._build_message_target(
-                room_id=room.room_id,
-                thread_id=candidate_thread_id,
-                reply_to_event_id=original_event_id,
-            )
-            if candidate_thread_id is None:
-                candidate_target = candidate_target.with_thread_root(None)
             execution_identity = self._build_tool_execution_identity(
                 target=candidate_target,
                 user_id=requester_user_id,
@@ -1886,7 +1889,7 @@ class AgentBot:
             matrix_run_metadata=matrix_run_metadata,
         )
 
-    async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
+    async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:  # noqa: C901, PLR0911
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
         assert self.client is not None
 
@@ -1975,16 +1978,24 @@ class AgentBot:
             # Generate the response, editing the acknowledgment message
             # Note: existing_event_id is only used for interactive questions to edit the acknowledgment
             prompt = f"The user selected: {selected_value}"
-            response_event_id = await self._generate_response(
-                room_id=room.room_id,
-                prompt=prompt,
-                reply_to_event_id=event.reacts_to,
-                thread_id=thread_id,
-                thread_history=thread_history,
-                existing_event_id=ack_event_id,  # Edit the acknowledgment instead of creating new message
-                existing_event_is_placeholder=True,
-                user_id=event.sender,
-            )
+            try:
+                response_event_id = await self._generate_response(
+                    room_id=room.room_id,
+                    prompt=prompt,
+                    reply_to_event_id=event.reacts_to,
+                    thread_id=thread_id,
+                    thread_history=thread_history,
+                    existing_event_id=ack_event_id,  # Edit the acknowledgment instead of creating new message
+                    existing_event_is_placeholder=True,
+                    user_id=event.sender,
+                )
+            except _SuppressedPlaceholderCleanupError:
+                self.logger.warning(
+                    "Suppressed placeholder cleanup failed",
+                    source_event_id=event.reacts_to,
+                    placeholder_event_id=ack_event_id,
+                )
+                return
             # Mark the original interactive question as responded
             if response_event_id is not None:
                 self.response_tracker.mark_responded(event.reacts_to, response_event_id)
@@ -2711,7 +2722,7 @@ class AgentBot:
             return None
         return action
 
-    async def _execute_dispatch_action(
+    async def _execute_dispatch_action(  # noqa: C901
         self,
         room: nio.MatrixRoom,
         event: _DispatchEvent,
@@ -2734,7 +2745,8 @@ class AgentBot:
                 response_text=action.rejection_message,
                 thread_id=dispatch.context.thread_id,
             )
-            self._mark_source_events_responded(tracked_source_event_ids, response_event_id)
+            if response_event_id is not None:
+                self._mark_source_events_responded(tracked_source_event_ids, response_event_id)
             return
 
         if not dispatch.context.am_i_mentioned:
@@ -5700,22 +5712,25 @@ class AgentBot:
     ) -> None:
         """Remove persisted runs tied to the pre-edit message before regenerating."""
         session_type = self._history_session_type()
+        canonical_target = self._build_message_target(
+            room_id=room.room_id,
+            thread_id=thread_id,
+            reply_to_event_id=original_event_id,
+        )
+        room_target = self._build_message_target(
+            room_id=room.room_id,
+            thread_id=None,
+            reply_to_event_id=original_event_id,
+        ).with_thread_root(None)
         session_contexts = [
-            (thread_id, create_session_id(room.room_id, thread_id)),
-            (None, create_session_id(room.room_id, None)),
+            (canonical_target, create_session_id(room.room_id, canonical_target.resolved_thread_id)),
+            (room_target, create_session_id(room.room_id, None)),
         ]
         checked_session_ids: set[str] = set()
-        for candidate_thread_id, session_id in session_contexts:
+        for candidate_target, session_id in session_contexts:
             if session_id in checked_session_ids:
                 continue
             checked_session_ids.add(session_id)
-            candidate_target = self._build_message_target(
-                room_id=room.room_id,
-                thread_id=candidate_thread_id,
-                reply_to_event_id=original_event_id,
-            )
-            if candidate_thread_id is None:
-                candidate_target = candidate_target.with_thread_root(None)
             execution_identity = self._build_tool_execution_identity(
                 target=candidate_target,
                 user_id=requester_user_id,
