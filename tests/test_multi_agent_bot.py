@@ -30,6 +30,7 @@ from mindroom.authorization import is_authorized_sender as is_authorized_sender_
 from mindroom.bot import (
     AgentBot,
     MultiKnowledgeVectorDb,
+    PreparedTextEvent,
     TeamBot,
     _DispatchPayload,
     _get_or_create_lock,
@@ -37,7 +38,6 @@ from mindroom.bot import (
     _MessageContext,
     _PrecheckedEvent,
     _PreparedDispatch,
-    _PreparedTextEvent,
     _ResponseAction,
     _ResponseDispatchResult,
     _SuppressedPlaceholderCleanupError,
@@ -5713,7 +5713,7 @@ class TestAgentBot:
                 },
             },
         )
-        prepared_event = _PreparedTextEvent(
+        prepared_event = PreparedTextEvent(
             sender="@user:localhost",
             event_id="$followup",
             body="stop right now!",
