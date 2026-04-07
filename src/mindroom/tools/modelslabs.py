@@ -47,6 +47,33 @@ if TYPE_CHECKING:
             placeholder="mp4",
             description="The type of file to generate (mp4, gif, or mp3)",
         ),
+        ConfigField(
+            name="model_id",
+            label="Model ID",
+            type="text",
+            required=False,
+            default=None,
+            placeholder="model-id",
+            description="Optional ModelsLab model identifier override",
+        ),
+        ConfigField(
+            name="width",
+            label="Width",
+            type="number",
+            required=False,
+            default=512,
+            placeholder="512",
+            description="Output image width in pixels",
+        ),
+        ConfigField(
+            name="height",
+            label="Height",
+            type="number",
+            required=False,
+            default=512,
+            placeholder="512",
+            description="Output image height in pixels",
+        ),
         # Timing and completion parameters
         ConfigField(
             name="wait_for_completion",

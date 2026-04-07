@@ -18,6 +18,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _default_scope_urls(tool_class: type[Any]) -> list[str]:
+    default_scopes = tool_class.DEFAULT_SCOPES
+    return list(default_scopes.values()) if isinstance(default_scopes, dict) else default_scopes
+
+
 @pytest.fixture
 def runtime_paths(tmp_path: Path) -> RuntimePaths:
     """Create an isolated runtime context for Google tool wrapper tests."""
@@ -57,21 +62,21 @@ def test_google_wrappers_reject_isolating_worker_scopes(
     [
         (
             GoogleCalendarTools,
-            list(GoogleCalendarTools.DEFAULT_SCOPES.values()),
+            _default_scope_urls(GoogleCalendarTools),
         ),
         (
             GoogleSheetsTools,
-            list(GoogleSheetsTools.DEFAULT_SCOPES.values()),
+            _default_scope_urls(GoogleSheetsTools),
         ),
     ],
 )
-def test_google_wrapper_build_credentials_uses_scope_urls_for_dict_defaults(
+def test_google_wrapper_build_credentials_uses_scope_urls_for_default_scopes(
     monkeypatch: pytest.MonkeyPatch,
     tool_class: type[Any],
     expected_scopes: list[str],
     runtime_paths: RuntimePaths,
 ) -> None:
-    """Dict-based Agno DEFAULT_SCOPES should be converted to a list of scope URLs."""
+    """Agno DEFAULT_SCOPES should normalize to a list of scope URLs."""
     monkeypatch.setattr(google_oauth_module, "ensure_tool_deps", lambda *_args, **_kwargs: None)
 
     tool = object.__new__(tool_class)

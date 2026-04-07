@@ -12,6 +12,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 
 import pytest
+from agno.agent import Agent as AgnoAgent
+from agno.team import Team as AgnoTeam
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -39,6 +41,21 @@ from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
     get_tool_execution_identity,
 )
+
+_TEST_MODEL = "openai:gpt-5.4"
+
+
+def _make_test_agent(name: str) -> AgnoAgent:
+    agent_id = name.removesuffix("Agent").replace(" ", "_").lower() or name.lower()
+    return AgnoAgent(name=name, id=agent_id, model=_TEST_MODEL)
+
+
+def _make_test_team(
+    *,
+    name: str = "Test Team",
+    team_id: str = "test-team",
+) -> AgnoTeam:
+    return AgnoTeam(name=name, id=team_id, model=_TEST_MODEL, members=[], tools=[])
 
 
 def _runtime_paths(process_env: dict[str, str] | None = None) -> RuntimePaths:
@@ -2178,9 +2195,9 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
+        mock_team = _make_test_team()
         mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Team consensus result"))
-        mock_agents = [MagicMock(name="GeneralAgent"), MagicMock(name="CodeAgent")]
+        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
 
         with (
             patch(
@@ -2218,8 +2235,8 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
-        mock_agents = [MagicMock(name="GeneralAgent")]
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             yield TeamContentEvent(content="Hello ")
@@ -2281,8 +2298,8 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
-        mock_agents = [MagicMock(name="GeneralAgent")]
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             yield TeamRunOutput(content="Team consensus result")
@@ -2325,8 +2342,8 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
-        mock_agents = [MagicMock(name="GeneralAgent")]
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             yield TeamRunOutput(status="error", content="Team execution failed upstream")
@@ -2364,9 +2381,9 @@ class TestTeamCompletion:
                 self.closed = True
 
         fake_storage = _FakeStorage()
-        mock_team = MagicMock()
+        mock_team = _make_test_team()
         mock_team.db = fake_storage
-        mock_agents: list[MagicMock] = []
+        mock_agents: list[AgnoAgent] = []
 
         @contextmanager
         def _open_scope_context() -> Iterator[ScopeSessionContext]:
@@ -2418,8 +2435,8 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
-        mock_agents = [MagicMock(name="GeneralAgent")]
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
         observed_session_ids: list[str | None] = []
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
@@ -2456,18 +2473,18 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
+        mock_team = _make_test_team()
         observed_agent_names: list[str | None] = []
         observed_session_ids: list[str | None] = []
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             yield TeamContentEvent(content="Hello world!")
 
-        def fake_build_team(*_args: object, **_kwargs: object) -> tuple[list[MagicMock], MagicMock, TeamMode]:
+        def fake_build_team(*_args: object, **_kwargs: object) -> tuple[list[AgnoAgent], AgnoTeam, TeamMode]:
             identity = get_tool_execution_identity()
             observed_agent_names.append(identity.agent_name if identity is not None else None)
             observed_session_ids.append(identity.session_id if identity is not None else None)
-            return [MagicMock(name="GeneralAgent")], mock_team, TeamMode.COORDINATE
+            return [_make_test_agent("GeneralAgent")], mock_team, TeamMode.COORDINATE
 
         mock_team.arun = mock_stream_events
 
@@ -2524,8 +2541,8 @@ class TestTeamCompletion:
             result="delegated",
         )
 
-        mock_team = MagicMock()
-        mock_agents = [MagicMock(name="GeneralAgent")]
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             yield TeamToolCallStartedEvent(tool=team_tool_started)
@@ -2575,8 +2592,8 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
-        mock_agents = [MagicMock(name="GeneralAgent")]
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             yield TeamRunErrorEvent(content="Error code: 404 - {'error': {'message': 'model not found'}}")
@@ -2607,8 +2624,8 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
-        mock_agents = [MagicMock(name="GeneralAgent")]
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             yield TeamContentEvent(content="Team started. ")
@@ -2671,7 +2688,7 @@ class TestTeamCompletion:
             patch("mindroom.api.openai_compat.get_agent_knowledge", return_value=None),
             patch(
                 "mindroom.api.openai_compat.create_agent",
-                side_effect=[MagicMock(name="GeneralAgent"), RuntimeError("boom")],
+                side_effect=[_make_test_agent("GeneralAgent"), RuntimeError("boom")],
             ),
         ):
             response = team_app_client.post(
@@ -2692,9 +2709,9 @@ class TestTeamCompletion:
         """Team execution exception returns 500."""
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
+        mock_team = _make_test_team()
         mock_team.arun = AsyncMock(side_effect=RuntimeError("Model error"))
-        mock_agents = [MagicMock(name="GeneralAgent")]
+        mock_agents = [_make_test_agent("GeneralAgent")]
 
         with patch(
             "mindroom.api.openai_compat._build_team",
@@ -2715,9 +2732,9 @@ class TestTeamCompletion:
         """Team streaming exceptions before first chunk return 500."""
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
+        mock_team = _make_test_team()
         mock_team.arun = MagicMock(side_effect=RuntimeError("boom"))
-        mock_agents = [MagicMock(name="GeneralAgent")]
+        mock_agents = [_make_test_agent("GeneralAgent")]
 
         with patch(
             "mindroom.api.openai_compat._build_team",
@@ -2742,8 +2759,8 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
-        mock_agents = [MagicMock(name="GeneralAgent")]
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             yield RunContentEvent(content="member noise ")
@@ -2798,8 +2815,8 @@ class TestTeamCompletion:
             tool_call_id="tc-pending-1",
         )
 
-        mock_team = MagicMock()
-        mock_agents = [MagicMock(name="GeneralAgent")]
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             yield ToolCallStartedEvent(tool=tool_started)
@@ -2844,8 +2861,8 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
-        mock_agents = [MagicMock(name="AgentA"), MagicMock(name="AgentB")]
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("AgentA"), _make_test_agent("AgentB")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             # Simulate interleaved chunks from two parallel members
@@ -2896,13 +2913,13 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
+        mock_team = _make_test_team()
         mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="ok"))
         mock_team.add_history_to_context = True
         mock_team.add_session_summary_to_context = True
         mock_team.num_history_runs = 3
         mock_team.num_history_messages = None
-        mock_agents = [MagicMock(name="GeneralAgent"), MagicMock(name="CodeAgent")]
+        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
 
         with patch(
             "mindroom.api.openai_compat._build_team",
@@ -2936,9 +2953,9 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
+        mock_team = _make_test_team()
         mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="ok"))
-        mock_agents = [MagicMock(name="GeneralAgent"), MagicMock(name="CodeAgent")]
+        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
 
         with (
             patch(
@@ -2994,8 +3011,8 @@ class TestTeamCompletion:
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
-        mock_agents = [MagicMock(name="GeneralAgent")]
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             yield TeamContentEvent(content="Hello world!")

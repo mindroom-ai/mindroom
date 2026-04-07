@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.google_bigquery import GoogleBigQueryTools
+    from agno.tools.google.bigquery import GoogleBigQueryTools
 
 
 @register_tool_with_metadata(
@@ -53,22 +53,22 @@ if TYPE_CHECKING:
             description="Optional Google Cloud credentials object passed directly to the toolkit",
         ),
         ConfigField(
-            name="enable_list_tables",
-            label="Enable List Tables",
+            name="list_tables",
+            label="List Tables",
             type="boolean",
             required=False,
             default=True,
         ),
         ConfigField(
-            name="enable_describe_table",
-            label="Enable Describe Table",
+            name="describe_table",
+            label="Describe Table",
             type="boolean",
             required=False,
             default=True,
         ),
         ConfigField(
-            name="enable_run_sql_query",
-            label="Enable Run SQL Query",
+            name="run_sql_query",
+            label="Run SQL Query",
             type="boolean",
             required=False,
             default=True,
@@ -87,6 +87,6 @@ if TYPE_CHECKING:
 )
 def google_bigquery_tools() -> type[GoogleBigQueryTools]:
     """Return Google BigQuery tools for data analytics."""
-    from agno.tools.google_bigquery import GoogleBigQueryTools
+    from agno.tools.google.bigquery import GoogleBigQueryTools
 
     return GoogleBigQueryTools

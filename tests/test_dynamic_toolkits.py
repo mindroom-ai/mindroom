@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.agent._tools import determine_tools_for_model
 from agno.models.openai import OpenAIChat
 from agno.run.agent import RunOutput
 from agno.run.base import RunContext, RunStatus
@@ -107,12 +108,13 @@ def _tool_schema_count(agent: object, *, session_id: str) -> int:
     run_context = RunContext(run_id=f"run-{session_id}", session_id=session_id)
     session = AgentSession(session_id=session_id, agent_id="code", created_at=1, updated_at=1)
     processed_tools = agent.get_tools(run_output, run_context, session)
-    tools_for_model = agent._determine_tools_for_model(
-        agent.model,
-        processed_tools,
-        run_output,
-        run_context,
-        session,
+    tools_for_model = determine_tools_for_model(
+        agent=agent,
+        model=agent.model,
+        processed_tools=processed_tools,
+        run_response=run_output,
+        run_context=run_context,
+        session=session,
     )
     return len(tools_for_model or [])
 

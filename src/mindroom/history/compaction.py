@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from html import escape
 from typing import TYPE_CHECKING, TypeGuard, cast
 
+from agno.agent._tools import determine_tools_for_model
 from agno.models.message import Message
 from agno.run import RunContext
 from agno.run.agent import RunOutput
@@ -17,6 +18,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
+from agno.team._tools import _determine_tools_for_model as determine_team_tools_for_model
 from agno.tools import Toolkit
 from agno.tools.function import Function
 from agno.utils.message import filter_tool_calls
@@ -460,7 +462,7 @@ def _prepare_team_prompt_inputs_for_estimation(
     payload and `_tool_instructions` state that feed that prompt are only built by
     the internal `_determine_tools_for_model()` path. Using that single internal
     entrypoint is less brittle than re-implementing several private team helpers in
-    MindRoom. This logic is verified against `agno==2.4.7`; if Agno changes those
+    MindRoom. This logic is verified against `agno==2.5.13`; if Agno changes those
     internals, update this estimator to match the new team prompt builder.
     """
     budget_session_id = "history-budget"
@@ -478,7 +480,8 @@ def _prepare_team_prompt_inputs_for_estimation(
     )
     model = team.model
     assert model is not None
-    prepared_tools = team._determine_tools_for_model(
+    prepared_tools = determine_team_tools_for_model(
+        team=team,
         model=model,
         run_response=run_response,
         run_context=run_context,
@@ -496,9 +499,9 @@ def _prepare_agent_prompt_inputs_for_estimation(
 
     Agno exposes `Agent.get_system_message()` publicly, but the prepared tool
     payload and `_tool_instructions` that feed that prompt are only finalized by
-    the internal `_determine_tools_for_model()` path. Using that single internal
-    entrypoint keeps MindRoom aligned with `agno==2.4.7` without re-implementing
-    several private agent helpers.
+    the shared `agno.agent._tools.determine_tools_for_model()` path. Using that
+    single internal entrypoint keeps MindRoom aligned with Agno without
+    re-implementing several private agent helpers.
     """
     budget_session_id = "history-budget"
     budget_user_id = "history-budget-user"
@@ -529,7 +532,8 @@ def _prepare_agent_prompt_inputs_for_estimation(
         session=session,
         user_id=budget_user_id,
     )
-    prepared_tools = agent._determine_tools_for_model(
+    prepared_tools = determine_tools_for_model(
+        agent=agent,
         model=model,
         processed_tools=processed_tools,
         run_response=run_response,

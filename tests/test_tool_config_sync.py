@@ -1,15 +1,26 @@
 """Test that ConfigField definitions match actual tool parameters from agno."""
 
 import inspect
-from typing import Union, get_args, get_origin
+from types import UnionType
+from typing import Union, get_args, get_origin, get_type_hints
 
 import pytest
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
+from mindroom.constants import RuntimePaths
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 SKIP_CUSTOM = {"homeassistant", "gmail", "google_calendar", "google_sheets", "openclaw_compat"}
+IGNORED_AGNO_PARAMS = {
+    # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
+    "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
+    # Agno accepts an SSLContext for Slack, but MindRoom has no safe serialized UI/config path for it.
+    "slack": {"ssl"},
+    # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.
+    "yfinance": {"session"},
+}
 
 
 @pytest.mark.parametrize("tool_name", list(_TOOL_REGISTRY.keys()))
@@ -41,6 +52,14 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
     """
     # Get the actual parameters from agno
     sig = inspect.signature(tool_class.__init__)
+    resolved_type_hints = get_type_hints(
+        tool_class.__init__,
+        globalns=tool_class.__init__.__globals__
+        | {
+            "ResolvedWorkerTarget": ResolvedWorkerTarget,
+            "RuntimePaths": RuntimePaths,
+        },
+    )
     agno_params = {}
 
     for name, param in sig.parameters.items():
@@ -53,8 +72,11 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
         if name == "runtime_paths":
             continue
         agno_params[name] = {
-            "type": param.annotation if param.annotation != inspect.Parameter.empty else None,
+            "type": resolved_type_hints.get(name),
         }
+
+    ignored_param_names = IGNORED_AGNO_PARAMS.get(tool_name, set())
+    agno_params = {name: param_info for name, param_info in agno_params.items() if name not in ignored_param_names}
 
     # Get our ConfigFields for the tool
     tool_metadata = TOOL_METADATA[tool_name]
@@ -87,7 +109,8 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
 
         # Handle Optional types
         actual_type = param_type
-        if get_origin(param_type) is Union:
+        origin = get_origin(param_type)
+        if origin in {Union, UnionType}:
             args = get_args(param_type)
             if type(None) in args:
                 # It's Optional, get the actual type

@@ -9,11 +9,13 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.agent import Agent as AgnoAgent
 from agno.run.base import RunStatus
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
+from agno.team import Team as AgnoTeam
 
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -42,6 +44,22 @@ from tests.conftest import bind_runtime_paths, make_visible_message, runtime_pat
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+
+_TEST_MODEL = "openai:gpt-5.4"
+
+
+def _make_test_agent(name: str) -> AgnoAgent:
+    agent_id = name.removesuffix("Agent").replace(" ", "_").lower() or name.lower()
+    return AgnoAgent(name=name, id=agent_id, model=_TEST_MODEL)
+
+
+def _make_test_team(
+    *,
+    name: str = "Test Team",
+    team_id: str = "test-team",
+) -> AgnoTeam:
+    return AgnoTeam(name=name, id=team_id, model=_TEST_MODEL, members=[], tools=[])
 
 
 def _build_test_config() -> Config:
@@ -132,7 +150,7 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     orchestrator.agent_bots = {"general": MagicMock()}
 
     media_validation_error = "Error code: 500 - audio input is not supported"
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
         side_effect=[
             Exception(media_validation_error),
@@ -141,8 +159,7 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     )
     audio_input = MagicMock(name="audio_input")
 
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
@@ -175,11 +192,9 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     orchestrator.runtime_paths = runtime_paths_for(config)
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
-    fake_agent.id = "general"
+    fake_agent = _make_test_agent("GeneralAgent")
     collector: list[object] = []
 
     with (
@@ -220,10 +235,9 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -266,11 +280,9 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
-    fake_agent = MagicMock()
-    fake_agent.id = "general"
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
     with open_bound_scope_session_context(
         agents=[fake_agent],
         session_id="session-123",
@@ -335,11 +347,9 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
-    fake_agent = MagicMock()
-    fake_agent.id = "general"
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
     with open_bound_scope_session_context(
         agents=[fake_agent],
         session_id="session-456",
@@ -403,13 +413,12 @@ async def test_team_response_passes_run_id_to_team_arun() -> None:
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
         return_value=TeamRunOutput(content="Recovered team response", status=RunStatus.completed),
     )
 
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
@@ -438,7 +447,7 @@ async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
         return_value=TeamRunOutput(
             content="Run run-123 was cancelled",
@@ -446,8 +455,7 @@ async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None
         ),
     )
 
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
@@ -474,13 +482,12 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
         return_value=TeamRunOutput(content="validation failed in team", status=RunStatus.error),
     )
 
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
@@ -509,7 +516,7 @@ async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> N
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
         side_effect=[
             TeamRunOutput(content="Error code: 500 - audio input is not supported", status=RunStatus.error),
@@ -517,8 +524,7 @@ async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> N
         ],
     )
 
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
     callback_run_ids: list[str] = []
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -580,7 +586,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams._create_team_instance", return_value=MagicMock()),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
 
@@ -642,7 +648,7 @@ async def test_team_response_stream_emits_team_run_output_fallback() -> None:
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams._create_team_instance", return_value=MagicMock()),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
         chunks = [
@@ -697,7 +703,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_output_f
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams._create_team_instance", return_value=MagicMock()),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
         pytest.raises(asyncio.CancelledError),
     ):
@@ -745,7 +751,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams._create_team_instance", return_value=MagicMock()),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
         patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
     ):
@@ -803,7 +809,7 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams._create_team_instance", return_value=MagicMock()),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
         chunks = [
@@ -840,12 +846,11 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
 
     media_validation_error = "Error code: 500 - audio input is not supported"
 
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=Exception(media_validation_error))
     audio_input = MagicMock(name="audio_input")
 
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
@@ -907,11 +912,9 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     orchestrator.runtime_paths = runtime_paths_for(config)
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock(running=True)}
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
-    fake_agent.id = "general"
+    fake_agent = _make_test_agent("GeneralAgent")
     collector: list[object] = []
-    mock_team = MagicMock(name="team")
+    mock_team = _make_test_team(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:
         yield TeamRunOutput(content="Streamed team response")
@@ -963,9 +966,8 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
     orchestrator.runtime_paths = runtime_paths_for(config)
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock(running=True)}
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
-    mock_team = MagicMock(name="team")
+    fake_agent = _make_test_agent("GeneralAgent")
+    mock_team = _make_test_team(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:
         yield TeamRunOutput(content="Streamed team response")
@@ -1016,9 +1018,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock(running=True)}
 
-    fake_agent = MagicMock()
-    fake_agent.id = "general"
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
     with open_bound_scope_session_context(
         agents=[fake_agent],
         session_id="session-789",
@@ -1031,7 +1031,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
         assert scope_context.session is not None
         update_scope_seen_event_ids(scope_context.session, scope_context.scope, ["event-1"])
         scope_context.storage.upsert_session(scope_context.session)
-    mock_team = MagicMock(name="team")
+    mock_team = _make_test_team(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:
         yield TeamRunOutput(content="Streamed team response")
@@ -1254,12 +1254,11 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
     async def successful_stream() -> AsyncIterator[object]:
         yield TeamRunContentEvent(content="Recovered setup stream")
 
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[Exception(media_validation_error), successful_stream()])
     audio_input = MagicMock(name="audio_input")
 
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
@@ -1306,12 +1305,11 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
     async def successful_stream() -> AsyncIterator[object]:
         yield TeamRunContentEvent(content="Recovered stream")
 
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[failing_stream(), successful_stream()])
     audio_input = MagicMock(name="audio_input")
 
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
@@ -1490,11 +1488,10 @@ async def test_team_response_ignores_router_in_direct_team_member_list() -> None
     general_bot.agent.name = "GeneralAgent"
     general_bot.agent.instructions = []
     orchestrator.agent_bots = {"general": general_bot}
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="General response"))
 
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -1525,10 +1522,9 @@ async def test_team_response_stream_ignores_router_in_direct_team_member_list() 
     async def successful_stream() -> AsyncIterator[object]:
         yield TeamRunContentEvent(content="General response")
 
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = MagicMock(return_value=successful_stream())
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -1566,11 +1562,10 @@ async def test_team_response_forwards_session_and_user_id_to_team_run() -> None:
     general_bot.agent.name = "GeneralAgent"
     general_bot.agent.instructions = []
     orchestrator.agent_bots = {"general": general_bot}
-    mock_team = MagicMock()
+    mock_team = _make_test_team()
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="General response"))
 
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
+    fake_agent = _make_test_agent("GeneralAgent")
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -1619,9 +1614,8 @@ async def test_team_response_materializes_members_with_request_execution_identit
         resolved_thread_id="$thread",
         session_id="session-123",
     )
-    fake_agent = MagicMock()
-    fake_agent.name = "GeneralAgent"
-    mock_team = MagicMock()
+    fake_agent = _make_test_agent("GeneralAgent")
+    mock_team = _make_test_team()
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="General response"))
 
     with (

@@ -55,6 +55,27 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
+            name="timelimit",
+            label="Time Limit",
+            type="text",
+            required=False,
+            default=None,
+        ),
+        ConfigField(
+            name="region",
+            label="Region",
+            type="text",
+            required=False,
+            default=None,
+        ),
+        ConfigField(
+            name="backend",
+            label="Backend",
+            type="text",
+            required=False,
+            default=None,
+        ),
+        ConfigField(
             name="proxy",
             label="Proxy",
             type="url",
