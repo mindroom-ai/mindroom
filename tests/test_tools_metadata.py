@@ -50,7 +50,7 @@ def test_export_tools_metadata_json() -> None:
 
     assert committed_content == expected_content, (
         "tools_metadata.json is out of date, regenerate it with "
-        "./.venv/bin/python -c \"import json; import mindroom.tools; "
+        './.venv/bin/python -c "import json; import mindroom.tools; '
         "from pathlib import Path; "
         "from mindroom.tool_system.metadata import export_tools_metadata; "
         "Path('src/mindroom/tools_metadata.json').write_text("
