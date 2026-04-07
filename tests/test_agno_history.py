@@ -590,11 +590,11 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == "merged summary"
-    assert [run.run_id for run in persisted.runs] == ["run-3", "run-4"]
+    assert persisted.runs == []
 
     state = read_scope_state(persisted, scope)
     assert state.last_summary_model == "summary-model"
-    assert state.last_compacted_run_count == 2
+    assert state.last_compacted_run_count == 4
     assert state.force_compact_before_next_run is False
     assert state.last_compacted_at is not None
 
@@ -694,7 +694,7 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
     assert [run.run_id for run in persisted_room.runs] == ["room-1", "room-2", "room-3"]
     assert persisted_thread.summary is not None
     assert persisted_thread.summary.summary == "thread summary"
-    assert [run.run_id for run in persisted_thread.runs] == ["thread-3", "thread-4"]
+    assert persisted_thread.runs == []
     assert len(prepared.compaction_outcomes) == 1
     outcome = prepared.compaction_outcomes[0]
     assert outcome.session_id == thread_session_id
@@ -704,7 +704,7 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_auto_compaction_rechecks_after_merged_summary_growth(
+async def test_prepare_history_for_run_auto_compaction_finishes_selected_runs_across_multiple_passes(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(
@@ -740,11 +740,69 @@ async def test_prepare_history_for_run_auto_compaction_rechecks_after_merged_sum
         ],
     )
     storage.upsert_session(session)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+    )
+    visible_runs = list(session.runs or [])
+    first_summary_text = "first pass summary"
+    second_summary_text = "final summary"
+
+    def _included_run_count(
+        previous_summary: str | None,
+        compacted_runs: list[RunOutput | TeamRunOutput],
+        budget: int,
+    ) -> int:
+        return len(
+            _build_summary_input(
+                previous_summary=previous_summary,
+                compacted_runs=compacted_runs,
+                max_input_tokens=budget,
+            )[1],
+        )
+
+    summary_input_budget = next(
+        budget
+        for budget in range(1, 10_000)
+        if _included_run_count(None, visible_runs, budget) == 2
+        and _included_run_count(first_summary_text, visible_runs[2:], budget) == 1
+    )
+    after_first_session = _session(
+        "session-1",
+        runs=visible_runs[2:],
+        summary=SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
+    )
+    replay_budget = estimate_prompt_visible_history_tokens(
+        session=after_first_session,
+        scope=scope,
+        history_settings=history_settings,
+    )
+    assert estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope,
+        history_settings=history_settings,
+    ) > replay_budget
+
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_config=True,
+        authored_compaction_enabled=True,
+        destructive_compaction_available=True,
+        explicit_compaction_model=True,
+        compaction_model_name="summary-model",
+        compaction_context_window=4_096,
+        replay_window_tokens=64_000,
+        trigger_threshold_tokens=1,
+        reserve_tokens=0,
+        static_prompt_tokens=0,
+        replay_budget_tokens=replay_budget,
+        summary_input_budget_tokens=summary_input_budget,
+    )
 
     summary_mock = AsyncMock(
         side_effect=[
-            SessionSummary(summary="expanded summary " * 20, updated_at=datetime.now(UTC)),
-            SessionSummary(summary="final summary", updated_at=datetime.now(UTC)),
+            SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
+            SessionSummary(summary=second_summary_text, updated_at=datetime.now(UTC)),
         ],
     )
     with (
@@ -767,17 +825,104 @@ async def test_prepare_history_for_run_auto_compaction_rechecks_after_merged_sum
             execution_identity=None,
             storage=storage,
             session=session,
-            available_history_budget=160,
+            history_settings=history_settings,
+            execution_plan=execution_plan,
         )
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == "final summary"
-    assert [run.run_id for run in persisted.runs] == ["run-3"]
+    assert persisted.summary.summary == second_summary_text
+    assert persisted.runs == []
+    state = read_scope_state(persisted, scope)
+    assert state.last_compacted_run_count == 3
     assert summary_mock.await_count == 2
     assert len(prepared.compaction_outcomes) == 1
-    assert prepared.compaction_outcomes[0].runs_after == 1
+    assert prepared.compaction_outcomes[0].compacted_run_count == 3
+    assert prepared.compaction_outcomes[0].runs_after == 0
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_auto_compaction_compacts_all_runs_when_over_budget(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-3",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-4",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    summary_mock = AsyncMock(
+        return_value=SessionSummary(summary="all runs summary", updated_at=datetime.now(UTC)),
+    )
+    with (
+        patch(
+            "mindroom.ai.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=summary_mock,
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            available_history_budget=1,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "all runs summary"
+    assert persisted.runs == []
+    assert summary_mock.await_count == 1
+    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_outcomes[0].runs_before == 4
+    assert prepared.compaction_outcomes[0].runs_after == 0
+    assert prepared.compaction_outcomes[0].compacted_run_count == 4
 
 
 @pytest.mark.asyncio
@@ -2369,10 +2514,7 @@ async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summar
         patch(
             "mindroom.history.compaction._generate_compaction_summary",
             new=AsyncMock(
-                side_effect=[
-                    SessionSummary(summary="first summary", updated_at=datetime.now(UTC)),
-                    SessionSummary(summary="final summary", updated_at=datetime.now(UTC)),
-                ],
+                return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
             ),
         ),
     ):
@@ -2392,14 +2534,14 @@ async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summar
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == "final summary"
+    assert persisted.summary.summary == "merged summary"
     assert persisted.runs == []
     state = read_scope_state(persisted, scope)
     assert state.last_compacted_run_count == 2
     assert state.force_compact_before_next_run is False
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].runs_after == 0
-    assert prepared.compaction_outcomes[0].summary == "final summary"
+    assert prepared.compaction_outcomes[0].summary == "merged summary"
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.mode == "disabled"
     assert prepared.replay_plan.add_history_to_context is False
