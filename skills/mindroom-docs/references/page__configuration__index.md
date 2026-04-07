@@ -18,6 +18,10 @@ You can also validate a specific file directly:
 mindroom config validate --path /path/to/config.yaml
 ```
 
+## MCP Servers
+
+MindRoom can connect to external Model Context Protocol servers through the top-level `mcp_servers` block. See [MCP](https://docs.mindroom.chat/mcp/index.md) for transport-specific config, tool naming, examples, and agent setup.
+
 ## Environment Variables
 
 ### Core

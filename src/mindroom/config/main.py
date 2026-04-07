@@ -51,6 +51,7 @@ from mindroom.matrix.identity import (
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
+from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.tool_system.metadata import ToolConfigOverrideError, ToolMetadataValidationError
 from mindroom.tool_system.plugins import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
@@ -345,7 +346,7 @@ class Config(BaseModel):
         default_factory=dict,
         description="Knowledge base configurations keyed by base ID",
     )
-    mcp_servers: dict[str, Any] = Field(
+    mcp_servers: dict[str, MCPServerConfig] = Field(
         default_factory=dict,
         description="MCP server configurations keyed by server id",
     )
@@ -408,6 +409,8 @@ class Config(BaseModel):
         if overlapping_names:
             msg = f"Agent and team names must be distinct, overlapping keys: {', '.join(overlapping_names)}"
             raise ValueError(msg)
+        for server_id in self.mcp_servers:
+            normalize_mcp_server_id(server_id)
         return self
 
     @model_validator(mode="after")
@@ -576,6 +579,7 @@ class Config(BaseModel):
             unsupported_tools = unsupported_shared_only_integration_names(
                 self.get_agent_tools(agent_name),
                 execution_scope,
+                configured_mcp_server_ids=self.mcp_servers,
             )
             invalid_assignments.extend(
                 f"{agent_name} -> {tool_name} ({scope_label})" for tool_name in unsupported_tools
@@ -1037,6 +1041,7 @@ class Config(BaseModel):
         return unsupported_shared_only_integration_names(
             [entry.name for entry in self.get_toolkit_tool_configs(toolkit_name)],
             execution_scope,
+            configured_mcp_server_ids=self.mcp_servers,
         )
 
     def get_agent_scope_incompatible_toolkits(self, agent_name: str) -> dict[str, list[str]]:
@@ -1168,21 +1173,29 @@ class Config(BaseModel):
         entry: ToolConfigEntry,
         *,
         config_path_prefix: str,
+        tool_registry: dict[str, Any],
         tool_metadata: dict[str, Any],
     ) -> None:
         """Validate one authored tool entry against the loaded tool metadata."""
+        from mindroom.mcp.registry import _MCP_TOOL_FACTORY_MARKER, validate_mcp_agent_overrides  # noqa: PLC0415
         from mindroom.tool_system.metadata import validate_authored_overrides  # noqa: PLC0415
 
         if entry.name not in tool_metadata and not self.is_tool_preset(entry.name):
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
             raise ToolConfigOverrideError(msg)
 
-        validate_authored_overrides(
+        validated_overrides = validate_authored_overrides(
             entry.name,
             entry.overrides,
             config_path_prefix=config_path_prefix,
             tool_metadata=tool_metadata,
         )
+        tool_factory = tool_registry.get(entry.name)
+        if tool_factory is not None and getattr(tool_factory, _MCP_TOOL_FACTORY_MARKER, False):
+            try:
+                validate_mcp_agent_overrides(entry.name, validated_overrides)
+            except ValueError as exc:
+                raise ToolConfigOverrideError(str(exc)) from exc
 
     def _validate_authored_tool_entries(self, runtime_paths: RuntimePaths) -> None:
         """Validate defaults and per-agent authored tool overrides with runtime metadata loaded."""
@@ -1193,6 +1206,7 @@ class Config(BaseModel):
             self._validate_authored_tool_entry(
                 entry,
                 config_path_prefix=f"defaults.tools[{index}]",
+                tool_registry=tool_registry,
                 tool_metadata=tool_metadata,
             )
         for agent_name, agent_config in self.agents.items():
@@ -1200,6 +1214,7 @@ class Config(BaseModel):
                 self._validate_authored_tool_entry(
                     entry,
                     config_path_prefix=f"agents.{agent_name}.tools[{index}]",
+                    tool_registry=tool_registry,
                     tool_metadata=tool_metadata,
                 )
         for toolkit_name, toolkit in self.toolkits.items():
@@ -1220,6 +1235,7 @@ class Config(BaseModel):
                 self._validate_authored_tool_entry(
                     entry,
                     config_path_prefix=config_path_prefix,
+                    tool_registry=tool_registry,
                     tool_metadata=tool_metadata,
                 )
 
@@ -1294,6 +1310,26 @@ class Config(BaseModel):
         return frozenset(
             agent_name for agent_name, agent_config in self.agents.items() if agent_config.private is not None
         )
+
+    def _agent_hard_dependency_tool_names(self, agent_name: str) -> set[str]:
+        """Return tool names that are hard startup dependencies for one agent."""
+        agent_config = self.get_agent(agent_name)
+        referenced_tool_names = set(self.get_agent_tools(agent_name))
+        for toolkit_name in agent_config.initial_toolkits:
+            referenced_tool_names.update(entry.name for entry in self.get_toolkit_tool_configs(toolkit_name))
+        return referenced_tool_names
+
+    def get_entities_referencing_tools(self, tool_names: set[str]) -> set[str]:
+        """Return agents and teams that depend on any of the given tools."""
+        matching_agents = {
+            agent_name for agent_name in self.agents if self._agent_hard_dependency_tool_names(agent_name) & tool_names
+        }
+        matching_teams = {
+            team_name
+            for team_name, team_config in self.teams.items()
+            if any(agent_name in matching_agents for agent_name in team_config.agents)
+        }
+        return matching_agents | matching_teams
 
     def get_agent_delegation_closure(
         self,

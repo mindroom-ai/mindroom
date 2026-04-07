@@ -84,7 +84,7 @@ MindRoom resolves the package location and looks for `mindroom.plugin.json` in t
 
 ## MCP via plugins (advanced)
 
-MindRoom does not yet support direct MCP server configuration in `config.yaml`. If you need MCP today, wrap Agno `MCPTools` in a plugin tool factory:
+MindRoom now supports native MCP servers in `config.yaml`. See [MCP](https://docs.mindroom.chat/mcp/index.md) for the normal setup path. This plugin pattern is still useful when you want a custom wrapper around Agno `MCPTools` instead of MindRoom's native MCP registry:
 
 ```
 from agno.tools.mcp import MCPTools

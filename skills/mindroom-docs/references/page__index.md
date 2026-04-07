@@ -148,7 +148,7 @@ mindroom run
 - [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/index.md) - Use agents from any OpenAI-compatible client
 - [Tools](https://docs.mindroom.chat/tools/index.md) - Available tool integrations
 - [OpenClaw Import](https://docs.mindroom.chat/openclaw/index.md) - Reuse OpenClaw workspace files in MindRoom
-- [MCP (Planned)](https://docs.mindroom.chat/tools/mcp/index.md) - Native MCP status and current plugin workaround
+- [MCP](https://docs.mindroom.chat/mcp/index.md) - Configure native MCP client servers and expose their tools to agents
 - [Skills](https://docs.mindroom.chat/skills/index.md) - OpenClaw-compatible skills system
 - [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend with custom tools and skills
 - [Knowledge Bases](https://docs.mindroom.chat/knowledge/index.md) - Configure RAG-backed document indexing

@@ -28,7 +28,7 @@ defaults:
     - scheduler
 ```
 
-`defaults.tools` are merged into each agent's own `tools` list with duplicates removed. Set `defaults.tools: []` to disable global default tools, or set `agents.<name>.include_default_tools: false` to opt out a specific agent. When the same tool appears in both `defaults.tools` and an agent's `tools` with inline overrides, the per-agent overrides take priority, with non-overlapping keys merged from both. See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration) for the full override syntax and merge order.
+`defaults.tools` are merged into each agent's own `tools` list with duplicates removed. Set `defaults.tools: []` to disable global default tools, or set `agents.<name>.include_default_tools: false` to opt out a specific agent. When the same tool appears in both `defaults.tools` and an agent's `tools` with inline overrides, the per-agent overrides take priority, with non-overlapping keys merged from both. See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration) for the full override syntax and merge order. Configured MCP servers also appear here as dynamic tools named `mcp_<server_id>`. See [MCP](https://docs.mindroom.chat/mcp/index.md) for the `mcp_servers` config and naming rules.
 
 ## Browse By Topic
 
@@ -62,7 +62,7 @@ Some tools default to running in a sandboxed worker container instead of the pri
 
 ## Shared-Only Integrations
 
-Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes. The current shared-only integrations are `google`, `spotify`, `homeassistant`, `gmail`, `google_calendar`, and `google_sheets`.
+Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes. The current shared-only integrations are `google`, `spotify`, `homeassistant`, `gmail`, `google_calendar`, `google_sheets`, and all configured `mcp_<server_id>` tools.
 
 ## Automatic Dependency Installation
 
@@ -70,7 +70,7 @@ Each tool declares its optional Python dependencies in `pyproject.toml`. When a 
 
 ## Related Docs
 
-- [MCP](https://docs.mindroom.chat/tools/mcp/index.md) - Native MCP status and plugin-based workaround.
+- [MCP](https://docs.mindroom.chat/mcp/index.md) - Configure native MCP client servers and expose them as MindRoom tools.
 - [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend MindRoom with custom tools and skills.
 - [Attachments](https://docs.mindroom.chat/attachments/index.md) - Attachment lifecycle and context scoping.
 - [Scheduling](https://docs.mindroom.chat/scheduling/index.md) - Chat command scheduling and task behavior.

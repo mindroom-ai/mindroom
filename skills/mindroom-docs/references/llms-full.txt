@@ -154,7 +154,7 @@ mindroom run
 - [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/index.md) - Use agents from any OpenAI-compatible client
 - [Tools](https://docs.mindroom.chat/tools/index.md) - Available tool integrations
 - [OpenClaw Import](https://docs.mindroom.chat/openclaw/index.md) - Reuse OpenClaw workspace files in MindRoom
-- [MCP (Planned)](https://docs.mindroom.chat/tools/mcp/index.md) - Native MCP status and current plugin workaround
+- [MCP](https://docs.mindroom.chat/mcp/index.md) - Configure native MCP client servers and expose their tools to agents
 - [Skills](https://docs.mindroom.chat/skills/index.md) - OpenClaw-compatible skills system
 - [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend with custom tools and skills
 - [Knowledge Bases](https://docs.mindroom.chat/knowledge/index.md) - Configure RAG-backed document indexing
@@ -754,6 +754,10 @@ You can also validate a specific file directly:
 ```
 mindroom config validate --path /path/to/config.yaml
 ```
+
+## MCP Servers
+
+MindRoom can connect to external Model Context Protocol servers through the top-level `mcp_servers` block. See [MCP](https://docs.mindroom.chat/mcp/index.md) for transport-specific config, tool naming, examples, and agent setup.
 
 ## Environment Variables
 
@@ -1428,7 +1432,7 @@ The `!config` chat command and the `config_manager` tool preserve inline overrid
 
 ## Worker Routing
 
-`worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process. When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default. `worker_scope` controls how those sandbox runtimes are reused between calls. Six integrations are shared-only (they require `worker_scope` unset or `shared`): `google`, `spotify`, `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`. Of those, `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` also always stay local regardless of `worker_tools` (they are never proxied to the sandbox). `google` and `spotify` can still be proxied through the sandbox.
+`worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process. When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default. `worker_scope` controls how those sandbox runtimes are reused between calls. The shared-only integrations require `worker_scope` unset or `shared`. That list includes `google`, `spotify`, `gmail`, `google_calendar`, `google_sheets`, `homeassistant`, and all configured `mcp_<server_id>` tools. Of those, `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` also always stay local regardless of `worker_tools` (they are never proxied to the sandbox). `google` and `spotify` can still be proxied through the sandbox.
 
 The supported `worker_scope` values are:
 
@@ -2177,7 +2181,7 @@ defaults:
     - scheduler
 ```
 
-`defaults.tools` are merged into each agent's own `tools` list with duplicates removed. Set `defaults.tools: []` to disable global default tools, or set `agents.<name>.include_default_tools: false` to opt out a specific agent. When the same tool appears in both `defaults.tools` and an agent's `tools` with inline overrides, the per-agent overrides take priority, with non-overlapping keys merged from both. See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration) for the full override syntax and merge order.
+`defaults.tools` are merged into each agent's own `tools` list with duplicates removed. Set `defaults.tools: []` to disable global default tools, or set `agents.<name>.include_default_tools: false` to opt out a specific agent. When the same tool appears in both `defaults.tools` and an agent's `tools` with inline overrides, the per-agent overrides take priority, with non-overlapping keys merged from both. See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration) for the full override syntax and merge order. Configured MCP servers also appear here as dynamic tools named `mcp_<server_id>`. See [MCP](https://docs.mindroom.chat/mcp/index.md) for the `mcp_servers` config and naming rules.
 
 ## Browse By Topic
 
@@ -2211,7 +2215,7 @@ Some tools default to running in a sandboxed worker container instead of the pri
 
 ## Shared-Only Integrations
 
-Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes. The current shared-only integrations are `google`, `spotify`, `homeassistant`, `gmail`, `google_calendar`, and `google_sheets`.
+Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes. The current shared-only integrations are `google`, `spotify`, `homeassistant`, `gmail`, `google_calendar`, `google_sheets`, and all configured `mcp_<server_id>` tools.
 
 ## Automatic Dependency Installation
 
@@ -2219,7 +2223,7 @@ Each tool declares its optional Python dependencies in `pyproject.toml`. When a 
 
 ## Related Docs
 
-- [MCP](https://docs.mindroom.chat/tools/mcp/index.md) - Native MCP status and plugin-based workaround.
+- [MCP](https://docs.mindroom.chat/mcp/index.md) - Configure native MCP client servers and expose them as MindRoom tools.
 - [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend MindRoom with custom tools and skills.
 - [Attachments](https://docs.mindroom.chat/attachments/index.md) - Attachment lifecycle and context scoping.
 - [Scheduling](https://docs.mindroom.chat/scheduling/index.md) - Chat command scheduling and task behavior.
@@ -7448,7 +7452,7 @@ make_request("reports", method="POST", json_data={"range": "7d"})
 - [Tools Overview](https://docs.mindroom.chat/tools/index.md)
 - [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/index.md)
 - [Project Management](https://docs.mindroom.chat/tools/project-management/index.md)
-- [MCP](https://docs.mindroom.chat/tools/mcp/index.md)
+- [MCP](https://docs.mindroom.chat/mcp/index.md)
 
 # Location, Commerce, & Home
 
@@ -7667,15 +7671,11 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 
 For tool configuration, presets, and runtime context, see the [Tools Overview](https://docs.mindroom.chat/tools/index.md).
 
-# MCP (Planned)
+# MCP
 
-> [!WARNING] MindRoom does not currently support direct MCP server configuration in `config.yaml`.
+Native MCP client support is now documented at [MCP](https://docs.mindroom.chat/mcp/index.md). Use that page for `mcp_servers`, transport examples, tool naming, and agent setup.
 
-MCP can still be used today through the plugin system by wrapping Agno `MCPTools` in a plugin tool factory.
-
-See [Plugins](https://docs.mindroom.chat/plugins/#mcp-via-plugins-advanced) for the current workaround and setup instructions.
-
-This page remains as a compatibility pointer and will be expanded when native MCP support is added.
+This compatibility page remains only so older links continue to resolve.
 
 # OpenClaw Workspace Import
 
@@ -8080,7 +8080,7 @@ MindRoom resolves the package location and looks for `mindroom.plugin.json` in t
 
 ## MCP via plugins (advanced)
 
-MindRoom does not yet support direct MCP server configuration in `config.yaml`. If you need MCP today, wrap Agno `MCPTools` in a plugin tool factory:
+MindRoom now supports native MCP servers in `config.yaml`. See [MCP](https://docs.mindroom.chat/mcp/index.md) for the normal setup path. This plugin pattern is still useful when you want a custom wrapper around Agno `MCPTools` instead of MindRoom's native MCP registry:
 
 ```
 from agno.tools.mcp import MCPTools

@@ -838,6 +838,9 @@ def ensure_tool_registry_loaded(
         return
 
     load_plugins(config, runtime_paths, set_skill_roots=False)
+    from mindroom.mcp.registry import sync_mcp_tool_registry  # noqa: PLC0415
+
+    sync_mcp_tool_registry(config)
 
 
 def _capture_tool_registry_snapshot() -> _ToolRegistrySnapshot:
@@ -953,10 +956,20 @@ def resolved_tool_state_for_runtime(
 ) -> tuple[dict[str, Callable[[], type[Toolkit]]], dict[str, ToolMetadata]]:
     """Return registry and metadata visible for one runtime config without mutating global state."""
     import mindroom.tools  # noqa: F401, PLC0415
+    from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
 
     plugin_entries = config.plugins
     if not plugin_entries:
-        return _BUILTIN_TOOL_REGISTRY.copy(), _BUILTIN_TOOL_METADATA.copy()
+        builtin_registry = _BUILTIN_TOOL_REGISTRY.copy()
+        builtin_metadata = _BUILTIN_TOOL_METADATA.copy()
+        mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
+        _merge_mcp_tool_state(
+            builtin_registry,
+            builtin_metadata,
+            mcp_registry,
+            mcp_metadata,
+        )
+        return builtin_registry, builtin_metadata
 
     plugin_bases: list[tuple[plugin_module._PluginBase, Any, int]] = []
     for plugin_order, plugin_entry in enumerate(plugin_entries):
@@ -999,7 +1012,30 @@ def resolved_tool_state_for_runtime(
                 validation_registrations,
             )
 
-    return _resolved_tool_state(active_plugins, validation_registrations)
+    desired_registry, desired_metadata = _resolved_tool_state(active_plugins, validation_registrations)
+    mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
+    _merge_mcp_tool_state(
+        desired_registry,
+        desired_metadata,
+        mcp_registry,
+        mcp_metadata,
+    )
+    return desired_registry, desired_metadata
+
+
+def _merge_mcp_tool_state(
+    registry: dict[str, Callable[[], type[Toolkit]]],
+    metadata: dict[str, ToolMetadata],
+    mcp_registry: dict[str, Callable[[], type[Toolkit]]],
+    mcp_metadata: dict[str, ToolMetadata],
+) -> None:
+    """Merge MCP tool state into one resolved runtime registry after collision checks."""
+    collisions = sorted({*mcp_registry, *mcp_metadata} & {*registry, *metadata})
+    if collisions:
+        msg = f"MCP tool '{collisions[0]}' conflicts with an existing registered tool"
+        raise ToolMetadataValidationError(msg)
+    registry.update(mcp_registry)
+    metadata.update(mcp_metadata)
 
 
 def resolved_tool_metadata_for_runtime(
@@ -1118,6 +1154,12 @@ def normalize_authored_tool_overrides(tool_name: str, overrides: dict[str, objec
             raise ValueError(msg) from exc
         if normalized_value is not None:
             normalized[field_name] = normalized_value
+
+    from mindroom.mcp.registry import _MCP_TOOL_FACTORY_MARKER, validate_mcp_agent_overrides  # noqa: PLC0415
+
+    tool_factory = _TOOL_REGISTRY.get(tool_name)
+    if tool_factory is not None and getattr(tool_factory, _MCP_TOOL_FACTORY_MARKER, False):
+        validate_mcp_agent_overrides(tool_name, normalized)
     return normalized
 
 
