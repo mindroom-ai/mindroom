@@ -4904,7 +4904,7 @@ class AgentBot:
             # send_streaming_response already preserves partial text and appends
             # a cancellation marker for the final edit.
             self.logger.warning(
-                "Streaming response cancelled — traceback for diagnosis",
+                "Bot streaming response cancelled — traceback for diagnosis",
                 message_id=existing_event_id,
                 exc_info=True,
             )
