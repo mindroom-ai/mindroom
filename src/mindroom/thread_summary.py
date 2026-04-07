@@ -236,14 +236,14 @@ async def maybe_generate_thread_summary(
     thread_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    message_count_hint: int | None = None,
 ) -> None:
     """Generate and send a thread summary if the message count crosses a threshold."""
     first_threshold = config.defaults.thread_summary_first_threshold
     subsequent_interval = config.defaults.thread_summary_subsequent_interval
 
     async with thread_summary_lock(room_id, thread_id):
-        thread_history = await fetch_thread_history(client, room_id, thread_id)
-        message_count = _count_non_summary_messages(thread_history)
         cache_key = thread_summary_cache_key(room_id, thread_id)
 
         # Recover from existing summary events on cache miss (e.g., after restart)
@@ -259,6 +259,11 @@ async def maybe_generate_thread_summary(
             subsequent_interval=subsequent_interval,
         )
 
+        if message_count_hint is not None and message_count_hint < threshold:
+            return
+
+        thread_history = await fetch_thread_history(client, room_id, thread_id)
+        message_count = _count_non_summary_messages(thread_history)
         if message_count < threshold:
             return
         try:
