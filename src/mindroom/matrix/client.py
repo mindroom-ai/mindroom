@@ -245,7 +245,14 @@ def visible_message_stream_status(message: VisibleMessageLike) -> str | None:
     if isinstance(message, ResolvedVisibleMessage):
         return message.stream_status
     stream_status = message.get("stream_status")
-    return stream_status if isinstance(stream_status, str) else None
+    if isinstance(stream_status, str):
+        return stream_status
+    content = visible_message_content(message)
+    if isinstance(content, dict):
+        content_stream_status = content.get(STREAM_STATUS_KEY)
+        if isinstance(content_stream_status, str):
+            return content_stream_status
+    return None
 
 
 def visible_message_visible_event_id(message: VisibleMessageLike) -> str | None:

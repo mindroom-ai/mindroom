@@ -20,7 +20,8 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
+from mindroom.matrix.client import ResolvedVisibleMessage, ThreadHistoryResult
 from mindroom.matrix.reply_chain import _merge_thread_and_chain_history
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -1151,6 +1152,128 @@ class TestThreadingBehavior:
         ]
         assert context.thread_history[-1]["body"] == "Preview plain reply [Message continues in attached file]"
         bot.client.download.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_extract_dispatch_context_marks_chain_merged_sidecar_preview_for_hydration(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Chain-only preview messages should preserve hydration needs after thread merge."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Newest plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$plain1:localhost"}},
+                },
+                "event_id": "$incoming:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567897,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Preview plain reply [Message continues in attached file]",
+                            "msgtype": "m.file",
+                            "info": {"mimetype": "application/json"},
+                            "io.mindroom.long_text": {
+                                "version": 2,
+                                "encoding": "matrix_event_content_json",
+                            },
+                            STREAM_STATUS_KEY: STREAM_STATUS_PENDING,
+                            "url": "mxc://server/plain1-sidecar-merge",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$t1:localhost"}},
+                        },
+                        "event_id": "$plain1:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567896,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Thread reply",
+                            "msgtype": "m.text",
+                            "m.relates_to": {
+                                "rel_type": "m.thread",
+                                "event_id": "$root:localhost",
+                                "m.in_reply_to": {"event_id": "$root:localhost"},
+                            },
+                        },
+                        "event_id": "$t1:localhost",
+                        "sender": "@mindroom_general:localhost",
+                        "origin_server_ts": 1234567895,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Thread root",
+                            "msgtype": "m.text",
+                        },
+                        "event_id": "$root:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567894,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
+        )
+        snapshot = ThreadHistoryResult(
+            [
+                {
+                    "event_id": "$root:localhost",
+                    "sender": "@user:localhost",
+                    "body": "Thread root",
+                    "timestamp": 1234567894,
+                    "content": {"body": "Thread root"},
+                },
+                {
+                    "event_id": "$t1:localhost",
+                    "sender": "@mindroom_general:localhost",
+                    "body": "Thread reply",
+                    "timestamp": 1234567895,
+                    "content": {
+                        "body": "Thread reply",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$root:localhost",
+                        },
+                    },
+                },
+            ],
+            is_full_history=True,
+        )
+
+        with patch("mindroom.bot.fetch_thread_snapshot", new=AsyncMock(return_value=snapshot)) as mock_snapshot:
+            context = await bot._extract_dispatch_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$root:localhost"
+        assert context.requires_full_thread_history is True
+        assert [message["event_id"] for message in context.thread_history] == [
+            "$root:localhost",
+            "$t1:localhost",
+            "$plain1:localhost",
+        ]
+        assert context.thread_history[-1]["body"] == "Preview plain reply [Message continues in attached file]"
+        assert context.thread_history[-1]["stream_status"] == STREAM_STATUS_PENDING
+        mock_snapshot.assert_awaited_once_with(bot.client, room.room_id, "$root:localhost")
 
     @pytest.mark.asyncio
     async def test_extract_context_retries_sidecar_hydration_after_cached_reply_chain_preview_failure(

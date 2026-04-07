@@ -179,6 +179,23 @@ class TestClassifyPartialReply:
             is _PartialReplyKind.IN_PROGRESS
         )
 
+    def test_snapshot_dict_reads_stream_status_from_content(self) -> None:
+        """Lightweight snapshot dicts should read persisted stream metadata from content."""
+        assert (
+            _classify_partial_reply(
+                {
+                    "event_id": "e_snapshot",
+                    "body": "Thinking...",
+                    "content": {
+                        "body": "Thinking...",
+                        STREAM_STATUS_KEY: STREAM_STATUS_PENDING,
+                    },
+                },
+                active_event_ids={"e_snapshot"},
+            )
+            is _PartialReplyKind.IN_PROGRESS
+        )
+
     def test_streaming_metadata_with_live_event_id_is_in_progress_even_when_old(self) -> None:
         """Prefer the live active-event set over any stale timestamp in the event body."""
         assert (

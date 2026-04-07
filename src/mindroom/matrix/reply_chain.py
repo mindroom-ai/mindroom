@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import nio
 
+from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import (
@@ -156,6 +157,9 @@ def _node_to_snapshot_message(node: _ReplyChainNode) -> dict[str, Any]:
     thread_id = event_info.thread_id or event_info.thread_id_from_edit
     if thread_id is not None:
         message["thread_id"] = thread_id
+    stream_status = visible_content.get(STREAM_STATUS_KEY)
+    if isinstance(stream_status, str):
+        message["stream_status"] = stream_status
     return message
 
 
@@ -659,6 +663,9 @@ async def derive_conversation_target(
         thread_history = await fetch_snapshot(client, room_id, context_root_id)
         requires_full_thread_history = not _thread_history_is_full(thread_history, default=False)
         if chain_history:
+            requires_full_thread_history = requires_full_thread_history or _snapshot_history_requires_full_hydration(
+                chain_history,
+            )
             thread_history = _merge_thread_and_chain_history(thread_history, chain_history)
         return True, context_root_id, list(thread_history), requires_full_thread_history
 
