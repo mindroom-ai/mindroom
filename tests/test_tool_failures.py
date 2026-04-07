@@ -33,6 +33,18 @@ def _execution_identity() -> ToolExecutionIdentity:
     )
 
 
+class _BadStr:
+    def __str__(self) -> str:
+        msg = "str disabled"
+        raise RuntimeError(msg)
+
+
+class _BadRepr:
+    def __repr__(self) -> str:
+        msg = "repr disabled"
+        raise RuntimeError(msg)
+
+
 def test_build_tool_failure_record_redacts_nested_arguments_and_urls() -> None:
     """Nested mappings, tokens, and URL credentials should be sanitized in persisted records."""
     error = RuntimeError("payload={'api_key': 'secret-value'}")
@@ -81,6 +93,23 @@ def test_sanitize_failure_text_redacts_url_credentials() -> None:
     assert sanitized == "clone failed for https://alice:***@example.com/private.git"
 
 
+def test_sanitize_failure_text_redacts_signed_url_query_credentials() -> None:
+    """Signed query-string credentials should be redacted alongside basic-auth URL credentials."""
+    sanitized = tool_failures.sanitize_failure_text(
+        "fetch failed for "
+        "https://alice:secret@example.com/private?"
+        "sig=azure-secret&X-Amz-Signature=s3-signature&X-Amz-Credential=s3-credential"
+        "&X-Amz-Security-Token=session-token&api_key=query-secret&keep=1",
+    )
+
+    assert sanitized == (
+        "fetch failed for "
+        "https://alice:***@example.com/private?"
+        "sig=***redacted***&X-Amz-Signature=***redacted***&X-Amz-Credential=***redacted***"
+        "&X-Amz-Security-Token=***redacted***&api_key=***redacted***&keep=1"
+    )
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -98,6 +127,17 @@ def test_sanitize_failure_text_redacts_url_credentials() -> None:
 def test_sanitize_failure_text_redacts_common_sdk_secret_phrasings(raw: str, expected: str) -> None:
     """Common SDK authentication errors should not leak tokens into durable logs."""
     assert tool_failures.sanitize_failure_text(raw) == expected
+
+
+def test_sanitize_failure_text_redacts_additional_provider_secret_formats() -> None:
+    """Provider-specific token formats should be recognized outside generic API-key phrasings."""
+    sanitized = tool_failures.sanitize_failure_text(
+        "sk_live_secret rk_live_secret ghp_secret github_pat_secret AIzaSySecret",
+    )
+
+    assert sanitized == (
+        "***redacted*** ***redacted*** ***redacted*** ***redacted*** ***redacted***"
+    )
 
 
 @pytest.mark.parametrize(
@@ -171,6 +211,38 @@ def test_sanitize_failure_redacts_secret_key_suffix_variants(secret_key: str) ->
         secret_key: "***redacted***",
     }
     assert tool_failures.sanitize_failure_text(f"{secret_key}=topsecret") == f"{secret_key}=***redacted***"
+
+
+def test_sanitize_failure_value_replaces_non_finite_floats() -> None:
+    """NaN and infinity should be normalized before persistence to JSONL."""
+    assert tool_failures.sanitize_failure_value(
+        {
+            "nan": float("nan"),
+            "pos_inf": float("inf"),
+            "neg_inf": float("-inf"),
+            "finite": 1.5,
+        },
+    ) == {
+        "nan": None,
+        "pos_inf": None,
+        "neg_inf": None,
+        "finite": 1.5,
+    }
+
+
+def test_sanitize_failure_value_handles_unrepresentable_keys_and_values() -> None:
+    """Custom objects with broken __str__ or __repr__ should not abort sanitization."""
+    sanitized = tool_failures.sanitize_failure_value(
+        {
+            _BadStr(): "kept",
+            "value": _BadRepr(),
+        },
+    )
+
+    assert sanitized == {
+        "<unrepresentable: _BadStr>": "kept",
+        "value": "<unrepresentable: _BadRepr>",
+    }
 
 
 def test_build_tool_failure_record_truncates_tracebacks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -273,6 +345,29 @@ def test_record_tool_failure_logs_secondary_write_errors(tmp_path: Path) -> None
     )
 
 
+def test_record_tool_failure_skips_persistence_without_runtime_paths() -> None:
+    """The durable record should still be built when runtime paths are unavailable."""
+    with patch("mindroom.tool_system.tool_failures._append_failure_record") as mock_append:
+        record = record_tool_failure(
+            tool_name="explode",
+            arguments={"api_key": "secret"},
+            error=RuntimeError("boom"),
+            duration_ms=10.0,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$resolved-thread",
+            requester_id="@user:localhost",
+            session_id="session-1",
+            correlation_id="corr-no-runtime",
+            execution_identity=_execution_identity(),
+            runtime_paths=None,
+        )
+
+    assert record.tool_name == "explode"
+    assert record.arguments == {"api_key": "***redacted***"}
+    mock_append.assert_not_called()
+
+
 def test_build_tool_failure_record_uses_redaction_markers_and_truncates_large_payloads() -> None:
     """Large values should stay bounded while preserving explicit redaction markers."""
     record = build_tool_failure_record(
@@ -298,3 +393,22 @@ def test_build_tool_failure_record_uses_redaction_markers_and_truncates_large_pa
     assert len(record.arguments["payload"]) == tool_failures._MAX_STRING_LENGTH
     assert record.arguments["items"][-1] == "... [truncated]"
     assert record.error_message == "cookie=***redacted***"
+
+
+def test_sanitize_failure_value_truncates_at_max_redaction_depth() -> None:
+    """Nested values beyond the configured redaction depth should be truncated."""
+    assert tool_failures.sanitize_failure_value(
+        {"a": {"b": {"c": {"d": {"e": {"f": {"g": "secret"}}}}}}},
+    ) == {
+        "a": {
+            "b": {
+                "c": {
+                    "d": {
+                        "e": {
+                            "f": tool_failures._TRUNCATED,
+                        },
+                    },
+                },
+            },
+        },
+    }
