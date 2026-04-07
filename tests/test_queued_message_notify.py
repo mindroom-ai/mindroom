@@ -32,8 +32,8 @@ from mindroom.bot import (
     _MessageContext,
     _PrecheckedEvent,
     _PreparedDispatch,
-    _PreparedTextEvent,
 )
+from mindroom.coalescing import PreparedTextEvent as _PreparedTextEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -519,7 +519,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
         patch.object(bot, "_resolve_text_dispatch_event", new=AsyncMock(return_value=event)),
         patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
         patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot, "_has_newer_unresponded_in_scope", return_value=True),
+        patch.object(bot, "_has_newer_unresponded_in_thread", return_value=True),
         patch.object(bot, "_resolve_dispatch_action", new=AsyncMock()) as mock_resolve_action,
     ):
         await bot._dispatch_text_message(

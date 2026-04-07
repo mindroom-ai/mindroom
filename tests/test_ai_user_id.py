@@ -32,7 +32,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
-    MATRIX_BATCH_PROMPT_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
@@ -986,7 +985,6 @@ class TestUserIdPassthrough:
             extra_metadata={
                 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],
                 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$first": "first", "$primary": "primary"},
-                MATRIX_BATCH_PROMPT_METADATA_KEY: "first\nprimary",
             },
         )
 
@@ -995,7 +993,6 @@ class TestUserIdPassthrough:
             MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$primary", "$first", "$unseen"],
             MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],
             MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$first": "first", "$primary": "primary"},
-            MATRIX_BATCH_PROMPT_METADATA_KEY: "first\nprimary",
         }
 
     @pytest.mark.asyncio

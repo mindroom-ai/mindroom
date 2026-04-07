@@ -44,6 +44,7 @@ from mindroom.hooks import (
     strip_enrichment_from_session_storage,
 )
 from mindroom.hooks.ingress import (
+    AUTOMATION_SOURCE_KINDS,
     HookIngressPolicy,
     hook_ingress_policy,
     is_automation_source_kind,
@@ -175,22 +176,18 @@ from .authorization import (
 )
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import (
-    COALESCED_SOURCE_EVENT_IDS_CONTENT_KEY,
-    COALESCED_SOURCE_EVENT_PROMPTS_CONTENT_KEY,
-    CoalescingGate,
-    coalesced_prompt,
+    CoalescedBatch as _CoalescedBatch,
 )
 from .coalescing import (
-    CoalescedBatch as _CoalescedBatch,
+    CoalescingGate,
+    PreparedTextEvent,
+    coalesced_prompt,
 )
 from .coalescing import (
     CoalescingKey as _CoalescingKey,
 )
 from .coalescing import (
     PendingEvent as _PendingEvent,
-)
-from .coalescing import (
-    SyntheticTextEvent as _SyntheticTextEvent,
 )
 from .coalescing import (
     build_batch_dispatch_event as _build_batch_dispatch_event,
@@ -590,26 +587,9 @@ class _PreparedHookedPayload:
 
 
 @dataclass(frozen=True)
-class _PreparedTextEvent:
-    """Normalized inbound text event with canonical body/source for dispatch.
-
-    This intentionally satisfies the ``CommandEvent`` protocol used by command handling.
-    """
-
-    sender: str
-    event_id: str
-    body: str
-    source: dict[str, Any]
-    server_timestamp: int | None = None
-    is_synthetic: bool = False
-    source_kind_override: str | None = None
-
-
-@dataclass(frozen=True)
 class _PersistedTurnMetadata:
     anchor_event_id: str
     source_event_ids: tuple[str, ...]
-    batch_prompt: str | None = None
     source_event_prompts: dict[str, str] | None = None
 
     @property
@@ -617,10 +597,9 @@ class _PersistedTurnMetadata:
         return len(self.source_event_ids) > 1
 
 
-type _TextDispatchEvent = nio.RoomMessageText | _PreparedTextEvent | _SyntheticTextEvent
+type _TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 
 type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
-type _CoalescingDispatchEvent = nio.RoomMessageText | _SyntheticTextEvent | _MediaDispatchEvent
 
 
 @dataclass(frozen=True)
@@ -634,21 +613,6 @@ class _PrecheckedEvent[T]:
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[_TextDispatchEvent]
 type _PrecheckedDispatchEvent = _PrecheckedEvent[_DispatchEvent]
 type _PrecheckedMediaDispatchEvent = _PrecheckedEvent[_MediaDispatchEvent]
-
-
-def _is_coalescing_exempt_source_kind(event: _DispatchEvent) -> bool:
-    """Return True when coalescing should be skipped for this event.
-
-    Automation messages (scheduled tasks, hooks) are one-shot synthetic events
-    that must never be coalesced — coalescing targets rapid human typing only.
-    """
-    if not isinstance(event.source, dict):
-        return False
-    content = event.source.get("content")
-    if not isinstance(content, dict):
-        return False
-    source_kind = content.get("com.mindroom.source_kind")
-    return isinstance(source_kind, str) and is_automation_source_kind(source_kind)
 
 
 def _merge_response_extra_content(
@@ -933,40 +897,17 @@ class AgentBot:
 
     def _dispatch_matrix_run_metadata(
         self,
-        event: _TextDispatchEvent,
         source_event_ids: list[str],
+        source_event_prompts: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """Build run metadata extras for one dispatch turn."""
         if len(source_event_ids) <= 1:
             return None
-        normalized_source_event_ids = list(source_event_ids)
         metadata: dict[str, Any] = {
-            constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: normalized_source_event_ids,
-            constants.MATRIX_BATCH_PROMPT_METADATA_KEY: event.body,
+            constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(source_event_ids),
         }
-        if isinstance(event.source, dict):
-            content = event.source.get("content")
-            if isinstance(content, dict):
-                raw_source_event_ids = content.get(COALESCED_SOURCE_EVENT_IDS_CONTENT_KEY)
-                if isinstance(raw_source_event_ids, list):
-                    normalized_source_event_ids = [
-                        event_id
-                        for event_id in raw_source_event_ids
-                        if isinstance(event_id, str) and event_id in source_event_ids
-                    ]
-                    if normalized_source_event_ids:
-                        metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = normalized_source_event_ids
-                raw_prompt_map = content.get(COALESCED_SOURCE_EVENT_PROMPTS_CONTENT_KEY)
-                if isinstance(raw_prompt_map, dict):
-                    prompt_map = {
-                        event_id: prompt
-                        for event_id, prompt in raw_prompt_map.items()
-                        if isinstance(event_id, str)
-                        and isinstance(prompt, str)
-                        and event_id in normalized_source_event_ids
-                    }
-                    if prompt_map:
-                        metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = prompt_map
+        if source_event_prompts:
+            metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(source_event_prompts)
         return metadata
 
     def _persisted_turn_metadata_for_run(self, metadata: dict[str, Any]) -> _PersistedTurnMetadata | None:
@@ -991,11 +932,9 @@ class AgentBot:
             if isinstance(raw_prompt_map, dict)
             else None
         )
-        raw_batch_prompt = metadata.get(constants.MATRIX_BATCH_PROMPT_METADATA_KEY)
         return _PersistedTurnMetadata(
             anchor_event_id=anchor_event_id,
             source_event_ids=normalized_source_event_ids,
-            batch_prompt=raw_batch_prompt if isinstance(raw_batch_prompt, str) else None,
             source_event_prompts=source_event_prompts,
         )
 
@@ -1124,7 +1063,7 @@ class AgentBot:
             source_kind
             if source_kind is not None
             else event.source_kind_override
-            if isinstance(event, _PreparedTextEvent)
+            if isinstance(event, PreparedTextEvent)
             else None
         )
         source_kind_sender_is_trusted = extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
@@ -1188,6 +1127,51 @@ class AgentBot:
             requester_user_id=requester_user_id,
             context=context,
         )
+
+    def _has_newer_unresponded_in_thread(
+        self,
+        event: _TextDispatchEvent,
+        requester_user_id: str,
+        thread_history: Sequence[ResolvedVisibleMessage],
+    ) -> bool:
+        """Return True when a newer unresponded message from the same sender exists.
+
+        Guards against duplicate replies during backlog replay: if the bot
+        restarts and processes an older message while a newer one from the
+        same sender is already visible in the thread, the older dispatch
+        should be skipped.
+
+        Automation events (scheduled tasks, hooks) are always independent
+        actions and must never be suppressed.  Command messages (``!help``,
+        etc.) are also excluded — they are handled separately and should
+        not suppress earlier questions.
+        """
+        # Automation events (scheduled tasks, hooks) are independent — never suppress.
+        # User-originated synthetics (coalesced batches, voice) must still be guarded.
+        if isinstance(event, PreparedTextEvent) and event.source_kind_override in AUTOMATION_SOURCE_KINDS:
+            return False
+        event_ts = event.server_timestamp
+        if event_ts is None or not thread_history:
+            return False
+        for msg in thread_history:
+            if msg.sender != requester_user_id:
+                continue
+            if msg.timestamp is None or msg.timestamp <= event_ts:
+                continue
+            if msg.event_id == event.event_id:
+                continue
+            if self.response_tracker.has_responded(msg.event_id):
+                continue
+            # Commands are handled independently — skip them as suppression candidates.
+            if msg.body and isinstance(msg.body, str) and command_parser.parse(msg.body.strip()) is not None:
+                continue
+            self.logger.info(
+                "Skipping older message — newer unresponded message from same sender in thread",
+                skipped_event_id=event.event_id,
+                newer_event_id=msg.event_id,
+            )
+            return True
+        return False
 
     def _should_skip_deep_synthetic_full_dispatch(
         self,
@@ -2071,7 +2055,7 @@ class AgentBot:
 
     async def _enqueue_for_dispatch(
         self,
-        event: _CoalescingDispatchEvent,
+        event: _DispatchEvent,
         room: nio.MatrixRoom,
         *,
         source_kind: str,
@@ -2103,6 +2087,24 @@ class AgentBot:
     async def _dispatch_coalesced_batch(self, batch: _CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
         dispatch_event = _build_batch_dispatch_event(batch)
+        batch_coalescing_key = await self._coalescing_key_for_event(
+            batch.room,
+            batch.primary_event,
+            batch.requester_user_id,
+        )
+        # The first room message opens the gate with thread_id=None, but dispatch
+        # resolves that turn into a new thread rooted at the source event ID.
+        canonical_key = (
+            batch.room.room_id,
+            self._build_message_target(
+                room_id=batch.room.room_id,
+                thread_id=batch_coalescing_key[1],
+                reply_to_event_id=dispatch_event.event_id,
+                event_source=dispatch_event.source,
+            ).resolved_thread_id,
+            batch.requester_user_id,
+        )
+        self._coalescing_gate.retarget(batch_coalescing_key, canonical_key)
         async with self._turn_thread_cache_scope():
             await self._dispatch_text_message(
                 batch.room,
@@ -2192,6 +2194,7 @@ class AgentBot:
         *,
         media_events: list[_MediaDispatchEvent] | None = None,
         source_event_ids: list[str] | None = None,
+        source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         """Run the normal text/command dispatch pipeline for a prepared text event."""
         raw_event: _TextDispatchEvent
@@ -2221,12 +2224,8 @@ class AgentBot:
             )
             if dispatch is None:
                 return
-            if self._should_skip_deep_synthetic_full_dispatch(
-                event_id=event.event_id,
-                envelope=dispatch.envelope,
-            ):
-                return
 
+            # Commands always dispatch — never suppressed by thread-history guard.
             command = command_parser.parse(event.body) if not media_events else None
             if command:
                 if self.agent_name == ROUTER_AGENT_NAME:
@@ -2240,12 +2239,21 @@ class AgentBot:
                         source_envelope=dispatch.envelope,
                     )
                 return
-            if dispatch.context.requires_full_thread_history:
-                await self._hydrate_dispatch_context(room, event, dispatch.context)
-            if not media_events and self._has_newer_unresponded_in_scope(event, dispatch.context):
+
+            if self._has_newer_unresponded_in_thread(
+                event,
+                requester_user_id,
+                dispatch.context.thread_history,
+            ):
                 self._mark_source_events_responded(tracked_source_event_ids)
                 return
-
+            if self._should_skip_deep_synthetic_full_dispatch(
+                event_id=event.event_id,
+                envelope=dispatch.envelope,
+            ):
+                return
+            if dispatch.context.requires_full_thread_history:
+                await self._hydrate_dispatch_context(room, event, dispatch.context)
             content = event.source.get("content") if isinstance(event.source, dict) else None
             message_attachment_ids = parse_attachment_ids_from_event_source(event.source)
             message_extra_content: dict[str, Any] = {}
@@ -2266,6 +2274,7 @@ class AgentBot:
                 if len(tracked_source_event_ids) > 1 or tracked_source_event_ids[0] != event.event_id
                 else None
             )
+
             action = await self._resolve_dispatch_action(
                 room,
                 event,
@@ -2279,7 +2288,7 @@ class AgentBot:
             )
             if action is None:
                 return
-            matrix_run_metadata = self._dispatch_matrix_run_metadata(event, tracked_source_event_ids)
+            matrix_run_metadata = self._dispatch_matrix_run_metadata(tracked_source_event_ids, source_event_prompts)
 
             async def build_payload(context: _MessageContext) -> _DispatchPayload:
                 effective_thread_id = self._build_message_target(
@@ -2523,7 +2532,7 @@ class AgentBot:
         )
 
         await self._enqueue_for_dispatch(
-            _SyntheticTextEvent(
+            PreparedTextEvent(
                 sender=event.sender,
                 event_id=event.event_id,
                 body=prepared_voice.text,
@@ -2535,6 +2544,8 @@ class AgentBot:
                     },
                 },
                 server_timestamp=event.server_timestamp,
+                is_synthetic=True,
+                source_kind_override="voice",
             ),
             room,
             source_kind="voice",
@@ -2703,14 +2714,14 @@ class AgentBot:
     async def _prepare_file_sidecar_text_event(
         self,
         event: nio.RoomMessageFile | nio.RoomEncryptedFile,
-    ) -> _PreparedTextEvent | None:
+    ) -> PreparedTextEvent | None:
         """Return a prepared text event when a file event is really a long-text preview."""
         if not is_v2_sidecar_text_preview(event.source):
             return None
 
         assert self.client is not None
         resolved_source = await resolve_event_source_content(event.source, self.client)
-        return _PreparedTextEvent(
+        return PreparedTextEvent(
             sender=event.sender,
             event_id=event.event_id,
             body=visible_body_from_event_source(resolved_source, event.body),
@@ -2850,7 +2861,7 @@ class AgentBot:
 
     def _is_trusted_internal_relay_event(self, event: _DispatchEvent) -> bool:
         """Return whether one agent-authored relay should bypass user-turn coalescing."""
-        if not isinstance(event, nio.RoomMessageText | _PreparedTextEvent | _SyntheticTextEvent):
+        if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
             return False
         if extract_agent_name(event.sender, self.config, self.runtime_paths) is None:
             return False
@@ -2925,98 +2936,6 @@ class AgentBot:
             return None
         return _PrecheckedEvent(event=event, requester_user_id=requester_user_id)
 
-    def _has_newer_unresponded_in_scope(
-        self,
-        event: _DispatchEvent,
-        context: _MessageContext,
-    ) -> bool:
-        """Return True if a newer unresponded message from the same sender exists.
-
-        Compares raw ``event.sender`` against thread_history ``sender`` fields.
-        When True the caller should ``mark_responded`` and skip AI generation;
-        the latest message will pick up earlier ones via unseen-message context.
-
-        Only considers newer messages that look like normal text (not ``!``
-        commands), because commands exit early in dispatch without generating
-        an AI response — coalescing against them would permanently drop the
-        older message.
-
-        Limitations (graceful degradation to current behaviour):
-        - Room-mode (no thread_history): returns False.
-        - Media / voice messages: not coalesced (text-only).
-        - Race condition: if the newer task completes before the older task
-          reaches this check, the older task proceeds normally (duplicate
-          reply, same as pre-coalescing behaviour).
-        """
-        if not context.thread_history:
-            return False
-
-        current_ts = self._coalescing_candidate_timestamp(event)
-        if current_ts is None:
-            return False
-
-        for msg in context.thread_history:
-            if msg.event_id == event.event_id:
-                continue
-            newer_event_id = self._coalescing_replacement_event_id(
-                msg,
-                sender=event.sender,
-                current_ts=current_ts,
-            )
-            if newer_event_id is None:
-                continue
-            self.logger.info(
-                "Coalescing older message; newer unresponded message exists",
-                event_id=event.event_id,
-                coalesced_event_id=newer_event_id,
-            )
-            return True
-
-        return False
-
-    def _coalescing_candidate_timestamp(self, event: _DispatchEvent) -> int | None:
-        if isinstance(event, _PreparedTextEvent):
-            if event.is_synthetic:
-                return None
-            current_ts = event.server_timestamp
-            if current_ts is None:
-                return None
-        elif isinstance(event, _SyntheticTextEvent):
-            return None
-        else:
-            current_ts = event.source.get("origin_server_ts")
-            if not isinstance(current_ts, int):
-                current_ts = event.server_timestamp
-        if not isinstance(current_ts, int):
-            return None
-        # Automation messages (scheduled tasks, hooks) are one-shot synthetic events
-        # that must never be coalesced — coalescing targets rapid human typing only.
-        if _is_coalescing_exempt_source_kind(event):
-            return None
-        return current_ts
-
-    def _coalescing_replacement_event_id(
-        self,
-        msg: ResolvedVisibleMessage,
-        *,
-        sender: str,
-        current_ts: int,
-    ) -> str | None:
-        event_id = msg.event_id
-        if msg.sender != sender:
-            return None
-        msg_ts = msg.timestamp
-        if msg_ts <= current_ts:
-            return None
-        # Skip commands — they exit early without generating an AI response,
-        # so coalescing against them would permanently lose the older message.
-        msg_body = msg.body
-        if msg_body.lstrip().startswith("!"):
-            return None
-        if self.response_tracker.has_responded(event_id):
-            return None
-        return event_id
-
     async def _prepare_dispatch(
         self,
         room: nio.MatrixRoom,
@@ -3074,25 +2993,14 @@ class AgentBot:
             envelope=envelope,
         )
 
-    async def _resolve_text_dispatch_event(self, event: _TextDispatchEvent) -> _PreparedTextEvent:
+    async def _resolve_text_dispatch_event(self, event: _TextDispatchEvent) -> PreparedTextEvent:
         """Return one canonical text event for hooks, routing, and command handling."""
-        if isinstance(event, _PreparedTextEvent):
+        if isinstance(event, PreparedTextEvent):
             return event
-        if isinstance(event, _SyntheticTextEvent):
-            content = event.source.get("content") if isinstance(event.source, dict) else None
-            source_kind_override = content.get("com.mindroom.source_kind") if isinstance(content, dict) else None
-            return _PreparedTextEvent(
-                sender=event.sender,
-                event_id=event.event_id,
-                body=event.body,
-                source=event.source,
-                is_synthetic=True,
-                source_kind_override=source_kind_override if isinstance(source_kind_override, str) else None,
-            )
 
         assert self.client is not None
         resolved_source = await resolve_event_source_content(event.source, self.client)
-        return _PreparedTextEvent(
+        return PreparedTextEvent(
             sender=event.sender,
             event_id=event.event_id,
             body=visible_body_from_event_source(resolved_source, event.body),
@@ -6537,7 +6445,6 @@ class AgentBot:
             regeneration_matrix_run_metadata = {
                 constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(turn_metadata.source_event_ids),
                 constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: updated_prompt_map,
-                constants.MATRIX_BATCH_PROMPT_METADATA_KEY: regeneration_prompt,
             }
         else:
             regeneration_prompt = edited_content
