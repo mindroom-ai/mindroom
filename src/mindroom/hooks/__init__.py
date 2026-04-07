@@ -14,14 +14,17 @@ from .context import (
     ResponseDraft,
     ResponseResult,
     ScheduleFiredContext,
+    SystemEnrichContext,
     ToolAfterCallContext,
     ToolBeforeCallContext,
 )
 from .decorators import hook
 from .enrichment import (
     render_enrichment_block,
+    render_system_enrichment_block,
     strip_enrichment_block,
     strip_enrichment_from_session_storage,
+    strip_system_enrichment_block,
 )
 from .execution import emit, emit_collect, emit_gate, emit_transform
 from .registry import HookRegistry
@@ -38,6 +41,7 @@ from .types import (
     EVENT_MESSAGE_RECEIVED,
     EVENT_REACTION_RECEIVED,
     EVENT_SCHEDULE_FIRED,
+    EVENT_SYSTEM_ENRICH,
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EnrichmentItem,
@@ -59,6 +63,7 @@ __all__ = [
     "EVENT_MESSAGE_RECEIVED",
     "EVENT_REACTION_RECEIVED",
     "EVENT_SCHEDULE_FIRED",
+    "EVENT_SYSTEM_ENRICH",
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
     "AfterResponseContext",
@@ -80,6 +85,7 @@ __all__ = [
     "ResponseDraft",
     "ResponseResult",
     "ScheduleFiredContext",
+    "SystemEnrichContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
     "build_hook_room_state_putter",
@@ -90,6 +96,8 @@ __all__ = [
     "emit_transform",
     "hook",
     "render_enrichment_block",
+    "render_system_enrichment_block",
     "strip_enrichment_block",
     "strip_enrichment_from_session_storage",
+    "strip_system_enrichment_block",
 ]

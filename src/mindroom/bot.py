@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from functools import cached_property
 from html import escape as html_escape
@@ -23,6 +23,7 @@ from mindroom.hooks import (
     AfterResponseContext,
     AgentLifecycleContext,
     BeforeResponseContext,
+    EnrichmentItem,
     HookRegistry,
     MessageEnrichContext,
     MessageEnvelope,
@@ -30,6 +31,7 @@ from mindroom.hooks import (
     ReactionReceivedContext,
     ResponseDraft,
     ResponseResult,
+    SystemEnrichContext,
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit,
@@ -54,6 +56,7 @@ from mindroom.hooks.types import (
     EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_RECEIVED,
     EVENT_REACTION_RECEIVED,
+    EVENT_SYSTEM_ENRICH,
 )
 from mindroom.matrix import image_handler
 from mindroom.matrix.event_info import EventInfo
@@ -524,6 +527,7 @@ class _PreparedHookedPayload:
     payload: _DispatchPayload
     envelope: MessageEnvelope
     strip_transient_enrichment_after_run: bool = False
+    system_enrichment_items: tuple[EnrichmentItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2894,6 +2898,17 @@ class AgentBot:
                 target_entity_name=self.agent_name,
                 target_member_names=target_member_names,
             )
+            system_enrichment_items = await self._apply_system_enrichment(
+                dispatch,
+                prepared_payload.envelope,
+                target_entity_name=self.agent_name,
+                target_member_names=target_member_names,
+            )
+            if system_enrichment_items:
+                prepared_payload = replace(
+                    prepared_payload,
+                    system_enrichment_items=tuple(system_enrichment_items),
+                )
             payload_ready_monotonic = time.monotonic()
         except Exception as error:
             response_event_id = await self._finalize_dispatch_failure(
@@ -2935,6 +2950,7 @@ class AgentBot:
                     existing_event_is_placeholder=placeholder_event_id is not None,
                     response_envelope=prepared_payload.envelope,
                     strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                    system_enrichment_items=prepared_payload.system_enrichment_items,
                     correlation_id=dispatch.correlation_id,
                     matrix_run_metadata=matrix_run_metadata,
                 )
@@ -2952,6 +2968,7 @@ class AgentBot:
                     existing_event_is_placeholder=placeholder_event_id is not None,
                     model_prompt=prepared_payload.payload.model_prompt,
                     strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                    system_enrichment_items=prepared_payload.system_enrichment_items,
                     response_envelope=prepared_payload.envelope,
                     correlation_id=dispatch.correlation_id,
                     matrix_run_metadata=matrix_run_metadata,
@@ -3714,6 +3731,25 @@ class AgentBot:
             strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
         )
 
+    async def _apply_system_enrichment(
+        self,
+        dispatch: _PreparedDispatch,
+        envelope: MessageEnvelope,
+        *,
+        target_entity_name: str,
+        target_member_names: tuple[str, ...] | None,
+    ) -> list[EnrichmentItem]:
+        """Run system:enrich and return system-prompt enrichment items."""
+        if not self.hook_registry.has_hooks(EVENT_SYSTEM_ENRICH):
+            return []
+        context = SystemEnrichContext(
+            **self._hook_base_kwargs(EVENT_SYSTEM_ENRICH, dispatch.correlation_id),
+            envelope=envelope,
+            target_entity_name=target_entity_name,
+            target_member_names=target_member_names,
+        )
+        return await emit_collect(self.hook_registry, EVENT_SYSTEM_ENRICH, context)
+
     async def _apply_before_response_hooks(
         self,
         *,
@@ -3782,6 +3818,7 @@ class AgentBot:
         payload: _DispatchPayload,
         response_envelope: MessageEnvelope | None = None,
         strip_transient_enrichment_after_run: bool = False,
+        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         correlation_id: str | None = None,
         reason_prefix: str = "Team request",
         response_target: _ResponseTarget | None = None,
@@ -3815,6 +3852,7 @@ class AgentBot:
                 payload=payload,
                 response_envelope=response_envelope,
                 strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
+                system_enrichment_items=system_enrichment_items,
                 correlation_id=correlation_id,
                 reason_prefix=reason_prefix,
                 matrix_run_metadata=matrix_run_metadata,
@@ -3836,6 +3874,7 @@ class AgentBot:
         payload: _DispatchPayload,
         response_envelope: MessageEnvelope | None = None,
         strip_transient_enrichment_after_run: bool = False,
+        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         correlation_id: str | None = None,
         reason_prefix: str = "Team request",
         matrix_run_metadata: dict[str, Any] | None = None,
@@ -3942,6 +3981,7 @@ class AgentBot:
                             response_sender_id=self.matrix_id.full_id,
                             compaction_outcomes_collector=compaction_outcomes,
                             configured_team_name=self.agent_name if self.agent_name in self.config.teams else None,
+                            system_enrichment_items=system_enrichment_items,
                             reason_prefix=reason_prefix,
                             matrix_run_metadata=matrix_run_metadata,
                         )
@@ -4051,6 +4091,7 @@ class AgentBot:
                                 response_sender_id=self.matrix_id.full_id,
                                 compaction_outcomes_collector=compaction_outcomes,
                                 configured_team_name=self.agent_name if self.agent_name in self.config.teams else None,
+                                system_enrichment_items=system_enrichment_items,
                                 reason_prefix=reason_prefix,
                                 matrix_run_metadata=matrix_run_metadata,
                             )
@@ -4281,6 +4322,7 @@ class AgentBot:
         response_target: _ResponseTarget | None = None,
         response_kind: str = "ai",
         matrix_run_metadata: dict[str, Any] | None = None,
+        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
     ) -> _ResponseDispatchResult:
         """Process a message and send a response (non-streaming)."""
         assert self.client is not None
@@ -4360,6 +4402,7 @@ class AgentBot:
                         execution_identity=execution_identity,
                         compaction_outcomes_collector=compaction_outcomes,
                         matrix_run_metadata=matrix_run_metadata,
+                        system_enrichment_items=system_enrichment_items,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -4795,6 +4838,7 @@ class AgentBot:
         response_target: _ResponseTarget | None = None,
         response_kind: str = "ai",
         matrix_run_metadata: dict[str, Any] | None = None,
+        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
     ) -> _ResponseDispatchResult:
         """Process a message and send a response (streaming)."""
         assert self.client is not None
@@ -4873,6 +4917,7 @@ class AgentBot:
                         execution_identity=execution_identity,
                         compaction_outcomes_collector=compaction_outcomes,
                         matrix_run_metadata=matrix_run_metadata,
+                        system_enrichment_items=system_enrichment_items,
                     )
                     response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
 
@@ -5052,6 +5097,7 @@ class AgentBot:
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
         strip_transient_enrichment_after_run: bool = False,
+        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
@@ -5074,6 +5120,8 @@ class AgentBot:
             model_prompt: Optional model-facing prompt that may include transient enrichment.
             strip_transient_enrichment_after_run: Whether hook-provided transient enrichment
                 must be scrubbed from persisted session history after this turn.
+            system_enrichment_items: Hook-provided transient system prompt fragments to
+                apply for this response before optional post-run scrubbing.
             response_envelope: Optional normalized inbound envelope for response hooks.
             correlation_id: Optional request correlation ID propagated to hook logging.
             matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
@@ -5107,6 +5155,7 @@ class AgentBot:
                 attachment_ids=attachment_ids,
                 model_prompt=model_prompt,
                 strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
+                system_enrichment_items=system_enrichment_items,
                 response_envelope=response_envelope,
                 correlation_id=correlation_id,
                 matrix_run_metadata=matrix_run_metadata,
@@ -5127,6 +5176,7 @@ class AgentBot:
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
         strip_transient_enrichment_after_run: bool = False,
+        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
@@ -5203,6 +5253,7 @@ class AgentBot:
                     correlation_id=correlation_id,
                     response_target=response_target,
                     matrix_run_metadata=matrix_run_metadata,
+                    system_enrichment_items=system_enrichment_items,
                 )
             else:
                 delivery_result = await self._process_and_respond(
@@ -5223,6 +5274,7 @@ class AgentBot:
                     correlation_id=correlation_id,
                     response_target=response_target,
                     matrix_run_metadata=matrix_run_metadata,
+                    system_enrichment_items=system_enrichment_items,
                 )
 
         # Use unified handler for cancellation support
@@ -5921,6 +5973,7 @@ class TeamBot(AgentBot):
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
         strip_transient_enrichment_after_run: bool = False,
+        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
@@ -6031,6 +6084,7 @@ class TeamBot(AgentBot):
                 attachment_ids=attachment_ids,
             ),
             strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
+            system_enrichment_items=system_enrichment_items,
             correlation_id=correlation_id or reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
             response_target=response_target,

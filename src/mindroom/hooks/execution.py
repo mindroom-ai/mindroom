@@ -22,6 +22,7 @@ from .context import (
     ReactionReceivedContext,
     ResponseDraft,
     ScheduleFiredContext,
+    SystemEnrichContext,
     ToolAfterCallContext,
     ToolBeforeCallContext,
 )
@@ -64,7 +65,7 @@ def reset_hook_execution_state() -> None:
 def _scope_agent_name(context: HookExecutionContext) -> str | None:  # noqa: PLR0911
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
         return context.agent_name
-    if isinstance(context, MessageEnrichContext):
+    if isinstance(context, MessageEnrichContext | SystemEnrichContext):
         return context.target_entity_name
     if isinstance(context, MessageReceivedContext):
         return context.envelope.agent_name
@@ -80,7 +81,7 @@ def _scope_agent_name(context: HookExecutionContext) -> str | None:  # noqa: PLR
 def _scope_room_ids(context: HookExecutionContext) -> tuple[str, ...]:  # noqa: PLR0911
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
         return (context.room_id,) if context.room_id else ()
-    if isinstance(context, MessageReceivedContext | MessageEnrichContext):
+    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
         return (context.envelope.room_id,)
     if isinstance(context, BeforeResponseContext):
         return (context.draft.envelope.room_id,)
@@ -149,7 +150,7 @@ def _bind_hook_context(hook: RegisteredHook, context: HookExecutionContext) -> H
     if isinstance(context, ToolAfterCallContext):
         replacement_kwargs["result"] = _snapshot_tool_observer_value(context.result)
         replacement_kwargs["error"] = _snapshot_tool_observer_error(context.error)
-    if isinstance(context, MessageEnrichContext):
+    if isinstance(context, MessageEnrichContext | SystemEnrichContext):
         replacement_kwargs["_items"] = []
     return replace(context, **replacement_kwargs)
 
@@ -311,7 +312,10 @@ async def emit_gate(
         _EMIT_DEPTH.reset(token)
 
 
-def _normalize_collector_result(result: object | None, hook_context: MessageEnrichContext) -> list[EnrichmentItem]:
+def _normalize_collector_result(
+    result: object | None,
+    hook_context: MessageEnrichContext | SystemEnrichContext,
+) -> list[EnrichmentItem]:
     items = list(hook_context._items)
     if isinstance(result, EnrichmentItem):
         items.append(result)
@@ -324,7 +328,7 @@ def _normalize_collector_result(result: object | None, hook_context: MessageEnri
 async def emit_collect(
     registry: HookRegistry,
     event_name: str,
-    context: MessageEnrichContext,
+    context: MessageEnrichContext | SystemEnrichContext,
 ) -> list[EnrichmentItem]:
     """Run collector hooks concurrently and return merged enrichment items."""
     hooks = _eligible_hooks(registry, event_name, context)
@@ -335,7 +339,7 @@ async def emit_collect(
 
     async def run_hook(hook: RegisteredHook) -> list[EnrichmentItem]:
         async with semaphore:
-            hook_context = cast("MessageEnrichContext", _bind_hook_context(hook, context))
+            hook_context = cast("MessageEnrichContext | SystemEnrichContext", _bind_hook_context(hook, context))
             invocation = await _invoke_hook(hook, hook_context)
             return _normalize_collector_result(invocation.value, hook_context)
 

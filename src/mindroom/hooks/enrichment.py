@@ -11,6 +11,8 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from agno.db.sqlite import SqliteDb
     from agno.models.message import Message
     from agno.run.agent import RunOutput
@@ -23,14 +25,14 @@ _ENRICHMENT_BLOCK_PATTERN = re.compile(
     r"\n*<mindroom_message_context>.*?</mindroom_message_context>\n*",
     re.DOTALL,
 )
+_SYSTEM_ENRICHMENT_BLOCK_PATTERN = re.compile(
+    r"\n*<mindroom_system_context>.*?</mindroom_system_context>\n*",
+    re.DOTALL,
+)
 
 
-def render_enrichment_block(items: list[EnrichmentItem]) -> str:
-    """Render enrichment items into one model-facing XML-like block."""
-    if not items:
-        return ""
-
-    rendered_items = [
+def _render_items(items: Sequence[EnrichmentItem]) -> list[str]:
+    return [
         "\n".join(
             (
                 (
@@ -43,6 +45,13 @@ def render_enrichment_block(items: list[EnrichmentItem]) -> str:
         )
         for item in items
     ]
+
+
+def render_enrichment_block(items: list[EnrichmentItem]) -> str:
+    """Render enrichment items into one model-facing XML-like block."""
+    if not items:
+        return ""
+    rendered_items = _render_items(items)
     return "<mindroom_message_context>\n" + "\n".join(rendered_items) + "\n</mindroom_message_context>"
 
 
@@ -51,17 +60,34 @@ def strip_enrichment_block(text: str) -> str:
     return _ENRICHMENT_BLOCK_PATTERN.sub("\n", text).strip()
 
 
+def render_system_enrichment_block(items: Sequence[EnrichmentItem]) -> str:
+    """Render system enrichment items with deterministic cache-aware ordering."""
+    if not items:
+        return ""
+
+    stable_items = sorted((item for item in items if item.cache_policy == "stable"), key=lambda item: item.key)
+    volatile_items = sorted((item for item in items if item.cache_policy == "volatile"), key=lambda item: item.key)
+    ordered_items = stable_items + volatile_items
+    rendered_items = _render_items(ordered_items)
+    return "<mindroom_system_context>\n" + "\n".join(rendered_items) + "\n</mindroom_system_context>"
+
+
+def strip_system_enrichment_block(text: str) -> str:
+    """Remove rendered system enrichment blocks from persisted text."""
+    return _SYSTEM_ENRICHMENT_BLOCK_PATTERN.sub("\n", text).strip()
+
+
 def _strip_session_message_content(message: object) -> bool:
     typed_message = cast("Message", message)
     changed = False
     if isinstance(typed_message.content, str):
-        stripped = strip_enrichment_block(typed_message.content)
+        stripped = strip_system_enrichment_block(strip_enrichment_block(typed_message.content))
         if stripped != typed_message.content:
             typed_message.content = stripped
             changed = True
 
     if isinstance(typed_message.compressed_content, str):
-        stripped = strip_enrichment_block(typed_message.compressed_content)
+        stripped = strip_system_enrichment_block(strip_enrichment_block(typed_message.compressed_content))
         if stripped != typed_message.compressed_content:
             typed_message.compressed_content = stripped
             changed = True

@@ -61,6 +61,7 @@ from mindroom.history.runtime import (
     open_resolved_scope_session_context,
 )
 from mindroom.history.types import HistoryScope
+from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
@@ -653,6 +654,7 @@ async def _prepare_agent_and_prompt(
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
+    system_enrichment_items: Sequence[EnrichmentItem] = (),
 ) -> tuple[Agent, str, list[str], PreparedHistoryState]:
     """Prepare agent and full prompt for AI processing.
 
@@ -693,6 +695,8 @@ async def _prepare_agent_and_prompt(
         execution_identity=execution_identity,
         delegation_depth=delegation_depth,
     )
+    if system_enrichment_items:
+        agent.additional_context = render_system_enrichment_block(system_enrichment_items)
 
     prepared_execution = await prepare_agent_execution_context(
         scope_context=scope_context,
@@ -752,6 +756,7 @@ async def ai_response(  # noqa: C901
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
     matrix_run_metadata: dict[str, Any] | None = None,
+    system_enrichment_items: Sequence[EnrichmentItem] = (),
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -789,6 +794,7 @@ async def ai_response(  # noqa: C901
         delegation_depth: Current nested delegation depth for delegated-agent runs.
         matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
             for unseen-message tracking, coalesced edit regeneration, and cleanup.
+        system_enrichment_items: Optional system-prompt enrichment items for this run.
 
     Returns:
         Agent response string
@@ -825,6 +831,7 @@ async def ai_response(  # noqa: C901
                     execution_identity=execution_identity,
                     compaction_outcomes_collector=compaction_outcomes_collector,
                     delegation_depth=delegation_depth,
+                    system_enrichment_items=system_enrichment_items,
                 )
             except Exception as e:
                 logger.exception("Error preparing agent", agent=agent_name)
@@ -1026,6 +1033,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
     matrix_run_metadata: dict[str, Any] | None = None,
+    system_enrichment_items: Sequence[EnrichmentItem] = (),
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -1061,6 +1069,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         delegation_depth: Current nested delegation depth for delegated-agent runs.
         matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
             for unseen-message tracking, coalesced edit regeneration, and cleanup.
+        system_enrichment_items: Optional system-prompt enrichment items for this run.
 
     Yields:
         Streaming chunks/events as they become available
@@ -1098,6 +1107,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     execution_identity=execution_identity,
                     compaction_outcomes_collector=compaction_outcomes_collector,
                     delegation_depth=delegation_depth,
+                    system_enrichment_items=system_enrichment_items,
                 )
             except Exception as e:
                 logger.exception("Error preparing agent for streaming", agent=agent_name)
