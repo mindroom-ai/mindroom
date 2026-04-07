@@ -159,15 +159,16 @@ class TestGetOwnConfig:
         finally:
             config_path.unlink(missing_ok=True)
 
-    def test_get_own_config_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
-        """Read-only self-config should surface runtime plugin validation failures consistently."""
+    def test_get_own_config_tolerates_invalid_plugin_manifest(self, tmp_path: Path) -> None:
+        """Read-only self-config should keep working when runtime plugin loading degrades."""
         config_path = _invalid_plugin_config_path(tmp_path)
         tool = _self_config_tools(agent_name="writer", config_path=config_path)
 
         result = tool.get_own_config()
 
-        assert "Invalid configuration" in result
-        assert "Invalid plugin name" in result
+        assert "Configuration for 'writer'" in result
+        assert "Writer" in result
+        assert "Invalid configuration" not in result
 
     def test_get_own_config_returns_malformed_yaml_error(self, tmp_path: Path) -> None:
         """Malformed YAML should return one user-facing invalid-config message, not raise."""

@@ -1041,9 +1041,15 @@ def _merge_mcp_tool_state(
 def resolved_tool_metadata_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
+    *,
+    tolerate_plugin_load_errors: bool = False,
 ) -> dict[str, ToolMetadata]:
     """Return tool metadata visible for one runtime config without mutating global state."""
-    _, desired_metadata = resolved_tool_state_for_runtime(runtime_paths, config)
+    _, desired_metadata = resolved_tool_state_for_runtime(
+        runtime_paths,
+        config,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
     return desired_metadata
 
 

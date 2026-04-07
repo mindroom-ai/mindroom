@@ -349,18 +349,12 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
     assert captured_runtime_paths == [runtime_a]
 
 
-def test_list_models_returns_runtime_validation_errors(tmp_path: Path) -> None:
-    """OpenAI-compatible routes should surface invalid runtime config as 422."""
+def test_list_models_tolerate_missing_plugin_path(tmp_path: Path) -> None:
+    """OpenAI-compatible reads should keep working when plugin loading degrades."""
     from fastapi import FastAPI  # noqa: PLC0415
 
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
-    plugin_root = tmp_path / "plugins" / "bad-name"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
-        encoding="utf-8",
-    )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n"
@@ -371,7 +365,7 @@ def test_list_models_returns_runtime_validation_errors(tmp_path: Path) -> None:
         "  model: default\n"
         "agents: {}\n"
         "plugins:\n"
-        "  - ./plugins/bad-name\n",
+        "  - ./plugins/missing\n",
         encoding="utf-8",
     )
     app = FastAPI()
@@ -381,13 +375,13 @@ def test_list_models_returns_runtime_validation_errors(tmp_path: Path) -> None:
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is False
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
 
     with TestClient(app) as client:
         response = client.get("/v1/models")
 
-    assert response.status_code == 422
-    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+    assert response.status_code == 200
+    assert response.json()["data"] == []
 
 
 def test_list_models_returns_malformed_yaml_errors(tmp_path: Path) -> None:
@@ -414,18 +408,12 @@ def test_list_models_returns_malformed_yaml_errors(tmp_path: Path) -> None:
     assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
 
 
-def test_chat_completions_returns_runtime_validation_errors(tmp_path: Path) -> None:
-    """Chat completions should surface invalid runtime config as 422."""
+def test_chat_completions_tolerate_missing_plugin_path_during_model_validation(tmp_path: Path) -> None:
+    """Chat completions should reach normal request validation when plugin loading degrades."""
     from fastapi import FastAPI  # noqa: PLC0415
 
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
-    plugin_root = tmp_path / "plugins" / "bad-name"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
-        encoding="utf-8",
-    )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n"
@@ -440,7 +428,7 @@ def test_chat_completions_returns_runtime_validation_errors(tmp_path: Path) -> N
         "    role: helper\n"
         "    rooms: []\n"
         "plugins:\n"
-        "  - ./plugins/bad-name\n",
+        "  - ./plugins/missing\n",
         encoding="utf-8",
     )
     app = FastAPI()
@@ -450,16 +438,16 @@ def test_chat_completions_returns_runtime_validation_errors(tmp_path: Path) -> N
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is False
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
 
     with TestClient(app) as client:
         response = client.post(
             "/v1/chat/completions",
-            json={"model": "general", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "missing-model", "messages": [{"role": "user", "content": "hi"}]},
         )
 
-    assert response.status_code == 422
-    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+    assert response.status_code == 404
+    assert "Model 'missing-model' not found" in response.json()["error"]["message"]
 
 
 def test_chat_completions_returns_malformed_yaml_errors(tmp_path: Path) -> None:

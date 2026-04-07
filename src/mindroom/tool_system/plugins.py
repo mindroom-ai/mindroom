@@ -203,11 +203,9 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
     if parsed is None:
         return None
 
-    module_name, subpath, explicit = parsed
+    module_name, subpath, _explicit = parsed
     spec = util.find_spec(module_name)
     if spec is None:
-        if explicit:
-            logger.warning("Plugin module not found", module=module_name, spec=plugin_path)
         return None
 
     if spec.submodule_search_locations:
@@ -215,14 +213,10 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
     elif spec.origin:
         root = Path(spec.origin).parent
     else:
-        if explicit:
-            logger.warning("Plugin module has no filesystem location", module=module_name)
         return None
 
     resolved_root = (root / subpath).resolve() if subpath else root.resolve()
     if not resolved_root.exists() or not resolved_root.is_dir():
-        if explicit:
-            logger.warning("Plugin module path is not a directory", module=module_name, path=str(resolved_root))
         return None
 
     return resolved_root

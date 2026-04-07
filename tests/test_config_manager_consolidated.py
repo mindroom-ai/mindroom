@@ -144,14 +144,15 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
-    def test_get_info_agents_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
-        """Read-only config-manager info should surface runtime plugin validation failures."""
+    def test_get_info_agents_tolerates_invalid_plugin_manifest(self, tmp_path: Path) -> None:
+        """Read-only config-manager info should keep working when runtime plugin loading degrades."""
         cm = _config_manager(_invalid_plugin_config_path(tmp_path))
 
         result = cm.get_info(info_type="agents")
 
-        assert "Invalid configuration" in result
-        assert "Invalid plugin name" in result
+        assert "Writer" in result
+        assert "writer" in result
+        assert "Invalid configuration" not in result
 
     def test_get_info_agents_returns_malformed_yaml_error(self, tmp_path: Path) -> None:
         """Malformed YAML should return one user-facing invalid-config message."""

@@ -146,7 +146,7 @@ def get_console() -> Console:
 
 def load_validated_config(runtime_paths: constants.RuntimePaths) -> Config:
     """Load and validate the active MindRoom configuration."""
-    return load_config(runtime_paths)
+    return load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
 
 def get_avatar_path(

@@ -326,8 +326,8 @@ async def test_handle_config_command_rejects_runtime_sensitive_invalid_change(tm
 
 
 @pytest.mark.asyncio
-async def test_handle_config_command_show_returns_invalid_plugin_manifest_error(tmp_path: Path) -> None:
-    """Show should return a user-facing error when plugin manifest validation fails."""
+async def test_handle_config_command_show_tolerates_invalid_plugin_manifest(tmp_path: Path) -> None:
+    """Show should keep working when runtime plugin loading degrades."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -350,9 +350,10 @@ async def test_handle_config_command_show_returns_invalid_plugin_manifest_error(
     response, change_info = await handle_config_command("show", _runtime_paths_for_config(config_path))
 
     assert change_info is None
-    assert "Invalid configuration" in response
-    assert "Invalid plugin name" in response
-    assert "Changes were NOT applied." not in response
+    assert "Current Configuration:" in response
+    assert "assistant" in response
+    assert "./plugins/bad-name" in response
+    assert "Invalid configuration" not in response
 
 
 @pytest.mark.asyncio
