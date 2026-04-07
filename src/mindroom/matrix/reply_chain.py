@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable, Coroutine, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import nio
@@ -332,7 +332,12 @@ async def _fetch_node(
     """Fetch reply-chain node metadata from cache or Matrix."""
     cached_node = caches.nodes.get(room_id, event_id)
     if cached_node:
-        return cached_node
+        refreshed_node = await _refresh_node_visible_state(client, room_id, cached_node)
+        if refreshed_node is not cached_node:
+            caches.nodes.put(room_id, event_id, refreshed_node)
+            if refreshed_node.thread_root_id:
+                _cache_roots(caches, room_id, [event_id], refreshed_node.thread_root_id, points_to_thread=True)
+        return refreshed_node
 
     response = await client.room_get_event(room_id, event_id)
     if not isinstance(response, nio.RoomGetEventResponse):
@@ -386,6 +391,53 @@ async def _fetch_node(
     if node.thread_root_id:
         _cache_roots(caches, room_id, [event_id], node.thread_root_id, points_to_thread=True)
     return node
+
+
+async def _refresh_node_visible_state(
+    client: nio.AsyncClient,
+    room_id: str,
+    node: _ReplyChainNode,
+) -> _ReplyChainNode:
+    """Refresh edit-derived visible state for one cached reply-chain node."""
+    from mindroom.matrix.client import (  # noqa: PLC0415
+        _fetch_latest_message_replacement,
+        _ThreadHistoryFastPathUnavailableError,
+    )
+
+    parsed_event = nio.Event.parse_event(node.event_source)
+    if not isinstance(parsed_event, (nio.RoomMessageText, nio.RoomMessageNotice)):
+        return node
+
+    visible_event_source = node.event_source
+    latest_event_id = node.event_id
+    thread_root_id = node.thread_root_id
+
+    try:
+        replacement = await _fetch_latest_message_replacement(client, room_id, parsed_event)
+    except _ThreadHistoryFastPathUnavailableError:
+        replacement = None
+
+    if replacement is not None:
+        replacement_event, replacement_thread_root_id = replacement
+        if isinstance(replacement_event.source, dict):
+            visible_event_source = replacement_event.source
+        latest_event_id = replacement_event.event_id
+        if replacement_thread_root_id is not None:
+            thread_root_id = replacement_thread_root_id
+
+    if (
+        visible_event_source == node.visible_event_source
+        and latest_event_id == node.latest_event_id
+        and thread_root_id == node.thread_root_id
+    ):
+        return node
+
+    return replace(
+        node,
+        latest_event_id=latest_event_id,
+        visible_event_source=visible_event_source,
+        thread_root_id=thread_root_id,
+    )
 
 
 async def _resolve_direct_thread_root(
