@@ -86,6 +86,13 @@ class ResolvedReplayPlan:
     history_limit: int | None = None
 
 
+def _to_k(tokens: int) -> str:
+    """Abbreviate token counts: ``145826`` → ``~146K``, values <1000 as-is."""
+    if tokens >= 1000:
+        return f"~{int((tokens + 500) // 1000)}K"
+    return str(tokens)
+
+
 @dataclass(frozen=True)
 class CompactionOutcome:
     """Completed pre-run compaction result used for notices and tests."""
@@ -134,18 +141,22 @@ class CompactionOutcome:
         return meta
 
     def format_notice(self) -> str:
-        """Format a human-readable compaction notice line."""
-        parts = [
-            f"~{self.before_tokens:,} \u2192 ~{self.after_tokens:,} / {self.window_tokens:,} tokens",
-        ]
+        """Format a human-readable compaction notice."""
+        line1 = (
+            f"\U0001f4e6 Compacted {self.compacted_run_count} runs: "
+            f"{_to_k(self.before_tokens)} \u2192 {_to_k(self.after_tokens)}"
+            f" / {_to_k(self.window_tokens)} history tokens"
+        )
+        overhead_parts: list[str] = []
         if self.role_instructions_tokens is not None:
-            parts.append(f"role/instructions ~{self.role_instructions_tokens:,}")
+            overhead_parts.append(f"{_to_k(self.role_instructions_tokens)} instructions")
         if self.tool_definition_tokens is not None:
-            parts.append(f"tools ~{self.tool_definition_tokens:,}")
+            overhead_parts.append(f"{_to_k(self.tool_definition_tokens)} tools")
         if self.current_prompt_tokens is not None:
-            parts.append(f"current prompt ~{self.current_prompt_tokens:,}")
-        parts.append(f"{self.compacted_run_count} runs summarized")
-        return f"Conversation compacted ({'; '.join(parts)})."
+            overhead_parts.append(f"{_to_k(self.current_prompt_tokens)} prompt")
+        if overhead_parts:
+            return f"{line1}\n   Overhead: {' + '.join(overhead_parts)}"
+        return line1
 
 
 @dataclass(frozen=True)

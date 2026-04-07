@@ -5674,7 +5674,7 @@ class AgentBot:
             return None
 
         summary_line = outcome.format_notice()
-        formatted_body = f"<em>{html_escape(summary_line)}</em>"
+        formatted_body = f"<em>{html_escape(summary_line).replace(chr(10), '<br/>')}</em>"
         effective_thread_id = self._build_message_target(
             room_id=room_id,
             thread_id=thread_id,

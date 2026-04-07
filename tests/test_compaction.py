@@ -14,7 +14,7 @@ from mindroom.history.compaction import (
     estimate_static_tokens,
     estimate_tool_definition_tokens,
 )
-from mindroom.history.types import CompactionOutcome
+from mindroom.history.types import CompactionOutcome, _to_k
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,6 +56,24 @@ def _make_outcome(**overrides: object) -> CompactionOutcome:
 
 
 # ---------------------------------------------------------------------------
+# _to_k helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestToK:
+    """Tests for _to_k half-up rounding helper."""
+
+    def test_boundary_values(self) -> None:
+        assert _to_k(0) == "0"
+        assert _to_k(999) == "999"
+        assert _to_k(1000) == "~1K"
+        assert _to_k(1499) == "~1K"
+        assert _to_k(1500) == "~2K"
+        assert _to_k(2500) == "~3K"
+        assert _to_k(3500) == "~4K"
+
+
+# ---------------------------------------------------------------------------
 # CompactionOutcome tests
 # ---------------------------------------------------------------------------
 
@@ -66,7 +84,7 @@ class TestCompactionOutcome:
     def test_format_notice_keeps_basic_format_without_breakdown(self) -> None:
         outcome = _make_outcome(window_tokens=128_000)
         notice = outcome.format_notice()
-        assert notice == "Conversation compacted (~30,000 → ~12,000 / 128,000 tokens; 12 runs summarized)."
+        assert notice == "\U0001f4e6 Compacted 12 runs: ~30K \u2192 ~12K / ~128K history tokens"
 
     def test_format_notice_uses_enriched_token_breakdown(self) -> None:
         outcome = _make_outcome(
@@ -77,15 +95,14 @@ class TestCompactionOutcome:
         )
         notice = outcome.format_notice()
         assert notice == (
-            "Conversation compacted (~30,000 → ~12,000 / 128,000 tokens; "
-            "role/instructions ~35,000; tools ~15,000; current prompt ~62,000; "
-            "12 runs summarized)."
+            "\U0001f4e6 Compacted 12 runs: ~30K \u2192 ~12K / ~128K history tokens\n"
+            "   Overhead: ~35K instructions + ~15K tools + ~62K prompt"
         )
 
     def test_format_notice_with_partial_breakdown(self) -> None:
         outcome = _make_outcome(role_instructions_tokens=8_000)
         notice = outcome.format_notice()
-        assert "role/instructions ~8,000" in notice
+        assert "~8K instructions" in notice
         assert "tools" not in notice
 
     def test_to_notice_metadata_basic(self) -> None:
