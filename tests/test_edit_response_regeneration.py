@@ -1292,7 +1292,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         # Verify that _generate_response was called with the acknowledgment event ID for editing
         call_kwargs = mock_generate_response.call_args.kwargs
         assert call_kwargs["existing_event_id"] == "$ack_event:example.com"
-        assert call_kwargs["existing_event_is_placeholder"] is False
+        assert call_kwargs["existing_event_is_placeholder"] is True
 
 
 @pytest.mark.asyncio
@@ -1372,7 +1372,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         assert bot.response_tracker.get_response_event_id("$question:example.com") is None
         call_kwargs = mock_generate_response.call_args.kwargs
         assert call_kwargs["existing_event_id"] == "$ack_event:example.com"
-        assert call_kwargs["existing_event_is_placeholder"] is False
+        assert call_kwargs["existing_event_is_placeholder"] is True
 
 
 @pytest.mark.asyncio

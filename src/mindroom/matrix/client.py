@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import nio
 from aiohttp import ClientError
@@ -28,6 +28,7 @@ from mindroom.matrix.message_content import (
     extract_and_resolve_message,
     extract_edit_body,
     visible_body_from_event_source,
+    visible_content_from_event_source,
 )
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
@@ -1212,29 +1213,42 @@ async def send_file_message(
     return await send_message(client, room_id, content)
 
 
-def _history_message_sort_key(message: ResolvedVisibleMessage) -> tuple[int, str]:
+def _history_message_sort_key(message: VisibleMessageLike) -> tuple[int, str]:
     """Sort thread history messages by timestamp and event ID."""
-    return (message.timestamp, message.event_id)
+    return (
+        visible_message_timestamp(message) or 0,
+        visible_message_event_id(message) or "",
+    )
 
 
 def _snapshot_message_dict(event: nio.RoomMessageText | nio.RoomMessageNotice) -> dict[str, Any]:
     """Build one lightweight history dict without hydrating sidecars."""
     event_source = event.source if isinstance(event.source, dict) else {}
-    content = event_source.get("content", {})
-    normalized_content = content if isinstance(content, dict) else {}
+    bundled_replacement = _bundled_replacement_event(event_source)
+    if (
+        bundled_replacement is not None
+        and EventInfo.from_event(bundled_replacement.source).original_event_id == event.event_id
+    ):
+        visible_event = bundled_replacement
+    else:
+        visible_event = event
+    visible_event_source = visible_event.source if isinstance(visible_event.source, dict) else event_source
+    visible_content = visible_content_from_event_source(visible_event_source)
     message: dict[str, Any] = {
-        "sender": event.sender,
-        "body": visible_body_from_event_source(event_source, event.body),
-        "timestamp": event.server_timestamp,
+        "sender": visible_event.sender,
+        "body": visible_body_from_event_source(visible_event_source, visible_event.body),
+        "timestamp": visible_event.server_timestamp,
         "event_id": event.event_id,
-        "content": normalized_content,
+        "content": visible_content,
+        "latest_event_id": visible_event.event_id,
     }
-    event_info = EventInfo.from_event(event_source)
-    if event_info.thread_id is not None:
-        message["thread_id"] = event_info.thread_id
-    if (msgtype := normalized_content.get("msgtype")) != "m.text" and isinstance(msgtype, str):
+    event_info = EventInfo.from_event(visible_event_source)
+    thread_id = event_info.thread_id or event_info.thread_id_from_edit
+    if thread_id is not None:
+        message["thread_id"] = thread_id
+    if (msgtype := visible_content.get("msgtype")) != "m.text" and isinstance(msgtype, str):
         message["msgtype"] = msgtype
-    if stream_status := _stream_status_from_content(normalized_content):
+    if stream_status := _stream_status_from_content(visible_content):
         message["stream_status"] = stream_status
     return message
 
@@ -1289,15 +1303,42 @@ async def _fetch_thread_context_via_relations(
 
 
 def _sort_thread_history_root_first(
-    messages: list[ResolvedVisibleMessage],
+    messages: list[ResolvedVisibleMessage] | list[dict[str, Any]],
     *,
     thread_id: str,
 ) -> None:
     """Keep the thread root first, then order the remaining messages chronologically."""
-    messages.sort(key=lambda message: (message.timestamp, message.event_id))
-    root_index = next((index for index, message in enumerate(messages) if message.event_id == thread_id), None)
-    if root_index not in (None, 0):
-        messages.insert(0, messages.pop(root_index))
+    if not messages:
+        return
+
+    if isinstance(messages[0], ResolvedVisibleMessage):
+        resolved_messages = cast("list[ResolvedVisibleMessage]", messages)
+        resolved_messages.sort(key=_history_message_sort_key)
+        root_index = next(
+            (
+                index
+                for index, message in enumerate(resolved_messages)
+                if visible_message_event_id(message) == thread_id
+            ),
+            None,
+        )
+        if root_index not in (None, 0):
+            root_message = resolved_messages.pop(root_index)
+            resolved_messages.insert(0, root_message)
+    else:
+        snapshot_messages = cast("list[dict[str, Any]]", messages)
+        snapshot_messages.sort(key=_history_message_sort_key)
+        root_index = next(
+            (
+                index
+                for index, message in enumerate(snapshot_messages)
+                if visible_message_event_id(message) == thread_id
+            ),
+            None,
+        )
+        if root_index not in (None, 0):
+            root_message = snapshot_messages.pop(root_index)
+            snapshot_messages.insert(0, root_message)
 
 
 def _parse_room_message_event(event_source: dict[str, Any]) -> nio.RoomMessageText | nio.RoomMessageNotice | None:
@@ -1335,6 +1376,27 @@ def _bundled_replacement_event(
             if (parsed_event := _parse_room_message_event(candidate)) is not None:
                 return parsed_event
     return None
+
+
+async def _fetch_room_message_event(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+) -> nio.RoomMessageText | nio.RoomMessageNotice:
+    """Fetch one visible room-message event or raise fast-path unavailability."""
+    try:
+        response = await client.room_get_event(room_id, event_id)
+    except Exception as exc:
+        msg = f"event lookup failed for {event_id}"
+        raise _ThreadHistoryFastPathUnavailableError(msg) from exc
+    if not isinstance(response, nio.RoomGetEventResponse):
+        msg = f"failed to fetch event {event_id}"
+        raise _ThreadHistoryFastPathUnavailableError(msg)
+    event = response.event
+    if not isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+        msg = f"event {event_id} is not a readable room message"
+        raise _ThreadHistoryFastPathUnavailableError(msg)
+    return event
 
 
 async def _collect_related_events(
@@ -1749,18 +1811,16 @@ async def fetch_thread_snapshot(
 ) -> ThreadHistoryResult:
     """Fetch lightweight thread context for dispatch decisions."""
     try:
-        return _thread_history_result(
-            await _fetch_thread_context_via_relations(client, room_id, thread_id),
-            is_full_history=False,
-        )
+        snapshot = await _fetch_thread_context_via_relations(client, room_id, thread_id)
+        _sort_thread_history_root_first(snapshot, thread_id=thread_id)
+        return _thread_history_result(snapshot, is_full_history=False)
     except _ThreadHistoryFastPathUnavailableError:
-        return _thread_history_result(
-            [
-                visible_message_to_dict(message)
-                for message in await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
-            ],
-            is_full_history=True,
-        )
+        snapshot = [
+            visible_message_to_dict(message)
+            for message in await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
+        ]
+        _sort_thread_history_root_first(snapshot, thread_id=thread_id)
+        return _thread_history_result(snapshot, is_full_history=True)
 
 
 async def get_room_threads_page(
@@ -1839,10 +1899,15 @@ async def _latest_thread_event_id(
         if not candidate_info.is_edit and candidate_info.thread_id == thread_id:
             try:
                 candidate_replacement = await _fetch_latest_message_replacement(client, room_id, candidate_event)
+                root_replacement = await _fetch_latest_message_replacement(
+                    client,
+                    room_id,
+                    await _fetch_room_message_event(client, room_id, thread_id),
+                )
             except _ThreadHistoryFastPathUnavailableError:
                 pass
             else:
-                if candidate_replacement is None:
+                if candidate_replacement is None and root_replacement is None:
                     return candidate_event.event_id
 
     try:
@@ -1850,7 +1915,15 @@ async def _latest_thread_event_id(
     except Exception:
         return thread_id
     if thread_msgs:
-        last_event_id = visible_message_visible_event_id(thread_msgs[-1])
+        latest_message = max(
+            enumerate(thread_msgs),
+            key=lambda item: (
+                visible_message_timestamp(item[1]) or -1,
+                item[0],
+                visible_message_visible_event_id(item[1]) or "",
+            ),
+        )[1]
+        last_event_id = visible_message_visible_event_id(latest_message)
         return last_event_id or thread_id
     return thread_id
 

@@ -1982,7 +1982,7 @@ class AgentBot:
                 thread_id=thread_id,
                 thread_history=thread_history,
                 existing_event_id=ack_event_id,  # Edit the acknowledgment instead of creating new message
-                existing_event_is_placeholder=False,
+                existing_event_is_placeholder=True,
                 user_id=event.sender,
             )
             # Mark the original interactive question as responded
@@ -3972,10 +3972,8 @@ class AgentBot:
 
         if delivery_result is not None and delivery_result.suppressed:
             return None
-        if delivery_result is not None and delivery_result.event_id is not None:
+        if delivery_result is not None:
             return delivery_result.event_id
-        if delivery_result is not None and existing_event_id is not None:
-            return existing_event_id
         return tracked_event_id or existing_event_id
 
     async def _run_cancellable_response(
@@ -4854,10 +4852,8 @@ class AgentBot:
     ) -> str | None:
         if delivery_result is not None and delivery_result.suppressed:
             return None
-        if delivery_result is not None and delivery_result.event_id is not None:
+        if delivery_result is not None:
             return delivery_result.event_id
-        if delivery_result is not None and existing_event_id is not None:
-            return existing_event_id
         return tracked_event_id or existing_event_id
 
     async def _generate_response(

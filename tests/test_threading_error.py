@@ -1034,7 +1034,7 @@ class TestThreadingBehavior:
                                 "version": 2,
                                 "encoding": "matrix_event_content_json",
                             },
-                            "url": "mxc://server/plain1-sidecar",
+                            "url": "mxc://server/plain1-sidecar-retry",
                             "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
                         },
                         "event_id": "$plain1:localhost",
@@ -1078,6 +1078,166 @@ class TestThreadingBehavior:
         assert context.thread_history[-1].body == "Hydrated plain reply from sidecar"
         assert context.thread_history[-1].content["body"] == "Hydrated plain reply from sidecar"
         bot.client.download.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_extract_dispatch_context_keeps_reply_chain_sidecars_lightweight(self, bot: AgentBot) -> None:
+        """Dispatch-target derivation should not hydrate reply-chain sidecars."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Newest plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$plain1:localhost"}},
+                },
+                "event_id": "$incoming:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567896,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.download = AsyncMock(side_effect=AssertionError("dispatch snapshot should not hydrate sidecars"))
+        bot.client.room_get_event = AsyncMock(
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Preview plain reply [Message continues in attached file]",
+                            "msgtype": "m.file",
+                            "info": {"mimetype": "application/json"},
+                            "io.mindroom.long_text": {
+                                "version": 2,
+                                "encoding": "matrix_event_content_json",
+                            },
+                            "url": "mxc://server/plain1-sidecar-retry",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$root:localhost"}},
+                        },
+                        "event_id": "$plain1:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567895,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Root message",
+                            "msgtype": "m.text",
+                        },
+                        "event_id": "$root:localhost",
+                        "sender": "@mindroom_general:localhost",
+                        "origin_server_ts": 1234567894,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
+        )
+
+        context = await bot._extract_dispatch_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$root:localhost"
+        assert context.requires_full_thread_history is False
+        assert [message["event_id"] for message in context.thread_history] == [
+            "$root:localhost",
+            "$plain1:localhost",
+        ]
+        assert context.thread_history[-1]["body"] == "Preview plain reply [Message continues in attached file]"
+        bot.client.download.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_extract_context_retries_sidecar_hydration_after_cached_reply_chain_preview_failure(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Cached reply-chain nodes should retry sidecar hydration on later traversals."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Newest plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$plain1:localhost"}},
+                },
+                "event_id": "$incoming:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567896,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.download = AsyncMock(
+            side_effect=[
+                MagicMock(),
+                MagicMock(
+                    spec=nio.DownloadResponse,
+                    body=json.dumps(
+                        {
+                            "msgtype": "m.text",
+                            "body": "Hydrated plain reply from sidecar",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$root:localhost"}},
+                        },
+                    ).encode("utf-8"),
+                ),
+            ],
+        )
+        bot.client.room_get_event = AsyncMock(
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Preview plain reply [Message continues in attached file]",
+                            "msgtype": "m.file",
+                            "info": {"mimetype": "application/json"},
+                            "io.mindroom.long_text": {
+                                "version": 2,
+                                "encoding": "matrix_event_content_json",
+                            },
+                            "url": "mxc://server/plain1-sidecar-retry-2",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$root:localhost"}},
+                        },
+                        "event_id": "$plain1:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567895,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Root message",
+                            "msgtype": "m.text",
+                        },
+                        "event_id": "$root:localhost",
+                        "sender": "@mindroom_general:localhost",
+                        "origin_server_ts": 1234567894,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
+        )
+
+        first_context = await bot._extract_message_context(room, event)
+        second_context = await bot._extract_message_context(room, event)
+
+        assert [msg.event_id for msg in first_context.thread_history] == ["$root:localhost", "$plain1:localhost"]
+        assert first_context.thread_history[-1].body == "Preview plain reply [Message continues in attached file]"
+        assert second_context.thread_history[-1].body == "Hydrated plain reply from sidecar"
+        assert bot.client.room_get_event.await_count == 2
+        assert bot.client.download.await_count == 2
 
     @pytest.mark.asyncio
     async def test_extract_context_preserves_plain_replies_across_thread_reentries(self, bot: AgentBot) -> None:

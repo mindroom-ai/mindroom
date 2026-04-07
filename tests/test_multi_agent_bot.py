@@ -2079,6 +2079,56 @@ class TestAgentBot:
         assert bot._edit_message.await_args.args[3] == "$canonical_thread:localhost"
 
     @pytest.mark.asyncio
+    async def test_generate_team_response_helper_returns_none_when_edit_delivery_has_no_event_id(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Failed team edits must not be reported as successful via the existing event ID."""
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function("$existing")
+            return "$existing"
+
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = AsyncMock()
+        bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
+        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
+        bot._deliver_generated_response = AsyncMock(
+            return_value=_ResponseDispatchResult(
+                event_id=None,
+                response_text="Team reply",
+                delivery_kind=None,
+            ),
+        )
+        matrix_ids = config.get_ids(runtime_paths)
+
+        with (
+            patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.team_response", new_callable=AsyncMock, return_value="Team reply"),
+        ):
+            event_id = await bot._generate_team_response_helper(
+                room_id="!test:localhost",
+                reply_to_event_id="$team-root",
+                thread_id=None,
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+                thread_history=[],
+                requester_user_id="@user:localhost",
+                existing_event_id="$existing",
+                existing_event_is_placeholder=False,
+                payload=_DispatchPayload(prompt="team prompt"),
+            )
+
+        assert event_id is None
+        bot._deliver_generated_response.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_generate_team_response_helper_registers_interactive_questions_with_bot_agent_name(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -2815,6 +2865,71 @@ class TestAgentBot:
             await asyncio.gather(*scheduled_tasks)
 
         assert event_id == "$existing"
+        bot._process_and_respond.assert_awaited_once()
+        bot._process_and_respond_streaming.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_generate_response_returns_none_when_edit_delivery_has_no_event_id(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Failed edits must not resolve to the previous event ID."""
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function("$existing")
+            return "$existing"
+
+        scheduled_tasks: list[asyncio.Task[None]] = []
+
+        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        def schedule_background_task(
+            coro: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            error_handler: object | None = None,  # noqa: ARG001
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+            scheduled_tasks.append(task)
+            return task
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._process_and_respond_streaming = AsyncMock()
+        bot._process_and_respond = AsyncMock(
+            return_value=_ResponseDispatchResult(
+                event_id=None,
+                response_text="edited",
+                delivery_kind=None,
+            ),
+        )
+        bot._run_cancellable_response = AsyncMock(side_effect=run_cancellable_response)
+
+        with (
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
+        ):
+            event_id = await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Regenerate",
+                reply_to_event_id="$event",
+                thread_id="$thread-root",
+                thread_history=[],
+                existing_event_id="$existing",
+                existing_event_is_placeholder=False,
+                user_id="@alice:localhost",
+            )
+
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+        assert event_id is None
         bot._process_and_respond.assert_awaited_once()
         bot._process_and_respond_streaming.assert_not_awaited()
 

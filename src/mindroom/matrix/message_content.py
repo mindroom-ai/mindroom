@@ -43,11 +43,15 @@ def _content_body(content: dict[str, Any], fallback_body: str) -> str:
     return body if isinstance(body, str) else fallback_body
 
 
+def visible_content_from_event_source(event_source: dict[str, Any]) -> dict[str, Any]:
+    """Return the visible content layer from an event source dict."""
+    content = _normalized_content_dict(event_source.get("content", {}))
+    return _normalized_content_dict(content.get("m.new_content")) or content
+
+
 def visible_body_from_event_source(event_source: dict[str, Any], fallback_body: str) -> str:
     """Return the visible message body from an event source dict."""
-    content = _normalized_content_dict(event_source.get("content", {}))
-    visible_content = _normalized_content_dict(content.get("m.new_content")) or content
-    return _content_body(visible_content, fallback_body)
+    return _content_body(visible_content_from_event_source(event_source), fallback_body)
 
 
 def is_v2_sidecar_text_preview(event_source: dict[str, Any]) -> bool:
