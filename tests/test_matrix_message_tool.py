@@ -6,7 +6,7 @@ import asyncio
 import json
 import tempfile
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -25,14 +25,17 @@ from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
 
 @pytest.fixture(autouse=True)
 def _reset_matrix_message_rate_limit() -> None:
     MatrixMessageTools._recent_actions.clear()
 
 
-def _empty_async_iterator() -> object:
-    async def iterator() -> object:
+def _empty_async_iterator() -> AsyncIterator[object]:
+    async def iterator() -> AsyncIterator[object]:
         if False:
             yield None
 
