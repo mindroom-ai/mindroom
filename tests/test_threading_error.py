@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 import pytest_asyncio
+from nio.api import RelationshipType
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
@@ -1152,6 +1153,122 @@ class TestThreadingBehavior:
         ]
         assert context.thread_history[-1]["body"] == "Preview plain reply [Message continues in attached file]"
         bot.client.download.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_extract_dispatch_context_applies_reply_chain_replacement_relations(self, bot: AgentBot) -> None:
+        """Dispatch snapshots should use the latest visible reply-chain edit state."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Newest reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$msg2:localhost"}},
+                },
+                "event_id": "$incoming:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567896,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Second message",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$msg1:localhost"}},
+                        },
+                        "event_id": "$msg2:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567894,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "First message",
+                            "msgtype": "m.text",
+                        },
+                        "event_id": "$msg1:localhost",
+                        "sender": "@mindroom_general:localhost",
+                        "origin_server_ts": 1234567893,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
+        )
+
+        def room_get_event_relations(
+            _room_id: str,
+            event_id: str,
+            *,
+            rel_type: RelationshipType | None = None,
+            event_type: str | None = None,
+            direction: nio.MessageDirection = nio.MessageDirection.back,
+            limit: int | None = None,
+        ) -> object:
+            assert rel_type == RelationshipType.replacement
+            assert event_type == "m.room.message"
+            assert direction == nio.MessageDirection.back
+            assert limit is None
+            relations_by_event_id = {
+                "$msg2:localhost": [
+                    nio.RoomMessageText.from_dict(
+                        {
+                            "content": {
+                                "body": "* Updated second message",
+                                "msgtype": "m.text",
+                                "m.new_content": {
+                                    "body": "Updated second message for @mindroom_general",
+                                    "msgtype": "m.text",
+                                    "m.relates_to": {"m.in_reply_to": {"event_id": "$msg1:localhost"}},
+                                },
+                                "m.relates_to": {
+                                    "rel_type": "m.replace",
+                                    "event_id": "$msg2:localhost",
+                                },
+                            },
+                            "event_id": "$edit_msg2:localhost",
+                            "sender": "@user:localhost",
+                            "origin_server_ts": 1234567895,
+                            "room_id": "!test:localhost",
+                            "type": "m.room.message",
+                        },
+                    ),
+                ],
+                "$msg1:localhost": [],
+            }
+
+            async def iterator() -> object:
+                for related_event in relations_by_event_id.get(event_id, []):
+                    yield related_event
+
+            return iterator()
+
+        bot.client.room_get_event_relations = MagicMock(side_effect=room_get_event_relations)
+
+        context = await bot._extract_dispatch_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$msg1:localhost"
+        assert context.requires_full_thread_history is False
+        assert [message["event_id"] for message in context.thread_history] == [
+            "$msg1:localhost",
+            "$msg2:localhost",
+        ]
+        assert context.thread_history[-1]["body"] == "Updated second message for @mindroom_general"
+        assert context.thread_history[-1]["content"]["body"] == "Updated second message for @mindroom_general"
+        assert context.thread_history[-1]["latest_event_id"] == "$edit_msg2:localhost"
 
     @pytest.mark.asyncio
     async def test_extract_dispatch_context_marks_chain_merged_sidecar_preview_for_hydration(

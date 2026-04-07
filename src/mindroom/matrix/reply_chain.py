@@ -86,8 +86,10 @@ class _ReplyChainNode:
 
     sender: str
     event_id: str
+    latest_event_id: str
     timestamp: int
     event_source: dict[str, Any]
+    visible_event_source: dict[str, Any]
     parent_event_id: str | None
     thread_root_id: str | None
     has_relations: bool
@@ -122,39 +124,43 @@ async def _node_to_history_message(
     """Convert cached reply-chain metadata into normalized history message structure."""
     from mindroom.matrix.client import ResolvedVisibleMessage  # noqa: PLC0415
 
-    resolved_source = await resolve_event_source_content(node.event_source, client)
-    content = resolved_source.get("content", {})
+    resolved_source = await resolve_event_source_content(node.visible_event_source, client)
+    content = visible_content_from_event_source(resolved_source)
     fallback_body = ""
-    if isinstance(content, dict):
-        raw_body = content.get("body")
-        if isinstance(raw_body, str):
-            fallback_body = raw_body
-    return ResolvedVisibleMessage.synthetic(
+    raw_body = content.get("body")
+    if isinstance(raw_body, str):
+        fallback_body = raw_body
+
+    message = ResolvedVisibleMessage(
         sender=node.sender,
         body=visible_body_from_event_source(resolved_source, fallback_body),
         timestamp=node.timestamp,
         event_id=node.event_id,
         content=content if isinstance(content, dict) else {},
+        thread_id=node.thread_root_id,
+        latest_event_id=node.latest_event_id,
     )
+    message.refresh_stream_status()
+    return message
 
 
 def _node_to_snapshot_message(node: _ReplyChainNode) -> dict[str, Any]:
     """Convert cached reply-chain metadata into lightweight visible message data."""
-    visible_content = visible_content_from_event_source(node.event_source)
+    visible_content = visible_content_from_event_source(node.visible_event_source)
     fallback_body = ""
     visible_body = visible_content.get("body")
     if isinstance(visible_body, str):
         fallback_body = visible_body
-    event_info = EventInfo.from_event(node.event_source)
+    event_info = EventInfo.from_event(node.visible_event_source)
     message = {
         "sender": node.sender,
-        "body": visible_body_from_event_source(node.event_source, fallback_body),
+        "body": visible_body_from_event_source(node.visible_event_source, fallback_body),
         "timestamp": node.timestamp,
         "event_id": node.event_id,
         "content": visible_content,
-        "latest_event_id": node.event_id,
+        "latest_event_id": node.latest_event_id,
     }
-    thread_id = event_info.thread_id or event_info.thread_id_from_edit
+    thread_id = node.thread_root_id or event_info.thread_id or event_info.thread_id_from_edit
     if thread_id is not None:
         message["thread_id"] = thread_id
     stream_status = visible_content.get(STREAM_STATUS_KEY)
@@ -341,13 +347,39 @@ async def _fetch_node(
     target_event = response.event
     target_info = EventInfo.from_event(target_event.source)
     event_source = target_event.source if isinstance(target_event.source, dict) else {}
+    visible_event_source = event_source
+    latest_event_id = target_event.event_id
+    thread_root_id = target_info.thread_id
+
+    if isinstance(target_event, (nio.RoomMessageText, nio.RoomMessageNotice)):
+        from mindroom.matrix.client import (  # noqa: PLC0415
+            _fetch_latest_message_replacement,
+            _ThreadHistoryFastPathUnavailableError,
+        )
+
+        try:
+            replacement = await _fetch_latest_message_replacement(client, room_id, target_event)
+        except _ThreadHistoryFastPathUnavailableError:
+            replacement = None
+
+        if replacement is not None:
+            replacement_event, replacement_thread_root_id = replacement
+            visible_event_source = (
+                replacement_event.source if isinstance(replacement_event.source, dict) else visible_event_source
+            )
+            latest_event_id = replacement_event.event_id
+            if replacement_thread_root_id is not None:
+                thread_root_id = replacement_thread_root_id
+
     node = _ReplyChainNode(
         sender=target_event.sender,
         event_id=target_event.event_id,
+        latest_event_id=latest_event_id,
         timestamp=target_event.server_timestamp if isinstance(target_event.server_timestamp, int) else 0,
         event_source=event_source,
+        visible_event_source=visible_event_source,
         parent_event_id=_next_reply_chain_event_id(target_info, event_id),
-        thread_root_id=target_info.thread_id,
+        thread_root_id=thread_root_id,
         has_relations=target_info.has_relations,
     )
     caches.nodes.put(room_id, event_id, node)
@@ -382,8 +414,10 @@ async def _resolve_direct_thread_root(
         _ReplyChainNode(
             sender=node.sender,
             event_id=node.event_id,
+            latest_event_id=node.latest_event_id,
             timestamp=node.timestamp,
             event_source=node.event_source,
+            visible_event_source=node.visible_event_source,
             parent_event_id=node.parent_event_id,
             thread_root_id=event_id,
             has_relations=node.has_relations,

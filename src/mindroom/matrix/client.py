@@ -1228,17 +1228,23 @@ def _history_message_sort_key(message: VisibleMessageLike) -> tuple[int, str]:
     )
 
 
-def _snapshot_message_dict(event: nio.RoomMessageText | nio.RoomMessageNotice) -> dict[str, Any]:
+def _snapshot_message_dict(
+    event: nio.RoomMessageText | nio.RoomMessageNotice,
+    *,
+    visible_event: nio.RoomMessageText | nio.RoomMessageNotice | None = None,
+    thread_id_override: str | None = None,
+) -> dict[str, Any]:
     """Build one lightweight history dict without hydrating sidecars."""
     event_source = event.source if isinstance(event.source, dict) else {}
-    bundled_replacement = _bundled_replacement_event(event_source)
-    if (
-        bundled_replacement is not None
-        and EventInfo.from_event(bundled_replacement.source).original_event_id == event.event_id
-    ):
-        visible_event = bundled_replacement
-    else:
-        visible_event = event
+    if visible_event is None:
+        bundled_replacement = _bundled_replacement_event(event_source)
+        if (
+            bundled_replacement is not None
+            and EventInfo.from_event(bundled_replacement.source).original_event_id == event.event_id
+        ):
+            visible_event = bundled_replacement
+        else:
+            visible_event = event
     visible_event_source = visible_event.source if isinstance(visible_event.source, dict) else event_source
     visible_content = visible_content_from_event_source(visible_event_source)
     message: dict[str, Any] = {
@@ -1250,7 +1256,9 @@ def _snapshot_message_dict(event: nio.RoomMessageText | nio.RoomMessageNotice) -
         "latest_event_id": visible_event.event_id,
     }
     event_info = EventInfo.from_event(visible_event_source)
-    thread_id = event_info.thread_id or event_info.thread_id_from_edit
+    thread_id = (
+        thread_id_override if thread_id_override is not None else event_info.thread_id or event_info.thread_id_from_edit
+    )
     if thread_id is not None:
         message["thread_id"] = thread_id
     if (msgtype := visible_content.get("msgtype")) != "m.text" and isinstance(msgtype, str):
@@ -1258,6 +1266,24 @@ def _snapshot_message_dict(event: nio.RoomMessageText | nio.RoomMessageNotice) -
     if stream_status := _stream_status_from_content(visible_content):
         message["stream_status"] = stream_status
     return message
+
+
+async def _snapshot_message_dict_with_latest_replacement(
+    client: nio.AsyncClient,
+    room_id: str,
+    event: nio.RoomMessageText | nio.RoomMessageNotice,
+) -> dict[str, Any]:
+    """Build one snapshot entry after resolving the latest visible replacement."""
+    replacement = await _fetch_latest_message_replacement(client, room_id, event)
+    if replacement is None:
+        return _snapshot_message_dict(event)
+
+    replacement_event, replacement_thread_id = replacement
+    return _snapshot_message_dict(
+        event,
+        visible_event=replacement_event,
+        thread_id_override=replacement_thread_id,
+    )
 
 
 async def _fetch_thread_context_via_relations(
@@ -1302,7 +1328,12 @@ async def _fetch_thread_context_via_relations(
         msg = f"no direct thread children returned for {thread_id}"
         raise _ThreadHistoryFastPathUnavailableError(msg)
 
-    snapshot = [_snapshot_message_dict(root_event), *(_snapshot_message_dict(event) for event in thread_events)]
+    snapshot = await asyncio.gather(
+        *[
+            _snapshot_message_dict_with_latest_replacement(client, room_id, event)
+            for event in [root_event, *thread_events]
+        ],
+    )
     snapshot.sort(key=lambda message: (message["timestamp"], message["event_id"]))
     return snapshot
 

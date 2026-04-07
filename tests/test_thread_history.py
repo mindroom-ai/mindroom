@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import aiohttp
 import nio
@@ -527,20 +527,120 @@ class TestThreadHistory:
             side_effect=AssertionError("should use _collect_related_events"),
         )
 
+        async def collect_related_events(
+            _client: nio.AsyncClient,
+            _room_id: str,
+            event_id: str,
+            *,
+            rel_type: RelationshipType,
+            event_type: str,
+            direction: nio.MessageDirection = nio.MessageDirection.back,
+            limit: int | None = None,
+            max_events: int | None = None,
+        ) -> list[nio.Event]:
+            del _client, _room_id, event_type, direction, limit, max_events
+            if rel_type == RelationshipType.thread:
+                assert event_id == "$thread_root"
+                return [thread_event]
+            assert rel_type == RelationshipType.replacement
+            return []
+
         with patch(
             "mindroom.matrix.client._collect_related_events",
-            new=AsyncMock(return_value=[thread_event]),
+            new=AsyncMock(side_effect=collect_related_events),
         ) as mock_collect:
             snapshot = await _fetch_thread_context_via_relations(client, "!room:localhost", "$thread_root")
 
         assert [message["event_id"] for message in snapshot] == ["$thread_root", "$reply"]
-        mock_collect.assert_awaited_once_with(
-            client,
-            "!room:localhost",
-            "$thread_root",
-            rel_type=RelationshipType.thread,
-            event_type="m.room.message",
+        assert mock_collect.await_args_list == [
+            call(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                rel_type=RelationshipType.thread,
+                event_type="m.room.message",
+            ),
+            call(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                rel_type=RelationshipType.replacement,
+                event_type="m.room.message",
+            ),
+            call(
+                client,
+                "!room:localhost",
+                "$reply",
+                rel_type=RelationshipType.replacement,
+                event_type="m.room.message",
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_snapshot_relations_path_applies_relation_fetched_edits(self) -> None:
+        """Snapshot fast path should apply relation-fetched replacements before dispatch."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Original root",
+            server_timestamp=1000,
+            source_content={"body": "Original root"},
         )
+        root_edit = self._make_text_event(
+            event_id="$root_edit",
+            sender="@user:localhost",
+            body="* Updated root",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Updated root",
+                "m.new_content": {"body": "Updated root", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread_root"},
+            },
+        )
+        thread_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Original reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Original reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        thread_edit = self._make_text_event(
+            event_id="$reply_edit",
+            sender="@agent:localhost",
+            body="* Updated reply",
+            server_timestamp=4000,
+            source_content={
+                "body": "* Updated reply",
+                "m.new_content": {
+                    "body": "Updated reply for @mindroom_calculator",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+            },
+        )
+        client = self._make_relations_client(
+            root_event=root_event,
+            relations={
+                self._relation_key("$thread_root", RelationshipType.thread): [thread_event],
+                self._relation_key("$thread_root", RelationshipType.replacement): [root_edit],
+                self._relation_key("$reply", RelationshipType.replacement): [thread_edit],
+            },
+        )
+
+        snapshot = await _fetch_thread_context_via_relations(client, "!room:localhost", "$thread_root")
+
+        assert [message["event_id"] for message in snapshot] == ["$thread_root", "$reply"]
+        assert snapshot[0]["body"] == "Updated root"
+        assert snapshot[0]["content"]["body"] == "Updated root"
+        assert snapshot[0]["latest_event_id"] == "$root_edit"
+        assert snapshot[1]["body"] == "Updated reply for @mindroom_calculator"
+        assert snapshot[1]["content"]["body"] == "Updated reply for @mindroom_calculator"
+        assert snapshot[1]["latest_event_id"] == "$reply_edit"
+        assert snapshot[1]["thread_id"] == "$thread_root"
 
     @pytest.mark.asyncio
     async def test_latest_thread_event_id_uses_relations_fast_path(self) -> None:
