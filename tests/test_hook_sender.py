@@ -26,6 +26,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
+from mindroom.dispatch_planner import DispatchPlan
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -654,15 +655,15 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot._resolve_dispatch_action = AsyncMock(return_value=None)
+    bot._plan_dispatch = AsyncMock(return_value=DispatchPlan(kind="ignore"))
 
     await bot._dispatch_text_message(
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
     )
 
-    bot._resolve_dispatch_action.assert_awaited_once()
-    dispatch = bot._resolve_dispatch_action.await_args.args[2]
+    bot._plan_dispatch.assert_awaited_once()
+    dispatch = bot._plan_dispatch.await_args.args[2]
     assert dispatch.envelope.source_kind == "hook"
     assert dispatch.envelope.message_received_depth == 1
     assert dispatch.envelope.mentioned_agents == ("code",)
@@ -718,7 +719,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot._resolve_dispatch_action = AsyncMock(return_value=None)
+    bot._plan_dispatch = AsyncMock(return_value=DispatchPlan(kind="ignore"))
 
     await bot._dispatch_text_message(
         room,
@@ -726,8 +727,8 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
     )
 
     assert hook_calls == ["called"]
-    bot._resolve_dispatch_action.assert_awaited_once()
-    dispatch = bot._resolve_dispatch_action.await_args.args[2]
+    bot._plan_dispatch.assert_awaited_once()
+    dispatch = bot._plan_dispatch.await_args.args[2]
     assert dispatch.envelope.source_kind == "message"
 
 
@@ -932,7 +933,12 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
     bot.handled_turn_ledger = MagicMock()
     bot.handled_turn_ledger.has_responded.return_value = False
     bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot._resolve_dispatch_action = AsyncMock(return_value=_ResponseAction(kind="individual"))
+    bot._plan_dispatch = AsyncMock(
+        return_value=DispatchPlan(
+            kind="respond",
+            response_action=_ResponseAction(kind="individual"),
+        ),
+    )
     bot._build_dispatch_payload_with_attachments = AsyncMock(return_value=_DispatchPayload(prompt="unused"))
     bot._execute_dispatch_action = AsyncMock()
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
@@ -966,10 +972,7 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
     await bot._on_media_message(room, event)
 
     assert captured_bodies == ["@mindroom_code:localhost what is 99+1?"]
-    assert (
-        bot._resolve_dispatch_action.await_args.kwargs["message_for_decision"]
-        == "@mindroom_code:localhost what is 99+1?"
-    )
+    assert bot._plan_dispatch.await_args.args[1].body == "@mindroom_code:localhost what is 99+1?"
     payload_builder = bot._execute_dispatch_action.await_args.args[4]
     await payload_builder(_dispatch_context(bot))
     assert (
@@ -1274,14 +1277,14 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
     )
     bot._resolve_text_dispatch_event = AsyncMock(return_value=event)
     bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot._resolve_dispatch_action = AsyncMock()
+    bot._plan_dispatch = AsyncMock()
 
     await bot._dispatch_text_message(
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
     )
 
-    bot._resolve_dispatch_action.assert_not_awaited()
+    bot._plan_dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1396,14 +1399,14 @@ async def test_first_hop_plain_hook_from_non_message_hook_still_dispatches(tmp_p
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._resolve_text_dispatch_event = AsyncMock(return_value=event)
     bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot._resolve_dispatch_action = AsyncMock(return_value=None)
+    bot._plan_dispatch = AsyncMock(return_value=DispatchPlan(kind="ignore"))
 
     await bot._dispatch_text_message(
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
     )
 
-    bot._resolve_dispatch_action.assert_awaited_once()
+    bot._plan_dispatch.assert_awaited_once()
     assert hook_calls == ["called"]
 
 
@@ -1555,15 +1558,15 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
         is_synthetic=True,
     )
     bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot._resolve_dispatch_action = AsyncMock(return_value=None)
+    bot._plan_dispatch = AsyncMock(return_value=DispatchPlan(kind="ignore"))
 
     await bot._dispatch_text_message(
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
     )
 
-    bot._resolve_dispatch_action.assert_awaited_once()
-    dispatch = bot._resolve_dispatch_action.await_args.args[2]
+    bot._plan_dispatch.assert_awaited_once()
+    dispatch = bot._plan_dispatch.await_args.args[2]
     assert dispatch.envelope.source_kind == "hook_dispatch"
     assert dispatch.envelope.message_received_depth == 1
 
@@ -1589,14 +1592,14 @@ async def test_deep_prepared_text_hook_dispatch_stops_before_dispatch(tmp_path: 
         is_synthetic=True,
     )
     bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot._resolve_dispatch_action = AsyncMock()
+    bot._plan_dispatch = AsyncMock()
 
     await bot._dispatch_text_message(
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
     )
 
-    bot._resolve_dispatch_action.assert_not_awaited()
+    bot._plan_dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio

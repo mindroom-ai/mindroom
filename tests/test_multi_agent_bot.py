@@ -59,6 +59,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.dispatch_planner import DispatchPlan
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionOutcome
 from mindroom.hooks import (
@@ -5849,10 +5850,13 @@ class TestAgentBot:
         ]
         call_order: list[str] = []
 
-        async def fake_resolve_action(*_args: object, **_kwargs: object) -> _ResponseAction:
+        async def fake_plan(*_args: object, **_kwargs: object) -> DispatchPlan:
             call_order.append("action")
             assert dispatch.context.thread_history == full_history
-            return _ResponseAction(kind="individual")
+            return DispatchPlan(
+                kind="respond",
+                response_action=_ResponseAction(kind="individual"),
+            )
 
         async def fake_send_response(*_args: object, **_kwargs: object) -> str:
             call_order.append("placeholder")
@@ -5876,7 +5880,7 @@ class TestAgentBot:
 
         with (
             patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-            patch.object(bot, "_resolve_dispatch_action", new=AsyncMock(side_effect=fake_resolve_action)),
+            patch.object(bot, "_plan_dispatch", new=AsyncMock(side_effect=fake_plan)),
             patch.object(bot, "_send_response", new=AsyncMock(side_effect=fake_send_response)),
             patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock(side_effect=fake_hydrate)),
             patch.object(
@@ -5937,7 +5941,7 @@ class TestAgentBot:
 
         with (
             patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-            patch.object(bot, "_resolve_dispatch_action", new=AsyncMock(return_value=None)),
+            patch.object(bot, "_plan_dispatch", new=AsyncMock(return_value=DispatchPlan(kind="ignore"))),
             patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()) as mock_hydrate,
             patch.object(bot, "_build_dispatch_payload_with_attachments", new=AsyncMock()) as mock_build_payload,
             patch.object(bot, "_execute_dispatch_action", new=AsyncMock()) as mock_execute,
@@ -5960,7 +5964,7 @@ class TestAgentBot:
         self,
         tmp_path: Path,
     ) -> None:
-        """Router handoff retries should reconcile visible echoes recorded on non-primary source events."""
+        """Router ignore plans should preserve visible echoes recorded on non-primary source events."""
         agent_user = AgentMatrixUser(
             agent_name="router",
             user_id="@mindroom_router:localhost",
@@ -5979,9 +5983,12 @@ class TestAgentBot:
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
-        event = MagicMock()
+        event = MagicMock(spec=nio.RoomMessageText)
         event.event_id = "$text"
         event.sender = "@user:localhost"
+        event.body = "hello"
+        event.server_timestamp = 1234567890
+        event.source = {"content": {"body": "hello"}}
 
         dispatch = _PreparedDispatch(
             requester_user_id="@user:localhost",
@@ -5991,7 +5998,7 @@ class TestAgentBot:
                 thread_id="$thread_root",
                 thread_history=[],
                 mentioned_agents=[],
-                has_non_agent_mentions=False,
+                has_non_agent_mentions=True,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -6002,23 +6009,21 @@ class TestAgentBot:
             envelope=_hook_envelope(body="hello", source_event_id="$text"),
         )
 
-        with patch.object(
-            bot,
-            "_handle_router_dispatch",
-            new=AsyncMock(return_value=MagicMock(handled=True, mark_visible_echo_responded=True)),
+        with (
+            patch.object(bot, "_resolve_text_dispatch_event", new=AsyncMock(return_value=event)),
+            patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(bot, "_has_newer_unresponded_in_thread", return_value=False),
+            patch.object(bot, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
         ):
-            action = await bot._resolve_dispatch_action(
+            await bot._dispatch_text_message(
                 room,
-                event,
-                dispatch,
-                message_for_decision="hello",
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
                 handled_turn=HandledTurnState.create(
                     ["$voice", "$text"],
                     source_event_prompts={"$voice": "voice prompt", "$text": "text prompt"},
                 ),
             )
 
-        assert action is None
         assert bot.handled_turn_ledger.record_handled_turn.call_args_list == [
             call(
                 HandledTurnState.create(
@@ -6366,7 +6371,12 @@ class TestAgentBot:
                 requires_full_thread_history=False,
             ),
         )
-        bot._resolve_dispatch_action = AsyncMock(return_value=_ResponseAction(kind="individual"))
+        bot._plan_dispatch = AsyncMock(
+            return_value=DispatchPlan(
+                kind="respond",
+                response_action=_ResponseAction(kind="individual"),
+            ),
+        )
         bot._edit_message = AsyncMock(return_value=True)
         bot._generate_response = AsyncMock()
 
