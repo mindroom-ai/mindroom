@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -392,6 +392,26 @@ def _collect_thread_tag_room_state_event(
 
     state_key = event.get("state_key")
     content = event.get("content")
+    _collect_thread_tag_state_entry(
+        room_id,
+        state_key,
+        content,
+        legacy_tags_by_thread=legacy_tags_by_thread,
+        per_tag_records_by_thread=per_tag_records_by_thread,
+        per_tag_tombstones_by_thread=per_tag_tombstones_by_thread,
+    )
+
+
+def _collect_thread_tag_state_entry(
+    room_id: str,
+    state_key: object,
+    content: object,
+    *,
+    legacy_tags_by_thread: dict[str, dict[str, ThreadTagRecord]],
+    per_tag_records_by_thread: dict[str, dict[str, ThreadTagRecord]],
+    per_tag_tombstones_by_thread: dict[str, set[str]],
+) -> None:
+    """Parse one thread-tag state entry from either room state or hook state maps."""
     if not isinstance(content, Mapping):
         return
     typed_content = cast("Mapping[str, object]", content)
@@ -644,6 +664,40 @@ async def _get_room_thread_tags_states(
     )
 
 
+def list_tagged_threads_from_state_map(
+    room_id: str,
+    room_state: Mapping[object, object],
+    *,
+    tag: str | None = None,
+) -> dict[str, ThreadTagsState]:
+    """Return tagged threads from one pre-fetched ``THREAD_TAGS_EVENT_TYPE`` state map."""
+    normalized_tag = normalize_tag_name(tag) if tag is not None else None
+
+    legacy_tags_by_thread: dict[str, dict[str, ThreadTagRecord]] = {}
+    per_tag_records_by_thread: dict[str, dict[str, ThreadTagRecord]] = {}
+    per_tag_tombstones_by_thread: dict[str, set[str]] = {}
+    for state_key, content in room_state.items():
+        _collect_thread_tag_state_entry(
+            room_id,
+            state_key,
+            content,
+            legacy_tags_by_thread=legacy_tags_by_thread,
+            per_tag_records_by_thread=per_tag_records_by_thread,
+            per_tag_tombstones_by_thread=per_tag_tombstones_by_thread,
+        )
+
+    tagged_threads = _merge_thread_tag_room_state(
+        room_id,
+        legacy_tags_by_thread=legacy_tags_by_thread,
+        per_tag_records_by_thread=per_tag_records_by_thread,
+        per_tag_tombstones_by_thread=per_tag_tombstones_by_thread,
+    )
+    if normalized_tag is None:
+        return tagged_threads
+
+    return {thread_root_id: state for thread_root_id, state in tagged_threads.items() if normalized_tag in state.tags}
+
+
 async def _assert_thread_tags_write_allowed(
     client: nio.AsyncClient,
     room_id: str,
@@ -852,6 +906,96 @@ async def remove_thread_tag(
             client,
             room_id,
             normalized_thread_root_id,
+        )
+        if _verified_remove_state_matches(
+            verified_state,
+            removed_tag=normalized_tag,
+        ):
+            if verified_state is None:
+                return _empty_thread_tags_state(room_id, normalized_thread_root_id)
+            return verified_state
+
+    msg = (
+        f"Failed to remove thread tag {normalized_tag!r} for {normalized_thread_root_id} in {room_id} "
+        f"after {MAX_THREAD_TAG_WRITE_ATTEMPTS} concurrent-write attempts."
+    )
+    raise ThreadTagsError(msg)
+
+
+async def _get_thread_tags_via_room_state(
+    room_id: str,
+    thread_root_id: str,
+    *,
+    query_room_state: Callable[[str, str, str | None], Awaitable[Mapping[object, object] | None]],
+) -> ThreadTagsState | None:
+    """Load one thread-tag state through abstract room-state bindings."""
+    room_state = await query_room_state(
+        room_id,
+        THREAD_TAGS_EVENT_TYPE,
+        None,
+    )
+    if room_state is None:
+        msg = f"Failed to fetch room state for thread tags in {room_id}."
+        raise ThreadTagsError(msg)
+
+    return list_tagged_threads_from_state_map(room_id, room_state).get(thread_root_id)
+
+
+async def remove_thread_tag_via_room_state(
+    room_id: str,
+    thread_root_id: str,
+    tag: str,
+    *,
+    query_room_state: Callable[[str, str, str | None], Awaitable[Mapping[object, object] | None]],
+    put_room_state: Callable[[str, str, str, dict[str, Any]], Awaitable[bool]],
+    expected_record: ThreadTagRecord | None = None,
+) -> ThreadTagsState:
+    """Remove one tag through abstract room-state bindings with verified reads."""
+    normalized_thread_root_id = _require_non_empty_string(
+        thread_root_id,
+        field_name="thread_root_id",
+    )
+    normalized_tag = normalize_tag_name(tag)
+    state_key = _thread_tag_state_key(normalized_thread_root_id, normalized_tag)
+
+    remove_written = False
+    for _ in range(MAX_THREAD_TAG_WRITE_ATTEMPTS):
+        existing_state = await _get_thread_tags_via_room_state(
+            room_id,
+            normalized_thread_root_id,
+            query_room_state=query_room_state,
+        )
+        if existing_state is None:
+            if remove_written:
+                return _empty_thread_tags_state(room_id, normalized_thread_root_id)
+            msg = f"No thread tags state exists for {normalized_thread_root_id} in {room_id}."
+            raise ThreadTagsError(msg)
+
+        existing_record = existing_state.tags.get(normalized_tag)
+        if existing_record is None:
+            if remove_written:
+                return existing_state
+            msg = f"Thread tag {normalized_tag!r} is not set for {normalized_thread_root_id} in {room_id}."
+            raise ThreadTagsError(msg)
+
+        if expected_record is not None and not _thread_tag_records_match(expected_record, existing_record):
+            return existing_state
+
+        wrote = await put_room_state(
+            room_id,
+            THREAD_TAGS_EVENT_TYPE,
+            state_key,
+            {},
+        )
+        if not wrote:
+            msg = f"Failed to update thread tags state for {normalized_thread_root_id} tag {normalized_tag!r} in {room_id}."
+            raise ThreadTagsError(msg)
+        remove_written = True
+
+        verified_state = await _get_thread_tags_via_room_state(
+            room_id,
+            normalized_thread_root_id,
+            query_room_state=query_room_state,
         )
         if _verified_remove_state_matches(
             verified_state,

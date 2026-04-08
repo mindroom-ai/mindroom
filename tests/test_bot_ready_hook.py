@@ -374,3 +374,82 @@ async def test_bot_ready_context_has_correct_entity_info(tmp_path: Path) -> None
     assert ctx.entity_name == "code"
     assert ctx.matrix_user_id == "@mindroom_code:localhost"
     assert "!room:localhost" in ctx.rooms
+    assert ctx.joined_room_ids == ("!room:localhost",)
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_context_preserves_configured_rooms_and_exposes_joined_room_ids(tmp_path: Path) -> None:
+    """Lifecycle hooks should keep configured rooms separate from resolved Matrix room IDs."""
+    bot = _agent_bot(tmp_path)
+    bot.config.agents["code"].rooms = ["lobby", "!room:localhost"]
+    bot.rooms = ["!room:localhost"]
+    bot.client = AsyncMock()
+
+    captured_ctx: list[AgentLifecycleContext] = []
+
+    @hook(EVENT_AGENT_STARTED)
+    async def on_started(ctx: AgentLifecycleContext) -> None:
+        captured_ctx.append(ctx)
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_started])])
+
+    await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
+
+    assert len(captured_ctx) == 1
+    assert captured_ctx[0].rooms == ("lobby", "!room:localhost")
+    assert captured_ctx[0].joined_room_ids == ("!room:localhost",)
+
+
+@pytest.mark.asyncio
+async def test_bot_ready_context_includes_joined_rooms_from_first_sync(tmp_path: Path) -> None:
+    """bot:ready should expose rooms learned from the first sync response."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+    bot.client.rooms = {"!joined:localhost": MagicMock()}
+
+    captured_ctx: list[AgentLifecycleContext] = []
+
+    @hook(EVENT_BOT_READY)
+    async def on_ready(ctx: AgentLifecycleContext) -> None:
+        captured_ctx.append(ctx)
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await bot._on_sync_response(MagicMock())
+
+    assert len(captured_ctx) == 1
+    assert captured_ctx[0].rooms == ("!room:localhost",)
+    assert captured_ctx[0].joined_room_ids == ("!room:localhost", "!joined:localhost")
+
+
+@pytest.mark.asyncio
+async def test_non_router_hook_sender_prefers_current_bot_client(tmp_path: Path) -> None:
+    """Non-router bots should send hook messages with their own Matrix client when available."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+    bot.client.user_id = "@mindroom_code:localhost"
+    router_bot = _agent_bot(tmp_path, agent_name="router")
+    router_bot.client = AsyncMock()
+    router_bot.client.user_id = "@mindroom_router:localhost"
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.agent_bots = {"router": router_bot, "code": bot}
+    bot.orchestrator = orchestrator
+
+    sent_clients: list[object] = []
+
+    async def mock_send(client: object, _room_id: str, _content: dict[str, object]) -> str:
+        sent_clients.append(client)
+        return "$hook-event"
+
+    sender = bot._hook_message_sender()
+    assert sender is not None
+
+    with (
+        patch("mindroom.hooks.sender.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
+        patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
+    ):
+        event_id = await sender("!room:localhost", "hello", None, "test-plugin:bot:ready", None)
+
+    assert event_id == "$hook-event"
+    assert sent_clients == [bot.client]
