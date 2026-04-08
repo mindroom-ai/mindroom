@@ -1625,10 +1625,22 @@ class AgentBot:
 
         thread_id = event_info.thread_id
         if thread_id is None and event_info.is_edit and event_info.original_event_id is not None:
-            thread_id = event_info.thread_id_from_edit or await event_cache.get_thread_id_for_event(
-                room_id,
-                event_info.original_event_id,
-            )
+            thread_id = event_info.thread_id_from_edit
+            if thread_id is None:
+                try:
+                    thread_id = await event_cache.get_thread_id_for_event(
+                        room_id,
+                        event_info.original_event_id,
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        "Failed to resolve cached thread for live edit event",
+                        room_id=room_id,
+                        event_id=event.event_id,
+                        original_event_id=event_info.original_event_id,
+                        error=str(exc),
+                    )
+                    return
         if thread_id is None:
             return
 
@@ -1659,7 +1671,17 @@ class AgentBot:
         if event_cache is None:
             return
 
-        thread_id = await event_cache.get_thread_id_for_event(room_id, event.redacts)
+        try:
+            thread_id = await event_cache.get_thread_id_for_event(room_id, event.redacts)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to resolve cached thread for redaction",
+                room_id=room_id,
+                event_id=event.event_id,
+                redacted_event_id=event.redacts,
+                error=str(exc),
+            )
+            thread_id = None
         server_timestamp = event.server_timestamp
         redaction_source = normalize_event_source_for_cache(
             event.source,
@@ -1695,6 +1717,8 @@ class AgentBot:
             return
 
         cached_events: list[tuple[str, str, dict[str, Any]]] = []
+        redacted_events: list[tuple[str, str]] = []
+        redacted_event_ids_by_room: dict[str, set[str]] = {}
         for room_id, room_info in response.rooms.join.items():
             for event in room_info.timeline.events:
                 if not isinstance(event, nio.Event):
@@ -1702,6 +1726,11 @@ class AgentBot:
                 if not isinstance(event.source, dict):
                     continue
                 if not isinstance(event.event_id, str):
+                    continue
+                if isinstance(event, nio.RedactionEvent):
+                    if isinstance(event.redacts, str):
+                        redacted_events.append((room_id, event.redacts))
+                        redacted_event_ids_by_room.setdefault(room_id, set()).add(event.redacts)
                     continue
                 server_timestamp = event.server_timestamp
                 cached_events.append(
@@ -1718,13 +1747,27 @@ class AgentBot:
                         ),
                     ),
                 )
-        if not cached_events:
+        if not cached_events and not redacted_events:
             return
 
+        filtered_cached_events = [
+            (event_id, room_id, event_source)
+            for event_id, room_id, event_source in cached_events
+            if event_id not in redacted_event_ids_by_room.get(room_id, set())
+        ]
+
         try:
-            await event_cache.store_events_batch(cached_events)
+            if filtered_cached_events:
+                await event_cache.store_events_batch(filtered_cached_events)
+            for room_id, redacted_event_id in redacted_events:
+                await event_cache.redact_event(room_id, redacted_event_id)
         except Exception as exc:
-            self.logger.warning("Failed to cache sync timeline events", error=str(exc), events=len(cached_events))
+            self.logger.warning(
+                "Failed to cache sync timeline events",
+                error=str(exc),
+                events=len(filtered_cached_events),
+                redactions=len(redacted_events),
+            )
 
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""

@@ -447,11 +447,16 @@ async def _scan_room_message_states(
         now_ms=now_ms,
     )
 
-    resolved_messages = await resolve_latest_visible_messages(message_events, client, sender=bot_user_id)
+    resolved_messages = await resolve_latest_visible_messages(message_events, client)
+    bot_resolved_messages = {
+        event_id: message
+        for event_id, message in resolved_messages.items()
+        if message.sender == bot_user_id
+    }
     scanned_message_data_by_event_id = _scanned_message_data_by_event_id(message_events)
     requester_ids_by_event_id = await _derive_requester_ids_for_bot_messages(
         client,
-        resolved_messages=resolved_messages,
+        resolved_messages=bot_resolved_messages,
         scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         room_id=room_id,
         bot_user_id=bot_user_id,
@@ -460,7 +465,7 @@ async def _scan_room_message_states(
     )
     _merge_bot_resolved_message_states(
         message_states,
-        resolved_messages,
+        bot_resolved_messages,
         bot_user_id=bot_user_id,
         requester_ids_by_event_id=requester_ids_by_event_id,
     )

@@ -1595,38 +1595,6 @@ async def fetch_thread_history(  # noqa: C901
 
     try:
         cached_event_sources = await active_event_cache.get_thread_events(room_id, thread_id)
-        if cached_event_sources is not None:
-            latest_timestamp = await active_event_cache.get_latest_timestamp(room_id, thread_id)
-            cached_event_ids = {
-                event_id
-                for event_source in cached_event_sources
-                if (event_id := _event_id_from_source(event_source)) is not None
-            }
-            if latest_timestamp is not None:
-                new_event_sources, redactions = await _fetch_incremental_thread_events(
-                    client,
-                    room_id,
-                    thread_id,
-                    since_ts=latest_timestamp,
-                    cached_event_ids=cached_event_ids,
-                )
-                if new_event_sources:
-                    await active_event_cache.store_thread_events(room_id, thread_id, new_event_sources)
-                for redacted_event_id, redaction_event in redactions:
-                    await active_event_cache.redact_event(
-                        room_id,
-                        redacted_event_id,
-                        thread_id=thread_id,
-                        redaction_event=redaction_event,
-                    )
-                if new_event_sources or redactions:
-                    refreshed_event_sources = await active_event_cache.get_thread_events(room_id, thread_id)
-                    cached_event_sources = refreshed_event_sources if refreshed_event_sources is not None else []
-            return await _resolve_thread_history_from_event_sources(
-                client,
-                thread_id=thread_id,
-                event_sources=cached_event_sources,
-            )
     except Exception as exc:
         logger.warning(
             "Event cache read failed; falling back to homeserver",
@@ -1634,14 +1602,76 @@ async def fetch_thread_history(  # noqa: C901
             thread_id=thread_id,
             error=str(exc),
         )
-        try:
-            await active_event_cache.invalidate_thread(room_id, thread_id)
-        except Exception:
-            logger.warning(
-                "Failed to invalidate broken event cache entry",
-                room_id=room_id,
-                thread_id=thread_id,
-            )
+    else:
+        if cached_event_sources is not None:
+            cached_event_ids = {
+                event_id
+                for event_source in cached_event_sources
+                if (event_id := _event_id_from_source(event_source)) is not None
+            }
+            if not cached_event_ids:
+                logger.warning(
+                    "Cached thread payload was missing event IDs; refetching from homeserver",
+                    room_id=room_id,
+                    thread_id=thread_id,
+                )
+                try:
+                    await active_event_cache.invalidate_thread(room_id, thread_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to invalidate broken event cache entry",
+                        room_id=room_id,
+                        thread_id=thread_id,
+                    )
+            else:
+                try:
+                    new_event_sources, redactions = await _fetch_incremental_thread_events(
+                        client,
+                        room_id,
+                        thread_id,
+                        cached_event_ids=cached_event_ids,
+                    )
+                    if new_event_sources:
+                        await active_event_cache.store_thread_events(room_id, thread_id, new_event_sources)
+                    for redacted_event_id, redaction_event in redactions:
+                        await active_event_cache.redact_event(
+                            room_id,
+                            redacted_event_id,
+                            thread_id=thread_id,
+                            redaction_event=redaction_event,
+                        )
+                    if new_event_sources or redactions:
+                        refreshed_event_sources = await active_event_cache.get_thread_events(room_id, thread_id)
+                        cached_event_sources = refreshed_event_sources if refreshed_event_sources is not None else []
+                except Exception as exc:
+                    logger.warning(
+                        "Incremental thread cache refresh failed; serving stale cache",
+                        room_id=room_id,
+                        thread_id=thread_id,
+                        error=str(exc),
+                    )
+
+                try:
+                    return await _resolve_thread_history_from_event_sources(
+                        client,
+                        thread_id=thread_id,
+                        event_sources=cached_event_sources,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Cached thread payload could not be resolved; refetching from homeserver",
+                        room_id=room_id,
+                        thread_id=thread_id,
+                        error=str(exc),
+                    )
+                    try:
+                        await active_event_cache.invalidate_thread(room_id, thread_id)
+                    except Exception:
+                        logger.warning(
+                            "Failed to invalidate broken event cache entry",
+                            room_id=room_id,
+                            thread_id=thread_id,
+                        )
 
     try:
         thread_messages, event_sources = await _fetch_thread_history_via_relations_with_events(
@@ -1834,7 +1864,6 @@ async def _fetch_incremental_thread_events(  # noqa: C901, PLR0912
     room_id: str,
     thread_id: str,
     *,
-    since_ts: int,
     cached_event_ids: Collection[str],
 ) -> tuple[list[dict[str, Any]], list[tuple[str, dict[str, Any]]]]:
     """Fetch only recent timeline events that may affect one cached thread."""
@@ -1861,7 +1890,7 @@ async def _fetch_incremental_thread_events(  # noqa: C901, PLR0912
         for event in response.chunk:
             if not isinstance(event, nio.Event):
                 continue
-            if _event_server_timestamp(event) < since_ts:
+            if event.event_id in cached_event_ids:
                 reached_cached_history = True
                 break
 

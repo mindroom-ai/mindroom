@@ -275,21 +275,26 @@ class EventCache:
         """Delete one cached event after a redaction."""
         del redaction_event
 
-        cached_thread_id = thread_id or await self.get_thread_id_for_event(room_id, event_id)
-
         async with self._lock:
             db = self._require_db()
-            deleted_thread_rows = 0
-            if cached_thread_id is not None:
+            if thread_id is None:
+                cursor = await db.execute(
+                    """
+                    DELETE FROM thread_events
+                    WHERE room_id = ? AND event_id = ?
+                    """,
+                    (room_id, event_id),
+                )
+            else:
                 cursor = await db.execute(
                     """
                     DELETE FROM thread_events
                     WHERE room_id = ? AND thread_id = ? AND event_id = ?
                     """,
-                    (room_id, cached_thread_id, event_id),
+                    (room_id, thread_id, event_id),
                 )
-                deleted_thread_rows = 0 if cursor.rowcount is None else int(cursor.rowcount)
-                await cursor.close()
+            deleted_thread_rows = 0 if cursor.rowcount is None else int(cursor.rowcount)
+            await cursor.close()
             cursor = await db.execute(
                 """
                 DELETE FROM events

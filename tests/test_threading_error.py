@@ -20,9 +20,11 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.matrix.client import ResolvedVisibleMessage, ThreadHistoryResult
+from mindroom.matrix.client import ResolvedVisibleMessage, ThreadHistoryResult, get_event_cache
+from mindroom.matrix.event_cache import EventCache
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
-from mindroom.matrix.reply_chain import _merge_thread_and_chain_history
+from mindroom.matrix.reply_chain import ReplyChainCaches, _merge_thread_and_chain_history
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -109,6 +111,314 @@ class TestThreadingBehavior:
             yield bot
 
         # No cleanup needed since we're using mocks
+
+    @pytest.mark.asyncio
+    async def test_start_and_stop_manage_persistent_event_cache(self, bot: AgentBot) -> None:
+        """Startup should attach the persistent cache and shutdown should detach it."""
+        start_client = AsyncMock(spec=nio.AsyncClient)
+        start_client.rooms = {}
+        start_client.user_id = "@mindroom_general:localhost"
+        start_client.homeserver = "http://localhost:8008"
+        start_client.add_event_callback = MagicMock()
+        start_client.add_response_callback = MagicMock()
+        start_client.close = AsyncMock()
+
+        with (
+            patch.object(bot, "ensure_user_account", AsyncMock()),
+            patch("mindroom.bot.login_agent_user", AsyncMock(return_value=start_client)),
+            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
+            patch("mindroom.bot.interactive.init_persistence"),
+            patch("mindroom.bot.wait_for_background_tasks", AsyncMock()),
+        ):
+            await bot.start()
+            assert bot._event_cache is not None
+            assert get_event_cache(start_client) is bot._event_cache
+
+            await bot.stop(reason="test")
+
+        assert bot._event_cache is None
+        assert get_event_cache(start_client) is None
+        start_client.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_sync_response_caches_timeline_events_for_point_lookups(self, bot: AgentBot) -> None:
+        """Sync-response handling should persist timeline events into SQLite-backed lookups."""
+        await bot._initialize_event_cache()
+        assert bot._event_cache is not None
+
+        try:
+            message_event = nio.RoomMessageText.from_dict(
+                {
+                    "content": {
+                        "body": "Thread reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                    },
+                    "event_id": "$thread_msg:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            )
+            sync_response = MagicMock()
+            sync_response.__class__ = nio.SyncResponse
+            sync_response.rooms = MagicMock()
+            sync_response.rooms.join = {
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
+            }
+            bot._first_sync_done = True
+
+            await bot._on_sync_response(sync_response)
+            cached_event = await bot._event_cache.get_event("$thread_msg:localhost")
+        finally:
+            await bot._close_event_cache()
+
+        assert cached_event is not None
+        assert cached_event["event_id"] == "$thread_msg:localhost"
+        assert cached_event["content"]["body"] == "Thread reply"
+
+    @pytest.mark.asyncio
+    async def test_live_redaction_callback_removes_persisted_lookup_event(self, bot: AgentBot) -> None:
+        """Live redaction callbacks should remove point-lookup cache entries."""
+        await bot._initialize_event_cache()
+        assert bot._event_cache is not None
+
+        try:
+            await bot._event_cache.store_event(
+                "$thread_msg:localhost",
+                "!test:localhost",
+                {
+                    "event_id": "$thread_msg:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "Thread reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                    },
+                },
+            )
+            room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
+            redaction_event = MagicMock(spec=nio.RedactionEvent)
+            redaction_event.event_id = "$redaction:localhost"
+            redaction_event.redacts = "$thread_msg:localhost"
+            redaction_event.sender = "@user:localhost"
+            redaction_event.server_timestamp = 1234567891
+            redaction_event.source = {
+                "content": {},
+                "event_id": "$redaction:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567891,
+                "redacts": "$thread_msg:localhost",
+                "room_id": "!test:localhost",
+                "type": "m.room.redaction",
+            }
+
+            await bot._on_redaction(room, redaction_event)
+            cached_event = await bot._event_cache.get_event("$thread_msg:localhost")
+        finally:
+            await bot._close_event_cache()
+
+        assert cached_event is None
+
+    @pytest.mark.asyncio
+    async def test_sync_timeline_redaction_does_not_resurrect_point_lookup_cache(self, bot: AgentBot) -> None:
+        """A sync batch that contains both a message and its redaction must leave no cached lookup entry."""
+        await bot._initialize_event_cache()
+        assert bot._event_cache is not None
+
+        try:
+            message_event = nio.RoomMessageText.from_dict(
+                {
+                    "content": {
+                        "body": "Redacted reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                    },
+                    "event_id": "$thread_msg:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            )
+            redaction_event = MagicMock(spec=nio.RedactionEvent)
+            redaction_event.event_id = "$redaction:localhost"
+            redaction_event.redacts = "$thread_msg:localhost"
+            redaction_event.sender = "@user:localhost"
+            redaction_event.server_timestamp = 1234567891
+            redaction_event.source = {
+                "content": {},
+                "event_id": "$redaction:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567891,
+                "redacts": "$thread_msg:localhost",
+                "room_id": "!test:localhost",
+                "type": "m.room.redaction",
+            }
+            sync_response = MagicMock()
+            sync_response.__class__ = nio.SyncResponse
+            sync_response.rooms = MagicMock()
+            sync_response.rooms.join = {
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event, redaction_event])),
+            }
+
+            await bot._cache_sync_timeline_events(sync_response)
+            cached_event = await bot._event_cache.get_event("$thread_msg:localhost")
+        finally:
+            await bot._close_event_cache()
+
+        assert cached_event is None
+
+    @pytest.mark.asyncio
+    async def test_live_edit_cache_lookup_failure_does_not_raise(self, bot: AgentBot) -> None:
+        """Live edit caching should degrade cleanly when SQLite lookup fails."""
+        event_cache = MagicMock(spec=EventCache)
+        event_cache.get_thread_id_for_event = AsyncMock(side_effect=RuntimeError("database is locked"))
+        event_cache.append_event = AsyncMock()
+        bot._event_cache = event_cache
+
+        edit_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread_msg:localhost"},
+                },
+                "event_id": "$edit_event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        await bot._cache_thread_event(
+            "!test:localhost",
+            edit_event,
+            event_info=EventInfo.from_event(edit_event.source),
+        )
+
+        event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$thread_msg:localhost")
+        event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_live_redaction_cache_lookup_failure_still_attempts_cache_delete(self, bot: AgentBot) -> None:
+        """Redaction callbacks should continue even when the thread lookup cannot read SQLite."""
+        event_cache = MagicMock(spec=EventCache)
+        event_cache.get_thread_id_for_event = AsyncMock(side_effect=RuntimeError("database is locked"))
+        event_cache.redact_event = AsyncMock(return_value=False)
+        bot._event_cache = event_cache
+
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.event_id = "$redaction:localhost"
+        redaction_event.redacts = "$thread_msg:localhost"
+        redaction_event.sender = "@user:localhost"
+        redaction_event.server_timestamp = 1234567891
+        redaction_event.source = {
+            "content": {},
+            "event_id": "$redaction:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567891,
+            "redacts": "$thread_msg:localhost",
+            "room_id": "!test:localhost",
+            "type": "m.room.redaction",
+        }
+
+        await bot._cache_redaction_event("!test:localhost", redaction_event)
+
+        event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$thread_msg:localhost")
+        event_cache.redact_event.assert_awaited_once()
+        assert event_cache.redact_event.await_args.kwargs["thread_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_reply_chain_event_cache_write_through_supports_later_sqlite_lookup(self, bot: AgentBot) -> None:
+        """Reply-chain resolution should populate the event cache and later reuse it without network I/O."""
+        await bot._initialize_event_cache()
+        assert bot._event_cache is not None
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Newest plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$msg2:localhost"}},
+                },
+                "event_id": "$incoming:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567893,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Second message",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$msg1:localhost"}},
+                        },
+                        "event_id": "$msg2:localhost",
+                        "sender": "@mindroom_general:localhost",
+                        "origin_server_ts": 1234567892,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {"body": "First message", "msgtype": "m.text"},
+                        "event_id": "$msg1:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567891,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
+        )
+
+        try:
+            with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
+                first_context = await bot._extract_message_context(room, event)
+
+            assert first_context.is_thread is True
+            assert first_context.thread_id == "$msg1:localhost"
+            assert [msg.event_id for msg in first_context.thread_history] == [
+                "$msg1:localhost",
+                "$msg2:localhost",
+            ]
+            assert await bot._event_cache.get_event("$msg2:localhost") is not None
+            assert await bot._event_cache.get_event("$msg1:localhost") is not None
+            mock_fetch.assert_not_called()
+
+            bot._reply_chain = ReplyChainCaches()
+            bot.client.room_get_event = AsyncMock(side_effect=AssertionError("should use persisted cache"))
+
+            with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch_again:
+                second_context = await bot._extract_message_context(room, event)
+
+            assert second_context.is_thread is True
+            assert second_context.thread_id == "$msg1:localhost"
+            assert [msg.event_id for msg in second_context.thread_history] == [
+                "$msg1:localhost",
+                "$msg2:localhost",
+            ]
+            mock_fetch_again.assert_not_called()
+            bot.client.room_get_event.assert_not_awaited()
+        finally:
+            await bot._close_event_cache()
 
     @pytest.mark.asyncio
     async def test_agent_creates_thread_when_mentioned_in_main_room(self, bot: AgentBot) -> None:
