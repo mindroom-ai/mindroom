@@ -1785,9 +1785,12 @@ class TestThreadHistoryCache:
         first_page.chunk = [root_event]
         first_page.end = None
         client.room_messages = AsyncMock(return_value=first_page)
+        attach_event_cache(client, cache)
+
         try:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
         finally:
+            detach_event_cache(client)
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
@@ -1826,10 +1829,13 @@ class TestThreadHistoryCache:
                 self._relation_key("$reply", RelationshipType.replacement): [],
             },
         )
+        attach_event_cache(client, cache)
+
         try:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
             cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
         finally:
+            detach_event_cache(client)
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
@@ -1882,10 +1888,13 @@ class TestThreadHistoryCache:
         client.room_messages = AsyncMock(return_value=first_page)
         client.room_get_event = AsyncMock()
         client.room_get_event_relations = MagicMock()
+        attach_event_cache(client, cache)
+
         try:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
             cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
         finally:
+            detach_event_cache(client)
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply", "$reply_2"]
@@ -2010,10 +2019,13 @@ class TestThreadHistoryCache:
         client.room_messages = AsyncMock(return_value=first_page)
         client.room_get_event = AsyncMock()
         client.room_get_event_relations = MagicMock()
+        attach_event_cache(client, cache)
+
         try:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
             cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
         finally:
+            detach_event_cache(client)
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
@@ -2063,10 +2075,13 @@ class TestThreadHistoryCache:
         client.room_messages = AsyncMock(return_value=first_page)
         client.room_get_event = AsyncMock()
         client.room_get_event_relations = MagicMock()
+        attach_event_cache(client, cache)
+
         try:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
             cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
         finally:
+            detach_event_cache(client)
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root"]
@@ -2149,7 +2164,12 @@ class TestThreadHistoryCache:
         broken_cache.get_latest_timestamp = AsyncMock()
         broken_cache.invalidate_thread = AsyncMock()
         broken_cache.store_thread_events = AsyncMock()
-        history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
+        attach_event_cache(client, broken_cache)
+
+        try:
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+        finally:
+            detach_event_cache(client)
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
         broken_cache.get_thread_events.assert_awaited_once_with("!room:localhost", "$thread_root")

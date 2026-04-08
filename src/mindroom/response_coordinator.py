@@ -109,6 +109,7 @@ class ResponseRequest:
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     strip_transient_enrichment_after_run: bool = False
     received_monotonic: float | None = None
+    on_lifecycle_lock_acquired: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -397,6 +398,8 @@ class ResponseCoordinator:
     ) -> str | None:
         """Generate a team response once the per-thread lifecycle lock is held."""
         request = team_request.request
+        if request.on_lifecycle_lock_acquired is not None:
+            request.on_lifecycle_lock_acquired()
         requester_user_id = request.user_id or ""
         prepared_prompt, model_thread_history = self.deps.timestamp_model_user_context(
             request.model_prompt or request.prompt,
@@ -1571,6 +1574,8 @@ class ResponseCoordinator:
         """Generate one agent response after acquiring the per-thread lock."""
         delivery_thread_id = resolved_target.resolved_thread_id
         resolved_target = resolved_target.with_thread_root(delivery_thread_id)
+        if request.on_lifecycle_lock_acquired is not None:
+            request.on_lifecycle_lock_acquired()
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             self.deps.prepare_memory_and_model_context(
                 request.prompt,

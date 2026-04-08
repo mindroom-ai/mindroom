@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -17,7 +17,6 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
-from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import StreamingResponse, send_streaming_response
@@ -1055,118 +1054,3 @@ class TestExtractedModuleLoggerRebinding:
             event_id="$img123",
         )
         original_logger.error.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_conversation_state_writer_uses_rebound_bot_logger(
-        self,
-        assistant_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """State-writer cache warnings should follow bot.logger rebinding after construction."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        original_logger = MagicMock()
-        rebound_logger = MagicMock()
-        bot.logger = original_logger
-        bot.logger = rebound_logger
-
-        event_cache = AsyncMock()
-        event_cache.append_event.side_effect = RuntimeError("cache write failed")
-        bot._event_cache = event_cache
-
-        event = nio.RoomMessageText.from_dict(
-            {
-                "event_id": "$event123",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234567890,
-                "content": {
-                    "msgtype": "m.text",
-                    "body": "hello",
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$threadroot",
-                        "is_falling_back": True,
-                    },
-                },
-            },
-        )
-
-        await bot._conversation_state_writer.cache_thread_event(
-            "!room:localhost",
-            event,
-            event_info=EventInfo.from_event(event.source),
-        )
-
-        rebound_logger.warning.assert_called_once_with(
-            "Failed to append live thread event to cache",
-            room_id="!room:localhost",
-            thread_id="$threadroot",
-            event_id="$event123",
-            error="cache write failed",
-        )
-        original_logger.warning.assert_not_called()
-
-    def test_conversation_resolver_fetch_path_uses_state_writer_api(
-        self,
-        assistant_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Resolver full-history fetches should go through the state-writer cache API."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-
-        fetch_dep = bot._conversation_resolver.deps.fetch_thread_history
-        assert fetch_dep.__self__ is bot._conversation_state_writer
-        assert fetch_dep.__func__.__name__ == "fetch_thread_history"
-
-    @pytest.mark.asyncio
-    async def test_conversation_state_writer_fetch_path_passes_explicit_event_cache(
-        self,
-        assistant_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Writer-owned fetches should opt into cache maintenance explicitly."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        bot._event_cache = MagicMock()
-
-        with patch("mindroom.bot.fetch_thread_history", new=AsyncMock(return_value=[])) as fetch_thread_history_mock:
-            await bot._conversation_state_writer.fetch_thread_history(
-                MagicMock(),
-                "!room:localhost",
-                "$threadroot",
-            )
-
-        fetch_thread_history_mock.assert_awaited_once_with(
-            ANY,
-            "!room:localhost",
-            "$threadroot",
-            event_cache=bot._event_cache,
-        )

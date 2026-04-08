@@ -808,10 +808,17 @@ class DispatchPlanner:
             target=resolved_target,
             extra_content=routed_extra_content or None,
         )
+        tracked_handled_turn = (
+            handled_turn or HandledTurnState.from_source_event_id(event.event_id)
+        ).with_response_context(
+            response_owner=self.deps.agent_name,
+            history_scope=None,
+            conversation_target=resolved_target,
+        )
         if event_id:
             self._logger().info("Routed to agent", suggested_agent=suggested_agent)
             self.deps.mark_source_events_responded(
-                (handled_turn or HandledTurnState.from_source_event_id(event.event_id)).with_response_event_id(
+                tracked_handled_turn.with_response_event_id(
                     event_id,
                 ),
             )
