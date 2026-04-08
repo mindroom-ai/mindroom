@@ -693,6 +693,19 @@ def test_load_registry_returns_existing_dict_without_migration(tmp_path: Path) -
     assert registry == old_data
 
 
+def test_resolve_by_label_require_thread_skips_entries_without_thread_id(tmp_path: Path) -> None:
+    """Thread reuse should ignore malformed labeled entries without a stored thread id."""
+    ctx = _make_context(tmp_path)
+    session_key = create_session_id(ctx.room_id, "$child:localhost")
+    subagents_module._record_session(ctx, session_key=session_key, label="work", target_agent="code")
+
+    registry = subagents_module._load_registry(ctx)
+    registry[session_key]["thread_id"] = None
+    subagents_module._save_registry(ctx, registry)
+
+    assert subagents_module._resolve_by_label(ctx, "work", require_thread=True) is None
+
+
 @pytest.mark.asyncio
 async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
     tmp_path: Path,
@@ -750,7 +763,7 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
     assert second["summary"] == TEST_SUMMARY
     assert second["tag"] == TEST_TAG
     send_mock.assert_not_awaited()
-    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 1, "manual")
+    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 0, "manual")
     tag_mock.assert_awaited_once_with(
         ctx.client,
         ctx.room_id,
@@ -759,6 +772,136 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
         set_by=ctx.requester_id,
     )
     update_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_skips_reuse_when_registry_entry_lacks_thread_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should create a fresh thread when a labeled entry is missing thread_id metadata."""
+    send_mock = AsyncMock(return_value="$new-event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    summary_mock, tag_mock, update_mock = _stub_spawn_followups(monkeypatch)
+    ctx = _make_context(tmp_path)
+    session_key = create_session_id(ctx.room_id, "$canonical-thread:localhost")
+    subagents_module._record_session(ctx, session_key=session_key, label="work", target_agent="code")
+
+    registry = subagents_module._load_registry(ctx)
+    registry[session_key]["thread_id"] = None
+    subagents_module._save_registry(ctx, registry)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary=TEST_SUMMARY,
+                tag=TEST_TAG,
+                label="work",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert "reused" not in payload
+    assert payload["event_id"] == "$new-event"
+    assert payload["session_key"] == create_session_id(ctx.room_id, "$new-event")
+    send_mock.assert_awaited_once()
+    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$new-event", TEST_SUMMARY, 1, "manual")
+    tag_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$new-event",
+        TEST_TAG,
+        set_by=ctx.requester_id,
+    )
+    update_mock.assert_called_once_with(ctx.room_id, "$new-event", 1)
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_reuse_derives_thread_id_from_session_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should target the canonical thread id encoded in the session key when reusing."""
+    send_mock = AsyncMock(return_value="$new-event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    summary_mock, tag_mock, update_mock = _stub_spawn_followups(monkeypatch)
+    ctx = _make_context(tmp_path)
+    session_key = create_session_id(ctx.room_id, "$canonical-thread:localhost")
+    subagents_module._record_session(ctx, session_key=session_key, label="work", target_agent="code")
+
+    registry = subagents_module._load_registry(ctx)
+    registry[session_key]["thread_id"] = "$stale-thread:localhost"
+    subagents_module._save_registry(ctx, registry)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary=TEST_SUMMARY,
+                tag=TEST_TAG,
+                label="work",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["reused"] is True
+    assert payload["session_key"] == session_key
+    assert payload["event_id"] == "$canonical-thread:localhost"
+    send_mock.assert_not_awaited()
+    summary_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$canonical-thread:localhost",
+        TEST_SUMMARY,
+        0,
+        "manual",
+    )
+    tag_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$canonical-thread:localhost",
+        TEST_TAG,
+        set_by=ctx.requester_id,
+    )
+    update_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_skips_room_level_reuse_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should create a new thread when the only labeled match is room-level."""
+    send_mock = AsyncMock(return_value="$event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    summary_mock, tag_mock, update_mock = _stub_spawn_followups(monkeypatch)
+    ctx = _make_context(tmp_path)
+    subagents_module._record_session(ctx, session_key=ctx.room_id, label="work", target_agent="code")
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary=TEST_SUMMARY,
+                tag=TEST_TAG,
+                label="work",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert "reused" not in payload
+    assert payload["event_id"] == "$event"
+    send_mock.assert_awaited_once()
+    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 1, "manual")
+    tag_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_TAG,
+        set_by=ctx.requester_id,
+    )
+    update_mock.assert_called_once_with(ctx.room_id, "$event", 1)
 
 
 @pytest.mark.asyncio

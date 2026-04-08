@@ -112,25 +112,23 @@ async def _maybe_reuse_spawned_session(
     if not label:
         return None
 
-    resolved = await asyncio.to_thread(_resolve_by_label, context, label)
+    resolved = await asyncio.to_thread(_resolve_by_label, context, label, require_thread=True)
     if resolved is None:
         return None
 
     existing_key, entry = resolved
-    event_id = entry.get("thread_id")
-    warnings: list[str] = []
-    if isinstance(event_id, str) and event_id:
-        warnings = await _spawn_followup_warnings(
-            context,
-            event_id=event_id,
-            summary=summary,
-            tag=tag,
-            skip_count_update=True,
-        )
-    else:
-        warnings.append(
-            "Failed to apply summary and tag to the reused session because the tracked thread_id is missing.",
-        )
+    _, event_id = _session_key_to_room_thread(existing_key)
+    if event_id is None:
+        return None
+
+    warnings = await _spawn_followup_warnings(
+        context,
+        event_id=event_id,
+        summary=summary,
+        tag=tag,
+        summary_message_count=0,
+        last_summary_count=None,
+    )
 
     payload_kwargs: dict[str, object] = {
         "session_key": existing_key,
@@ -290,7 +288,8 @@ async def _spawn_followup_warnings(
     event_id: str,
     summary: str,
     tag: str,
-    skip_count_update: bool = False,
+    summary_message_count: int = 1,
+    last_summary_count: int | None = 1,
 ) -> list[str]:
     warnings: list[str] = []
     try:
@@ -299,7 +298,7 @@ async def _spawn_followup_warnings(
             context.room_id,
             event_id,
             summary,
-            1,
+            summary_message_count,
             "manual",
         )
     except Exception as exc:
@@ -307,8 +306,8 @@ async def _spawn_followup_warnings(
     else:
         if summary_event_id is None:
             warnings.append("Failed to set thread summary.")
-        elif not skip_count_update:
-            update_last_summary_count(context.room_id, event_id, 1)
+        elif last_summary_count is not None:
+            update_last_summary_count(context.room_id, event_id, last_summary_count)
 
     try:
         await set_thread_tag(
@@ -430,7 +429,19 @@ def _in_scope(entry: dict[str, Any], context: ToolRuntimeContext) -> bool:
     )
 
 
-def _resolve_by_label(context: ToolRuntimeContext, label: str) -> tuple[str, dict[str, Any]] | None:
+def _entry_thread_id(entry: dict[str, Any]) -> str | None:
+    thread_id = entry.get("thread_id")
+    if isinstance(thread_id, str) and thread_id:
+        return thread_id
+    return None
+
+
+def _resolve_by_label(
+    context: ToolRuntimeContext,
+    label: str,
+    *,
+    require_thread: bool = False,
+) -> tuple[str, dict[str, Any]] | None:
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
 
@@ -443,7 +454,16 @@ def _resolve_by_label(context: ToolRuntimeContext, label: str) -> tuple[str, dic
         return None
 
     candidates.sort(key=lambda item: (_entry_recency(item[1]), item[0]), reverse=True)
-    return candidates[0]
+    for key, entry in candidates:
+        if not require_thread:
+            return key, entry
+
+        if _entry_thread_id(entry) is None:
+            continue
+
+        if _session_key_to_room_thread(key)[1] is not None:
+            return key, entry
+    return None
 
 
 def _lookup_target_agent(context: ToolRuntimeContext, session_key: str) -> str | None:
