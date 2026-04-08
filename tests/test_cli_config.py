@@ -18,6 +18,8 @@ from anthropic import PermissionDeniedError
 from google.auth.exceptions import DefaultCredentialsError
 from typer.testing import CliRunner
 
+from tests.conftest import normalize_console_output
+
 import mindroom.constants as constants_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli.config import _activate_cli_runtime
@@ -29,16 +31,6 @@ from mindroom.matrix.state import MatrixState
 from mindroom.response_tracker import ResponseTracker
 
 runner = CliRunner()
-
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def _strip_ansi(text: str) -> str:
-    return _ANSI_RE.sub("", text)
-
-
-def _unwrap_console_output(text: str) -> str:
-    return _strip_ansi(text).replace("\n", "")
 
 
 @pytest.fixture(autouse=True)
@@ -322,7 +314,7 @@ class TestConfigInit:
         assert "\n\n\n# AI provider API keys" not in env_content
 
         # Public profile next steps must include the pairing command
-        output = _strip_ansi(result.output)
+        output = normalize_console_output(result.output)
         assert "mindroom connect --pair-code" in output
 
     def test_init_profile_public_vertexai_anthropic_writes_hosted_vertex_defaults(self, tmp_path: Path) -> None:
@@ -347,7 +339,7 @@ class TestConfigInit:
         assert "\nOPENAI_API_KEY=" not in env_content
         assert "\nOPENROUTER_API_KEY=" not in env_content
 
-        output = _unwrap_console_output(result.output)
+        output = normalize_console_output(result.output)
         assert "mindroom connect --pair-code" in output
         assert "Vertex AI project/region" in output
         assert "Google" in output
@@ -358,7 +350,7 @@ class TestConfigInit:
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
-        output = _strip_ansi(result.output)
+        output = normalize_console_output(result.output)
         assert "mindroom connect" not in output
 
     def test_init_creates_env_with_dashboard_key(self, tmp_path: Path) -> None:
@@ -479,7 +471,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         new_content = env_path.read_text()
         assert "ANTHROPIC_API_KEY=sk-existing" not in new_content
-        assert "Env file overwritten" in _strip_ansi(result.output)
+        assert "Env file overwritten" in normalize_console_output(result.output)
 
     def test_init_refuses_overwrite_without_force(self, tmp_path: Path) -> None:
         """Config init prompts before overwriting and aborts on 'n'."""
@@ -593,7 +585,7 @@ class TestConfigShow:
         result = runner.invoke(app, ["config", "show", "--path", str(missing)], terminal_width=200)
 
         assert result.exit_code == 1
-        output = _unwrap_console_output(result.output)
+        output = normalize_console_output(result.output)
         assert str(missing.resolve()) in output
         assert output.index(str(missing.resolve())) < output.index(str(Path("config.yaml").resolve()))
 
@@ -803,7 +795,7 @@ class TestConfigPath:
         result = runner.invoke(app, ["config", "path", "--path", str(missing)], terminal_width=200)
 
         assert result.exit_code == 0
-        output = _unwrap_console_output(result.output)
+        output = normalize_console_output(result.output)
         assert str(missing.resolve()) in output
         assert output.index(str(missing.resolve())) < output.index(str(Path("config.yaml").resolve()))
 
@@ -838,7 +830,7 @@ class TestRunErrorHandling:
         with pytest.raises(typer.Exit):
             _load_active_config_or_exit(runtime_paths)
 
-        output = _unwrap_console_output(capsys.readouterr().out)
+        output = normalize_console_output(capsys.readouterr().out)
         assert str(missing.resolve()) in output
         assert str(ambient.resolve()) not in output
 
@@ -904,7 +896,7 @@ class TestRunErrorHandling:
             result = _invoke_with_runtime(["avatars", "generate"], cfg)
 
         assert result.exit_code == 1
-        assert "Avatar generation failed" in _strip_ansi(result.output)
+        assert "Avatar generation failed" in normalize_console_output(result.output)
 
 
 # ---------------------------------------------------------------------------
@@ -941,7 +933,7 @@ class TestRunApiFlags:
         """Run --help lists the new API server flags."""
         result = runner.invoke(app, ["run", "--help"])
         assert result.exit_code == 0
-        output = _strip_ansi(result.output)
+        output = normalize_console_output(result.output)
         assert "--api" in output
         assert "--no-api" in output
         assert "--api-port" in output
@@ -1041,7 +1033,7 @@ class TestAvatarsCommands:
         """The avatars command should expose generate and sync subcommands."""
         result = runner.invoke(app, ["avatars", "--help"])
         assert result.exit_code == 0
-        output = _strip_ansi(result.output)
+        output = normalize_console_output(result.output)
         assert "generate" in output
         assert "sync" in output
 
@@ -1117,7 +1109,7 @@ class TestAvatarsCommands:
             result = _invoke_with_runtime(["avatars", "sync"], cfg)
 
         assert result.exit_code == 1
-        assert "No router account found in Matrix state." in _strip_ansi(result.output)
+        assert "No router account found in Matrix state." in normalize_console_output(result.output)
 
 
 # ---------------------------------------------------------------------------
@@ -1773,7 +1765,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        output = _unwrap_console_output(result.output)
+        output = normalize_console_output(result.output)
         assert "could not reach embeddings" in output
         assert "endpoint (http://llama.local/v1)" in output
         assert "reachable LAN" in output
@@ -2051,7 +2043,7 @@ class TestConnect:
         )
 
         assert result.exit_code == 0
-        assert "malformed owner_user_id" in _strip_ansi(result.output)
+        assert "malformed owner_user_id" in normalize_console_output(result.output)
         updated_config = cfg.read_text()
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in updated_config
 

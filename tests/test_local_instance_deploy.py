@@ -11,17 +11,14 @@ import pytest
 import yaml
 from rich.console import Console
 
+from tests.conftest import normalize_console_output
+
 _SCRIPT_PATH = Path("local/instances/deploy/deploy.py")
 _MODULE_SPEC = importlib.util.spec_from_file_location("mindroom_local_instance_deploy", _SCRIPT_PATH)
 assert _MODULE_SPEC is not None
 assert _MODULE_SPEC.loader is not None
 deploy = importlib.util.module_from_spec(_MODULE_SPEC)
 _MODULE_SPEC.loader.exec_module(deploy)
-
-
-def _collapse_output(text: str) -> str:
-    """Collapse Rich-wrapped console output for stable substring assertions."""
-    return " ".join(text.split())
 
 
 def _instance(
@@ -175,7 +172,7 @@ def test_print_running_instance_access_keeps_domain_routes_conditional(
         ),
     )
 
-    text = _collapse_output(console.export_text())
+    text = normalize_console_output(console.export_text())
     assert "Traefik detected:" in text
     assert "only work" in text
     assert "after the proxy matches this instance's entrypoint and certresolver names" in text

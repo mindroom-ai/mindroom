@@ -1,6 +1,7 @@
 """Test configuration and fixtures for MindRoom tests."""
 
 import os
+import re
 from collections.abc import AsyncGenerator, Callable, Generator
 from itertools import count
 from pathlib import Path
@@ -24,6 +25,7 @@ __all__ = [
     "bypass_authorization",
     "create_mock_room",
     "make_visible_message",
+    "normalize_console_output",
     "orchestrator_runtime_paths",
     "runtime_paths_for",
     "test_runtime_paths",
@@ -31,6 +33,13 @@ __all__ = [
 
 _TEST_RUNTIME_PATHS_BY_CONFIG_ID: dict[int, RuntimePaths] = {}
 _VISIBLE_MESSAGE_IDS = count(1)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_SOFT_WRAP_RE = re.compile(r"(?<=\S)\n(?=\S)")
+
+
+def normalize_console_output(text: str) -> str:
+    """Collapse wrapped console output for stable substring assertions."""
+    return " ".join(_SOFT_WRAP_RE.sub("", _ANSI_RE.sub("", text)).split())
 
 
 class FakeCredentialsManager:
