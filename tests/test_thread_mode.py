@@ -5,18 +5,19 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 from pydantic import ValidationError
 
-from mindroom.bot import AgentBot, _PrecheckedEvent
+from mindroom.bot import AgentBot, _MessageContext, _PrecheckedEvent
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import StreamingResponse, send_streaming_response
@@ -539,7 +540,9 @@ class TestExtractMessageContextRoomMode:
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = MagicMock()
-        bot._derive_conversation_context = AsyncMock(return_value=(True, "$thread123", [{"event_id": "$thread123"}]))
+        bot._conversation_resolver.derive_conversation_context = AsyncMock(
+            return_value=(True, "$thread123", [{"event_id": "$thread123"}]),
+        )
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -571,6 +574,165 @@ class TestExtractMessageContextRoomMode:
         assert thread_mode_ctx.is_thread is True
         assert thread_mode_ctx.thread_id == "$thread123"
         assert thread_mode_ctx.thread_history == [{"event_id": "$thread123"}]
+
+    def test_target_helpers_delegate_to_conversation_resolver(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Target resolution wrappers should stay thin and route through the resolver."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        expected_target = MessageTarget.resolve("!room:localhost", "$thread123", "$event123")
+        bot._conversation_resolver.build_message_target = MagicMock(return_value=expected_target)
+        bot._conversation_resolver.resolve_response_thread_root = MagicMock(return_value="$thread123")
+
+        target = bot._build_message_target(
+            room_id="!room:localhost",
+            thread_id="$thread123",
+            reply_to_event_id="$event123",
+        )
+        thread_root = bot._resolve_response_thread_root(
+            "$thread123",
+            "$event123",
+            room_id="!room:localhost",
+        )
+
+        assert target is expected_target
+        assert thread_root == "$thread123"
+        bot._conversation_resolver.build_message_target.assert_called_once_with(
+            room_id="!room:localhost",
+            thread_id="$thread123",
+            reply_to_event_id="$event123",
+            event_source=None,
+            thread_mode_override=None,
+        )
+        bot._conversation_resolver.resolve_response_thread_root.assert_called_once_with(
+            "$thread123",
+            "$event123",
+            room_id="!room:localhost",
+            response_envelope=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_context_helpers_delegate_to_conversation_resolver(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Context extraction and hydration should go through the extracted resolver."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$event123"
+        event.sender = "@user:localhost"
+        event.source = {"content": {"body": "hello", "msgtype": "m.text"}}
+        context = _MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread123",
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+            requires_full_thread_history=True,
+        )
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=context)
+        bot._conversation_resolver.extract_message_context = AsyncMock(return_value=context)
+        bot._conversation_resolver.extract_message_context_impl = AsyncMock(return_value=context)
+        bot._conversation_resolver.hydrate_dispatch_context = AsyncMock()
+
+        assert await bot._extract_dispatch_context(room, event) is context
+        assert await bot._extract_message_context(room, event, full_history=False) is context
+        assert await AgentBot._extract_message_context_impl(bot, room, event, full_history=True) is context
+        await bot._hydrate_dispatch_context(room, event, context)
+
+        bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(room, event)
+        bot._conversation_resolver.extract_message_context.assert_awaited_once_with(
+            room,
+            event,
+            full_history=False,
+        )
+        bot._conversation_resolver.extract_message_context_impl.assert_awaited_once_with(
+            room,
+            event,
+            full_history=True,
+        )
+        bot._conversation_resolver.hydrate_dispatch_context.assert_awaited_once_with(room, event, context)
+
+    def test_hot_reloaded_bot_uses_updated_thread_mode_without_restart(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Swapping bot.config should immediately change resolver thread targeting."""
+        initial_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "assistant": AgentConfig(
+                        display_name="Assistant",
+                        rooms=["!room:localhost"],
+                        thread_mode="thread",
+                    ),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        updated_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "assistant": AgentConfig(
+                        display_name="Assistant",
+                        rooms=["!room:localhost"],
+                        thread_mode="room",
+                    ),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=initial_config, agent_user=assistant_user, storage_path=tmp_path)
+
+        threaded_target = bot._build_message_target(
+            room_id="!room:localhost",
+            thread_id="$thread123",
+            reply_to_event_id="$event123",
+        )
+        bot.config = updated_config
+        room_mode_target = bot._build_message_target(
+            room_id="!room:localhost",
+            thread_id="$thread123",
+            reply_to_event_id="$event123",
+        )
+
+        assert threaded_target.resolved_thread_id == "$thread123"
+        assert room_mode_target.resolved_thread_id is None
 
 
 class TestSendResponseRoomMode:
@@ -800,3 +962,211 @@ class TestCommandThreadContextRoomMode:
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None
         assert bot._send_response.await_args.args[3] is None
+
+
+class TestExtractedModuleLoggerRebinding:
+    """Extracted helper modules should use the bot's current logger reference."""
+
+    @pytest.mark.asyncio
+    async def test_conversation_resolver_uses_rebound_bot_logger(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Resolver logging should follow bot.logger rebinding after construction."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot.client = AsyncMock()
+        original_logger = MagicMock()
+        rebound_logger = MagicMock()
+        bot.logger = original_logger
+        bot.logger = rebound_logger
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$event123"
+        event.sender = "@user:localhost"
+        event.source = {
+            "event_id": "$event123",
+            "sender": "@user:localhost",
+            "content": {"body": "hello", "msgtype": "m.text"},
+            "type": "m.room.message",
+        }
+
+        with patch(
+            "mindroom.bot.check_agent_mentioned",
+            return_value=([assistant_user.matrix_id], True, False),
+        ):
+            await bot._extract_message_context(room, event)
+
+        rebound_logger.info.assert_any_call("Mentioned", event_id="$event123", room_id="!room:localhost")
+        original_logger.info.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_inbound_turn_normalizer_uses_rebound_bot_logger(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Normalizer logging should follow bot.logger rebinding after construction."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot.client = AsyncMock()
+        original_logger = MagicMock()
+        rebound_logger = MagicMock()
+        bot.logger = original_logger
+        bot.logger = rebound_logger
+
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$img123"
+        event.sender = "@user:localhost"
+        event.body = "photo.png"
+        event.source = {"content": {"body": "photo.png", "msgtype": "m.image"}}
+
+        with patch("mindroom.bot.register_image_attachment", new_callable=AsyncMock, return_value=None):
+            attachment_id = await bot._register_routed_attachment(
+                room_id="!room:localhost",
+                thread_id=None,
+                event=event,
+            )
+
+        assert attachment_id is None
+        rebound_logger.error.assert_called_once_with(
+            "Failed to register routed image attachment",
+            event_id="$img123",
+        )
+        original_logger.error.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_conversation_state_writer_uses_rebound_bot_logger(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """State-writer cache warnings should follow bot.logger rebinding after construction."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        original_logger = MagicMock()
+        rebound_logger = MagicMock()
+        bot.logger = original_logger
+        bot.logger = rebound_logger
+
+        event_cache = AsyncMock()
+        event_cache.append_event.side_effect = RuntimeError("cache write failed")
+        bot._event_cache = event_cache
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event123",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "hello",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$threadroot",
+                        "is_falling_back": True,
+                    },
+                },
+            },
+        )
+
+        await bot._conversation_state_writer.cache_thread_event(
+            "!room:localhost",
+            event,
+            event_info=EventInfo.from_event(event.source),
+        )
+
+        rebound_logger.warning.assert_called_once_with(
+            "Failed to append live thread event to cache",
+            room_id="!room:localhost",
+            thread_id="$threadroot",
+            event_id="$event123",
+            error="cache write failed",
+        )
+        original_logger.warning.assert_not_called()
+
+    def test_conversation_resolver_fetch_path_uses_state_writer_api(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Resolver full-history fetches should go through the state-writer cache API."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+
+        fetch_dep = bot._conversation_resolver.deps.fetch_thread_history
+        assert fetch_dep.__self__ is bot._conversation_state_writer
+        assert fetch_dep.__func__.__name__ == "fetch_thread_history"
+
+    @pytest.mark.asyncio
+    async def test_conversation_state_writer_fetch_path_passes_explicit_event_cache(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Writer-owned fetches should opt into cache maintenance explicitly."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot._event_cache = MagicMock()
+
+        with patch("mindroom.bot.fetch_thread_history", new=AsyncMock(return_value=[])) as fetch_thread_history_mock:
+            await bot._conversation_state_writer.fetch_thread_history(
+                MagicMock(),
+                "!room:localhost",
+                "$threadroot",
+            )
+
+        fetch_thread_history_mock.assert_awaited_once_with(
+            ANY,
+            "!room:localhost",
+            "$threadroot",
+            event_cache=bot._event_cache,
+        )

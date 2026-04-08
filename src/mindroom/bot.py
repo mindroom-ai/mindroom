@@ -6,7 +6,6 @@ import asyncio
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from functools import cached_property
@@ -15,9 +14,6 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import nio
-from agno.db.base import SessionType
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from mindroom.hooks import (
@@ -61,7 +57,6 @@ from mindroom.hooks.types import (
     EVENT_REACTION_RECEIVED,
     EVENT_SYSTEM_ENRICH,
 )
-from mindroom.matrix import image_handler
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.health import (
     clear_matrix_sync_state,
@@ -86,7 +81,6 @@ from mindroom.matrix.presence import (
     set_presence_status,
     should_use_streaming,
 )
-from mindroom.matrix.reply_chain import ReplyChainCaches, derive_conversation_context, derive_conversation_target
 from mindroom.matrix.room_cache import cached_room, cached_room_get_event
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import (
@@ -133,7 +127,6 @@ from mindroom.teams import (
 from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.thread_utils import (
     check_agent_mentioned,
-    create_session_id,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     get_configured_agents_for_room,
@@ -152,16 +145,12 @@ from mindroom.tool_system.worker_routing import (
 from . import constants, interactive, voice_handler
 from .agents import (
     create_agent,
-    create_session_storage,
-    get_agent_session,
     get_rooms_for_entity,
-    get_team_session,
     remove_run_by_event_id,
 )
 from .ai import ai_response, stream_agent_response
 from .attachment_media import resolve_attachment_media
 from .attachments import (
-    append_attachment_ids_prompt,
     merge_attachment_ids,
     parse_attachment_ids_from_event_source,
     parse_attachment_ids_from_thread_history,
@@ -205,7 +194,6 @@ from .commands.handler import (
 from .commands.parsing import Command, command_parser
 from .constants import (
     ATTACHMENT_IDS_KEY,
-    HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_COMPLETED,
@@ -215,6 +203,22 @@ from .constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
     resolve_avatar_path,
+)
+from .conversation_resolver import (
+    ConversationResolver,
+    ConversationResolverDeps,
+)
+from .conversation_resolver import (
+    MessageContext as _MessageContext,
+)
+from .conversation_state_writer import (
+    ConversationStateWriter,
+    ConversationStateWriterDeps,
+    LoadPersistedTurnMetadataRequest,
+    RemoveStaleRunsRequest,
+)
+from .conversation_state_writer import (
+    PersistedTurnMetadata as _PersistedTurnMetadata,
 )
 from .delivery_gateway import (
     CompactionNoticeRequest,
@@ -233,20 +237,29 @@ from .delivery_gateway import (
 from .error_handling import get_user_friendly_error_message
 from .handled_turns import HandledTurnLedger, HandledTurnState
 from .history.runtime import create_scope_session_storage
-from .history.types import HistoryScope
+from .inbound_turn_normalizer import (
+    BatchMediaAttachmentRequest,
+    DispatchPayloadWithAttachmentsRequest,
+    InboundTurnNormalizer,
+    InboundTurnNormalizerDeps,
+    TextNormalizationRequest,
+    VoiceNormalizationRequest,
+)
+from .inbound_turn_normalizer import (
+    DispatchPayload as _DispatchPayload,
+)
 from .knowledge.utils import (
     MultiKnowledgeVectorDb,
     ensure_request_knowledge_managers,
     get_agent_knowledge,
 )
 from .logging_config import emoji, get_logger
+from .matrix import image_handler
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
     PermanentMatrixStartupError,
     ResolvedVisibleMessage,
-    attach_event_cache,
     build_threaded_edit_content,
-    detach_event_cache,
     edit_message,
     fetch_thread_history,
     fetch_thread_snapshot,
@@ -273,10 +286,12 @@ _StreamChunk = TypeVar("_StreamChunk")
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from contextvars import ContextVar
     from pathlib import Path
 
     import structlog
     from agno.agent import Agent
+    from agno.db.base import SessionType
     from agno.db.sqlite import SqliteDb
     from agno.knowledge.knowledge import Knowledge
     from agno.media import Image
@@ -286,14 +301,13 @@ if TYPE_CHECKING:
     from mindroom.hooks.types import HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.reply_chain import ReplyChainCaches
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
 
 __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
-
-_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 
 
 # Constants
@@ -435,43 +449,6 @@ class _RouterDispatchResult:
     mark_visible_echo_responded: bool = False
 
 
-@dataclass(frozen=True)
-class _PersistedTurnMetadata:
-    """Run metadata needed to rebuild a coalesced turn after a partial ledger write."""
-
-    anchor_event_id: str
-    source_event_ids: tuple[str, ...]
-    response_event_id: str | None = None
-    source_event_prompts: dict[str, str] | None = None
-
-    @property
-    def is_coalesced(self) -> bool:
-        return len(self.source_event_ids) > 1
-
-
-def _should_skip_mentions(event_source: dict) -> bool:
-    """Check if mentions in this message should be ignored for agent responses.
-
-    This is used for messages like scheduling confirmations that contain mentions
-    but should not trigger agent responses.
-
-    Args:
-        event_source: The Matrix event source dict
-
-    Returns:
-        True if mentions should be ignored, False otherwise
-
-    """
-    content = event_source.get("content", {})
-    if not isinstance(content, dict):
-        return False
-    if bool(content.get("com.mindroom.skip_mentions", False)):
-        return True
-
-    new_content = content.get("m.new_content")
-    return isinstance(new_content, dict) and bool(new_content.get("com.mindroom.skip_mentions", False))
-
-
 def create_bot_for_entity(
     entity_name: str,
     agent_user: AgentMatrixUser,
@@ -548,19 +525,6 @@ def create_bot_for_entity(
     raise ValueError(msg)
 
 
-@dataclass
-class _MessageContext:
-    """Context extracted from a Matrix message event."""
-
-    am_i_mentioned: bool
-    is_thread: bool
-    thread_id: str | None
-    thread_history: Sequence[ResolvedVisibleMessage]
-    mentioned_agents: list[MatrixID]
-    has_non_agent_mentions: bool
-    requires_full_thread_history: bool = False
-
-
 type _MediaDispatchEvent = (
     nio.RoomMessageImage
     | nio.RoomEncryptedImage
@@ -581,16 +545,6 @@ class _PreparedDispatch:
     target: MessageTarget
     correlation_id: str
     envelope: MessageEnvelope
-
-
-@dataclass(frozen=True)
-class _DispatchPayload:
-    """Dispatch prompt + optional media + attachment metadata."""
-
-    prompt: str
-    model_prompt: str | None = None
-    media: MediaInputs = field(default_factory=MediaInputs)
-    attachment_ids: list[str] | None = None
 
 
 type _DispatchPayloadBuilder = Callable[[_MessageContext], Awaitable[_DispatchPayload]]
@@ -737,7 +691,6 @@ class AgentBot:
     _first_sync_done: bool = field(default=False, init=False)
     _sync_shutting_down: bool = field(default=False, init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
-    _reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches, init=False)
     _response_lifecycle_locks: dict[tuple[str, str | None], asyncio.Lock] = field(
         default_factory=dict,
         init=False,
@@ -747,11 +700,9 @@ class AgentBot:
         default_factory=dict,
         init=False,
     )
-    _turn_thread_cache: ContextVar[dict[str, list[ResolvedVisibleMessage]] | None] = field(
-        default_factory=lambda: ContextVar("mindroom_turn_thread_cache", default=None),
-        init=False,
-        repr=False,
-    )
+    _inbound_turn_normalizer: InboundTurnNormalizer = field(init=False, repr=False)
+    _conversation_resolver: ConversationResolver = field(init=False, repr=False)
+    _conversation_state_writer: ConversationStateWriter = field(init=False, repr=False)
     in_flight_response_count: int = field(default=0, init=False)
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None = field(default=None, init=False)
     _event_cache: EventCache | None = field(default=None, init=False)
@@ -765,6 +716,117 @@ class AgentBot:
             upload_grace_seconds=self._coalescing_upload_grace_seconds,
             is_shutting_down=lambda: self._sync_shutting_down,
         )
+        self._conversation_state_writer = ConversationStateWriter(
+            ConversationStateWriterDeps(
+                config_getter=lambda: self.config,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                logger_getter=lambda: self.logger,
+                event_cache_getter=lambda: self._event_cache,
+                fetch_thread_history=lambda client, room_id, thread_id: fetch_thread_history(
+                    client,
+                    room_id,
+                    thread_id,
+                    event_cache=self._event_cache,
+                ),
+            ),
+        )
+        self._conversation_resolver = ConversationResolver(
+            ConversationResolverDeps(
+                client_getter=lambda: self.client,
+                config_getter=lambda: self.config,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                matrix_id_getter=lambda: self.matrix_id,
+                logger_getter=lambda: self.logger,
+                resolve_event_source_content=lambda *args, **kwargs: resolve_event_source_content(
+                    *args,
+                    **kwargs,
+                ),
+                check_agent_mentioned=lambda *args, **kwargs: check_agent_mentioned(
+                    *args,
+                    **kwargs,
+                ),
+                fetch_thread_history=self._conversation_state_writer.fetch_thread_history,
+                fetch_thread_snapshot=lambda client, room_id, thread_id: fetch_thread_snapshot(
+                    client,
+                    room_id,
+                    thread_id,
+                ),
+                cached_room=cached_room,
+                extract_agent_name=lambda *args, **kwargs: extract_agent_name(
+                    *args,
+                    **kwargs,
+                ),
+                event_cache_getter=lambda: self._event_cache,
+            ),
+        )
+        self._inbound_turn_normalizer = InboundTurnNormalizer(
+            InboundTurnNormalizerDeps(
+                client_getter=lambda: self.client,
+                storage_path=self.storage_path,
+                config_getter=lambda: self.config,
+                runtime_paths=self.runtime_paths,
+                matrix_id_getter=lambda: self.matrix_id,
+                logger_getter=lambda: self.logger,
+                prepare_voice_message=lambda *args, **kwargs: voice_handler.prepare_voice_message(
+                    *args,
+                    **kwargs,
+                ),
+                resolve_event_source_content=lambda *args, **kwargs: resolve_event_source_content(
+                    *args,
+                    **kwargs,
+                ),
+                visible_body_from_event_source=visible_body_from_event_source,
+                download_image=lambda *args, **kwargs: image_handler.download_image(
+                    *args,
+                    **kwargs,
+                ),
+                register_file_or_video_attachment=lambda *args, **kwargs: register_file_or_video_attachment(
+                    *args,
+                    **kwargs,
+                ),
+                register_image_attachment=lambda *args, **kwargs: register_image_attachment(
+                    *args,
+                    **kwargs,
+                ),
+                resolve_attachment_media=lambda *args, **kwargs: resolve_attachment_media(
+                    *args,
+                    **kwargs,
+                ),
+                build_message_target=lambda *args, **kwargs: self._build_message_target(
+                    *args,
+                    **kwargs,
+                ),
+                derive_conversation_context=lambda *args, **kwargs: self._derive_conversation_context(
+                    *args,
+                    **kwargs,
+                ),
+                resolve_thread_attachment_ids=lambda *args, **kwargs: resolve_thread_attachment_ids(
+                    *args,
+                    **kwargs,
+                ),
+                parse_attachment_ids_from_thread_history=lambda *args,
+                **kwargs: parse_attachment_ids_from_thread_history(
+                    *args,
+                    **kwargs,
+                ),
+                merge_attachment_ids=lambda *args, **kwargs: merge_attachment_ids(
+                    *args,
+                    **kwargs,
+                ),
+            ),
+        )
+
+    @property
+    def _reply_chain(self) -> ReplyChainCaches:
+        """Expose reply-chain caches through the extracted resolver for tests."""
+        return self._conversation_resolver.reply_chain
+
+    @property
+    def _turn_thread_cache(self) -> ContextVar[dict[str, list[ResolvedVisibleMessage]] | None]:
+        """Expose the per-turn thread cache through the extracted resolver for tests."""
+        return self._conversation_resolver.turn_thread_cache
 
     @property
     def agent_name(self) -> str:
@@ -1070,36 +1132,6 @@ class AgentBot:
             ),
         )
 
-    def _persisted_turn_metadata_for_run(self, metadata: dict[str, Any]) -> _PersistedTurnMetadata | None:
-        """Parse persisted run metadata needed for coalesced edit regeneration."""
-        anchor_event_id = metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY)
-        if not isinstance(anchor_event_id, str) or not anchor_event_id:
-            return None
-        raw_source_event_ids = metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-        raw_prompt_map = metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)
-        response_event_id = (
-            metadata.get(_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
-            if isinstance(metadata.get(_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY), str)
-            else None
-        )
-        handled_turn = HandledTurnState.create(
-            raw_source_event_ids if isinstance(raw_source_event_ids, list) else [anchor_event_id],
-            response_event_id=response_event_id,
-            source_event_prompts=raw_prompt_map if isinstance(raw_prompt_map, dict) else None,
-        )
-        if not handled_turn.source_event_ids:
-            handled_turn = HandledTurnState.from_source_event_id(
-                anchor_event_id,
-                response_event_id=response_event_id,
-                source_event_prompts=raw_prompt_map if isinstance(raw_prompt_map, dict) else None,
-            )
-        return _PersistedTurnMetadata(
-            anchor_event_id=anchor_event_id,
-            source_event_ids=handled_turn.source_event_ids,
-            response_event_id=handled_turn.response_event_id,
-            source_event_prompts=handled_turn.source_event_prompts,
-        )
-
     def _load_persisted_turn_metadata(
         self,
         *,
@@ -1109,86 +1141,16 @@ class AgentBot:
         requester_user_id: str,
     ) -> _PersistedTurnMetadata | None:
         """Load persisted run metadata for one edited turn when available."""
-        resolved_thread_id = self._resolved_conversation_thread_id(
-            room_id=room.room_id,
-            thread_id=thread_id,
-            reply_to_event_id=original_event_id,
+        return self._conversation_state_writer.load_persisted_turn_metadata(
+            LoadPersistedTurnMetadataRequest(
+                room=room,
+                thread_id=thread_id,
+                original_event_id=original_event_id,
+                requester_user_id=requester_user_id,
+            ),
+            build_message_target=self._build_message_target,
+            build_tool_execution_identity=self._build_tool_execution_identity,
         )
-        session_type = self._history_session_type()
-        session_contexts = [
-            (resolved_thread_id, create_session_id(room.room_id, resolved_thread_id)),
-            (None, create_session_id(room.room_id, None)),
-        ]
-        checked_session_ids: set[str] = set()
-        newest_match: _PersistedTurnMetadata | None = None
-        newest_sort_key: tuple[int | float, int] | None = None
-        for candidate_thread_id, session_id in session_contexts:
-            if session_id in checked_session_ids:
-                continue
-            checked_session_ids.add(session_id)
-            candidate_target = self._build_message_target(
-                room_id=room.room_id,
-                thread_id=candidate_thread_id,
-                reply_to_event_id=original_event_id,
-            )
-            if candidate_target.resolved_thread_id != candidate_thread_id:
-                candidate_target = candidate_target.with_thread_root(candidate_thread_id)
-            execution_identity = self._build_tool_execution_identity(
-                target=candidate_target,
-                user_id=requester_user_id,
-                session_id=session_id,
-            )
-            storage = self._create_history_scope_storage(execution_identity)
-            try:
-                session = (
-                    get_team_session(storage, session_id)
-                    if session_type is SessionType.TEAM
-                    else get_agent_session(
-                        storage,
-                        session_id,
-                    )
-                )
-                if session is None:
-                    continue
-                session_match = self._latest_matching_persisted_turn_metadata(
-                    session.runs,
-                    original_event_id=original_event_id,
-                )
-                if session_match is not None:
-                    session_sort_key, turn_metadata = session_match
-                    if newest_sort_key is None or session_sort_key > newest_sort_key:
-                        newest_sort_key = session_sort_key
-                        newest_match = turn_metadata
-            finally:
-                storage.close()
-        return newest_match
-
-    def _latest_matching_persisted_turn_metadata(
-        self,
-        runs: list[RunOutput | TeamRunOutput] | None,
-        *,
-        original_event_id: str,
-    ) -> tuple[tuple[int | float, int], _PersistedTurnMetadata] | None:
-        """Return the newest persisted turn metadata in one session that matches the edit target."""
-        newest_match: tuple[tuple[int | float, int], _PersistedTurnMetadata] | None = None
-        for run_index, run in enumerate(runs or []):
-            if not isinstance(run, (RunOutput, TeamRunOutput)):
-                continue
-            if not isinstance(run.metadata, dict):
-                continue
-            turn_metadata = self._persisted_turn_metadata_for_run(run.metadata)
-            if turn_metadata is None:
-                continue
-            if (
-                original_event_id != turn_metadata.anchor_event_id
-                and original_event_id not in turn_metadata.source_event_ids
-            ):
-                continue
-            run_created_at = run.created_at if isinstance(run.created_at, int | float) else 0
-            sort_key = (run_created_at, run_index)
-            if newest_match is None or sort_key > newest_match[0]:
-                newest_match = (sort_key, turn_metadata)
-        return newest_match
 
     def _persist_response_event_id_in_session_run(
         self,
@@ -1200,26 +1162,13 @@ class AgentBot:
         response_event_id: str,
     ) -> None:
         """Persist Matrix response linkage onto the run that produced it."""
-        session = (
-            get_team_session(storage, session_id)
-            if session_type is SessionType.TEAM
-            else get_agent_session(
-                storage,
-                session_id,
-            )
+        self._conversation_state_writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id=session_id,
+            session_type=session_type,
+            run_id=run_id,
+            response_event_id=response_event_id,
         )
-        if session is None or not session.runs:
-            return
-        for run in session.runs:
-            if not isinstance(run, (RunOutput, TeamRunOutput)) or run.run_id != run_id:
-                continue
-            metadata = dict(run.metadata or {})
-            if metadata.get(_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id:
-                return
-            metadata[_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
-            run.metadata = metadata
-            storage.upsert_session(session)
-            return
 
     def _hook_base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
         """Return shared base fields for hook context construction."""
@@ -1276,58 +1225,16 @@ class AgentBot:
         source_kind: str | None = None,
     ) -> MessageEnvelope:
         """Build the normalized inbound envelope consumed by message hooks."""
-        content = event.source.get("content") if isinstance(event.source, dict) else None
-        resolved_source_kind = (
-            source_kind
-            if source_kind is not None
-            else event.source_kind_override
-            if isinstance(event, PreparedTextEvent)
-            else None
-        )
-        source_kind_sender_is_trusted = extract_agent_name(event.sender, self.config, self.runtime_paths) is not None
-        if resolved_source_kind is None and isinstance(content, dict):
-            source_kind_override = content.get("com.mindroom.source_kind")
-            if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
-                resolved_source_kind = source_kind_override
-        if resolved_source_kind is None:
-            if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
-                resolved_source_kind = "voice"
-            elif isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
-                resolved_source_kind = "image"
-            else:
-                resolved_source_kind = "message"
-        hook_source: str | None = None
-        message_received_depth = 0
-        if isinstance(content, dict) and source_kind_sender_is_trusted:
-            hook_source_override = content.get("com.mindroom.hook_source")
-            if isinstance(hook_source_override, str) and hook_source_override:
-                hook_source = hook_source_override
-            depth_override = content.get(HOOK_MESSAGE_RECEIVED_DEPTH_KEY)
-            if isinstance(depth_override, int) and not isinstance(depth_override, bool) and depth_override > 0:
-                message_received_depth = depth_override
-        resolved_target = target or self._build_message_target(
+        return self._conversation_resolver.build_message_envelope(
             room_id=room_id,
-            thread_id=context.thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
-
-        return MessageEnvelope(
-            source_event_id=event.event_id,
-            room_id=room_id,
-            target=resolved_target,
-            requester_id=requester_user_id,
-            sender_id=event.sender,
-            body=body or event.body,
-            attachment_ids=tuple(attachment_ids or parse_attachment_ids_from_event_source(event.source)),
-            mentioned_agents=tuple(
-                agent_id.agent_name(self.config, self.runtime_paths) or agent_id.username
-                for agent_id in context.mentioned_agents
-            ),
-            agent_name=agent_name or self.agent_name,
-            source_kind=resolved_source_kind,
-            hook_source=hook_source,
-            message_received_depth=message_received_depth,
+            event=event,
+            requester_user_id=requester_user_id,
+            context=context,
+            target=target,
+            attachment_ids=attachment_ids,
+            agent_name=agent_name,
+            body=body,
+            source_kind=source_kind,
         )
 
     async def _build_dispatch_envelope(
@@ -1338,12 +1245,10 @@ class AgentBot:
         requester_user_id: str,
     ) -> MessageEnvelope:
         """Build the normalized inbound envelope for one prepared dispatch event."""
-        context = await self._extract_dispatch_context(room, event)
-        return self._build_message_envelope(
-            room_id=room.room_id,
+        return await self._conversation_resolver.build_dispatch_envelope(
+            room=room,
             event=event,
             requester_user_id=requester_user_id,
-            context=context,
         )
 
     def _has_newer_unresponded_in_thread(
@@ -1558,18 +1463,12 @@ class AgentBot:
         thread_mode_override: Literal["thread", "room"] | None = None,
     ) -> MessageTarget:
         """Build the canonical delivery target for one outbound response."""
-        effective_thread_mode = thread_mode_override or self.config.get_entity_thread_mode(
-            self.agent_name,
-            self.runtime_paths,
-            room_id=room_id,
-        )
-        safe_thread_root = EventInfo.from_event(event_source).safe_thread_root if event_source is not None else None
-        return MessageTarget.resolve(
+        return self._conversation_resolver.build_message_target(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
-            safe_thread_root=safe_thread_root,
-            room_mode=effective_thread_mode == "room",
+            event_source=event_source,
+            thread_mode_override=thread_mode_override,
         )
 
     def _resolve_response_thread_root(
@@ -1581,13 +1480,12 @@ class AgentBot:
         response_envelope: MessageEnvelope | None = None,
     ) -> str | None:
         """Return the canonical thread root for outbound response delivery."""
-        if response_envelope is not None:
-            return response_envelope.target.resolved_thread_id
-        return self._build_message_target(
+        return self._conversation_resolver.resolve_response_thread_root(
+            thread_id,
+            reply_to_event_id,
             room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-        ).resolved_thread_id
+            response_envelope=response_envelope,
+        )
 
     @property
     def show_tool_calls(self) -> bool:
@@ -1835,7 +1733,7 @@ class AgentBot:
             return
 
         if isinstance(_response, nio.SyncResponse):
-            await self._cache_sync_timeline_events(_response)
+            await self._conversation_state_writer.cache_sync_timeline_events(_response)
 
         self._first_sync_done = True
 
@@ -1861,8 +1759,7 @@ class AgentBot:
         await self.leave_unconfigured_rooms()
 
     async def _initialize_event_cache(self) -> None:
-        """Initialize and attach the persistent Matrix event cache when enabled."""
-        assert self.client is not None
+        """Initialize the persistent Matrix event cache when enabled."""
         if not self.config.cache.enabled:
             return
 
@@ -1874,13 +1771,9 @@ class AgentBot:
             return
 
         self._event_cache = event_cache
-        attach_event_cache(self.client, event_cache)
 
     async def _close_event_cache(self) -> None:
-        """Detach and close the persistent Matrix event cache when present."""
-        if self.client is not None:
-            detach_event_cache(self.client)
-
+        """Close the persistent Matrix event cache when present."""
         event_cache = self._event_cache
         self._event_cache = None
         if event_cache is None:
@@ -1890,128 +1783,6 @@ class AgentBot:
             await event_cache.close()
         except Exception as exc:
             self.logger.warning("Failed to close event cache", error=str(exc))
-
-    async def _cache_thread_event(
-        self,
-        room_id: str,
-        event: nio.RoomMessageText,
-        *,
-        event_info: EventInfo,
-    ) -> None:
-        """Append live thread events to the cache when the thread was already hydrated."""
-        event_cache = self._event_cache
-        if event_cache is None:
-            return
-
-        thread_id = event_info.thread_id
-        if thread_id is None and event_info.is_edit and event_info.original_event_id is not None:
-            thread_id = event_info.thread_id_from_edit
-            if thread_id is None:
-                try:
-                    thread_id = await event_cache.get_thread_id_for_event(
-                        room_id,
-                        event_info.original_event_id,
-                    )
-                except Exception as exc:
-                    self.logger.warning(
-                        "Failed to resolve cached thread for live edit event",
-                        room_id=room_id,
-                        event_id=event.event_id,
-                        original_event_id=event_info.original_event_id,
-                        error=str(exc),
-                    )
-                    return
-        if thread_id is None:
-            return
-
-        server_timestamp = event.server_timestamp
-        event_source = normalize_event_source_for_cache(
-            event.source,
-            event_id=event.event_id,
-            sender=event.sender,
-            origin_server_ts=server_timestamp
-            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
-            else None,
-        )
-
-        try:
-            await event_cache.append_event(room_id, thread_id, event_source)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to append live thread event to cache",
-                room_id=room_id,
-                thread_id=thread_id,
-                event_id=event.event_id,
-                error=str(exc),
-            )
-
-    async def _cache_redaction_event(self, room_id: str, event: nio.RedactionEvent) -> None:
-        """Apply live redactions to cached thread history when relevant."""
-        event_cache = self._event_cache
-        if event_cache is None:
-            return
-
-        try:
-            thread_id = await event_cache.get_thread_id_for_event(room_id, event.redacts)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to resolve cached thread for redaction",
-                room_id=room_id,
-                event_id=event.event_id,
-                redacted_event_id=event.redacts,
-                error=str(exc),
-            )
-            thread_id = None
-        server_timestamp = event.server_timestamp
-        redaction_source = normalize_event_source_for_cache(
-            event.source,
-            event_id=event.event_id,
-            sender=event.sender,
-            origin_server_ts=server_timestamp
-            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
-            else None,
-        )
-
-        try:
-            redacted = await event_cache.redact_event(
-                room_id,
-                event.redacts,
-                thread_id=thread_id,
-                redaction_event=redaction_source,
-            )
-            if not redacted:
-                return
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to apply live redaction to cache",
-                room_id=room_id,
-                thread_id=thread_id,
-                redacted_event_id=event.redacts,
-                error=str(exc),
-            )
-
-    async def _cache_sync_timeline_events(self, response: nio.SyncResponse) -> None:
-        """Persist timeline events from sync so later point lookups can hit SQLite."""
-        event_cache = self._event_cache
-        if event_cache is None:
-            return
-
-        filtered_cached_events, redacted_events = _collect_sync_timeline_cache_updates(response)
-        if not filtered_cached_events and not redacted_events:
-            return
-
-        try:
-            if filtered_cached_events:
-                await event_cache.store_events_batch(filtered_cached_events)
-            for room_id, redacted_event_id in redacted_events:
-                await event_cache.redact_event(room_id, redacted_event_id)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to cache sync timeline events",
-                error=str(exc),
-                events=len(filtered_cached_events),
-                redactions=len(redacted_events),
-            )
 
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
@@ -2253,17 +2024,7 @@ class AgentBot:
         event: _DispatchEvent,
     ) -> str | None:
         """Return the coalescing thread scope for one inbound event."""
-        if self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room.room_id) == "room":
-            return None
-        event_info = EventInfo.from_event(event.source)
-        if event_info.thread_id:
-            return event_info.thread_id
-        if event_info.thread_id_from_edit:
-            return event_info.thread_id_from_edit
-        if not event_info.has_relations:
-            return None
-        _, thread_id, _, _ = await self._derive_conversation_target(room.room_id, event_info)
-        return thread_id
+        return await self._conversation_resolver.coalescing_thread_id(room, event)
 
     async def _coalescing_key_for_event(
         self,
@@ -2351,7 +2112,7 @@ class AgentBot:
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
         event_info = EventInfo.from_event(event.source)
-        await self._cache_thread_event(room.room_id, event, event_info=event_info)
+        await self._conversation_state_writer.cache_thread_event(room.room_id, event, event_info=event_info)
         if not isinstance(event.body, str):
             return
         # Skip messages that are still being streamed (use metadata, not text pattern)
@@ -2560,7 +2321,7 @@ class AgentBot:
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Keep cached thread history consistent when Matrix redactions arrive."""
-        await self._cache_redaction_event(room.room_id, event)
+        await self._conversation_state_writer.cache_redaction_event(room.room_id, event)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
@@ -2681,42 +2442,16 @@ class AgentBot:
         fallback_images: list[Image] | None = None,
     ) -> _DispatchPayload:
         """Build dispatch payload by merging thread/history attachment media."""
-        assert self.client is not None
-        thread_attachment_ids = (
-            await resolve_thread_attachment_ids(
-                self.client,
-                self.storage_path,
+        return await self._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
                 room_id=room_id,
+                prompt=prompt,
+                current_attachment_ids=current_attachment_ids,
                 thread_id=context.thread_id,
-            )
-            if context.thread_id
-            else []
-        )
-        history_attachment_ids = parse_attachment_ids_from_thread_history(context.thread_history)
-        attachment_ids = merge_attachment_ids(
-            current_attachment_ids,
-            thread_attachment_ids,
-            history_attachment_ids,
-        )
-        resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
-            resolve_attachment_media(
-                self.storage_path,
-                attachment_ids,
-                room_id=room_id,
-                thread_id=media_thread_id,
-            )
-        )
-        if fallback_images:
-            attachment_images = [*attachment_images, *fallback_images] if attachment_images else list(fallback_images)
-        return _DispatchPayload(
-            prompt=append_attachment_ids_prompt(prompt, resolved_attachment_ids),
-            media=MediaInputs.from_optional(
-                audio=attachment_audio,
-                images=attachment_images,
-                files=attachment_files,
-                videos=attachment_videos,
+                media_thread_id=media_thread_id,
+                thread_history=context.thread_history,
+                fallback_images=fallback_images,
             ),
-            attachment_ids=resolved_attachment_ids or None,
         )
 
     async def _on_audio_media_message(
@@ -2737,51 +2472,25 @@ class AgentBot:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
-        event_info = EventInfo.from_event(event.source)
-        _, thread_id, _ = await self._derive_conversation_context(room.room_id, event_info)
-        effective_thread_id = self._build_message_target(
-            room_id=room.room_id,
-            thread_id=thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        ).resolved_thread_id
-        prepared_voice = await voice_handler.prepare_voice_message(
-            self.client,
-            self.storage_path,
-            room,
-            event,
-            self.config,
-            runtime_paths=self.runtime_paths,
-            sender_domain=self.matrix_id.domain,
-            thread_id=effective_thread_id,
+        normalized_voice = await self._inbound_turn_normalizer.prepare_voice_event(
+            VoiceNormalizationRequest(
+                room=room,
+                event=event,
+            ),
         )
-        if prepared_voice is None:
+        if normalized_voice is None:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
         await self._maybe_send_visible_voice_echo(
             room,
             event,
-            text=prepared_voice.text,
-            thread_id=effective_thread_id,
+            text=normalized_voice.event.body,
+            thread_id=normalized_voice.effective_thread_id,
         )
 
         await self._enqueue_for_dispatch(
-            PreparedTextEvent(
-                sender=event.sender,
-                event_id=event.event_id,
-                body=prepared_voice.text,
-                source={
-                    **prepared_voice.source,
-                    "content": {
-                        **prepared_voice.source.get("content", {}),
-                        "com.mindroom.source_kind": "voice",
-                    },
-                },
-                server_timestamp=event.server_timestamp,
-                is_synthetic=True,
-                source_kind_override="voice",
-            ),
+            normalized_voice.event,
             room,
             source_kind="voice",
             requester_user_id=prechecked_event.requester_user_id,
@@ -2879,38 +2588,11 @@ class AgentBot:
         event: _DispatchEvent,
     ) -> str | None:
         """Register a routed media event and return its attachment ID when available."""
-        if isinstance(
-            event,
-            nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-        ):
-            assert self.client is not None
-            attachment_record = await register_file_or_video_attachment(
-                self.client,
-                self.storage_path,
-                room_id=room_id,
-                thread_id=thread_id,
-                event=event,
-            )
-            if attachment_record is None:
-                self.logger.error("Failed to register routed media attachment", event_id=event.event_id)
-                return None
-            return attachment_record.attachment_id
-
-        if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
-            assert self.client is not None
-            attachment_record = await register_image_attachment(
-                self.client,
-                self.storage_path,
-                room_id=room_id,
-                thread_id=thread_id,
-                event=event,
-            )
-            if attachment_record is None:
-                self.logger.error("Failed to register routed image attachment", event_id=event.event_id)
-                return None
-            return attachment_record.attachment_id
-
-        return None
+        return await self._inbound_turn_normalizer.register_routed_attachment(
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+        )
 
     async def _dispatch_file_sidecar_text_preview(
         self,
@@ -2951,18 +2633,7 @@ class AgentBot:
         event: nio.RoomMessageFile | nio.RoomEncryptedFile,
     ) -> PreparedTextEvent | None:
         """Return a prepared text event when a file event is really a long-text preview."""
-        if not is_v2_sidecar_text_preview(event.source):
-            return None
-
-        assert self.client is not None
-        resolved_source = await resolve_event_source_content(event.source, self.client)
-        return PreparedTextEvent(
-            sender=event.sender,
-            event_id=event.event_id,
-            body=visible_body_from_event_source(resolved_source, event.body),
-            source=resolved_source,
-            server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
-        )
+        return await self._inbound_turn_normalizer.prepare_file_sidecar_text_event(event)
 
     async def _register_batch_media_attachments(
         self,
@@ -2972,59 +2643,14 @@ class AgentBot:
         media_events: list[_MediaDispatchEvent],
     ) -> tuple[list[str], list[Image] | None]:
         """Register media attachments for one coalesced batch."""
-        if not media_events:
-            return [], None
-
-        assert self.client is not None
-        attachment_ids: list[str] = []
-        fallback_images: list[Image] = []
-        for media_event in media_events:
-            if isinstance(media_event, nio.RoomMessageImage | nio.RoomEncryptedImage):
-                image = await image_handler.download_image(self.client, media_event)
-                if image is None:
-                    msg = "Failed to download image"
-                    raise RuntimeError(msg)
-                attachment_record = await register_image_attachment(
-                    self.client,
-                    self.storage_path,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    event=media_event,
-                    image_bytes=image.content,
-                )
-                if attachment_record is not None:
-                    attachment_ids.append(attachment_record.attachment_id)
-                else:
-                    fallback_images.append(image)
-                continue
-
-            file_or_video_event = self._as_file_or_video_dispatch_event(media_event)
-            attachment_record = await register_file_or_video_attachment(
-                self.client,
-                self.storage_path,
+        result = await self._inbound_turn_normalizer.register_batch_media_attachments(
+            BatchMediaAttachmentRequest(
                 room_id=room_id,
                 thread_id=thread_id,
-                event=file_or_video_event,
-            )
-            if attachment_record is None:
-                msg = "Failed to register media attachment"
-                raise RuntimeError(msg)
-            attachment_ids.append(attachment_record.attachment_id)
-
-        return attachment_ids, fallback_images or None
-
-    @staticmethod
-    def _as_file_or_video_dispatch_event(
-        event: _MediaDispatchEvent,
-    ) -> nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo:
-        """Narrow a media dispatch event to the file/video subset used for attachment registration."""
-        if isinstance(
-            event,
-            nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-        ):
-            return event
-        msg = f"Expected file or video event, got {type(event).__name__}"
-        raise TypeError(msg)
+                media_events=media_events,
+            ),
+        )
+        return result.attachment_ids, result.fallback_images
 
     async def _derive_conversation_context(
         self,
@@ -3032,18 +2658,7 @@ class AgentBot:
         event_info: EventInfo,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
         """Derive conversation context from threads or reply chains."""
-        assert self.client is not None
-
-        is_thread, thread_id, thread_history = await derive_conversation_context(
-            self.client,
-            room_id,
-            event_info,
-            self._reply_chain,
-            self.logger,
-            self._fetch_thread_history,
-            event_cache=self._event_cache,
-        )
-        return is_thread, thread_id, thread_history
+        return await self._conversation_resolver.derive_conversation_context(room_id, event_info)
 
     async def _derive_conversation_target(
         self,
@@ -3051,16 +2666,7 @@ class AgentBot:
         event_info: EventInfo,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
         """Derive dispatch target using lightweight thread snapshots."""
-        assert self.client is not None
-        return await derive_conversation_target(
-            self.client,
-            room_id,
-            event_info,
-            self._reply_chain,
-            self.logger,
-            fetch_thread_snapshot,
-            event_cache=self._event_cache,
-        )
+        return await self._conversation_resolver.derive_conversation_target(room_id, event_info)
 
     def _requester_user_id(
         self,
@@ -3184,18 +2790,11 @@ class AgentBot:
         effective_requester_user_id = prechecked_event.requester_user_id
 
         context = await self._extract_dispatch_context(room, event)
-        event_info = EventInfo.from_event(event.source)
-        target = MessageTarget.resolve(
+        target = self._build_message_target(
             room_id=room.room_id,
             thread_id=context.thread_id,
             reply_to_event_id=event.event_id,
-            safe_thread_root=event_info.safe_thread_root,
-            room_mode=self.config.get_entity_thread_mode(
-                self.agent_name,
-                self.runtime_paths,
-                room_id=room.room_id,
-            )
-            == "room",
+            event_source=event.source,
         )
         correlation_id = event.event_id
         envelope = self._build_message_envelope(
@@ -3230,17 +2829,8 @@ class AgentBot:
 
     async def _resolve_text_dispatch_event(self, event: _TextDispatchEvent) -> PreparedTextEvent:
         """Return one canonical text event for hooks, routing, and command handling."""
-        if isinstance(event, PreparedTextEvent):
-            return event
-
-        assert self.client is not None
-        resolved_source = await resolve_event_source_content(event.source, self.client)
-        return PreparedTextEvent(
-            sender=event.sender,
-            event_id=event.event_id,
-            body=visible_body_from_event_source(resolved_source, event.body),
-            source=resolved_source,
-            server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
+        return await self._inbound_turn_normalizer.resolve_text_event(
+            TextNormalizationRequest(event=event),
         )
 
     @timed("dispatch_action_resolution")
@@ -3794,7 +3384,7 @@ class AgentBot:
         event: _DispatchEvent,
     ) -> _MessageContext:
         """Extract lightweight routing context without hydrating full thread history."""
-        return await self._extract_message_context(room, event, full_history=False)
+        return await self._conversation_resolver.extract_dispatch_context(room, event)
 
     async def _extract_message_context(
         self,
@@ -3804,7 +3394,11 @@ class AgentBot:
         full_history: bool = True,
     ) -> _MessageContext:
         """Extract message context, optionally using a lightweight thread snapshot."""
-        return await self._extract_message_context_impl(room, event, full_history=full_history)
+        return await self._conversation_resolver.extract_message_context(
+            room,
+            event,
+            full_history=full_history,
+        )
 
     async def _extract_message_context_impl(
         self,
@@ -3813,71 +3407,10 @@ class AgentBot:
         *,
         full_history: bool,
     ) -> _MessageContext:
-        assert self.client is not None
-        resolved_event_source = await resolve_event_source_content(event.source, self.client)
-
-        # Check if mentions should be ignored for this message
-        skip_mentions = _should_skip_mentions(resolved_event_source)
-
-        if skip_mentions:
-            # Don't detect mentions if the message has skip_mentions metadata
-            mentioned_agents: list[MatrixID] = []
-            am_i_mentioned = False
-            has_non_agent_mentions = False
-        else:
-            mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
-                resolved_event_source,
-                self.matrix_id,
-                self.config,
-                self.runtime_paths,
-            )
-
-        if am_i_mentioned:
-            self.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
-
-        event_info = EventInfo.from_event(resolved_event_source)
-        if self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room.room_id) == "room":
-            is_thread = False
-            thread_id = None
-            thread_history: list[ResolvedVisibleMessage] = []
-            requires_full_thread_history = False
-        elif full_history:
-            is_thread, thread_id, thread_history = await self._derive_conversation_context(
-                room.room_id,
-                event_info,
-            )
-            requires_full_thread_history = False
-        else:
-            (
-                is_thread,
-                thread_id,
-                thread_history,
-                requires_full_thread_history,
-            ) = await self._derive_conversation_target(
-                room.room_id,
-                event_info,
-            )
-            if (
-                event_info.is_thread
-                and is_thread
-                and thread_id is not None
-                and not thread_history
-                and requires_full_thread_history
-            ):
-                # PR447 removed the old snapshot helper. For standalone checkpoints that
-                # still need thread-participation decisions before final dispatch, use the
-                # current thread-history fetch as the best available preview.
-                thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-                requires_full_thread_history = False
-
-        return _MessageContext(
-            am_i_mentioned=am_i_mentioned,
-            is_thread=is_thread,
-            thread_id=thread_id,
-            thread_history=thread_history,
-            mentioned_agents=mentioned_agents,
-            has_non_agent_mentions=has_non_agent_mentions,
-            requires_full_thread_history=requires_full_thread_history,
+        return await self._conversation_resolver.extract_message_context_impl(
+            room,
+            event,
+            full_history=full_history,
         )
 
     @timed("hydrate_dispatch_context")
@@ -3888,35 +3421,17 @@ class AgentBot:
         context: _MessageContext,
     ) -> None:
         """Replace lightweight thread snapshots with full history once a reply is required."""
-        if not context.requires_full_thread_history or context.thread_id is None:
-            context.requires_full_thread_history = False
-            return
-        full_context = await self._extract_message_context(room, event)
-        context.thread_history = full_context.thread_history
-        context.is_thread = full_context.is_thread
-        context.thread_id = full_context.thread_id
-        context.requires_full_thread_history = False
+        await self._conversation_resolver.hydrate_dispatch_context(room, event, context)
 
     def _cached_room(self, room_id: str) -> nio.MatrixRoom | None:
         """Return room from client cache when available."""
-        client = self.client
-        if client is None:
-            return None
-        return cached_room(client, room_id)
+        return self._conversation_resolver.cached_room(room_id)
 
     @asynccontextmanager
     async def _turn_thread_cache_scope(self) -> AsyncIterator[None]:
         """Cache thread history for the lifetime of one message-handling turn."""
-        existing_cache = self._turn_thread_cache.get()
-        if existing_cache is not None:
+        async with self._conversation_resolver.turn_thread_cache_scope():
             yield
-            return
-
-        token = self._turn_thread_cache.set({})
-        try:
-            yield
-        finally:
-            self._turn_thread_cache.reset(token)
 
     @timed("fetch_thread_history")
     async def _fetch_thread_history(
@@ -3926,15 +3441,7 @@ class AgentBot:
         thread_id: str,
     ) -> list[ResolvedVisibleMessage]:
         """Fetch thread history once per turn for the same room/thread pair."""
-        cache = self._turn_thread_cache.get()
-        cache_key = f"{room_id}:{thread_id}"
-        if cache is not None and cache_key in cache:
-            return cache[cache_key]
-
-        thread_history = await fetch_thread_history(client, room_id, thread_id)
-        if cache is not None:
-            cache[cache_key] = thread_history
-        return thread_history
+        return await self._conversation_resolver.fetch_thread_history(client, room_id, thread_id)
 
     @timed("dispatch_payload_builder")
     async def _build_dispatch_payload(
@@ -3982,41 +3489,13 @@ class AgentBot:
             message_received_depth=source_envelope.message_received_depth if source_envelope is not None else 0,
         )
 
-    def _history_scope(self) -> HistoryScope:
-        """Return the persisted history scope backing this bot's runs."""
-        if self.agent_name in self.config.teams:
-            return HistoryScope(kind="team", scope_id=self.agent_name)
-        return HistoryScope(kind="agent", scope_id=self.agent_name)
-
     def _history_session_type(self) -> SessionType:
         """Return the Agno session type used by this bot's persisted history."""
-        return SessionType.TEAM if self.agent_name in self.config.teams else SessionType.AGENT
+        return self._conversation_state_writer.history_session_type()
 
     def _create_history_scope_storage(self, execution_identity: ToolExecutionIdentity | None) -> SqliteDb:
         """Create the canonical storage backing this bot's persisted history scope."""
-        if self.agent_name not in self.config.teams:
-            return create_session_storage(
-                agent_name=self.agent_name,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                execution_identity=execution_identity,
-            )
-        return create_scope_session_storage(
-            agent_name=self.agent_name,
-            scope=self._history_scope(),
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            execution_identity=execution_identity,
-        )
-
-    def _team_history_scope(self, team_agents: list[MatrixID]) -> HistoryScope:
-        """Return the persisted team-history scope for one team response."""
-        if self.agent_name in self.config.teams:
-            return HistoryScope(kind="team", scope_id=self.agent_name)
-        team_member_names = [
-            matrix_id.agent_name(self.config, self.runtime_paths) or matrix_id.username for matrix_id in team_agents
-        ]
-        return HistoryScope(kind="team", scope_id=f"team_{'+'.join(sorted(team_member_names))}")
+        return self._conversation_state_writer.create_history_scope_storage(execution_identity)
 
     def _create_team_history_storage(
         self,
@@ -4025,12 +3504,10 @@ class AgentBot:
         execution_identity: ToolExecutionIdentity | None,
     ) -> SqliteDb:
         """Create the canonical shared storage backing one team response."""
-        return create_scope_session_storage(
-            agent_name=self.agent_name,
-            scope=self._team_history_scope(team_agents),
-            config=self.config,
-            runtime_paths=self.runtime_paths,
+        return self._conversation_state_writer.create_team_history_storage(
+            team_agents=team_agents,
             execution_identity=execution_identity,
+            create_scope_session_storage_fn=create_scope_session_storage,
         )
 
     def _build_tool_execution_identity(
@@ -5138,49 +4615,17 @@ class AgentBot:
         requester_user_id: str,
     ) -> None:
         """Remove persisted runs tied to the pre-edit message before regenerating."""
-        resolved_thread_id = self._resolved_conversation_thread_id(
-            room_id=room.room_id,
-            thread_id=thread_id,
-            reply_to_event_id=original_event_id,
+        self._conversation_state_writer.remove_stale_runs_for_edited_message(
+            RemoveStaleRunsRequest(
+                room=room,
+                thread_id=thread_id,
+                original_event_id=original_event_id,
+                requester_user_id=requester_user_id,
+            ),
+            build_message_target=self._build_message_target,
+            build_tool_execution_identity=self._build_tool_execution_identity,
+            remove_run_by_event_id_fn=remove_run_by_event_id,
         )
-        session_type = self._history_session_type()
-        session_contexts = [
-            (resolved_thread_id, create_session_id(room.room_id, resolved_thread_id)),
-            (None, create_session_id(room.room_id, None)),
-        ]
-        checked_session_ids: set[str] = set()
-        for candidate_thread_id, session_id in session_contexts:
-            if session_id in checked_session_ids:
-                continue
-            checked_session_ids.add(session_id)
-            candidate_target = self._build_message_target(
-                room_id=room.room_id,
-                thread_id=candidate_thread_id,
-                reply_to_event_id=original_event_id,
-            )
-            if candidate_target.resolved_thread_id != candidate_thread_id:
-                candidate_target = candidate_target.with_thread_root(candidate_thread_id)
-            execution_identity = self._build_tool_execution_identity(
-                target=candidate_target,
-                user_id=requester_user_id,
-                session_id=session_id,
-            )
-            storage = self._create_history_scope_storage(execution_identity)
-            try:
-                removed = remove_run_by_event_id(
-                    storage,
-                    session_id,
-                    original_event_id,
-                    session_type=session_type,
-                )
-            finally:
-                storage.close()
-            if removed:
-                self.logger.info(
-                    "Removed stale run for edited message",
-                    event_id=original_event_id,
-                    session_id=session_id,
-                )
 
     async def _handle_command(
         self,

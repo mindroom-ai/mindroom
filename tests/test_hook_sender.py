@@ -553,7 +553,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
         hook_calls.append("called")
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
-    bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     bot.handled_turn_ledger.record_handled_turn = MagicMock()
 
     dispatch = await bot._prepare_dispatch(
@@ -571,6 +571,60 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
     assert dispatch.envelope.message_received_depth == 1
     assert dispatch.envelope.mentioned_agents == ("code",)
     bot.handled_turn_ledger.record_handled_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_prepare_dispatch_builds_target_via_bot_target_helper(tmp_path: Path) -> None:
+    """Dispatch preparation should route target construction through the bot helper seam."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$threaded-event",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "hello",
+                "m.relates_to": {
+                    "event_id": "$thread-root",
+                    "rel_type": "m.thread",
+                },
+            },
+        },
+    )
+    context = _MessageContext(
+        am_i_mentioned=True,
+        is_thread=True,
+        thread_id="$thread-root",
+        thread_history=[],
+        mentioned_agents=[bot.matrix_id],
+        has_non_agent_mentions=False,
+    )
+    expected_target = MessageTarget.resolve(
+        room_id=room.room_id,
+        thread_id="$thread-root",
+        reply_to_event_id=event.event_id,
+        safe_thread_root="$thread-root",
+    )
+    bot._extract_dispatch_context = AsyncMock(return_value=context)
+
+    with patch.object(bot, "_build_message_target", return_value=expected_target) as mock_build_message_target:
+        dispatch = await bot._prepare_dispatch(
+            room,
+            _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            event_label="message",
+            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+        )
+
+    assert dispatch is not None
+    mock_build_message_target.assert_called_once_with(
+        room_id=room.room_id,
+        thread_id="$thread-root",
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    )
+    assert dispatch.target == expected_target
 
 
 @pytest.mark.asyncio
@@ -599,7 +653,7 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
         hook_calls.append("called")
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
-    bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._resolve_dispatch_action = AsyncMock(return_value=None)
 
     await bot._dispatch_text_message(
@@ -663,7 +717,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
         hook_calls.append("called")
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
-    bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._resolve_dispatch_action = AsyncMock(return_value=None)
 
     await bot._dispatch_text_message(
@@ -710,6 +764,51 @@ async def test_voice_prepared_text_does_not_trust_hook_metadata_from_user_conten
     assert envelope.message_received_depth == 0
 
 
+def test_build_message_envelope_delegates_to_conversation_resolver(tmp_path: Path) -> None:
+    """Bot hook-envelope assembly should go through the extracted resolver."""
+    bot = _agent_bot(tmp_path)
+    event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$event",
+        body="hello",
+        source={"content": {"body": "hello", "msgtype": "m.text"}},
+    )
+    context = _dispatch_context(bot)
+    expected = MessageEnvelope(
+        source_event_id=event.event_id,
+        room_id="!room:localhost",
+        target=MessageTarget.resolve("!room:localhost", None, event.event_id),
+        requester_id="@user:localhost",
+        sender_id=event.sender,
+        body=event.body,
+        attachment_ids=(),
+        mentioned_agents=(),
+        agent_name=bot.agent_name,
+        source_kind="message",
+    )
+    bot._conversation_resolver.build_message_envelope = MagicMock(return_value=expected)
+
+    envelope = bot._build_message_envelope(
+        room_id="!room:localhost",
+        event=event,
+        requester_user_id="@user:localhost",
+        context=context,
+    )
+
+    assert envelope is expected
+    bot._conversation_resolver.build_message_envelope.assert_called_once_with(
+        room_id="!room:localhost",
+        event=event,
+        requester_user_id="@user:localhost",
+        context=context,
+        target=None,
+        attachment_ids=None,
+        agent_name=None,
+        body=None,
+        source_kind=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_dispatch_text_message_runs_message_received_before_command_parsing(tmp_path: Path) -> None:
     """Router command handling must still allow message:received hooks to suppress first."""
@@ -734,7 +833,7 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
         ctx.suppress = True
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
-    bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._handle_command = AsyncMock()
     bot.handled_turn_ledger.record_handled_turn = MagicMock()
 
@@ -772,7 +871,7 @@ async def test_prepare_dispatch_marks_all_source_events_when_hooks_suppress_batc
         ctx.suppress = True
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
-    bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     bot.handled_turn_ledger.record_handled_turn = MagicMock()
 
     dispatch = await bot._prepare_dispatch(
@@ -832,7 +931,7 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
     )
     bot.handled_turn_ledger = MagicMock()
     bot.handled_turn_ledger.has_responded.return_value = False
-    bot._extract_message_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._resolve_dispatch_action = AsyncMock(return_value=_ResponseAction(kind="individual"))
     bot._build_dispatch_payload_with_attachments = AsyncMock(return_value=_DispatchPayload(prompt="unused"))
     bot._execute_dispatch_action = AsyncMock()
@@ -973,7 +1072,7 @@ async def test_prepare_dispatch_allows_hook_dispatch_without_mention(tmp_path: P
         mentioned_agents=[],
         has_non_agent_mentions=False,
     )
-    bot._extract_message_context = AsyncMock(return_value=no_mention_context)
+    bot._extract_dispatch_context = AsyncMock(return_value=no_mention_context)
 
     dispatch = await bot._prepare_dispatch(
         room,
@@ -1014,7 +1113,7 @@ async def test_prepare_dispatch_reruns_message_received_for_hook_dispatch_from_n
         hook_calls.append("called")
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
-    bot._extract_message_context = AsyncMock(
+    bot._extract_dispatch_context = AsyncMock(
         return_value=_MessageContext(
             am_i_mentioned=False,
             is_thread=False,
@@ -1071,7 +1170,7 @@ async def test_hook_dispatch_from_message_received_reenters_once_and_skips_origi
     bot.hook_registry = HookRegistry.from_plugins(
         [_plugin("origin-plugin", [origin]), _plugin("other-plugin", [other])],
     )
-    bot._extract_message_context = AsyncMock(
+    bot._extract_dispatch_context = AsyncMock(
         return_value=_MessageContext(
             am_i_mentioned=False,
             is_thread=False,
@@ -1130,7 +1229,7 @@ async def test_hook_dispatch_from_message_received_stops_reentry_after_first_syn
     bot.hook_registry = HookRegistry.from_plugins(
         [_plugin("origin-plugin", [origin]), _plugin("other-plugin", [other])],
     )
-    bot._extract_message_context = AsyncMock(
+    bot._extract_dispatch_context = AsyncMock(
         return_value=_MessageContext(
             am_i_mentioned=False,
             is_thread=False,
@@ -1651,7 +1750,7 @@ async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_pat
         mentioned_agents=[],
         has_non_agent_mentions=False,
     )
-    bot._extract_message_context = AsyncMock(return_value=no_mention_context)
+    bot._extract_dispatch_context = AsyncMock(return_value=no_mention_context)
 
     dispatch = await bot._prepare_dispatch(
         room,
@@ -1683,7 +1782,7 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
         },
     )
     bot.hook_registry = HookRegistry.empty()
-    bot._extract_message_context = AsyncMock(
+    bot._extract_dispatch_context = AsyncMock(
         return_value=_MessageContext(
             am_i_mentioned=False,
             is_thread=False,

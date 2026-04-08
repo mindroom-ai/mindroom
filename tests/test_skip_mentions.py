@@ -8,21 +8,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot, _should_skip_mentions
+from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.conversation_resolver import should_skip_mentions
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalDeliveryRequest
 from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 def test_should_skip_mentions_with_metadata() -> None:
-    """Test that _should_skip_mentions detects the metadata."""
+    """Test that should_skip_mentions detects the metadata."""
     # Event with skip_mentions metadata
     event_source = {
         "content": {
@@ -30,49 +32,64 @@ def test_should_skip_mentions_with_metadata() -> None:
             "com.mindroom.skip_mentions": True,
         },
     }
-    assert _should_skip_mentions(event_source) is True
+    assert should_skip_mentions(event_source) is True
 
 
 def test_should_skip_mentions_without_metadata() -> None:
-    """Test that _should_skip_mentions returns False when no metadata."""
+    """Test that should_skip_mentions returns False when no metadata."""
     # Normal event without metadata
     event_source = {
         "content": {
             "body": "Regular message @email_agent",
         },
     }
-    assert _should_skip_mentions(event_source) is False
+    assert should_skip_mentions(event_source) is False
 
 
 def test_should_skip_mentions_explicit_false() -> None:
-    """Test that _should_skip_mentions returns False when metadata is False."""
+    """Test that should_skip_mentions returns False when metadata is False."""
     event_source = {
         "content": {
             "body": "Message with explicit false @email_agent",
             "com.mindroom.skip_mentions": False,
         },
     }
-    assert _should_skip_mentions(event_source) is False
+    assert should_skip_mentions(event_source) is False
+
+
+def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:
+    """Build a real bot so context extraction exercises the resolver runtime path."""
+    if config is None:
+        config = bind_runtime_paths(
+            Config(agents={"email_agent": AgentConfig(display_name="Email Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+    bot = AgentBot(
+        agent_user=AgentMatrixUser(
+            agent_name="email_agent",
+            password=TEST_PASSWORD,
+            display_name="Email Agent",
+            user_id="@mindroom_email_agent:localhost",
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot.logger = MagicMock()
+    bot._conversation_resolver.derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    return bot
 
 
 @pytest.mark.asyncio
 async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
     """Test that _send_response adds metadata when skip_mentions is True."""
-    # Create a mock bot
     config = bind_runtime_paths(
         Config(agents={"email_agent": AgentConfig(display_name="Email Agent")}),
         test_runtime_paths(tmp_path),
     )
-    bot = AsyncMock(spec=AgentBot)
-    bot.config = config
-    bot.agent_name = "email_agent"
-    bot.matrix_id = MatrixID.from_agent("email_agent", "localhost", runtime_paths_for(config))
-    bot.client = AsyncMock()
-    bot.logger = MagicMock()
+    bot = _context_bot(tmp_path, config)
     bot.handled_turn_ledger = AsyncMock()
-    bot.runtime_paths = runtime_paths_for(config)
-    bot._build_message_target = AgentBot._build_message_target.__get__(bot, AgentBot)
-    bot._delivery_gateway = AgentBot._delivery_gateway.__get__(bot, AgentBot)
 
     # Mock the format_message_with_mentions to return a dict we can check
     mock_content = {"body": "test", "msgtype": "m.text"}
@@ -119,16 +136,7 @@ async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
     """Test that _extract_message_context ignores mentions when skip_mentions is set."""
-    # Create a mock bot
-    bot = AsyncMock(spec=AgentBot)
-    bot.config = MagicMock()
-    bot.config.get_entity_thread_mode.return_value = "thread"
-    bot.agent_name = "email_agent"
-    bot.client = AsyncMock()
-    bot.logger = MagicMock()
-    bot.matrix_id = MagicMock()
-    bot.runtime_paths = test_runtime_paths(tmp_path)
-    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    bot = _context_bot(tmp_path)
 
     # Create room
     room = nio.MatrixRoom(room_id="!test:server", own_user_id="@bot:server")
@@ -195,14 +203,7 @@ async def test_extract_context_without_skip_metadata_detects_tool_mentions(tmp_p
     )
     runtime_paths = runtime_paths_for(config)
 
-    bot = AsyncMock(spec=AgentBot)
-    bot.config = config
-    bot.agent_name = "email_agent"
-    bot.client = AsyncMock()
-    bot.logger = MagicMock()
-    bot.matrix_id = MatrixID.from_agent("email_agent", "localhost", runtime_paths)
-    bot.runtime_paths = runtime_paths
-    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    bot = _context_bot(tmp_path, config)
 
     room = nio.MatrixRoom(room_id="!test:server", own_user_id="@bot:server")
     event = nio.RoomMessageText.from_dict(
@@ -224,7 +225,9 @@ async def test_extract_context_without_skip_metadata_detects_tool_mentions(tmp_p
     context = await AgentBot._extract_message_context_impl(bot, room, event, full_history=True)
 
     assert context.am_i_mentioned is True
-    assert [agent.full_id for agent in context.mentioned_agents] == [bot.matrix_id.full_id]
+    assert [agent.full_id for agent in context.mentioned_agents] == [
+        MatrixID.from_agent("email_agent", "localhost", runtime_paths).full_id,
+    ]
 
 
 def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, AsyncMock]:
