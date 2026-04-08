@@ -89,11 +89,13 @@ def parse_attachment_ids_from_event_source(event_source: dict[str, Any] | None) 
     if not isinstance(raw_attachment_ids, list):
         return []
     normalized: list[str] = []
+    seen_attachment_ids: set[str] = set()
     for raw_attachment_id in raw_attachment_ids:
         if not isinstance(raw_attachment_id, str):
             continue
         attachment_id = _normalize_attachment_id(raw_attachment_id)
-        if attachment_id and attachment_id not in normalized:
+        if attachment_id and attachment_id not in seen_attachment_ids:
+            seen_attachment_ids.add(attachment_id)
             normalized.append(attachment_id)
     return normalized
 
@@ -101,10 +103,12 @@ def parse_attachment_ids_from_event_source(event_source: dict[str, Any] | None) 
 def parse_attachment_ids_from_thread_history(thread_history: Sequence[ResolvedVisibleMessage]) -> list[str]:
     """Extract attachment IDs referenced by message metadata in thread history."""
     attachment_ids: list[str] = []
+    seen_attachment_ids: set[str] = set()
     for message in thread_history:
         message_attachment_ids = parse_attachment_ids_from_event_source({"content": message.content})
         for attachment_id in message_attachment_ids:
-            if attachment_id not in attachment_ids:
+            if attachment_id not in seen_attachment_ids:
+                seen_attachment_ids.add(attachment_id)
                 attachment_ids.append(attachment_id)
     return attachment_ids
 
@@ -112,9 +116,11 @@ def parse_attachment_ids_from_thread_history(thread_history: Sequence[ResolvedVi
 def merge_attachment_ids(*attachment_id_lists: list[str]) -> list[str]:
     """Merge attachment IDs preserving first-seen order."""
     merged: list[str] = []
+    seen_attachment_ids: set[str] = set()
     for attachment_ids in attachment_id_lists:
         for attachment_id in attachment_ids:
-            if attachment_id and attachment_id not in merged:
+            if attachment_id and attachment_id not in seen_attachment_ids:
+                seen_attachment_ids.add(attachment_id)
                 merged.append(attachment_id)
     return merged
 

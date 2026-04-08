@@ -7,6 +7,7 @@ correct thread.
 
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
@@ -178,6 +179,27 @@ async def _hydrate_cached_node_message(
         hydrate_sidecars=True,
     )
     node.content_hydrated = True
+
+
+async def _node_to_history_message(
+    node: _ReplyChainNode,
+    client: nio.AsyncClient,
+) -> ResolvedVisibleMessage:
+    """Convert one cached reply-chain node into a visible history message."""
+    await _hydrate_cached_node_message(node, client)
+    return node.message
+
+
+async def _materialize_chain_history(
+    chain_nodes: Sequence[_ReplyChainNode],
+    content_client: nio.AsyncClient,
+) -> list[ResolvedVisibleMessage]:
+    """Convert cached reply-chain nodes into visible history messages."""
+    return list(
+        await asyncio.gather(
+            *(_node_to_history_message(node, content_client) for node in chain_nodes),
+        ),
+    )
 
 
 def _history_message_event_id(message: _HistoryMessage) -> str | None:
@@ -614,7 +636,7 @@ async def derive_conversation_context(
 
         thread_history = await fetch_history(client, room_id, context_root_id)
         if chain_history:
-            thread_history = _merge_thread_and_chain_history(thread_history, chain_history)
+            thread_history = await asyncio.to_thread(_merge_thread_and_chain_history, thread_history, chain_history)
         return True, context_root_id, list(thread_history)
 
     # Policy choice: reply-only chains are still treated as one conversation
@@ -677,7 +699,7 @@ async def derive_conversation_target(
         thread_history = await fetch_snapshot(client, room_id, context_root_id)
         requires_full_thread_history = not _thread_history_is_full(thread_history, default=False)
         if chain_history:
-            thread_history = _merge_thread_and_chain_history(thread_history, chain_history)
+            thread_history = await asyncio.to_thread(_merge_thread_and_chain_history, thread_history, chain_history)
         return True, context_root_id, list(thread_history), requires_full_thread_history
 
     return True, context_root_id, list(chain_history), False
