@@ -33,6 +33,13 @@ from mindroom.thread_utils import create_session_id
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 
+def _room_send_response(event_id: str) -> MagicMock:
+    """Create one minimal successful Matrix send response."""
+    response = MagicMock(spec=nio.RoomSendResponse)
+    response.event_id = event_id
+    return response
+
+
 @dataclass
 class _FakeTeamStorage:
     session: TeamSession | None
@@ -250,10 +257,10 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     # Mock the methods needed for regeneration
     with (
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(bot, "_edit_message", new_callable=AsyncMock) as mock_edit,
         patch("mindroom.bot.should_agent_respond") as mock_should_respond,
         patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock) as mock_streaming,
         patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai_response,
+        patch("mindroom.bot.edit_message", new=AsyncMock(return_value="$edit")) as mock_edit,
     ):
         # Setup mocks
         mock_context.return_value = MagicMock(
@@ -281,14 +288,14 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
             thread_id=None,
             reply_to_event_id=original_event.event_id,
         )
-        mock_edit.assert_called_once_with(
-            room.room_id,
-            response_event_id,
-            "The answer is 6",
-            expected_target.resolved_thread_id,
-            tool_trace=[],
-            extra_content={},
-        )
+        mock_edit.assert_called_once()
+        edit_args = mock_edit.call_args.args
+        assert edit_args[0] is bot.client
+        assert edit_args[1] == room.room_id
+        assert edit_args[2] == response_event_id
+        assert edit_args[4] == "The answer is 6"
+        assert edit_args[3]["m.relates_to"]["event_id"] == expected_target.resolved_thread_id
+        assert edit_args[3]["m.relates_to"]["m.in_reply_to"]["event_id"] == original_event.event_id
 
         # Verify that the response tracker still maps to the same response
         assert bot.handled_turn_ledger.get_response_event_id(original_event.event_id) == response_event_id
@@ -1030,6 +1037,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
     bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
     bot.logger = MagicMock()
 
@@ -1570,10 +1578,6 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     session_id = create_session_id("!test:example.com", None)
     storage = _FakeAgentStorage(session=None)
 
-    async def run_cancellable_response(*_args: object, **kwargs: object) -> None:
-        response_function = kwargs["response_function"]
-        await response_function(None)
-
     async def process_and_respond(*_args: object, **kwargs: object) -> _ResponseDispatchResult:
         storage.session = AgentSession(
             session_id=session_id,
@@ -1601,8 +1605,10 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     with (
         patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
         patch.object(bot, "_create_history_scope_storage", return_value=storage),
-        patch.object(bot, "_process_and_respond", new=AsyncMock(side_effect=process_and_respond)),
-        patch.object(bot, "_run_cancellable_response", new=AsyncMock(side_effect=run_cancellable_response)),
+        patch(
+            "mindroom.response_coordinator.ResponseCoordinator.process_and_respond",
+            new=AsyncMock(side_effect=process_and_respond),
+        ),
         patch("mindroom.bot.reprioritize_auto_flush_sessions"),
         patch("mindroom.bot.mark_auto_flush_dirty_session"),
         patch.object(Config, "get_agent_memory_backend", return_value="none"),
@@ -1691,6 +1697,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
     bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
     bot.logger = MagicMock()
     _record_handled_turn(
@@ -1698,9 +1705,6 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         ["$original:example.com"],
         response_event_id="$response-old:example.com",
     )
-
-    async def run_cancellable_response(*_args: object, **kwargs: object) -> None:
-        await kwargs["response_function"](None)
 
     async def process_and_respond(*_args: object, **kwargs: object) -> _ResponseDispatchResult:
         storage = bot._create_history_scope_storage(None)
@@ -1739,8 +1743,10 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
 
     with (
         patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
-        patch.object(bot, "_process_and_respond", new=AsyncMock(side_effect=process_and_respond)),
-        patch.object(bot, "_run_cancellable_response", new=AsyncMock(side_effect=run_cancellable_response)),
+        patch(
+            "mindroom.response_coordinator.ResponseCoordinator.process_and_respond",
+            new=AsyncMock(side_effect=process_and_respond),
+        ),
         patch("mindroom.bot.reprioritize_auto_flush_sessions"),
         patch("mindroom.bot.mark_auto_flush_dirty_session"),
         patch.object(Config, "get_agent_memory_backend", return_value="none"),

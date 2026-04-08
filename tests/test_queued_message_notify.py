@@ -38,9 +38,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.delivery_gateway import DeliveryResult
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
+from mindroom.response_coordinator import ResponseCoordinator, ResponseRequest
 from mindroom.teams import TeamMode, _create_team_instance
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -203,6 +206,38 @@ class _PrelockBarrierLock:
 
 
 @pytest.mark.asyncio
+async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery() -> None:
+    """Suppressed deliveries must not enqueue a thread summary."""
+    queue_thread_summary = MagicMock()
+
+    await apply_post_response_effects(
+        ResponseOutcome(
+            resolved_event_id="$response",
+            delivery_result=DeliveryResult(
+                event_id="$response",
+                response_text="hidden",
+                delivery_kind="sent",
+                suppressed=True,
+            ),
+            interactive_target=MessageTarget.resolve(
+                room_id="!room:localhost",
+                thread_id="$thread",
+                reply_to_event_id="$event",
+            ),
+            thread_summary_room_id="!room:localhost",
+            thread_summary_thread_id="$thread",
+            thread_summary_message_count_hint=3,
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            queue_thread_summary=queue_thread_summary,
+        ),
+    )
+
+    queue_thread_summary.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: Path) -> None:
     """A waiting human-authored turn should notify the active turn before blocking on the lock."""
     bot = _bot(tmp_path)
@@ -213,7 +248,11 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
     await lifecycle_lock.acquire()
 
     try:
-        with patch.object(bot, "_generate_response_locked", new=AsyncMock(return_value="$response")) as mock_locked:
+        with patch.object(
+            ResponseCoordinator,
+            "generate_response_locked",
+            new=AsyncMock(return_value="$response"),
+        ) as mock_locked:
             task = asyncio.create_task(
                 bot._generate_response(
                     room_id="!room:localhost",
@@ -247,7 +286,11 @@ async def test_generate_response_skips_signal_for_automation_ingress(tmp_path: P
     await lifecycle_lock.acquire()
 
     try:
-        with patch.object(bot, "_generate_response_locked", new=AsyncMock(return_value="$response")):
+        with patch.object(
+            ResponseCoordinator,
+            "generate_response_locked",
+            new=AsyncMock(return_value="$response"),
+        ):
             task = asyncio.create_task(
                 bot._generate_response(
                     room_id="!room:localhost",
@@ -279,15 +322,21 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
     response_target = response_envelope.target
     observed_pending: dict[str, int] = {}
 
-    async def fake_generate_response_locked(*_args: object, **kwargs: object) -> str:
-        user_id = str(kwargs["user_id"])
+    async def fake_generate_response_locked(
+        _self: ResponseCoordinator,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+    ) -> str:
+        del resolved_target
+        user_id = str(request.user_id)
         queued_signal = bot._get_or_create_queued_signal(response_target)
         observed_pending[user_id] = queued_signal.pending_human_messages
         return user_id
 
     with (
         patch.object(bot, "_response_lifecycle_lock", return_value=lock),
-        patch.object(bot, "_generate_response_locked", new=AsyncMock(side_effect=fake_generate_response_locked)),
+        patch.object(ResponseCoordinator, "generate_response_locked", new=fake_generate_response_locked),
     ):
         first_task = asyncio.create_task(
             bot._generate_response(
@@ -335,8 +384,8 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
 
     try:
         with patch.object(
-            bot,
-            "_generate_team_response_helper_locked",
+            ResponseCoordinator,
+            "generate_team_response_helper_locked",
             new=AsyncMock(return_value="$team-response"),
         ) as mock_locked:
             task = asyncio.create_task(
@@ -375,7 +424,7 @@ async def test_generate_response_preserves_later_queued_human_message(tmp_path: 
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
 
-    async def fake_locked(*_args: object, **_kwargs: object) -> str:
+    async def fake_locked(_self: ResponseCoordinator, *_args: object, **_kwargs: object) -> str:
         observed_pending.append(queued_signal.has_pending_human_messages())
         if len(observed_pending) == 1:
             second_turn_started.set()
@@ -384,7 +433,7 @@ async def test_generate_response_preserves_later_queued_human_message(tmp_path: 
 
     await lifecycle_lock.acquire()
     try:
-        with patch.object(bot, "_generate_response_locked", new=fake_locked):
+        with patch.object(ResponseCoordinator, "generate_response_locked", new=fake_locked):
             task_b = asyncio.create_task(
                 bot._generate_response(
                     room_id="!room:localhost",
@@ -441,7 +490,7 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
 
-    async def fake_locked(*_args: object, **_kwargs: object) -> str:
+    async def fake_locked(_self: ResponseCoordinator, *_args: object, **_kwargs: object) -> str:
         observed_pending.append(queued_signal.has_pending_human_messages())
         if len(observed_pending) == 1:
             second_turn_started.set()
@@ -450,7 +499,7 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
 
     await lifecycle_lock.acquire()
     try:
-        with patch.object(bot, "_generate_team_response_helper_locked", new=fake_locked):
+        with patch.object(ResponseCoordinator, "generate_team_response_helper_locked", new=fake_locked):
             task_b = asyncio.create_task(
                 bot._generate_team_response_helper(
                     room_id="!room:localhost",

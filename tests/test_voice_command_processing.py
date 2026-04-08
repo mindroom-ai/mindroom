@@ -1065,10 +1065,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
     }
     bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(
-            "$voice_event",
-            response_event_id="$response",
-        ),
+        HandledTurnState.from_source_event_id("$voice_event", response_event_id="$response"),
     )
 
 

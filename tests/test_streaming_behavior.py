@@ -22,10 +22,12 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_coordinator import ResponseRequest
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
+    StreamingDeliveryError,
     StreamingResponse,
     clean_partial_reply_text,
     is_interrupted_partial_reply,
@@ -846,15 +848,16 @@ class TestStreamingBehavior:
             patch("mindroom.streaming.edit_message", new=record_edit),
         ):
             delivery = await bot._process_and_respond_streaming(
-                room_id="!test:localhost",
-                prompt="Continue",
-                reply_to_event_id="$reply_plain:localhost",
-                thread_id=None,
-                thread_history=[],
-                existing_event_id=None,
-                user_id="@user:localhost",
-                response_envelope=envelope,
-                correlation_id="$request:localhost",
+                ResponseRequest(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$reply_plain:localhost",
+                    thread_id=None,
+                    thread_history=[],
+                    prompt="Continue",
+                    user_id="@user:localhost",
+                    response_envelope=envelope,
+                    correlation_id="$request:localhost",
+                ),
             )
 
         assert delivery.event_id == "$stream_1"
@@ -1010,7 +1013,7 @@ class TestStreamingBehavior:
 
         with (
             patch("mindroom.streaming.edit_message", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(RuntimeError, match="model backend disconnected"),
+            pytest.raises(StreamingDeliveryError, match="model backend disconnected") as exc_info,
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -1025,9 +1028,13 @@ class TestStreamingBehavior:
                 room_mode=True,
             )
 
+        assert isinstance(exc_info.value.error, RuntimeError)
+        assert str(exc_info.value.error) == "model backend disconnected"
+        assert exc_info.value.event_id == "$thinking_123"
         assert len(edited_texts) == 2
         assert IN_PROGRESS_MARKER not in edited_texts[0]
         final_text = edited_texts[-1]
+        assert exc_info.value.accumulated_text == final_text
         assert final_text.startswith("Partial answer\n\n**[Response interrupted by an error:")
         assert "model backend disconnected" in final_text
         assert IN_PROGRESS_MARKER not in final_text
@@ -1056,7 +1063,7 @@ class TestStreamingBehavior:
 
         with (
             patch("mindroom.streaming.edit_message", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(RuntimeError, match="provider stream failed"),
+            pytest.raises(StreamingDeliveryError, match="provider stream failed") as exc_info,
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -1071,8 +1078,12 @@ class TestStreamingBehavior:
                 room_mode=True,
             )
 
+        assert isinstance(exc_info.value.error, RuntimeError)
+        assert str(exc_info.value.error) == "provider stream failed"
+        assert exc_info.value.event_id == "$thinking_123"
         assert len(edited_texts) == 1
         final_text = edited_texts[0]
+        assert exc_info.value.accumulated_text == final_text
         assert final_text.startswith("**[Response interrupted by an error:")
         assert "provider stream failed" in final_text
         assert IN_PROGRESS_MARKER not in final_text

@@ -51,6 +51,24 @@ _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 
 
+class StreamingDeliveryError(Exception):
+    """Preserve the finalized stream state when delivery fails mid-response."""
+
+    def __init__(
+        self,
+        error: Exception,
+        *,
+        event_id: str | None,
+        accumulated_text: str,
+        tool_trace: list[ToolTraceEntry],
+    ) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.event_id = event_id
+        self.accumulated_text = accumulated_text
+        self.tool_trace = tool_trace.copy()
+
+
 def _format_stream_error_note(error: Exception) -> str:
     """Return a concise user-facing note for stream-time exceptions."""
     normalized_error = " ".join(str(error).split())
@@ -573,7 +591,14 @@ async def send_streaming_response(
     except Exception as e:
         logger.exception("Streaming response failed", error=str(e))
         await streaming.finalize(client, error=e)
-        raise
+        if tool_trace_collector is not None:
+            tool_trace_collector[:] = streaming.tool_trace
+        raise StreamingDeliveryError(
+            e,
+            event_id=streaming.event_id,
+            accumulated_text=streaming.accumulated_text,
+            tool_trace=streaming.tool_trace,
+        ) from e
     else:
         await streaming.finalize(client)
 

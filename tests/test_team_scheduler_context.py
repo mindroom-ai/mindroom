@@ -17,6 +17,7 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_coordinator import ResponseCoordinator
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -113,9 +114,12 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
         assert _kwargs["run_id"] == response_run_id
         return "team non-streaming response"
 
-    bot._run_cancellable_response = AsyncMock(side_effect=fake_run_cancellable_response)
-
     with (
+        patch.object(
+            ResponseCoordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
         patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.bot.typing_indicator", new=_noop_typing_indicator),
         patch("mindroom.bot.team_response", new=fake_team_response),
@@ -160,10 +164,14 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         raise asyncio.CancelledError
 
-    bot._run_cancellable_response = AsyncMock(side_effect=fake_run_cancellable_response)
     bot._edit_message = AsyncMock()
 
     with (
+        patch.object(
+            ResponseCoordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
         patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.bot.typing_indicator", new=_noop_typing_indicator),
         patch("mindroom.bot.team_response", new=fake_team_response),
@@ -227,9 +235,12 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
         assert _kwargs["run_id"] == response_run_id
         yield "stream chunk"
 
-    bot._run_cancellable_response = AsyncMock(side_effect=fake_run_cancellable_response)
-
     with (
+        patch.object(
+            ResponseCoordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
         patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=True)),
         patch("mindroom.bot.typing_indicator", new=_noop_typing_indicator),
         patch("mindroom.bot.team_response_stream", new=fake_team_response_stream),
