@@ -983,7 +983,6 @@ async def _edit_stale_message(
     content = await build_threaded_edit_content(
         client,
         room_id=room_id,
-        event_id=target_event_id,
         new_text=new_text,
         thread_id=thread_id,
         config=config,

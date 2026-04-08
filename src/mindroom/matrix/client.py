@@ -1696,30 +1696,45 @@ async def _latest_thread_event_id(
 ) -> str:
     """Get the latest visible event ID in a thread for MSC3440 fallback compliance."""
     try:
-        async for event in client.room_get_event_relations(
+        thread_messages = await fetch_thread_history(client, room_id, thread_id)
+    except Exception:
+        return thread_id
+    if thread_messages:
+        last_event_id = thread_messages[-1].visible_event_id
+        if last_event_id:
+            return last_event_id
+
+    try:
+        relation_events = await _collect_related_events(
+            client,
             room_id,
             thread_id,
             rel_type=RelationshipType.thread,
             event_type="m.room.message",
-            direction=nio.MessageDirection.back,
-            limit=1,
-        ):
-            if not isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
-                continue
-            event_info = EventInfo.from_event(event.source)
-            if not event_info.is_edit and event_info.thread_id == thread_id:
-                return event.event_id
-    except Exception:
-        try:
-            thread_messages = await fetch_thread_history(client, room_id, thread_id)
-        except Exception:
-            return thread_id
-        if thread_messages:
-            last_event_id = thread_messages[-1].visible_event_id
-            return last_event_id or thread_id
+        )
+    except _ThreadHistoryFastPathUnavailableError:
         return thread_id
-    else:
-        return thread_id
+
+    latest_thread_edit: nio.RoomMessageText | nio.RoomMessageNotice | None = None
+    for event in relation_events:
+        if not isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+            continue
+        event_info = EventInfo.from_event(event.source)
+        if not event_info.is_edit or event_info.thread_id_from_edit != thread_id:
+            continue
+        candidate_key = (
+            event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
+            event.event_id,
+        )
+        latest_key = (
+            latest_thread_edit.server_timestamp if latest_thread_edit and isinstance(latest_thread_edit.server_timestamp, int) else 0,
+            latest_thread_edit.event_id if latest_thread_edit is not None else "",
+        )
+        if latest_thread_edit is None or candidate_key > latest_key:
+            latest_thread_edit = event
+    if latest_thread_edit is not None:
+        return latest_thread_edit.event_id
+    return thread_id
 
 
 async def get_latest_thread_event_id_if_needed(
@@ -1759,7 +1774,6 @@ async def build_threaded_edit_content(
     client: nio.AsyncClient,
     *,
     room_id: str,
-    event_id: str,
     new_text: str,
     thread_id: str | None,
     config: Config,
@@ -1767,12 +1781,12 @@ async def build_threaded_edit_content(
     sender_domain: str,
     tool_trace: list[Any] | None = None,
     extra_content: dict[str, Any] | None = None,
+    latest_thread_event_id: str | None = None,
 ) -> dict[str, Any]:
     """Build edit content that preserves thread fallback semantics when needed."""
-    latest_thread_event_id = None
-    if thread_id:
-        thread_msgs = await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
-        latest_thread_event_id = thread_msgs[-1].visible_event_id or thread_id if thread_msgs else event_id
+    latest_visible_thread_event_id = latest_thread_event_id
+    if thread_id is not None and latest_visible_thread_event_id is None:
+        latest_visible_thread_event_id = await _latest_thread_event_id(client, room_id, thread_id)
 
     return format_message_with_mentions(
         config,
@@ -1780,7 +1794,7 @@ async def build_threaded_edit_content(
         new_text,
         sender_domain=sender_domain,
         thread_event_id=thread_id,
-        latest_thread_event_id=latest_thread_event_id,
+        latest_thread_event_id=latest_visible_thread_event_id,
         tool_trace=tool_trace,
         extra_content=extra_content,
     )

@@ -558,6 +558,10 @@ class _ResponseDispatchResult:
     options_list: list[dict[str, str]] | None = None
 
 
+class _SuppressedPlaceholderCleanupError(RuntimeError):
+    """Raised when a suppressed provisional response cannot be removed safely."""
+
+
 @dataclass(frozen=True)
 class _PreparedHookedPayload:
     """Resolved dispatch payload after enrichment hooks run."""
@@ -930,9 +934,14 @@ class AgentBot:
         requester_user_id: str,
     ) -> _PersistedTurnMetadata | None:
         """Load persisted run metadata for one edited turn when available."""
+        resolved_thread_id = self._resolved_conversation_thread_id(
+            room_id=room.room_id,
+            thread_id=thread_id,
+            reply_to_event_id=original_event_id,
+        )
         session_type = self._history_session_type()
         session_contexts = [
-            (thread_id, create_session_id(room.room_id, thread_id)),
+            (resolved_thread_id, create_session_id(room.room_id, resolved_thread_id)),
             (None, create_session_id(room.room_id, None)),
         ]
         checked_session_ids: set[str] = set()
@@ -945,8 +954,8 @@ class AgentBot:
                 thread_id=candidate_thread_id,
                 reply_to_event_id=original_event_id,
             )
-            if candidate_thread_id is None:
-                candidate_target = candidate_target.with_thread_root(None)
+            if candidate_target.resolved_thread_id != candidate_thread_id:
+                candidate_target = candidate_target.with_thread_root(candidate_thread_id)
             execution_identity = self._build_tool_execution_identity(
                 target=candidate_target,
                 user_id=requester_user_id,
@@ -2150,16 +2159,24 @@ class AgentBot:
             return
 
         prompt = f"The user selected: {selected_value}"
-        response_event_id = await self._generate_response(
-            room_id=room.room_id,
-            prompt=prompt,
-            reply_to_event_id=event.reacts_to,
-            thread_id=thread_id,
-            thread_history=thread_history,
-            existing_event_id=ack_event_id,
-            existing_event_is_placeholder=False,
-            user_id=event.sender,
-        )
+        try:
+            response_event_id = await self._generate_response(
+                room_id=room.room_id,
+                prompt=prompt,
+                reply_to_event_id=event.reacts_to,
+                thread_id=thread_id,
+                thread_history=thread_history,
+                existing_event_id=ack_event_id,
+                existing_event_is_placeholder=True,
+                user_id=event.sender,
+            )
+        except _SuppressedPlaceholderCleanupError:
+            self.logger.warning(
+                "Suppressed interactive acknowledgment cleanup failed",
+                source_event_id=event.reacts_to,
+                acknowledgment_event_id=ack_event_id,
+            )
+            return
         if response_event_id is not None:
             self.response_tracker.mark_responded(event.reacts_to, response_event_id)
 
@@ -2981,47 +2998,56 @@ class AgentBot:
         )
 
         self.logger.info(processing_log, event_id=event.event_id)
-        if action.kind == "team":
-            assert action.form_team is not None
-            assert action.form_team.mode is not None
-            response_event_id = await self._generate_team_response_helper(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                thread_id=dispatch.context.thread_id,
-                target=dispatch.target,
-                payload=prepared_payload.payload,
-                team_agents=action.form_team.eligible_members,
-                team_mode=action.form_team.mode,
-                thread_history=dispatch.context.thread_history,
-                requester_user_id=dispatch.requester_user_id,
-                existing_event_id=placeholder_event_id,
-                existing_event_is_placeholder=placeholder_event_id is not None,
-                response_envelope=prepared_payload.envelope,
-                strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
-                system_enrichment_items=prepared_payload.system_enrichment_items,
+        try:
+            if action.kind == "team":
+                assert action.form_team is not None
+                assert action.form_team.mode is not None
+                response_event_id = await self._generate_team_response_helper(
+                    room_id=room.room_id,
+                    reply_to_event_id=event.event_id,
+                    thread_id=dispatch.context.thread_id,
+                    target=dispatch.target,
+                    payload=prepared_payload.payload,
+                    team_agents=action.form_team.eligible_members,
+                    team_mode=action.form_team.mode,
+                    thread_history=dispatch.context.thread_history,
+                    requester_user_id=dispatch.requester_user_id,
+                    existing_event_id=placeholder_event_id,
+                    existing_event_is_placeholder=placeholder_event_id is not None,
+                    response_envelope=prepared_payload.envelope,
+                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                    system_enrichment_items=prepared_payload.system_enrichment_items,
+                    correlation_id=dispatch.correlation_id,
+                    matrix_run_metadata=matrix_run_metadata,
+                )
+            else:
+                response_event_id = await self._generate_response(
+                    room_id=room.room_id,
+                    prompt=prepared_payload.payload.prompt,
+                    reply_to_event_id=event.event_id,
+                    thread_id=dispatch.context.thread_id,
+                    target=dispatch.target,
+                    thread_history=dispatch.context.thread_history,
+                    user_id=dispatch.requester_user_id,
+                    media=prepared_payload.payload.media,
+                    attachment_ids=prepared_payload.payload.attachment_ids,
+                    existing_event_id=placeholder_event_id,
+                    existing_event_is_placeholder=placeholder_event_id is not None,
+                    model_prompt=prepared_payload.payload.model_prompt,
+                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                    system_enrichment_items=prepared_payload.system_enrichment_items,
+                    response_envelope=prepared_payload.envelope,
+                    correlation_id=dispatch.correlation_id,
+                    matrix_run_metadata=matrix_run_metadata,
+                )
+        except _SuppressedPlaceholderCleanupError:
+            self.logger.warning(
+                "Suppressed placeholder cleanup failed",
+                source_event_id=event.event_id,
+                placeholder_event_id=placeholder_event_id,
                 correlation_id=dispatch.correlation_id,
-                matrix_run_metadata=matrix_run_metadata,
             )
-        else:
-            response_event_id = await self._generate_response(
-                room_id=room.room_id,
-                prompt=prepared_payload.payload.prompt,
-                reply_to_event_id=event.event_id,
-                thread_id=dispatch.context.thread_id,
-                target=dispatch.target,
-                thread_history=dispatch.context.thread_history,
-                user_id=dispatch.requester_user_id,
-                media=prepared_payload.payload.media,
-                attachment_ids=prepared_payload.payload.attachment_ids,
-                existing_event_id=placeholder_event_id,
-                existing_event_is_placeholder=placeholder_event_id is not None,
-                model_prompt=prepared_payload.payload.model_prompt,
-                strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
-                system_enrichment_items=prepared_payload.system_enrichment_items,
-                response_envelope=prepared_payload.envelope,
-                correlation_id=dispatch.correlation_id,
-                matrix_run_metadata=matrix_run_metadata,
-            )
+            return
         if response_event_id is not None:
             self._mark_source_events_responded(tracked_source_event_ids, response_event_id)
 
@@ -4049,6 +4075,9 @@ class AgentBot:
                             reason_prefix=reason_prefix,
                             matrix_run_metadata=matrix_run_metadata,
                         )
+                        adopt_existing_placeholder = message_id is not None and (
+                            existing_event_is_placeholder or existing_event_id is None
+                        )
 
                         event_id, accumulated = await send_streaming_response(
                             client,
@@ -4063,8 +4092,7 @@ class AgentBot:
                             header=None,
                             show_tool_calls=self.show_tool_calls,
                             existing_event_id=message_id,
-                            adopt_existing_placeholder=message_id is not None
-                            and (existing_event_is_placeholder or existing_event_id is None),
+                            adopt_existing_placeholder=adopt_existing_placeholder,
                             target=delivery_target,
                             room_mode=room_mode,
                         )
@@ -4086,6 +4114,16 @@ class AgentBot:
                     extra_content=None,
                 )
                 if draft.suppress:
+                    if adopt_existing_placeholder:
+                        delivery_result = await self._cleanup_suppressed_streamed_response(
+                            room_id=room_id,
+                            event_id=event_id,
+                            response_text=accumulated,
+                            response_kind="team",
+                            response_envelope=resolved_response_envelope,
+                            correlation_id=resolved_correlation_id,
+                        )
+                        return
                     self.logger.warning(
                         "Team streaming response was already delivered before a suppressing hook ran",
                         source_event_id=resolved_response_envelope.source_event_id,
@@ -4182,6 +4220,7 @@ class AgentBot:
                     thread_id=thread_id,
                     target=delivery_target,
                     existing_event_id=message_id,
+                    existing_event_is_placeholder=existing_event_is_placeholder,
                     response_text=response_text,
                     response_kind="team",
                     response_envelope=resolved_response_envelope,
@@ -4253,11 +4292,11 @@ class AgentBot:
                 compaction_outcomes=compaction_outcomes,
             )
 
-        if delivery_result is not None and delivery_result.event_id is not None:
-            return delivery_result.event_id
-        if delivery_result is not None and existing_event_id is not None:
-            return existing_event_id
-        return tracked_event_id or existing_event_id
+        return self._resolve_response_event_id(
+            delivery_result=delivery_result,
+            tracked_event_id=tracked_event_id,
+            existing_event_id=existing_event_id,
+        )
 
     async def _run_cancellable_response(
         self,
@@ -4504,6 +4543,7 @@ class AgentBot:
             thread_id=thread_id,
             target=resolved_target,
             existing_event_id=existing_event_id,
+            existing_event_is_placeholder=existing_event_is_placeholder,
             response_text=response_text,
             response_kind=response_kind,
             response_envelope=response_envelope
@@ -4766,6 +4806,7 @@ class AgentBot:
         thread_id: str | None,
         target: MessageTarget | None = None,
         existing_event_id: str | None,
+        existing_event_is_placeholder: bool = False,
         response_text: str,
         response_kind: str,
         response_envelope: MessageEnvelope,
@@ -4800,8 +4841,15 @@ class AgentBot:
                 source_event_id=response_envelope.source_event_id,
                 correlation_id=correlation_id,
             )
+            if existing_event_id is not None and existing_event_is_placeholder:
+                return await self._redact_suppressed_response_event(
+                    room_id=room_id,
+                    event_id=existing_event_id,
+                    response_text=draft.response_text,
+                    reason="Suppressed placeholder response",
+                )
             return _ResponseDispatchResult(
-                event_id=existing_event_id,
+                event_id=None,
                 response_text=draft.response_text,
                 delivery_kind=None,
                 suppressed=True,
@@ -4857,6 +4905,54 @@ class AgentBot:
             suppressed=False,
             option_map=interactive_response.option_map,
             options_list=interactive_response.options_list,
+        )
+
+    async def _redact_suppressed_response_event(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        response_text: str,
+        reason: str,
+    ) -> _ResponseDispatchResult:
+        """Redact one provisional response and report a suppressed no-final-event outcome."""
+        redacted = await self._redact_message_event(
+            room_id=room_id,
+            event_id=event_id,
+            reason=reason,
+        )
+        if not redacted:
+            msg = f"failed to redact suppressed response {event_id}"
+            raise _SuppressedPlaceholderCleanupError(msg)
+        return _ResponseDispatchResult(
+            event_id=None,
+            response_text=response_text,
+            delivery_kind=None,
+            suppressed=True,
+        )
+
+    async def _cleanup_suppressed_streamed_response(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        response_text: str,
+        response_kind: str,
+        response_envelope: MessageEnvelope,
+        correlation_id: str,
+    ) -> _ResponseDispatchResult:
+        """Remove one provisional streamed response after a suppressing hook runs."""
+        self.logger.warning(
+            "Streaming response was already delivered before a suppressing hook ran",
+            response_kind=response_kind,
+            source_event_id=response_envelope.source_event_id,
+            correlation_id=correlation_id,
+        )
+        return await self._redact_suppressed_response_event(
+            room_id=room_id,
+            event_id=event_id,
+            response_text=response_text,
+            reason="Suppressed streamed response",
         )
 
     async def _process_and_respond_streaming(  # noqa: C901, PLR0915
@@ -5048,6 +5144,15 @@ class AgentBot:
             extra_content=response_extra_content,
         )
         if draft.suppress:
+            if adopt_existing_placeholder or existing_event_id is None:
+                return await self._cleanup_suppressed_streamed_response(
+                    room_id=room_id,
+                    event_id=event_id,
+                    response_text=accumulated,
+                    response_kind=response_kind,
+                    response_envelope=response_envelope,
+                    correlation_id=correlation_id,
+                )
             self.logger.warning(
                 "Streaming response was already delivered before a suppressing hook ran",
                 source_event_id=response_envelope.source_event_id,
@@ -5072,6 +5177,7 @@ class AgentBot:
                 thread_id=thread_id,
                 target=resolved_target,
                 existing_event_id=event_id,
+                existing_event_is_placeholder=adopt_existing_placeholder,
                 response_text=draft.response_text,
                 response_kind=response_kind,
                 response_envelope=response_envelope,
@@ -5129,10 +5235,10 @@ class AgentBot:
         tracked_event_id: str | None,
         existing_event_id: str | None,
     ) -> str | None:
-        if delivery_result is not None and delivery_result.event_id is not None:
-            return delivery_result.event_id
-        if delivery_result is not None and existing_event_id is not None:
-            return existing_event_id
+        if delivery_result is not None:
+            if delivery_result.event_id is not None:
+                return delivery_result.event_id
+            return None
         return tracked_event_id or existing_event_id
 
     async def _generate_response(
@@ -5663,7 +5769,6 @@ class AgentBot:
             content = await build_threaded_edit_content(
                 self.client,
                 room_id=room_id,
-                event_id=event_id,
                 new_text=new_text,
                 thread_id=thread_id,
                 config=self.config,
@@ -5676,11 +5781,27 @@ class AgentBot:
         assert self.client is not None
         response = await edit_message(self.client, room_id, event_id, content, new_text)
 
-        if isinstance(response, nio.RoomSendResponse):
-            self.logger.info("Edited message", event_id=event_id)
+        if isinstance(response, str):
+            self.logger.info("Edited message", event_id=event_id, edit_event_id=response)
             return True
         self.logger.error("Failed to edit message", event_id=event_id, error=str(response))
         return False
+
+    async def _redact_message_event(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        reason: str,
+    ) -> bool:
+        """Redact one visible event when a provisional response should disappear entirely."""
+        if self.client is None:
+            return False
+        response = await self.client.room_redact(room_id, event_id, reason=reason)
+        if isinstance(response, nio.RoomRedactError):
+            self.logger.error("Failed to redact message", event_id=event_id, error=str(response))
+            return False
+        return True
 
     async def _handle_ai_routing(
         self,
@@ -5962,9 +6083,14 @@ class AgentBot:
         requester_user_id: str,
     ) -> None:
         """Remove persisted runs tied to the pre-edit message before regenerating."""
+        resolved_thread_id = self._resolved_conversation_thread_id(
+            room_id=room.room_id,
+            thread_id=thread_id,
+            reply_to_event_id=original_event_id,
+        )
         session_type = self._history_session_type()
         session_contexts = [
-            (thread_id, create_session_id(room.room_id, thread_id)),
+            (resolved_thread_id, create_session_id(room.room_id, resolved_thread_id)),
             (None, create_session_id(room.room_id, None)),
         ]
         checked_session_ids: set[str] = set()
@@ -5977,8 +6103,8 @@ class AgentBot:
                 thread_id=candidate_thread_id,
                 reply_to_event_id=original_event_id,
             )
-            if candidate_thread_id is None:
-                candidate_target = candidate_target.with_thread_root(None)
+            if candidate_target.resolved_thread_id != candidate_thread_id:
+                candidate_target = candidate_target.with_thread_root(candidate_thread_id)
             execution_identity = self._build_tool_execution_identity(
                 target=candidate_target,
                 user_id=requester_user_id,
