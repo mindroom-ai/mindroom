@@ -38,7 +38,7 @@ dependencies = [
   "mem0ai>=0.1.115",
   "openai",
   "pydantic>=2",
-  "pygments>=2.18",
+  "pygments>=2.20",
   "pyjwt>=2.8",
   "python-dotenv>=1",
   "pyyaml>=6",
