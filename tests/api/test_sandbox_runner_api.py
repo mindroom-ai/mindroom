@@ -2128,6 +2128,80 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
     assert not (worker_root / "workspace" / "note.txt").exists()
 
 
+def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_filesystem(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers should not fail startup on control-plane-only private templates."""
+    _set_sandbox_token(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "agents:\n"
+            "  mind:\n"
+            "    display_name: Mind\n"
+            "    private:\n"
+            "      per: user_agent\n"
+            "      template_dir: ./missing-template\n"
+            "router:\n"
+            "  model: default\n"
+        ),
+        encoding="utf-8",
+    )
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="mind",
+    )
+    assert worker_key is not None
+    shared_root = tmp_path / "shared-storage"
+    worker_root = shared_root / "workers" / worker_dir_name(worker_key)
+    private_base_dir = _private_instance_state_root_path(shared_root, worker_key=worker_key, agent_name="mind") / (
+        "mind_data"
+    )
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_MODE", "true")
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    _refresh_runner_app_from_env()
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["hello from private worker", "note.txt"],
+                "kwargs": {},
+                "worker_key": worker_key,
+                "routing_agent_name": "mind",
+                "private_agent_names": ["mind"],
+                "tool_init_overrides": {"base_dir": str(private_base_dir)},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert (private_base_dir / "note.txt").read_text(encoding="utf-8") == "hello from private worker"
+
+
 @REQUIRES_LINUX_LOCAL_WORKER
 def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_nested_worker_prefix(
     runner_client: TestClient,

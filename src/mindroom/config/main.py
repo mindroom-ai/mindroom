@@ -287,6 +287,15 @@ def _template_contains_overlapping_subtree(template_dir: Path, target_path: Path
     )
 
 
+def _skip_private_template_dir_validation(runtime_paths: RuntimePaths | None) -> bool:
+    """Return whether runtime-local workers should skip control-plane template validation."""
+    if runtime_paths is None:
+        return False
+    return runtime_paths.env_flag("MINDROOM_SANDBOX_RUNNER_MODE") and bool(
+        runtime_paths.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", default=""),
+    )
+
+
 def _router_agents_for_room(
     agents: dict[str, AgentConfig],
     teams: dict[str, TeamConfig],
@@ -702,7 +711,7 @@ class Config(BaseModel):
     def validate_private_template_dirs(self, info: ValidationInfo) -> Config:
         """Ensure private template directories exist when runtime path resolution is available."""
         runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
-        if runtime_paths is None:
+        if runtime_paths is None or _skip_private_template_dir_validation(runtime_paths):
             return self
         for agent_name, agent_config in self.agents.items():
             private_config = agent_config.private
