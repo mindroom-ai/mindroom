@@ -40,6 +40,12 @@ STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 _CANCELLING_LOGGED_TASKS: set[asyncio.Task[Any]] = set()
 _MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
 _MATRIX_SYNC_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS"
+SYNC_RESTART_CANCEL_MSG = "sync_restart"
+
+
+def is_sync_restart_cancel(exc: asyncio.CancelledError) -> bool:
+    """Return whether one cancellation was caused by a sync restart."""
+    return len(exc.args) > 0 and exc.args[0] == SYNC_RESTART_CANCEL_MSG
 
 
 def matrix_sync_startup_timeout_seconds(runtime_paths: RuntimePaths) -> float:
@@ -90,11 +96,15 @@ async def cancel_task(
     task: asyncio.Task | None,
     *,
     suppress_exceptions: tuple[type[BaseException], ...] = (asyncio.CancelledError,),
+    cancel_msg: str | None = None,
 ) -> None:
     """Cancel a detached task and wait for it to finish."""
     if task is None:
         return
-    task.cancel()
+    if cancel_msg is None:
+        task.cancel()
+    else:
+        task.cancel(msg=cancel_msg)
     with suppress(*suppress_exceptions):
         await task
 
@@ -160,7 +170,7 @@ class _SyncIteration:
                     last_sync_time=bot.last_sync_time.isoformat() if bot.last_sync_time is not None else None,
                 )
 
-            sync_task.cancel()
+            sync_task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
             with suppress(asyncio.CancelledError):
                 await sync_task
             msg = f"Matrix sync loop stalled for {bot.agent_name}"
@@ -210,7 +220,10 @@ class _SyncIteration:
             if task is None:
                 continue
             setattr(self, attr, None)
-            task.cancel()
+            if attr == "sync_task":
+                task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+            else:
+                task.cancel()
             try:
                 await task
             except (asyncio.CancelledError, MatrixSyncStalledError):
@@ -376,10 +389,15 @@ def create_temp_user(entity_name: str, config: Config) -> AgentMatrixUser:
     )
 
 
-async def cancel_sync_task(entity_name: str, sync_tasks: dict[str, asyncio.Task]) -> None:
+async def cancel_sync_task(
+    entity_name: str,
+    sync_tasks: dict[str, asyncio.Task],
+    *,
+    cancel_msg: str | None = None,
+) -> None:
     """Cancel and remove a sync task for an entity."""
     task = sync_tasks.pop(entity_name, None)
-    await cancel_task(task)
+    await cancel_task(task, cancel_msg=cancel_msg)
 
 
 async def stop_entities(
@@ -396,7 +414,7 @@ async def stop_entities(
 
     # Cancel sync tasks next so restarted entities do not accumulate duplicate loops.
     for entity_name in entities_to_restart:
-        await cancel_sync_task(entity_name, sync_tasks)
+        await cancel_sync_task(entity_name, sync_tasks, cancel_msg=SYNC_RESTART_CANCEL_MSG)
 
     stop_tasks = [
         agent_bots[entity_name].stop(reason="restart")

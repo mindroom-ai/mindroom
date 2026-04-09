@@ -14,8 +14,10 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.runtime import (
+    SYNC_RESTART_CANCEL_MSG,
     _SyncIteration,
     cancel_sync_task,
+    is_sync_restart_cancel,
     matrix_sync_startup_timeout_seconds,
     stop_entities,
     sync_forever_with_restart,
@@ -48,6 +50,7 @@ class _FakeBot:
         self._sync_shutting_down = False
         self.sync_calls = 0
         self.first_call_cancelled = False
+        self.first_call_cancel_args: tuple[object, ...] = ()
         self.prepare_for_sync_shutdown_calls = 0
         self.runtime_paths = _fake_runtime_paths(**env_overrides)
 
@@ -66,9 +69,10 @@ class _FakeBot:
         self.sync_calls += 1
         try:
             await asyncio.Event().wait()
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             if self.sync_calls == 1:
                 self.first_call_cancelled = True
+                self.first_call_cancel_args = exc.args
             raise
 
     async def prepare_for_sync_shutdown(self) -> None:
@@ -141,8 +145,16 @@ async def test_sync_forever_with_restart_restarts_stalled_sync(monkeypatch: pyte
     await sync_forever_with_restart(bot, max_retries=2)
 
     assert bot.first_call_cancelled is True
+    assert bot.first_call_cancel_args == (SYNC_RESTART_CANCEL_MSG,)
     assert bot.sync_calls == 1  # sync_forever called once, then sync_then_stop stopped
     assert bot.prepare_for_sync_shutdown_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_is_sync_restart_cancel_checks_cancel_message() -> None:
+    """The restart helper should only match the dedicated cancel message."""
+    assert is_sync_restart_cancel(asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)) is True
+    assert is_sync_restart_cancel(asyncio.CancelledError()) is False
 
 
 @pytest.mark.asyncio
@@ -432,6 +444,7 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
 async def test_stop_entities_prepares_bots_before_cancelling_sync_tasks() -> None:
     """Restart teardown should cancel deferred work before the sync loop stops."""
     call_order: list[tuple[str, str]] = []
+    cancel_messages: list[tuple[str, str | None]] = []
 
     mock_bot1 = AsyncMock()
     mock_bot1.prepare_for_sync_shutdown = AsyncMock(
@@ -454,8 +467,14 @@ async def test_stop_entities_prepares_bots_before_cancelling_sync_tasks() -> Non
         "agent2": asyncio.create_task(asyncio.sleep(60)),
     }
 
-    async def fake_cancel_sync_task(entity_name: str, _sync_tasks: dict[str, asyncio.Task]) -> None:
+    async def fake_cancel_sync_task(
+        entity_name: str,
+        _sync_tasks: dict[str, asyncio.Task],
+        *,
+        cancel_msg: str | None = None,
+    ) -> None:
         call_order.append(("cancel", entity_name))
+        cancel_messages.append((entity_name, cancel_msg))
         task = _sync_tasks.pop(entity_name)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -469,6 +488,10 @@ async def test_stop_entities_prepares_bots_before_cancelling_sync_tasks() -> Non
     assert prepare_indexes
     assert cancel_indexes
     assert max(prepare_indexes) < min(cancel_indexes)
+    assert sorted(cancel_messages) == [
+        ("agent1", SYNC_RESTART_CANCEL_MSG),
+        ("agent2", SYNC_RESTART_CANCEL_MSG),
+    ]
 
 
 @pytest.mark.asyncio

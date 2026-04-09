@@ -13,12 +13,15 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.constants import STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
 from mindroom.response_coordinator import ResponseCoordinator
+from mindroom.streaming import build_restart_interrupted_body
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
@@ -209,7 +212,70 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
         "**[Response cancelled by user]**",
         "$thread_root",
         tool_trace=None,
-        extra_content=None,
+        extra_content={STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED},
+    )
+
+
+@pytest.mark.asyncio
+async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_note(tmp_path: Path) -> None:
+    """Sync restarts should mark team placeholders as interrupted, not user-cancelled."""
+    bot = _make_bot(tmp_path)
+    team_agents = [
+        MatrixID.from_agent(
+            "general",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
+        MatrixID.from_agent(
+            "research",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
+    ]
+
+    async def fake_run_cancellable_response(**kwargs: object) -> None:
+        response_function = kwargs["response_function"]
+        with suppress(asyncio.CancelledError):
+            await response_function("$thinking")
+
+    async def fake_team_response(*_args: object, **_kwargs: object) -> str:
+        raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
+
+    bot._edit_message = AsyncMock()
+    install_edit_message_mock(bot, bot._edit_message)
+
+    with (
+        patch.object(
+            ResponseCoordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.response_coordinator.typing_indicator", new=_noop_typing_indicator),
+        patch_response_coordinator_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            team_response=fake_team_response,
+        ),
+    ):
+        await bot._generate_team_response_helper(
+            room_id="!team:localhost",
+            reply_to_event_id="$user_event",
+            thread_id="$thread_root",
+            payload=DispatchPayload(prompt="Please coordinate and schedule a reminder"),
+            team_agents=team_agents,
+            team_mode="coordinate",
+            thread_history=[],
+            requester_user_id="@user:localhost",
+            response_envelope=_response_envelope(),
+            correlation_id="corr-team-restart",
+        )
+
+    bot._edit_message.assert_awaited_once_with(
+        "!team:localhost",
+        "$thinking",
+        build_restart_interrupted_body(""),
+        "$thread_root",
+        tool_trace=None,
+        extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
     )
 
 
