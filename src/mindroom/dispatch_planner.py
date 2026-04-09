@@ -83,7 +83,7 @@ from mindroom.thread_utils import (
     has_multiple_non_agent_users_in_thread,
     should_agent_respond,
 )
-from mindroom.timing import timed
+from mindroom.timing import get_dispatch_pipeline_timing, timed
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -977,7 +977,7 @@ class DispatchPlanner:
         configured_team_action = self.configured_team_response_action()
         return configured_team_action or action
 
-    async def execute_response_action(  # noqa: C901
+    async def execute_response_action(  # noqa: C901, PLR0912, PLR0915
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
@@ -992,6 +992,9 @@ class DispatchPlanner:
     ) -> None:
         """Execute the final response path for a prepared dispatch action."""
         action = self._effective_response_action(action)
+        dispatch_timing = get_dispatch_pipeline_timing(event.source)
+        if dispatch_timing is not None:
+            dispatch_timing.note(response_action_kind=action.kind)
 
         if action.kind == "reject":
             assert action.rejection_message is not None
@@ -1006,6 +1009,9 @@ class DispatchPlanner:
             self._mark_source_events_responded(
                 handled_turn.with_response_event_id(response_event_id),
             )
+            if dispatch_timing is not None and response_event_id is not None:
+                dispatch_timing.mark("response_complete")
+                dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
             return
 
         if not dispatch.context.am_i_mentioned:
@@ -1021,6 +1027,8 @@ class DispatchPlanner:
             )
 
         try:
+            if dispatch_timing is not None:
+                dispatch_timing.mark("response_payload_start")
             if dispatch.context.requires_full_thread_history:
                 await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
             context_ready_monotonic = time.monotonic()
@@ -1045,6 +1053,8 @@ class DispatchPlanner:
                     system_enrichment_items=tuple(system_enrichment_items),
                 )
             payload_ready_monotonic = time.monotonic()
+            if dispatch_timing is not None:
+                dispatch_timing.mark("response_payload_ready")
         except Exception as error:
             response_event_id = await self.finalize_dispatch_failure(
                 room_id=room.room_id,
@@ -1056,6 +1066,9 @@ class DispatchPlanner:
                 self._mark_source_events_responded(
                     handled_turn.with_response_event_id(response_event_id),
                 )
+                if dispatch_timing is not None:
+                    dispatch_timing.mark("response_complete")
+                    dispatch_timing.emit_summary(self.deps.logger, outcome="dispatch_failure")
             return
 
         self.log_dispatch_latency(
@@ -1090,6 +1103,7 @@ class DispatchPlanner:
                         system_enrichment_items=prepared_payload.system_enrichment_items,
                         strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
                         received_monotonic=received_monotonic,
+                        pipeline_timing=dispatch_timing,
                     ),
                     team_agents=action.form_team.eligible_members,
                     team_mode=action.form_team.mode.value,
@@ -1113,6 +1127,7 @@ class DispatchPlanner:
                         system_enrichment_items=prepared_payload.system_enrichment_items,
                         strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
                         received_monotonic=received_monotonic,
+                        pipeline_timing=dispatch_timing,
                     ),
                 )
         except SuppressedPlaceholderCleanupError:

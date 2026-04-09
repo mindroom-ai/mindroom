@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.timing import DispatchPipelineTiming
 
 from mindroom.matrix.client import get_latest_thread_event_id_if_needed
 
@@ -185,6 +186,7 @@ class StreamingResponse:
     stream_started_at: float | None = None
     chars_since_last_update: int = 0
     placeholder_progress_sent: bool = False
+    pipeline_timing: DispatchPipelineTiming | None = None
 
     def __post_init__(self) -> None:
         """Normalize transitional target fields onto one canonical target."""
@@ -389,6 +391,8 @@ class StreamingResponse:
                     response_event_id = await send_message(client, self.room_id, content)
                     if response_event_id:
                         self.event_id = response_event_id
+                        if self.pipeline_timing is not None and self.accumulated_text.strip():
+                            self.pipeline_timing.mark("first_visible_stream_update")
                         logger.debug("Initial streaming message sent", event_id=self.event_id)
                         return True
                     logger.error("Failed to send initial streaming message", attempt=attempt)
@@ -396,6 +400,8 @@ class StreamingResponse:
                     logger.debug("Editing streaming message", event_id=self.event_id, attempt=attempt)
                     response_event_id = await edit_message(client, self.room_id, self.event_id, content, display_text)
                     if response_event_id:
+                        if self.pipeline_timing is not None and self.accumulated_text.strip():
+                            self.pipeline_timing.mark("first_visible_stream_update")
                         return True
                     logger.error("Failed to edit streaming message", attempt=attempt)
             except Exception:
@@ -529,6 +535,7 @@ async def send_streaming_response(
     show_tool_calls: bool = True,
     extra_content: dict[str, Any] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> tuple[str | None, str]:
     """Stream chunks to a Matrix room, returning (event_id, accumulated_text)."""
     resolved_target = target or MessageTarget.resolve(
@@ -565,6 +572,7 @@ async def send_streaming_response(
         update_interval=sc.update_interval,
         min_update_interval=sc.min_update_interval,
         interval_ramp_seconds=sc.interval_ramp_seconds,
+        pipeline_timing=pipeline_timing,
     )
 
     # Ensure the first chunk triggers an initial send immediately

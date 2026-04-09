@@ -14,6 +14,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+_RUNTIME_ONLY_EVENT_SOURCE_KEYS = frozenset({"com.mindroom.dispatch_pipeline_timing"})
+
+
 class EventCache:
     """Persist raw Matrix events for thread-history and reply-chain reconstruction."""
 
@@ -159,6 +162,7 @@ class EventCache:
             return
 
         cached_at = time.time()
+        normalized_events = [normalize_event_source_for_cache(event) for event in events]
         async with self._lock:
             db = self._require_db()
             serialized_events = [
@@ -167,7 +171,7 @@ class EventCache:
                     _event_timestamp(event),
                     json.dumps(event, separators=(",", ":")),
                 )
-                for event in events
+                for event in normalized_events
             ]
             await db.executemany(
                 """
@@ -338,7 +342,11 @@ def normalize_event_source_for_cache(
     origin_server_ts: int | None = None,
 ) -> dict[str, Any]:
     """Normalize one raw Matrix event payload for persistent cache storage."""
-    source = dict(event_source)
+    source = {
+        key: value
+        for key, value in event_source.items()
+        if key not in _RUNTIME_ONLY_EVENT_SOURCE_KEYS
+    }
     if "event_id" not in source and isinstance(event_id, str):
         source["event_id"] = event_id
     if "sender" not in source and isinstance(sender, str):

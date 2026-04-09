@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.streaming import _StreamInputChunk
+    from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
 
 
@@ -201,6 +202,7 @@ class StreamingDeliveryRequest:
     extra_content: dict[str, Any] | None = None
     tool_trace_collector: list[ToolTraceEntry] | None = None
     streaming_cls: type[StreamingResponse] = StreamingResponse
+    pipeline_timing: DispatchPipelineTiming | None = None
 
 
 @dataclass(frozen=True)
@@ -546,6 +548,7 @@ class DeliveryGateway:
             room_mode=request.room_mode,
             extra_content=request.extra_content,
             tool_trace_collector=request.tool_trace_collector,
+            pipeline_timing=request.pipeline_timing,
         )
 
     async def finalize_streamed_response(

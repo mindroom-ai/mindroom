@@ -69,6 +69,11 @@ from mindroom.teams import TeamMode, TeamOutcome, TeamResolution, resolve_config
 from mindroom.thread_utils import (
     should_agent_respond,
 )
+from mindroom.timing import (
+    attach_dispatch_pipeline_timing,
+    create_dispatch_pipeline_timing,
+    get_dispatch_pipeline_timing,
+)
 from mindroom.timing import timing_scope as timing_scope_context
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import (
@@ -1584,11 +1589,17 @@ class AgentBot:
         requester_user_id: str | None = None,
     ) -> None:
         """Route one inbound event through the live coalescing gate."""
+        dispatch_timing = get_dispatch_pipeline_timing(event.source)
+        if dispatch_timing is not None:
+            dispatch_timing.mark("gate_enter")
         effective_requester_user_id = requester_user_id or self._requester_user_id(
             sender=event.sender,
             source=event.source,
         )
         if self._is_trusted_internal_relay_event(event):
+            if dispatch_timing is not None:
+                dispatch_timing.note(coalescing_bypassed=True, coalescing_bypass_reason="trusted_internal_relay")
+                dispatch_timing.mark("gate_exit")
             trusted_relay_event = cast("_TextDispatchEvent", event)
             await self._dispatch_text_message(
                 room,
@@ -1609,6 +1620,9 @@ class AgentBot:
     async def _dispatch_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
         dispatch_event = build_batch_dispatch_event(batch)
+        dispatch_timing = get_dispatch_pipeline_timing(dispatch_event.source)
+        if dispatch_timing is not None:
+            dispatch_timing.mark("gate_exit")
         batch_coalescing_key = await self._coalescing_key_for_event(
             batch.room,
             batch.primary_event,
@@ -1647,6 +1661,11 @@ class AgentBot:
         """Handle one text message inside the per-turn thread-history cache scope."""
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
+        dispatch_timing = create_dispatch_pipeline_timing(
+            event_id=event.event_id,
+            room_id=room.room_id,
+        )
+        attach_dispatch_pipeline_timing(event.source, dispatch_timing)
         event_info = EventInfo.from_event(event.source)
         await self._cache_thread_event(room.room_id, event, event_info=event_info)
         if not isinstance(event.body, str):
@@ -1677,6 +1696,7 @@ class AgentBot:
         prepared_event = await self._inbound_turn_normalizer.resolve_text_event(
             TextNormalizationRequest(event=prechecked_event.event),
         )
+        attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
         envelope = await self._conversation_resolver.build_dispatch_envelope(
             room=room,
             event=prepared_event,
@@ -1690,6 +1710,13 @@ class AgentBot:
         if should_handle_interactive_text_response(envelope):
             await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
         if self._should_bypass_coalescing_for_active_thread_follow_up(envelope):
+            if dispatch_timing is not None:
+                dispatch_timing.mark("gate_enter")
+                dispatch_timing.note(
+                    coalescing_bypassed=True,
+                    coalescing_bypass_reason="active_thread_follow_up",
+                )
+                dispatch_timing.mark("gate_exit")
             await self._dispatch_text_message(
                 room,
                 prepared_event,
@@ -1736,11 +1763,17 @@ class AgentBot:
         event = await self._inbound_turn_normalizer.resolve_text_event(
             TextNormalizationRequest(event=raw_event),
         )
+        dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
+        attach_dispatch_pipeline_timing(event.source, dispatch_timing)
         timing_scope_token = timing_scope_context.set(event.event_id[:20] if event.event_id else "unknown")
         try:
+            if dispatch_timing is not None:
+                dispatch_timing.mark("dispatch_start")
             dispatch_started_at = time.monotonic()
             handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
 
+            if dispatch_timing is not None:
+                dispatch_timing.mark("dispatch_prepare_start")
             dispatch = await self._dispatch_planner.prepare_dispatch(
                 room,
                 event,
@@ -1748,6 +1781,8 @@ class AgentBot:
                 event_label="message",
                 handled_turn=handled_turn,
             )
+            if dispatch_timing is not None:
+                dispatch_timing.mark("dispatch_prepare_ready")
             if dispatch is None:
                 return
 
@@ -1795,6 +1830,8 @@ class AgentBot:
             router_extra_content = dict(message_extra_content)
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
+            if dispatch_timing is not None:
+                dispatch_timing.mark("dispatch_plan_start")
             plan = await self._dispatch_planner.plan_dispatch(
                 room,
                 event,
@@ -1806,6 +1843,8 @@ class AgentBot:
                 if media_events and len(handled_turn.source_event_ids) == 1
                 else router_event,
             )
+            if dispatch_timing is not None:
+                dispatch_timing.mark("dispatch_plan_ready")
             if plan.kind == "ignore":
                 if plan.handled_turn_outcome is not None:
                     self._mark_source_events_responded(plan.handled_turn_outcome)
