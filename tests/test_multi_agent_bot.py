@@ -6217,7 +6217,7 @@ class TestAgentBot:
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
         )
 
-        monotonic_values = iter([10.0, 10.2, 10.2, 10.2, 10.2, 10.2, 10.5])
+        monotonic_values = iter([10.0, 10.2, 10.5])
         with (
             patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
             patch.object(bot, "_generate_response", new=AsyncMock(return_value="$placeholder")),
