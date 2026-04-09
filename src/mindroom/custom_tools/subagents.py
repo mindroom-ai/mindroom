@@ -14,6 +14,8 @@ from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.matrix.client import get_latest_thread_event_id_if_needed, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
+from mindroom.thread_summary import send_thread_summary_event, update_last_summary_count
+from mindroom.thread_tags import ThreadTagsError, normalize_tag_name, set_thread_tag
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
 
 
 _REGISTRY_LOCK = Lock()
+_MAX_SPAWN_SUMMARY_LENGTH = 500
 
 
 def _now_iso() -> str:
@@ -56,6 +59,24 @@ def _get_context() -> ToolRuntimeContext | None:
     return context
 
 
+def _normalize_spawn_summary(summary: object) -> str:
+    if not isinstance(summary, str) or not summary.strip():
+        msg = "summary must be a non-empty string."
+        raise ValueError(msg)
+
+    normalized_summary = " ".join(summary.split())
+    if len(normalized_summary) > _MAX_SPAWN_SUMMARY_LENGTH:
+        msg = f"summary must be {_MAX_SPAWN_SUMMARY_LENGTH} characters or fewer after whitespace normalization."
+        raise ValueError(msg)
+    return normalized_summary
+
+
+def _validate_spawn_metadata(summary: object, tag: object) -> tuple[str, str]:
+    normalized_summary = _normalize_spawn_summary(summary)
+    normalized_tag = normalize_tag_name(tag)
+    return normalized_summary, normalized_tag
+
+
 def _registry_path(context: ToolRuntimeContext) -> Path:
     assert context.storage_path is not None
     return context.storage_path / "subagents" / "session_registry.json"
@@ -78,6 +99,52 @@ def _load_registry(context: ToolRuntimeContext) -> dict[str, Any]:
 
     loaded = json.loads(raw)
     return _normalize_registry(loaded)
+
+
+async def _maybe_reuse_spawned_session(
+    context: ToolRuntimeContext,
+    *,
+    label: str | None,
+    summary: str,
+    tag: str,
+    target_agent: str,
+) -> str | None:
+    if not label:
+        return None
+
+    resolved = await asyncio.to_thread(_resolve_by_label, context, label, require_thread=True)
+    if resolved is None:
+        return None
+
+    existing_key, entry = resolved
+    _, event_id = _session_key_to_room_thread(existing_key)
+    if event_id is None:
+        return None
+
+    warnings = await _spawn_followup_warnings(
+        context,
+        event_id=event_id,
+        summary=summary,
+        tag=tag,
+        summary_message_count=0,
+        last_summary_count=None,
+    )
+
+    payload_kwargs: dict[str, object] = {
+        "session_key": existing_key,
+        "event_id": event_id,
+        "target_agent": entry.get("target_agent", target_agent),
+        "summary": summary,
+        "tag": tag,
+        "reused": True,
+    }
+    if warnings:
+        payload_kwargs["warnings"] = warnings
+    return _payload(
+        "sessions_spawn",
+        "ok",
+        **payload_kwargs,
+    )
 
 
 def _save_registry(context: ToolRuntimeContext, registry: dict[str, Any]) -> None:
@@ -203,6 +270,110 @@ async def _send_matrix_text(
     return await send_message(context.client, room_id, content)
 
 
+def _spawn_room_mode_error(context: ToolRuntimeContext, *, target_agent: str) -> str | None:
+    if _agent_thread_mode(context, target_agent) != "room":
+        return None
+    return _payload(
+        "sessions_spawn",
+        "error",
+        message=(
+            f"Isolated spawn sessions are not supported for agent '{target_agent}' because it uses thread_mode=room."
+        ),
+    )
+
+
+async def _spawn_followup_warnings(
+    context: ToolRuntimeContext,
+    *,
+    event_id: str,
+    summary: str,
+    tag: str,
+    summary_message_count: int = 1,
+    last_summary_count: int | None = 1,
+) -> list[str]:
+    warnings: list[str] = []
+    try:
+        summary_event_id = await send_thread_summary_event(
+            context.client,
+            context.room_id,
+            event_id,
+            summary,
+            summary_message_count,
+            "manual",
+        )
+    except Exception as exc:
+        warnings.append(f"Failed to set thread summary: {exc}")
+    else:
+        if summary_event_id is None:
+            warnings.append("Failed to set thread summary.")
+        elif last_summary_count is not None:
+            update_last_summary_count(context.room_id, event_id, last_summary_count)
+
+    try:
+        await set_thread_tag(
+            context.client,
+            context.room_id,
+            event_id,
+            tag,
+            set_by=context.requester_id,
+        )
+    except Exception as exc:
+        warnings.append(f"Failed to set thread tag: {exc}")
+
+    return warnings
+
+
+async def _spawn_session_payload(
+    context: ToolRuntimeContext,
+    *,
+    task: str,
+    summary: str,
+    tag: str,
+    label: str | None,
+    target_agent: str,
+) -> str:
+    spawn_message = f"@mindroom_{target_agent} {task}"
+    event_id = await _send_matrix_text(
+        context,
+        room_id=context.room_id,
+        text=spawn_message,
+        thread_id=None,
+        original_sender=context.requester_id,
+    )
+    if event_id is None:
+        return _payload(
+            "sessions_spawn",
+            "error",
+            message="Failed to send spawn message to Matrix.",
+        )
+
+    spawned_session_key = create_session_id(context.room_id, event_id)
+    await asyncio.to_thread(
+        _record_session,
+        context,
+        session_key=spawned_session_key,
+        label=label,
+        target_agent=target_agent,
+    )
+
+    warnings = await _spawn_followup_warnings(
+        context,
+        event_id=event_id,
+        summary=summary,
+        tag=tag,
+    )
+    payload_kwargs: dict[str, object] = {
+        "session_key": spawned_session_key,
+        "event_id": event_id,
+        "target_agent": target_agent,
+        "summary": summary,
+        "tag": tag,
+    }
+    if warnings:
+        payload_kwargs["warnings"] = warnings
+    return _payload("sessions_spawn", "ok", **payload_kwargs)
+
+
 def _record_session(
     context: ToolRuntimeContext,
     *,
@@ -258,7 +429,19 @@ def _in_scope(entry: dict[str, Any], context: ToolRuntimeContext) -> bool:
     )
 
 
-def _resolve_by_label(context: ToolRuntimeContext, label: str) -> tuple[str, dict[str, Any]] | None:
+def _entry_thread_id(entry: dict[str, Any]) -> str | None:
+    thread_id = entry.get("thread_id")
+    if isinstance(thread_id, str) and thread_id:
+        return thread_id
+    return None
+
+
+def _resolve_by_label(
+    context: ToolRuntimeContext,
+    label: str,
+    *,
+    require_thread: bool = False,
+) -> tuple[str, dict[str, Any]] | None:
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
 
@@ -271,7 +454,16 @@ def _resolve_by_label(context: ToolRuntimeContext, label: str) -> tuple[str, dic
         return None
 
     candidates.sort(key=lambda item: (_entry_recency(item[1]), item[0]), reverse=True)
-    return candidates[0]
+    for key, entry in candidates:
+        if not require_thread:
+            return key, entry
+
+        if _entry_thread_id(entry) is None:
+            continue
+
+        if _session_key_to_room_thread(key)[1] is not None:
+            return key, entry
+    return None
 
 
 def _lookup_target_agent(context: ToolRuntimeContext, session_key: str) -> str | None:
@@ -387,73 +579,46 @@ class SubAgentsTools(Toolkit):
     async def sessions_spawn(
         self,
         task: str,
+        summary: str,
+        tag: str,
         label: str | None = None,
         agent_id: str | None = None,
     ) -> str:
-        """Spawn an isolated background session."""
+        """Spawn an isolated background session with a required summary and tag."""
         context = _get_context()
         if context is None:
             return _context_error("sessions_spawn")
 
-        if not task.strip():
+        normalized_task = task.strip()
+        if not normalized_task:
             return _payload("sessions_spawn", "error", message="Task cannot be empty.")
 
+        try:
+            normalized_summary, normalized_tag = _validate_spawn_metadata(summary, tag)
+        except (ThreadTagsError, ValueError) as exc:
+            return _payload("sessions_spawn", "error", message=str(exc))
+
         target_agent = agent_id or context.agent_name
-
-        if label:
-            resolved = await asyncio.to_thread(_resolve_by_label, context, label)
-            if resolved is not None:
-                existing_key, entry = resolved
-                return _payload(
-                    "sessions_spawn",
-                    "ok",
-                    session_key=existing_key,
-                    event_id=entry.get("thread_id"),
-                    target_agent=entry.get("target_agent", target_agent),
-                    reused=True,
-                )
-
-        if _agent_thread_mode(context, target_agent) == "room":
-            return _payload(
-                "sessions_spawn",
-                "error",
-                message=(
-                    f"Isolated spawn sessions are not supported for agent '{target_agent}' "
-                    "because it uses thread_mode=room."
-                ),
-            )
-
-        spawn_message = f"@mindroom_{target_agent} {task.strip()}"
-        event_id = await _send_matrix_text(
+        reused_payload = await _maybe_reuse_spawned_session(
             context,
-            room_id=context.room_id,
-            text=spawn_message,
-            thread_id=None,
-            original_sender=context.requester_id,
-        )
-
-        if event_id is None:
-            return _payload(
-                "sessions_spawn",
-                "error",
-                message="Failed to send spawn message to Matrix.",
-            )
-
-        spawned_session_key = create_session_id(context.room_id, event_id)
-
-        await asyncio.to_thread(
-            _record_session,
-            context,
-            session_key=spawned_session_key,
             label=label,
+            summary=normalized_summary,
+            tag=normalized_tag,
             target_agent=target_agent,
         )
+        if reused_payload is not None:
+            return reused_payload
 
-        return _payload(
-            "sessions_spawn",
-            "ok",
-            session_key=spawned_session_key,
-            event_id=event_id,
+        room_mode_error = _spawn_room_mode_error(context, target_agent=target_agent)
+        if room_mode_error is not None:
+            return room_mode_error
+
+        return await _spawn_session_payload(
+            context,
+            task=normalized_task,
+            summary=normalized_summary,
+            tag=normalized_tag,
+            label=label,
             target_agent=target_agent,
         )
 
