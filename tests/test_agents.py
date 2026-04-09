@@ -1873,6 +1873,28 @@ def test_bind_runtime_paths_rejects_missing_private_template_dir(tmp_path: Path)
         _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
 
+def test_bind_runtime_paths_allows_missing_private_template_dir_for_dedicated_sandbox_worker(tmp_path: Path) -> None:
+    """Dedicated sandbox workers should not validate control-plane private template paths."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./missing-template",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant-123:user:alice",
+        },
+    )
+
+    bound = _bind_runtime_paths(config, runtime_paths)
+
+    assert bound.get_agent("general").private is not None
+
+
 def test_bind_runtime_paths_rejects_private_template_dir_with_symlinked_content(tmp_path: Path) -> None:
     """Private templates must reject symlinked content instead of copying host files."""
     template_dir = tmp_path / "mind_template"
