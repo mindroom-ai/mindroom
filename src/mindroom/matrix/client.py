@@ -1727,7 +1727,9 @@ async def _latest_thread_event_id(
             event.event_id,
         )
         latest_key = (
-            latest_thread_edit.server_timestamp if latest_thread_edit and isinstance(latest_thread_edit.server_timestamp, int) else 0,
+            latest_thread_edit.server_timestamp
+            if latest_thread_edit and isinstance(latest_thread_edit.server_timestamp, int)
+            else 0,
             latest_thread_edit.event_id if latest_thread_edit is not None else "",
         )
         if latest_thread_edit is None or candidate_key > latest_key:

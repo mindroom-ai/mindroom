@@ -40,6 +40,7 @@ from mindroom.bot import (
     _PreparedTextEvent,
     _ResponseAction,
     _ResponseDispatchResult,
+    _SuppressedPlaceholderCleanupError,
     _thread_summary_message_count_hint,
 )
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig

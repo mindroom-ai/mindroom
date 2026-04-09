@@ -88,6 +88,7 @@ class _MessageState:
     latest_body: str | None = None
     latest_timestamp: int = 0
     latest_event_id: str = ""
+    latest_thread_event_id: str = ""
     latest_content: dict[str, Any] | None = None
     thread_id: str | None = None
     stream_status: str | None = None
@@ -326,6 +327,7 @@ async def _repair_restart_marked_message_metadata(
             new_text=state.latest_body,
             preserved_content=_terminal_stream_content(state.latest_content),
             thread_id=state.thread_id,
+            latest_thread_event_id=state.latest_thread_event_id or state.latest_event_id or target_event_id,
             sender_domain=sender_domain,
             config=config,
             runtime_paths=runtime_paths,
@@ -361,6 +363,7 @@ async def _cleanup_one_stale_message(
         new_text=build_restart_interrupted_body(state.latest_body),
         preserved_content=_terminal_stream_content(state.latest_content),
         thread_id=state.thread_id,
+        latest_thread_event_id=state.latest_thread_event_id or state.latest_event_id or target_event_id,
         sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
@@ -461,8 +464,37 @@ async def _scan_room_message_states(
         bot_user_id=bot_user_id,
         requester_ids_by_event_id=requester_ids_by_event_id,
     )
+    _assign_latest_thread_event_ids(message_states, resolved_messages)
 
     return message_states
+
+
+def _assign_latest_thread_event_ids(
+    message_states: dict[str, _MessageState],
+    resolved_messages: dict[str, ResolvedVisibleMessage],
+) -> None:
+    """Record the latest visible event ID seen for each explicit thread."""
+    thread_root_ids = {message.thread_id for message in resolved_messages.values() if message.thread_id is not None}
+    latest_event_id_by_thread: dict[str, tuple[int, str]] = {}
+
+    for message in resolved_messages.values():
+        thread_key = message.thread_id
+        if thread_key is None and message.event_id in thread_root_ids:
+            thread_key = message.event_id
+        if thread_key is None:
+            continue
+
+        candidate = (message.timestamp, message.visible_event_id)
+        current = latest_event_id_by_thread.get(thread_key)
+        if current is None or candidate > current:
+            latest_event_id_by_thread[thread_key] = candidate
+
+    for state in message_states.values():
+        if state.thread_id is None:
+            continue
+        latest_event = latest_event_id_by_thread.get(state.thread_id)
+        if latest_event is not None:
+            state.latest_thread_event_id = latest_event[1]
 
 
 async def _collect_room_history_events(
@@ -974,6 +1006,7 @@ async def _edit_stale_message(
     new_text: str,
     preserved_content: dict[str, Any] | None,
     thread_id: str | None,
+    latest_thread_event_id: str | None,
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -985,6 +1018,7 @@ async def _edit_stale_message(
         room_id=room_id,
         new_text=new_text,
         thread_id=thread_id,
+        latest_thread_event_id=latest_thread_event_id,
         config=config,
         runtime_paths=runtime_paths,
         sender_domain=sender_domain,

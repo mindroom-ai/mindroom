@@ -2903,7 +2903,7 @@ class AgentBot:
             return None
         return action
 
-    async def _execute_dispatch_action(
+    async def _execute_dispatch_action(  # noqa: C901
         self,
         room: nio.MatrixRoom,
         event: _DispatchEvent,
@@ -4955,7 +4955,7 @@ class AgentBot:
             reason="Suppressed streamed response",
         )
 
-    async def _process_and_respond_streaming(  # noqa: C901, PLR0915
+    async def _process_and_respond_streaming(  # noqa: C901, PLR0911, PLR0915
         self,
         room_id: str,
         prompt: str,

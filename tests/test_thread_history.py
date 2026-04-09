@@ -13,13 +13,12 @@ from nio.api import RelationshipType
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
 from mindroom.matrix.client import (
-    ResolvedVisibleMessage,
     RoomThreadsPageError,
     ThreadHistoryResult,
-    build_threaded_edit_content,
     _fetch_thread_history_via_room_messages,
     _latest_thread_event_id,
     _ThreadHistoryFastPathUnavailableError,
+    build_threaded_edit_content,
     fetch_thread_history,
     fetch_thread_snapshot,
     get_room_threads_page,
