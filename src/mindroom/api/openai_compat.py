@@ -47,7 +47,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.routing import suggest_agent
 from mindroom.team_runtime_resolution import materialize_exact_requested_team_members
 from mindroom.teams import TeamMode, TeamOutcome, _create_team_instance, format_team_response, resolve_configured_team
-from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
+from mindroom.tool_system.events import StructuredStreamChunk, format_tool_completed_event, format_tool_started_event
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -1027,6 +1027,8 @@ def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> 
     """Extract text content from a stream event."""
     if isinstance(event, RunContentEvent) and event.content:
         return str(event.content)
+    if isinstance(event, StructuredStreamChunk):
+        return event.content
     if isinstance(event, str):
         return event
     return _format_stream_tool_event(event, tool_state)

@@ -30,7 +30,7 @@ from mindroom.ai import (
     stream_agent_response,
 )
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -48,6 +48,8 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.response_coordinator import ResponseCoordinator, ResponseCoordinatorDeps, ResponseRequest
+from mindroom.teams import TeamMode
+from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport, get_tool_runtime_context
 from tests.conftest import bind_runtime_paths, resolve_response_thread_root_for_test
 
@@ -567,6 +569,48 @@ class TestUserIdPassthrough:
         mock_friendly_error.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_ai_response_routes_configured_team_names_to_team_runtime(self, tmp_path: Path) -> None:
+        """Configured teams should use the stable team execution path, not agent-only history resolution."""
+        config = Config(
+            agents={
+                "general": AgentConfig(display_name="General"),
+                "helper": AgentConfig(display_name="Helper"),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            teams={
+                "ultimate": TeamConfig(
+                    display_name="Ultimate",
+                    role="Coordinate a final answer",
+                    agents=["general", "helper"],
+                    mode="coordinate",
+                ),
+            },
+        )
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.teams.team_response", new_callable=AsyncMock, return_value="team reply") as mock_team,
+        ):
+            response = await ai_response(
+                agent_name="ultimate",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=config,
+            )
+
+        assert response == "team reply"
+        mock_prepare.assert_not_called()
+        mock_team.assert_awaited_once()
+        kwargs = mock_team.await_args.kwargs
+        assert kwargs["agent_names"] == ["general", "helper"]
+        assert kwargs["mode"] is TeamMode.COORDINATE
+        assert kwargs["message"] == "test"
+        assert kwargs["configured_team_name"] == "ultimate"
+        assert kwargs["orchestrator"].config is config
+        assert kwargs["orchestrator"].runtime_paths == _runtime_paths(tmp_path)
+
+    @pytest.mark.asyncio
     async def test_ai_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:
         """Vertex Claude path should not silently drop non-PDF file media."""
         mock_agent = MagicMock()
@@ -634,6 +678,61 @@ class TestUserIdPassthrough:
         mock_agent.arun.assert_called_once()
         sent_files = list(mock_agent.arun.call_args.kwargs["files"])
         assert sent_files == [pdf_file, zip_file]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_routes_configured_team_names_to_team_stream_runtime(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Configured teams should stream through the stable team execution path."""
+        config = Config(
+            agents={
+                "general": AgentConfig(display_name="General"),
+                "helper": AgentConfig(display_name="Helper"),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            teams={
+                "ultimate": TeamConfig(
+                    display_name="Ultimate",
+                    role="Coordinate a final answer",
+                    agents=["general", "helper"],
+                    mode="coordinate",
+                ),
+            },
+        )
+
+        async def fake_team_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield StructuredStreamChunk(content="team chunk")
+            yield "done"
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.teams.team_response_stream", side_effect=fake_team_stream) as mock_team_stream,
+        ):
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="ultimate",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=config,
+                )
+            ]
+
+        assert chunks == [StructuredStreamChunk(content="team chunk"), "done"]
+        mock_prepare.assert_not_called()
+        mock_team_stream.assert_called_once()
+        kwargs = mock_team_stream.call_args.kwargs
+        assert kwargs["mode"] is TeamMode.COORDINATE
+        assert kwargs["message"] == "test"
+        assert kwargs["configured_team_name"] == "ultimate"
+        assert [agent_id.agent_name(config, _runtime_paths(tmp_path)) for agent_id in kwargs["agent_ids"]] == [
+            "general",
+            "helper",
+        ]
+        assert kwargs["orchestrator"].config is config
+        assert kwargs["orchestrator"].runtime_paths == _runtime_paths(tmp_path)
 
     @pytest.mark.asyncio
     async def test_ai_response_retries_without_media_on_validation_error(self, tmp_path: Path) -> None:

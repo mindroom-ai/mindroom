@@ -76,6 +76,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_enhanced_prompt
 from mindroom.timing import timed
 from mindroom.tool_system.events import (
+    StructuredStreamChunk,
     complete_pending_tool_block,
     extract_tool_completed_info,
     format_tool_combined,
@@ -93,6 +94,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -110,7 +112,7 @@ __all__ = [
     "stream_agent_response",
 ]
 
-AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+AIStreamChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _AI_RUN_METADATA_VERSION = 1
 _QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_MESSAGE_NOTICE_HOOK_ATTR = "_mindroom_queued_message_notice_hook_installed"
@@ -160,6 +162,126 @@ def _has_queued_notice_marker(message: Message) -> bool:
 def _is_queued_notice_message(message: Message) -> bool:
     """Return whether one Agno message is the hidden queued-message notice."""
     return _has_queued_notice_marker(message)
+
+
+def _is_configured_team(config: Config, entity_name: str) -> bool:
+    """Return whether one execution target is a configured team."""
+    return entity_name in config.teams
+
+
+def _build_ephemeral_team_orchestrator(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> MultiAgentOrchestrator:
+    """Return a minimal orchestrator view for configured-team execution helpers."""
+    from mindroom.orchestrator import MultiAgentOrchestrator  # noqa: PLC0415
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = config
+    return orchestrator
+
+
+async def _configured_team_response(
+    *,
+    team_name: str,
+    prompt: str,
+    session_id: str,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    user_id: str | None,
+    run_id: str | None,
+    run_id_callback: Callable[[str], None] | None,
+    media: MediaInputs | None,
+    reply_to_event_id: str | None,
+    active_event_ids: Collection[str],
+    execution_identity: ToolExecutionIdentity | None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None,
+    matrix_run_metadata: dict[str, Any] | None,
+    system_enrichment_items: Sequence[EnrichmentItem],
+) -> str:
+    """Route one generic AI request through the configured-team execution path."""
+    from mindroom.teams import TeamMode, team_response  # noqa: PLC0415
+
+    team_config = config.teams[team_name]
+    orchestrator = _build_ephemeral_team_orchestrator(
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    return await team_response(
+        agent_names=list(team_config.agents),
+        mode=TeamMode(team_config.mode),
+        message=prompt,
+        orchestrator=orchestrator,
+        execution_identity=execution_identity,
+        thread_history=thread_history,
+        media=media,
+        session_id=session_id,
+        run_id=run_id,
+        run_id_callback=run_id_callback,
+        user_id=user_id,
+        reply_to_event_id=reply_to_event_id,
+        active_event_ids=active_event_ids,
+        compaction_outcomes_collector=compaction_outcomes_collector,
+        configured_team_name=team_name,
+        matrix_run_metadata=matrix_run_metadata,
+        system_enrichment_items=system_enrichment_items,
+    )
+
+
+async def _configured_team_stream(
+    *,
+    team_name: str,
+    prompt: str,
+    session_id: str,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    user_id: str | None,
+    run_id: str | None,
+    run_id_callback: Callable[[str], None] | None,
+    media: MediaInputs | None,
+    reply_to_event_id: str | None,
+    active_event_ids: Collection[str],
+    show_tool_calls: bool,
+    execution_identity: ToolExecutionIdentity | None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None,
+    matrix_run_metadata: dict[str, Any] | None,
+    system_enrichment_items: Sequence[EnrichmentItem],
+) -> AsyncIterator[AIStreamChunk]:
+    """Stream one configured team through the generic AI streaming interface."""
+    from mindroom.matrix.identity import MatrixID  # noqa: PLC0415
+    from mindroom.teams import TeamMode, team_response_stream  # noqa: PLC0415
+
+    team_config = config.teams[team_name]
+    orchestrator = _build_ephemeral_team_orchestrator(
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    domain = config.get_domain(runtime_paths)
+    agent_ids = [MatrixID.from_agent(member_name, domain, runtime_paths) for member_name in team_config.agents]
+    async for chunk in team_response_stream(
+        agent_ids=agent_ids,
+        message=prompt,
+        orchestrator=orchestrator,
+        execution_identity=execution_identity,
+        mode=TeamMode(team_config.mode),
+        thread_history=thread_history,
+        media=media,
+        show_tool_calls=show_tool_calls,
+        session_id=session_id,
+        run_id=run_id,
+        run_id_callback=run_id_callback,
+        user_id=user_id,
+        reply_to_event_id=reply_to_event_id,
+        active_event_ids=active_event_ids,
+        compaction_outcomes_collector=compaction_outcomes_collector,
+        configured_team_name=team_name,
+        matrix_run_metadata=matrix_run_metadata,
+        system_enrichment_items=system_enrichment_items,
+    ):
+        yield chunk
 
 
 def _strip_queued_notice_messages(messages: list[Message] | None) -> bool:
@@ -1109,6 +1231,25 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         session_id=session_id,
         agent_name=agent_name,
     )
+    if _is_configured_team(config, agent_name):
+        return await _configured_team_response(
+            team_name=agent_name,
+            prompt=prompt,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            thread_history=thread_history,
+            user_id=user_id,
+            run_id=run_id,
+            run_id_callback=run_id_callback,
+            media=media,
+            reply_to_event_id=reply_to_event_id,
+            active_event_ids=active_event_ids,
+            execution_identity=execution_identity,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+            matrix_run_metadata=matrix_run_metadata,
+            system_enrichment_items=system_enrichment_items,
+        )
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
@@ -1428,6 +1569,28 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         session_id=session_id,
         agent_name=agent_name,
     )
+    if _is_configured_team(config, agent_name):
+        async for chunk in _configured_team_stream(
+            team_name=agent_name,
+            prompt=prompt,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            thread_history=thread_history,
+            user_id=user_id,
+            run_id=run_id,
+            run_id_callback=run_id_callback,
+            media=media,
+            reply_to_event_id=reply_to_event_id,
+            active_event_ids=active_event_ids,
+            show_tool_calls=show_tool_calls,
+            execution_identity=execution_identity,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+            matrix_run_metadata=matrix_run_metadata,
+            system_enrichment_items=system_enrichment_items,
+        ):
+            yield chunk
+        return
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
