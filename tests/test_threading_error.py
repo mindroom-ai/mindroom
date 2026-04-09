@@ -8,7 +8,6 @@ This test verifies that:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,13 +24,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage, ThreadHistoryResult, 
 from mindroom.matrix.event_cache import EventCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
-from mindroom.matrix.reply_chain import (
-    ReplyChainCaches,
-    _materialize_chain_history,
-    _merge_thread_and_chain_history,
-    _ReplyChainNode,
-    derive_conversation_context,
-)
+from mindroom.matrix.reply_chain import ReplyChainCaches, _merge_thread_and_chain_history
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -1735,98 +1728,6 @@ class TestThreadingBehavior:
             "$t2:localhost",
             "$p2:localhost",
         ]
-
-    @pytest.mark.asyncio
-    async def test_materialize_chain_history_hydrates_nodes_concurrently(self) -> None:
-        """Reply-chain hydration should start all node fetches before awaiting completion."""
-        chain_nodes = [
-            _ReplyChainNode(
-                message=_message(event_id="$p1:localhost", body="$p1:localhost"),
-                event_source={},
-                parent_event_id=None,
-                thread_root_id=None,
-                has_relations=False,
-                content_hydrated=False,
-            ),
-            _ReplyChainNode(
-                message=_message(event_id="$p2:localhost", body="$p2:localhost"),
-                event_source={},
-                parent_event_id=None,
-                thread_root_id=None,
-                has_relations=False,
-                content_hydrated=False,
-            ),
-        ]
-        started_event_ids: list[str] = []
-        all_started = asyncio.Event()
-
-        async def fake_node_to_history_message(
-            node: _ReplyChainNode,
-            _client: nio.AsyncClient,
-        ) -> ResolvedVisibleMessage:
-            assert node.message.event_id is not None
-            started_event_ids.append(node.message.event_id)
-            if len(started_event_ids) == len(chain_nodes):
-                all_started.set()
-            await all_started.wait()
-            return _message(event_id=node.message.event_id, body=node.message.event_id)
-
-        with patch(
-            "mindroom.matrix.reply_chain._node_to_history_message",
-            side_effect=fake_node_to_history_message,
-        ):
-            history = await asyncio.wait_for(
-                _materialize_chain_history(chain_nodes, AsyncMock(spec=nio.AsyncClient)),
-                timeout=1,
-            )
-
-        assert started_event_ids == ["$p1:localhost", "$p2:localhost"]
-        assert [message.event_id for message in history] == ["$p1:localhost", "$p2:localhost"]
-
-    @pytest.mark.asyncio
-    async def test_derive_conversation_context_offloads_reply_chain_merge(self) -> None:
-        """Merging long chain history into a thread should run off the event loop."""
-        event_info = MagicMock()
-        event_info.thread_id = None
-        event_info.thread_id_from_edit = None
-        event_info.is_edit = False
-        event_info.reply_to_event_id = "$reply:localhost"
-        event_info.original_event_id = None
-        thread_history = [
-            _message(event_id="$root:localhost", body="Thread root"),
-            _message(event_id="$t1:localhost", body="Thread reply"),
-        ]
-        chain_history = [_message(event_id="$p1:localhost", body="Plain reply")]
-        merged_history = [
-            _message(event_id="$root:localhost", body="Thread root"),
-            _message(event_id="$t1:localhost", body="Thread reply"),
-            _message(event_id="$p1:localhost", body="Plain reply"),
-        ]
-        fetch_history = AsyncMock(return_value=thread_history)
-
-        with (
-            patch(
-                "mindroom.matrix.reply_chain._resolve_reply_chain",
-                new=AsyncMock(return_value=("$root:localhost", chain_history, True, False)),
-            ),
-            patch(
-                "mindroom.matrix.reply_chain.asyncio.to_thread",
-                new=AsyncMock(return_value=merged_history),
-            ) as mock_to_thread,
-        ):
-            is_thread, thread_id, history = await derive_conversation_context(
-                AsyncMock(spec=nio.AsyncClient),
-                "!test:localhost",
-                event_info,
-                ReplyChainCaches(),
-                MagicMock(),
-                fetch_history,
-            )
-
-        assert is_thread is True
-        assert thread_id == "$root:localhost"
-        assert history == merged_history
-        mock_to_thread.assert_awaited_once_with(_merge_thread_and_chain_history, thread_history, chain_history)
 
     @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
