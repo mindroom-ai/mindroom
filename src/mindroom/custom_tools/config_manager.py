@@ -303,7 +303,11 @@ class ConfigManagerTools(Toolkit):
         footer: str | None = None,
     ) -> tuple[Config | None, str | None]:
         """Load config or return one shared invalid-config response."""
-        return load_config_or_user_error(self.runtime_paths, footer=footer)
+        return load_config_or_user_error(
+            self.runtime_paths,
+            footer=footer,
+            tolerate_plugin_load_errors=True,
+        )
 
     def _load_config_and_tool_metadata_or_error(
         self,
@@ -315,7 +319,15 @@ class ConfigManagerTools(Toolkit):
         if load_error:
             return None, None, load_error
         assert config is not None
-        return config, resolved_tool_metadata_for_runtime(self.runtime_paths, config), None
+        return (
+            config,
+            resolved_tool_metadata_for_runtime(
+                self.runtime_paths,
+                config,
+                tolerate_plugin_load_errors=True,
+            ),
+            None,
+        )
 
     def _get_available_models(self) -> str:
         """Get the list of configured models from the current configuration."""

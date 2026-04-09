@@ -283,35 +283,16 @@ def test_reindex_syncs_git_before_reindex_for_git_bases(test_client: TestClient,
     manager.reindex_all.assert_awaited_once()
 
 
-def test_knowledge_routes_return_runtime_validation_errors(test_client: TestClient, tmp_path: Path) -> None:
-    """Knowledge routes should surface invalid runtime config as 422, not generic 500s."""
+def test_knowledge_routes_return_runtime_validation_errors(test_client: TestClient) -> None:
+    """Knowledge routes should surface malformed runtime config as 422, not generic 500s."""
     runtime_paths = main._app_runtime_paths(test_client.app)
-    plugin_root = tmp_path / "plugins" / "bad-name"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        '{"name": "BadName", "tools_module": null, "skills": []}',
-        encoding="utf-8",
-    )
-    runtime_paths.config_path.write_text(
-        (
-            "models:\n"
-            "  default:\n"
-            "    provider: openai\n"
-            "    id: gpt-5.4\n"
-            "router:\n"
-            "  model: default\n"
-            "agents: {}\n"
-            "plugins:\n"
-            "  - ./plugins/bad-name\n"
-        ),
-        encoding="utf-8",
-    )
+    runtime_paths.config_path.write_text("agents:\n  broken: [\n", encoding="utf-8")
     assert main.load_api_config_into_app(runtime_paths, test_client.app) is False
 
     response = test_client.get("/api/knowledge/bases")
 
     assert response.status_code == 422
-    assert "Invalid plugin name" in response.json()["detail"][0]["msg"]
+    assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
 
 
 def test_knowledge_routes_use_committed_snapshot_until_reload(test_client: TestClient, tmp_path: Path) -> None:

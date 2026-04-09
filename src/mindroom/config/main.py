@@ -847,11 +847,19 @@ class Config(BaseModel):
         cls,
         data: object,
         runtime_paths: RuntimePaths,
+        *,
+        tolerate_plugin_load_errors: bool = False,
     ) -> Config:
         """Validate config data against one explicit runtime context."""
         config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
         try:
-            config._validate_authored_tool_entries(runtime_paths)
+            if tolerate_plugin_load_errors:
+                config._validate_authored_tool_entries(
+                    runtime_paths,
+                    tolerate_plugin_load_errors=True,
+                )
+            else:
+                config._validate_authored_tool_entries(runtime_paths)
         except (PluginValidationError, ToolConfigOverrideError, ToolMetadataValidationError) as exc:
             raise ConfigRuntimeValidationError(str(exc)) from exc
         return config
@@ -1197,11 +1205,20 @@ class Config(BaseModel):
             except ValueError as exc:
                 raise ToolConfigOverrideError(str(exc)) from exc
 
-    def _validate_authored_tool_entries(self, runtime_paths: RuntimePaths) -> None:
+    def _validate_authored_tool_entries(
+        self,
+        runtime_paths: RuntimePaths,
+        *,
+        tolerate_plugin_load_errors: bool = False,
+    ) -> None:
         """Validate defaults and per-agent authored tool overrides with runtime metadata loaded."""
         from mindroom.tool_system.metadata import resolved_tool_state_for_runtime  # noqa: PLC0415
 
-        tool_registry, tool_metadata = resolved_tool_state_for_runtime(runtime_paths, self)
+        tool_registry, tool_metadata = resolved_tool_state_for_runtime(
+            runtime_paths,
+            self,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
         for index, entry in enumerate(self.defaults.tools):
             self._validate_authored_tool_entry(
                 entry,
@@ -1679,7 +1696,11 @@ class Config(BaseModel):
         logger.info(f"Saved configuration to {config_path}")
 
 
-def load_config(runtime_paths: RuntimePaths) -> Config:
+def load_config(
+    runtime_paths: RuntimePaths,
+    *,
+    tolerate_plugin_load_errors: bool = False,
+) -> Config:
     """Load and validate one config against an explicit runtime context."""
     path = runtime_paths.config_path
     if not path.exists():
@@ -1689,7 +1710,11 @@ def load_config(runtime_paths: RuntimePaths) -> Config:
     with path.open() as f:
         data = yaml.safe_load(f) or {}
 
-    config = Config.validate_with_runtime(data, runtime_paths)
+    config = Config.validate_with_runtime(
+        data,
+        runtime_paths,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
     logger.info(f"Loaded agent configuration from {path}")
     logger.info(f"Found {len(config.agents)} agent configurations")
     return config
@@ -1699,9 +1724,13 @@ def load_config_or_user_error(
     runtime_paths: RuntimePaths,
     *,
     footer: str | None = None,
+    tolerate_plugin_load_errors: bool = False,
 ) -> tuple[Config | None, str | None]:
     """Load config or return one shared user-facing invalid-configuration message."""
     try:
-        return load_config(runtime_paths), None
+        return load_config(
+            runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        ), None
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         return None, format_invalid_config_message(exc, footer=footer)

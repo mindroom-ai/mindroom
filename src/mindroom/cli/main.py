@@ -130,7 +130,10 @@ def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
         raise typer.Exit(1)
 
     try:
-        config = _load_config_quiet(runtime_paths=runtime_paths)
+        config = _load_config_quiet(
+            runtime_paths=runtime_paths,
+            tolerate_plugin_load_errors=True,
+        )
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         _format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None

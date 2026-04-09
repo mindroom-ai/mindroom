@@ -186,7 +186,11 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     load_error_footer = _CONFIG_CHANGE_REJECTED_MESSAGE if operation == "set" else None
 
     # Load current config
-    config, load_error = load_config_or_user_error(runtime_paths, footer=load_error_footer)
+    config, load_error = load_config_or_user_error(
+        runtime_paths,
+        footer=load_error_footer,
+        tolerate_plugin_load_errors=True,
+    )
     if load_error:
         return load_error, None
     assert config is not None
@@ -311,7 +315,11 @@ async def apply_config_change(
 
     try:
         # Load the current configuration
-        config, load_error = load_config_or_user_error(runtime_paths, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+        config, load_error = load_config_or_user_error(
+            runtime_paths,
+            footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
+            tolerate_plugin_load_errors=True,
+        )
         if load_error:
             return load_error
         assert config is not None

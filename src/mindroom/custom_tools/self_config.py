@@ -51,7 +51,10 @@ class SelfConfigTools(Toolkit):
             The agent's configuration formatted as YAML, or an error message.
 
         """
-        config, load_error = load_config_or_user_error(self.runtime_paths)
+        config, load_error = load_config_or_user_error(
+            self.runtime_paths,
+            tolerate_plugin_load_errors=True,
+        )
         if load_error:
             return load_error
         assert config is not None
@@ -115,6 +118,7 @@ class SelfConfigTools(Toolkit):
         config, load_error = load_config_or_user_error(
             self.runtime_paths,
             footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
+            tolerate_plugin_load_errors=True,
         )
         if load_error:
             return load_error
@@ -125,7 +129,11 @@ class SelfConfigTools(Toolkit):
 
         # Validate tools against known tool metadata
         if tools is not None:
-            tool_metadata = resolved_tool_metadata_for_runtime(self.runtime_paths, config)
+            tool_metadata = resolved_tool_metadata_for_runtime(
+                self.runtime_paths,
+                config,
+                tolerate_plugin_load_errors=True,
+            )
             invalid_tools = [t for t in tools if t not in tool_metadata]
             if invalid_tools:
                 return f"Error: Unknown tools: {', '.join(invalid_tools)}"

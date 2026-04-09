@@ -257,7 +257,11 @@ async def get_registered_tools(
     based on credentials (including plugin-provided tools).
     """
     config, runtime_paths = _read_tools_runtime_config(request)
-    tool_metadata = resolved_tool_metadata_for_runtime(runtime_paths, config)
+    tool_metadata = resolved_tool_metadata_for_runtime(
+        runtime_paths,
+        config,
+        tolerate_plugin_load_errors=True,
+    )
     tools = export_tools_metadata(tool_metadata)
     execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
     context = _resolve_tool_availability_context(

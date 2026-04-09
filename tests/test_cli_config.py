@@ -705,6 +705,23 @@ class TestConfigValidate:
         assert "Invalid configuration" in result.output
         assert "Plugin tools_module must be a string" in result.output
 
+    def test_validate_rejects_missing_plugin_path(self, tmp_path: Path) -> None:
+        """Config validate should stay strict about missing plugin paths."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n"
+            "plugins:\n  - ./plugins/this-plugin-does-not-exist\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 1
+        assert "Invalid configuration" in result.output
+        assert "Configured plugin path does not exist" in result.output
+
     def test_validate_invalid_utf8_config(self, tmp_path: Path) -> None:
         """Config validate should report unreadable config text cleanly."""
         cfg = tmp_path / "config.yaml"
@@ -842,7 +859,7 @@ class TestRunErrorHandling:
         assert "Invalid configuration" in result.output
 
     def test_run_invalid_plugin_manifest_name(self, tmp_path: Path) -> None:
-        """Run should surface plugin manifest validation errors without a traceback."""
+        """Run should let startup continue when a plugin manifest is malformed."""
         plugin_root = tmp_path / "plugins" / "bad-name"
         plugin_root.mkdir(parents=True)
         (plugin_root / "mindroom.plugin.json").write_text(
@@ -856,12 +873,33 @@ class TestRunErrorHandling:
             "router:\n  model: default\n"
             "plugins:\n  - ./plugins/bad-name\n",
         )
+        mock_main = AsyncMock()
 
-        result = _invoke_with_runtime(["run"], bad_cfg)
+        with patch("mindroom.orchestrator.main", mock_main):
+            result = _invoke_with_runtime(["run"], bad_cfg)
 
-        assert result.exit_code == 1
-        assert "Invalid configuration" in result.output
-        assert "Invalid plugin name" in result.output
+        assert result.exit_code == 0
+        mock_main.assert_awaited_once()
+        assert "Invalid configuration" not in result.output
+
+    def test_run_tolerates_missing_plugin_path(self, tmp_path: Path) -> None:
+        """Run should let the orchestrator start when an optional plugin path is missing."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n"
+            "plugins:\n  - ./plugins/this-plugin-does-not-exist\n",
+            encoding="utf-8",
+        )
+        mock_main = AsyncMock()
+
+        with patch("mindroom.orchestrator.main", mock_main):
+            result = _invoke_with_runtime(["run"], cfg)
+
+        assert result.exit_code == 0
+        mock_main.assert_awaited_once()
+        assert "Invalid configuration" not in result.output
 
     def test_run_invalid_utf8_config(self, tmp_path: Path) -> None:
         """Run should report unreadable config text without a traceback."""

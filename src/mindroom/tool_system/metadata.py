@@ -953,6 +953,8 @@ def _execute_validation_plugin_module(
 def resolved_tool_state_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
+    *,
+    tolerate_plugin_load_errors: bool = False,
 ) -> tuple[dict[str, Callable[[], type[Toolkit]]], dict[str, ToolMetadata]]:
     """Return registry and metadata visible for one runtime config without mutating global state."""
     import mindroom.tools  # noqa: F401, PLC0415
@@ -971,46 +973,58 @@ def resolved_tool_state_for_runtime(
         )
         return builtin_registry, builtin_metadata
 
-    plugin_bases: list[tuple[plugin_module._PluginBase, Any, int]] = []
-    for plugin_order, plugin_entry in enumerate(plugin_entries):
-        if not plugin_entry.enabled:
-            continue
-        root = plugin_module._resolve_plugin_root(plugin_entry.path, runtime_paths)
-        plugin_base = plugin_module._load_plugin_base(root)
-        plugin_bases.append((plugin_base, plugin_entry, plugin_order))
+    plugin_bases = plugin_module._collect_plugin_bases(
+        plugin_entries,
+        runtime_paths,
+        skip_broken_plugins=tolerate_plugin_load_errors,
+    )
 
     plugin_module._reject_duplicate_plugin_manifest_names(plugin_bases)
 
     validation_registrations: dict[str, dict[str, ToolMetadata]] = {}
     active_plugins: list[tuple[str, str]] = []
-    for plugin_base, _, _ in plugin_bases:
-        if plugin_base.tools_module_path is None:
-            if plugin_base.hooks_module_path is not None:
-                _execute_validation_plugin_module(
-                    plugin_base.name,
-                    plugin_base.root,
-                    plugin_base.hooks_module_path,
-                    validation_registrations,
+    for plugin_base, plugin_entry, _ in plugin_bases:
+        candidate_registrations: dict[str, dict[str, ToolMetadata]] = {}
+        candidate_active_plugins: list[tuple[str, str]] = []
+        try:
+            if plugin_base.tools_module_path is None:
+                if plugin_base.hooks_module_path is not None:
+                    _execute_validation_plugin_module(
+                        plugin_base.name,
+                        plugin_base.root,
+                        plugin_base.hooks_module_path,
+                        candidate_registrations,
+                    )
+            else:
+                candidate_active_plugins.append(
+                    (
+                        plugin_base.name,
+                        _execute_validation_plugin_module(
+                            plugin_base.name,
+                            plugin_base.root,
+                            plugin_base.tools_module_path,
+                            candidate_registrations,
+                        ),
+                    ),
                 )
+                if (
+                    plugin_base.hooks_module_path is not None
+                    and plugin_base.hooks_module_path != plugin_base.tools_module_path
+                ):
+                    _execute_validation_plugin_module(
+                        plugin_base.name,
+                        plugin_base.root,
+                        plugin_base.hooks_module_path,
+                        candidate_registrations,
+                    )
+        except Exception as exc:
+            if not tolerate_plugin_load_errors:
+                raise
+            plugin_module._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
             continue
-        active_plugins.append(
-            (
-                plugin_base.name,
-                _execute_validation_plugin_module(
-                    plugin_base.name,
-                    plugin_base.root,
-                    plugin_base.tools_module_path,
-                    validation_registrations,
-                ),
-            ),
-        )
-        if plugin_base.hooks_module_path is not None and plugin_base.hooks_module_path != plugin_base.tools_module_path:
-            _execute_validation_plugin_module(
-                plugin_base.name,
-                plugin_base.root,
-                plugin_base.hooks_module_path,
-                validation_registrations,
-            )
+
+        validation_registrations.update(candidate_registrations)
+        active_plugins.extend(candidate_active_plugins)
 
     desired_registry, desired_metadata = _resolved_tool_state(active_plugins, validation_registrations)
     mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
@@ -1041,9 +1055,15 @@ def _merge_mcp_tool_state(
 def resolved_tool_metadata_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
+    *,
+    tolerate_plugin_load_errors: bool = False,
 ) -> dict[str, ToolMetadata]:
     """Return tool metadata visible for one runtime config without mutating global state."""
-    _, desired_metadata = resolved_tool_state_for_runtime(runtime_paths, config)
+    _, desired_metadata = resolved_tool_state_for_runtime(
+        runtime_paths,
+        config,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
     return desired_metadata
 
 
