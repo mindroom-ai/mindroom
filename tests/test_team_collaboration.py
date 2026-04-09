@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
@@ -656,6 +656,74 @@ class TestRouterTeamFormation:
         assert result.outcome is TeamOutcome.INDIVIDUAL
         assert result.intent is TeamIntent.IMPLICIT_THREAD_TEAM
         assert _agent_names(result.eligible_members, config) == ["calculator"]
+
+    @pytest.mark.asyncio
+    async def test_thread_history_ignores_configured_team_participants(self) -> None:
+        """Implicit thread teams must ignore configured team bots instead of treating them as leaf members."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "agent_alpha": AgentConfig(display_name="Agent Alpha", role="Alpha"),
+                    "agent_beta": AgentConfig(display_name="Agent Beta", role="Beta"),
+                    "agent_gamma": AgentConfig(display_name="Agent Gamma", role="Gamma"),
+                },
+                teams={
+                    "meta_team": TeamConfig(
+                        display_name="Meta Team",
+                        role="Combined agent team",
+                        agents=["agent_alpha", "agent_beta", "agent_gamma"],
+                        mode="coordinate",
+                    ),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!thread:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["meta_team"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["agent_alpha"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["agent_beta"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["agent_gamma"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["agent_gamma"],
+            tagged_agents=[],
+            agents_in_thread=[
+                config.get_ids(runtime_paths_for(config))["meta_team"],
+                config.get_ids(runtime_paths_for(config))["agent_alpha"],
+                config.get_ids(runtime_paths_for(config))["agent_beta"],
+                config.get_ids(runtime_paths_for(config))["agent_gamma"],
+            ],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="continue the thread",
+            config=config,
+            room=room,
+            is_thread=True,
+            use_ai_decision=False,
+        )
+
+        assert result.outcome is TeamOutcome.TEAM
+        assert result.intent is TeamIntent.IMPLICIT_THREAD_TEAM
+        assert sorted(_agent_names(result.requested_members, config)) == [
+            "agent_alpha",
+            "agent_beta",
+            "agent_gamma",
+        ]
+        assert sorted(_agent_names(result.eligible_members, config)) == [
+            "agent_alpha",
+            "agent_beta",
+            "agent_gamma",
+        ]
 
     @pytest.mark.asyncio
     async def test_previously_mentioned_off_room_agents_degrade_to_individual(self) -> None:

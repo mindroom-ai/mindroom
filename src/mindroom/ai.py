@@ -924,6 +924,17 @@ async def _run_cached_agent_attempt(
     )
 
 
+def _assert_agent_target(agent_name: str, config: Config) -> None:
+    """Reject configured team names in the agent-only AI helper path."""
+    if agent_name in config.teams:
+        msg = (
+            f"'{agent_name}' is a configured team, not an agent. "
+            "Use the explicit team execution helpers or the OpenAI-compatible model "
+            f"'team/{agent_name}' instead."
+        )
+        raise ValueError(msg)
+
+
 @timed("system_prompt_assembly")
 async def _prepare_agent_and_prompt(
     agent_name: str,
@@ -952,6 +963,7 @@ async def _prepare_agent_and_prompt(
         (empty when using the fallback path).
 
     """
+    _assert_agent_target(agent_name, config)
     storage_path = runtime_paths.storage_root
     enhanced_prompt = await build_memory_enhanced_prompt(
         prompt,
@@ -1113,6 +1125,10 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
     try:
+        try:
+            _assert_agent_target(agent_name, config)
+        except ValueError as e:
+            return get_user_friendly_error_message(e, agent_name)
         with open_resolved_scope_session_context(
             agent_name=agent_name,
             scope=HistoryScope(kind="agent", scope_id=agent_name),
@@ -1433,6 +1449,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     scope_context: ScopeSessionContext | None = None
 
     try:
+        try:
+            _assert_agent_target(agent_name, config)
+        except ValueError as e:
+            yield get_user_friendly_error_message(e, agent_name)
+            return
         with open_resolved_scope_session_context(
             agent_name=agent_name,
             scope=HistoryScope(kind="agent", scope_id=agent_name),

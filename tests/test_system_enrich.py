@@ -47,7 +47,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_coordinator import ResponseRequest
 from mindroom.team_runtime_resolution import ResolvedExactTeamMembers
-from mindroom.teams import TeamMode, _prepare_materialized_team_execution
+from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -486,14 +486,26 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
-        prepared = await _prepare_materialized_team_execution(
-            scope_context=None,
-            team_members=team_members,
+        team = build_materialized_team_instance(
+            requested_agent_names=team_members.requested_agent_names,
+            agents=team_members.agents,
             mode=TeamMode.COORDINATE,
-            message="Coordinate",
-            orchestrator=SimpleNamespace(config=config, runtime_paths=runtime_paths),
-            thread_history=[],
+            config=config,
+            runtime_paths=runtime_paths,
+            scope_context=None,
             model_name=None,
+            configured_team_name=None,
+        )
+        await prepare_materialized_team_execution(
+            scope_context=None,
+            agents=team_members.agents,
+            team=team,
+            message="Coordinate",
+            fallback_prompt="Coordinate",
+            thread_history=[],
+            config=config,
+            runtime_paths=runtime_paths,
+            active_model_name=None,
             reply_to_event_id="$event",
             active_event_ids=frozenset(),
             response_sender_id="@mindroom_code:localhost",
@@ -502,9 +514,9 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
             system_enrichment_items=system_items,
         )
 
-    assert prepared.team is prepared_team
-    assert prepared.team.additional_context == rendered
-    assert rendered in _team_system_message(prepared.team)
+    assert team is prepared_team
+    assert team.additional_context == rendered
+    assert rendered in _team_system_message(team)
     assert all(agent.additional_context == rendered for agent in member_agents)
     assert all(rendered in _agent_system_message(agent) for agent in member_agents)
 

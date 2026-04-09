@@ -26,17 +26,12 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from mindroom.agents import create_agent
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
-from mindroom.execution_preparation import (
-    build_prompt_with_thread_history,
-    prepare_bound_team_execution_context,
-)
+from mindroom.execution_preparation import build_prompt_with_thread_history
 from mindroom.history.runtime import (
     ScopeSessionContext,
-    apply_replay_plan,
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
 )
@@ -45,8 +40,15 @@ from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.routing import suggest_agent
-from mindroom.team_runtime_resolution import materialize_exact_requested_team_members
-from mindroom.teams import TeamMode, TeamOutcome, _create_team_instance, format_team_response, resolve_configured_team
+from mindroom.teams import (
+    TeamMode,
+    TeamOutcome,
+    build_materialized_team_instance,
+    format_team_response,
+    materialize_exact_team_members,
+    prepare_materialized_team_execution,
+    resolve_configured_team,
+)
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -1124,26 +1126,13 @@ def _build_team(
     requested_members = [config_ids[member_name] for member_name in team_config.agents]
     model_name = team_config.model or "default"
 
-    def _build_member(member_name: str) -> Agent:
-        return create_agent(
-            member_name,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-            knowledge=get_agent_knowledge(
-                member_name,
-                config,
-                runtime_paths,
-                on_missing_bases=_log_missing_knowledge_bases(member_name),
-            ),
-            session_id=session_id,
-            include_interactive_questions=False,
-        )
-
-    team_members = materialize_exact_requested_team_members(
+    team_members = materialize_exact_team_members(
         team_config.agents,
-        materializable_agent_names=None,
-        build_member=_build_member,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        session_id=session_id,
+        reason_prefix=f"Team '{team_name}'",
     )
 
     final_resolution = resolve_configured_team(
@@ -1157,16 +1146,15 @@ def _build_team(
     if final_resolution.outcome is not TeamOutcome.TEAM:
         raise ValueError(final_resolution.reason or f"Team '{team_name}' cannot be materialized")
 
-    team = _create_team_instance(
+    team = build_materialized_team_instance(
+        requested_agent_names=team_members.requested_agent_names,
         agents=team_members.agents,
         mode=mode,
         config=config,
         runtime_paths=runtime_paths,
-        team_display_name=f"Team-{team_name}",
-        fallback_team_id=team_name,
         model_name=model_name,
         configured_team_name=team_name,
-        history_storage=scope_context.storage if scope_context is not None else None,
+        scope_context=scope_context,
     )
     return team_members.agents, team, mode
 
@@ -1190,23 +1178,25 @@ async def _prepare_openai_team_prompt(
 ) -> str:
     """Prepare the final prompt for one OpenAI-compatible team run."""
     fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
-    runtime_model = config.resolve_runtime_model(entity_name=team_name)
-    prepared_execution = await prepare_bound_team_execution_context(
+    prepared_execution = await prepare_materialized_team_execution(
         scope_context=scope_context,
         agents=agents,
         team=team,
-        prompt=prompt,
+        message=prompt,
         fallback_prompt=fallback_prompt,
         thread_history=thread_history,
-        runtime_paths=runtime_paths,
         config=config,
-        team_name=team_name,
-        active_model_name=runtime_model.model_name,
-        active_context_window=runtime_model.context_window,
+        runtime_paths=runtime_paths,
+        active_model_name=config.resolve_runtime_model(entity_name=team_name).model_name,
+        reply_to_event_id=None,
+        active_event_ids=frozenset(),
+        response_sender_id=None,
+        compaction_outcomes_collector=None,
+        configured_team_name=team_name,
+        matrix_run_metadata=None,
+        system_enrichment_items=(),
     )
-    if prepared_execution.replay_plan is not None:
-        apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)
-    return prepared_execution.final_prompt
+    return prepared_execution.prepared_prompt
 
 
 async def _non_stream_team_completion(

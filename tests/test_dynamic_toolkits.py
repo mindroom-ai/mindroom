@@ -23,7 +23,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
-from mindroom.teams import _build_agent_from_orchestrator
+from mindroom.teams import materialize_exact_team_members
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import (
@@ -998,11 +998,6 @@ def test_team_builder_passes_team_session_id_to_create_agent(tmp_path: Path) -> 
     """Team member creation should share the team session id across member agents."""
     config = _validated_config(tmp_path, _base_config_data())
     runtime_paths = _runtime_paths(tmp_path)
-    orchestrator = SimpleNamespace(
-        config=config,
-        runtime_paths=runtime_paths,
-        knowledge_managers={},
-    )
     execution_identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="code",
@@ -1017,11 +1012,12 @@ def test_team_builder_passes_team_session_id_to_create_agent(tmp_path: Path) -> 
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams.create_agent", return_value=MagicMock(name="CodeAgent")) as mock_create_agent,
     ):
-        result = _build_agent_from_orchestrator(
-            "code",
-            orchestrator,
+        result = materialize_exact_team_members(
+            ["code"],
+            config=config,
+            runtime_paths=runtime_paths,
             execution_identity=execution_identity,
-        )
+        ).agents[0]
 
     assert result is mock_create_agent.return_value
     assert mock_create_agent.call_args.kwargs["session_id"] == "team-session"
@@ -1051,8 +1047,8 @@ def test_openai_team_builder_passes_session_id_to_member_agents(tmp_path: Path) 
     runtime_paths = _runtime_paths(tmp_path)
 
     with (
-        patch("mindroom.api.openai_compat.create_agent", return_value=MagicMock(name="CodeAgent")) as mock_create,
-        patch("mindroom.api.openai_compat.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.create_agent", return_value=MagicMock(name="CodeAgent")) as mock_create,
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch(
             "mindroom.api.openai_compat.resolve_bound_team_scope_context",
             create=True,

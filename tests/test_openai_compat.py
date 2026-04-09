@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,7 +33,6 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import HistoryScope, ResolvedReplayPlan
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -67,8 +67,9 @@ def _prepared_team_execution_context(
     final_prompt: str,
     replay_plan: ResolvedReplayPlan | None = None,
     replays_persisted_history: bool = False,
-) -> PreparedExecutionContext:
-    return PreparedExecutionContext(
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        prepared_prompt=final_prompt,
         final_prompt=final_prompt,
         replay_plan=replay_plan,
         unseen_event_ids=[],
@@ -2193,7 +2194,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2215,7 +2216,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_count == 1
         assert mock_prepare.await_args.kwargs["agents"] == mock_agents
         assert mock_prepare.await_args.kwargs["team"] is mock_team
-        assert mock_prepare.await_args.kwargs["prompt"] == "Build a feature"
+        assert mock_prepare.await_args.kwargs["message"] == "Build a feature"
 
     def test_team_streaming(self, team_app_client: TestClient) -> None:
         """Streaming team completion streams TeamContentEvent (leader text) directly."""
@@ -2238,7 +2239,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2300,7 +2301,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2400,7 +2401,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2673,9 +2674,9 @@ class TestTeamCompletion:
         """Configured team failures should surface the user-facing materialization error."""
         with (
             patch("mindroom.teams.get_model_instance", return_value=MagicMock()),
-            patch("mindroom.api.openai_compat.get_agent_knowledge", return_value=None),
+            patch("mindroom.teams.get_agent_knowledge", return_value=None),
             patch(
-                "mindroom.api.openai_compat.create_agent",
+                "mindroom.teams.create_agent",
                 side_effect=[_make_test_agent("GeneralAgent"), RuntimeError("boom")],
             ),
         ):
@@ -2951,7 +2952,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2982,7 +2983,7 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        assert mock_prepare.await_args.kwargs["prompt"] == "Follow-up"
+        assert mock_prepare.await_args.kwargs["message"] == "Follow-up"
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert "Start" in mock_prepare.await_args.kwargs["fallback_prompt"]
         assert "Ack" in mock_prepare.await_args.kwargs["fallback_prompt"]
@@ -2991,7 +2992,6 @@ class TestTeamCompletion:
         assert "Previous conversation in this thread:" not in prompt
         assert "user: Start" not in prompt
         assert "assistant: Ack" not in prompt
-        assert mock_team.num_history_runs == 1
 
     def test_team_streaming_prefers_persisted_history_over_thread_history(self, team_app_client: TestClient) -> None:
         """Persisted team history should suppress request-history stuffing in the streaming path too."""
@@ -3013,7 +3013,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3035,7 +3035,7 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        assert mock_prepare.await_args.kwargs["prompt"] == "Follow-up"
+        assert mock_prepare.await_args.kwargs["message"] == "Follow-up"
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert "Start" in mock_prepare.await_args.kwargs["fallback_prompt"]
         assert "Ack" in mock_prepare.await_args.kwargs["fallback_prompt"]
@@ -3061,7 +3061,7 @@ class TestTeamCompletion:
             },
         )
         with (
-            patch("mindroom.api.openai_compat.create_agent") as mock_create,
+            patch("mindroom.teams.create_agent") as mock_create,
             patch("mindroom.teams.get_model_instance"),
             patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
         ):
@@ -3077,7 +3077,7 @@ class TestTeamCompletion:
     def test_coordinate_mode_no_delegate_all(self) -> None:
         """Coordinate mode sets delegate_to_all_members=False on Team."""
         with (
-            patch("mindroom.api.openai_compat.create_agent") as mock_create,
+            patch("mindroom.teams.create_agent") as mock_create,
             patch("mindroom.teams.get_model_instance"),
             patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
         ):
@@ -3124,7 +3124,7 @@ class TestTeamCompletion:
         member.id = "general"
 
         with (
-            patch("mindroom.api.openai_compat.create_agent", return_value=member),
+            patch("mindroom.teams.create_agent", return_value=member),
             patch("mindroom.teams.get_model_instance"),
             patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
         ):
@@ -3168,7 +3168,7 @@ class TestTeamCompletion:
         member.id = "general"
 
         with (
-            patch("mindroom.api.openai_compat.create_agent", return_value=member),
+            patch("mindroom.teams.create_agent", return_value=member),
             patch("mindroom.teams.get_model_instance", return_value="openai:test-model"),
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
@@ -3205,9 +3205,9 @@ class TestTeamCompletion:
         )
         mock_knowledge = MagicMock()
         with (
-            patch("mindroom.api.openai_compat.create_agent") as mock_create,
+            patch("mindroom.teams.create_agent") as mock_create,
             patch("mindroom.teams.get_model_instance"),
-            patch("mindroom.api.openai_compat.get_agent_knowledge", return_value=mock_knowledge),
+            patch("mindroom.teams.get_agent_knowledge", return_value=mock_knowledge),
             patch("agno.team.Team.__init__", return_value=None),
         ):
             mock_create.return_value = MagicMock(name="Research")
