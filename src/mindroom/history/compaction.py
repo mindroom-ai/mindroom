@@ -885,6 +885,7 @@ def _media_payload_snapshot(media_value: object) -> object:
 
 
 def _render_message_content(message: Message) -> str:
+    """Render one replayable string form of a message body."""
     content = message.compressed_content if message.compressed_content is not None else message.content
     if isinstance(content, str):
         return content
@@ -923,13 +924,7 @@ def estimate_history_messages_tokens(messages: list[Message]) -> int:
     """Estimate the token count of materialized history messages."""
     if not messages:
         return 0
-    total_chars = 0
-    for message in messages:
-        total_chars += len(_render_message_content(message))
-        if message.tool_calls:
-            total_chars += len(stable_serialize(message.tool_calls))
-        total_chars += _estimate_message_media_chars(message)
-    return total_chars // 4
+    return sum(_estimated_message_chars(message) for message in messages) // 4
 
 
 def _select_runs_to_compact(
@@ -943,10 +938,8 @@ def _select_runs_to_compact(
 ) -> list[RunOutput | TeamRunOutput]:
     if not visible_runs:
         return []
-
     if state.force_compact_before_next_run:
         return visible_runs
-
     if available_history_budget is None:
         return []
     current_tokens = estimate_prompt_visible_history_tokens(
@@ -954,9 +947,7 @@ def _select_runs_to_compact(
         scope=scope,
         history_settings=history_settings,
     )
-    if current_tokens <= available_history_budget:
-        return []
-    return visible_runs
+    return visible_runs if current_tokens > available_history_budget else []
 
 
 def _history_messages_for_session(
@@ -965,14 +956,12 @@ def _history_messages_for_session(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    history_messages = [
-        deepcopy(message)
-        for message in _session_history_messages(
-            session=session,
-            scope=scope,
-            history_settings=history_settings,
-        )
-    ]
+    session_messages = _session_history_messages(
+        session=session,
+        scope=scope,
+        history_settings=history_settings,
+    )
+    history_messages = [deepcopy(message) for message in session_messages]
     if history_settings.max_tool_calls_from_history is not None and history_messages:
         filter_tool_calls(history_messages, history_settings.max_tool_calls_from_history)
     return history_messages
@@ -1076,8 +1065,13 @@ def runs_for_scope(
 def _current_summary_text(session: AgentSession | TeamSession) -> str | None:
     if session.summary is None:
         return None
-    summary = session.summary.summary.strip()
-    return summary or None
+    return session.summary.summary.strip() or None
+
+
+def _estimated_message_chars(message: Message) -> int:
+    content_chars = len(_render_message_content(message))
+    tool_call_chars = len(stable_serialize(message.tool_calls)) if message.tool_calls else 0
+    return content_chars + tool_call_chars + _estimate_message_media_chars(message)
 
 
 def _remove_runs_by_id(
@@ -1104,17 +1098,9 @@ def _remove_runs_by_id(
 
 
 def _estimate_message_media_chars(message: Message) -> int:
+    """Estimate serialized character cost for a message's media payloads."""
     media_chars = 0
-    for media_value in (
-        message.images,
-        message.audio,
-        message.videos,
-        message.files,
-        message.audio_output,
-        message.image_output,
-        message.video_output,
-        message.file_output,
-    ):
+    for _tag, media_value in _message_media_entries(message):
         if media_value is None:
             continue
         media_chars += len(stable_serialize(_media_payload_snapshot(media_value)))

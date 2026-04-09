@@ -1018,13 +1018,14 @@ def plan_replay_that_fits(
         max_limit=max_limit,
     )
     if fitting_limit > 0:
+        num_history_runs, num_history_messages = _history_limit_fields(limit_mode, fitting_limit)
         return ResolvedReplayPlan(
             mode="limited",
             estimated_tokens=fitting_tokens,
             add_history_to_context=True,
             add_session_summary_to_context=True,
-            num_history_runs=fitting_limit if limit_mode == "runs" else None,
-            num_history_messages=fitting_limit if limit_mode == "messages" else None,
+            num_history_runs=num_history_runs,
+            num_history_messages=num_history_messages,
             history_limit_mode=limit_mode,
             history_limit=fitting_limit,
         )
@@ -1066,13 +1067,14 @@ def _context_window_guard_limit_bounds(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> tuple[Literal["runs", "messages"], int]:
+    configured_limit = history_settings.policy.limit or 0
     if history_settings.policy.mode == "messages":
-        return "messages", history_settings.policy.limit or 0
+        return "messages", configured_limit
 
     visible_run_count = len(runs_for_scope(completed_top_level_runs(session), scope))
     if history_settings.policy.mode == "all":
         return "runs", visible_run_count
-    return "runs", min(history_settings.policy.limit or 0, visible_run_count)
+    return "runs", min(configured_limit, visible_run_count)
 
 
 def _find_fitting_history_limit_for_budget(
@@ -1096,11 +1098,10 @@ def _find_fitting_history_limit_for_budget(
         candidate_tokens = estimate_prompt_visible_history_tokens(
             session=session,
             scope=scope,
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode=limit_mode, limit=mid),
-                max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
-                system_message_role=history_settings.system_message_role,
-                skip_history_system_role=history_settings.skip_history_system_role,
+            history_settings=_history_settings_with_limit(
+                history_settings,
+                mode=limit_mode,
+                limit=mid,
             ),
         )
         if candidate_tokens <= available_history_budget:
@@ -1149,32 +1150,43 @@ def _configured_replay_plan(
     history_settings: ResolvedHistorySettings,
     estimated_tokens: int,
 ) -> ResolvedReplayPlan:
-    if history_settings.policy.mode == "messages":
-        return ResolvedReplayPlan(
-            mode="configured",
-            estimated_tokens=estimated_tokens,
-            add_history_to_context=True,
-            add_session_summary_to_context=True,
-            num_history_runs=None,
-            num_history_messages=history_settings.policy.limit,
-        )
-    if history_settings.policy.mode == "runs":
-        return ResolvedReplayPlan(
-            mode="configured",
-            estimated_tokens=estimated_tokens,
-            add_history_to_context=True,
-            add_session_summary_to_context=True,
-            num_history_runs=history_settings.policy.limit,
-            num_history_messages=None,
-        )
+    num_history_runs, num_history_messages = _history_limit_fields(
+        history_settings.policy.mode,
+        history_settings.policy.limit,
+    )
     return ResolvedReplayPlan(
         mode="configured",
         estimated_tokens=estimated_tokens,
         add_history_to_context=True,
         add_session_summary_to_context=True,
-        num_history_runs=None,
-        num_history_messages=None,
+        num_history_runs=num_history_runs,
+        num_history_messages=num_history_messages,
     )
+
+
+def _history_settings_with_limit(
+    history_settings: ResolvedHistorySettings,
+    *,
+    mode: Literal["runs", "messages"],
+    limit: int,
+) -> ResolvedHistorySettings:
+    return ResolvedHistorySettings(
+        policy=HistoryPolicy(mode=mode, limit=limit),
+        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
+        system_message_role=history_settings.system_message_role,
+        skip_history_system_role=history_settings.skip_history_system_role,
+    )
+
+
+def _history_limit_fields(
+    mode: Literal["all", "runs", "messages"],
+    limit: int | None,
+) -> tuple[int | None, int | None]:
+    if mode == "runs":
+        return limit, None
+    if mode == "messages":
+        return None, limit
+    return None, None
 
 
 def _has_effective_persisted_replay(
