@@ -763,7 +763,7 @@ def _excerpt_blocks(run: RunOutput | TeamRunOutput) -> list[_ExcerptBlock]:
     if run.metadata:
         blocks.append(_ExcerptBlock("<run_metadata>", stable_serialize(run.metadata), "</run_metadata>"))
     for message in run.messages or []:
-        content = _render_message_content(message)
+        content = render_message_content(message)
         if not content:
             continue
         blocks.append(_ExcerptBlock(_message_open_tag(message), content, "</message>"))
@@ -826,7 +826,7 @@ def _serialize_run(run: RunOutput | TeamRunOutput, index: int) -> str:
 
 
 def _serialize_message(message: Message) -> list[str]:
-    lines = [_message_open_tag(message), _escape_xml_content(_render_message_content(message)), "</message>"]
+    lines = [_message_open_tag(message), _escape_xml_content(render_message_content(message)), "</message>"]
     if message.tool_calls:
         lines.extend(["<tool_calls>", _escape_xml_content(stable_serialize(message.tool_calls)), "</tool_calls>"])
     for tag, media_value in _message_media_entries(message):
@@ -884,7 +884,8 @@ def _media_payload_snapshot(media_value: object) -> object:
     return media_value
 
 
-def _render_message_content(message: Message) -> str:
+def render_message_content(message: Message) -> str:
+    """Return one stable string representation for a replayable message body."""
     content = message.compressed_content if message.compressed_content is not None else message.content
     if isinstance(content, str):
         return content
@@ -925,10 +926,10 @@ def estimate_history_messages_tokens(messages: list[Message]) -> int:
         return 0
     total_chars = 0
     for message in messages:
-        total_chars += len(_render_message_content(message))
+        total_chars += len(render_message_content(message))
         if message.tool_calls:
             total_chars += len(stable_serialize(message.tool_calls))
-        total_chars += _estimate_message_media_chars(message)
+        total_chars += estimate_message_media_chars(message)
     return total_chars // 4
 
 
@@ -1007,7 +1008,7 @@ def _agent_session_history_messages(
     history_settings: ResolvedHistorySettings,
     limit: int | None,
 ) -> list[Message]:
-    skip_roles = _history_skip_roles(history_settings)
+    skip_roles = history_skip_roles(history_settings)
     if history_settings.policy.mode == "runs":
         return session.get_messages(agent_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
     if history_settings.policy.mode == "messages":
@@ -1022,7 +1023,7 @@ def _team_session_history_messages(
     history_settings: ResolvedHistorySettings,
     limit: int | None,
 ) -> list[Message]:
-    skip_roles = _history_skip_roles(history_settings)
+    skip_roles = history_skip_roles(history_settings)
     if history_settings.policy.mode == "runs":
         return session.get_messages(team_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
     if history_settings.policy.mode == "messages":
@@ -1030,7 +1031,7 @@ def _team_session_history_messages(
     return session.get_messages(team_id=scope_id, skip_roles=skip_roles)
 
 
-def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str] | None:
+def history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str] | None:
     """Return the effective Agno skip_roles filter for persisted history replay."""
     if not history_settings.skip_history_system_role:
         return None
@@ -1103,7 +1104,8 @@ def _remove_runs_by_id(
     return [run for run in runs if not isinstance(run.run_id, str) or run.run_id not in remove_ids]
 
 
-def _estimate_message_media_chars(message: Message) -> int:
+def estimate_message_media_chars(message: Message) -> int:
+    """Estimate serialized character cost for one message's media payloads."""
     media_chars = 0
     for media_value in (
         message.images,

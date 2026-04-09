@@ -62,6 +62,29 @@ def test_parse_attachment_ids_from_thread_history_dedupes_in_order() -> None:
     assert parse_attachment_ids_from_thread_history(thread_history) == ["att_a", "att_b", "att_c"]
 
 
+def test_merge_attachment_ids_avoids_quadratic_membership_checks() -> None:
+    """Merging many IDs should stay near linear in equality checks."""
+
+    class _TrackedAttachmentId(str):
+        __slots__ = ()
+        comparison_count = 0
+
+        def __eq__(self, other: object) -> bool:
+            type(self).comparison_count += 1
+            return super().__eq__(other)
+
+        __hash__ = str.__hash__
+
+    _TrackedAttachmentId.comparison_count = 0
+    first_batch = [_TrackedAttachmentId(f"att_{index}") for index in range(200)]
+    second_batch = [_TrackedAttachmentId(f"att_{index}") for index in range(200)]
+
+    merged = merge_attachment_ids(first_batch, second_batch)
+
+    assert merged == [f"att_{index}" for index in range(200)]
+    assert _TrackedAttachmentId.comparison_count < 600
+
+
 def test_register_resolve_and_convert_attachment(tmp_path: Path) -> None:
     """Registered attachments should resolve and convert to Agno media objects."""
     file_path = tmp_path / "payload.zip"
