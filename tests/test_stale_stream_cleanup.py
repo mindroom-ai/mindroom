@@ -733,6 +733,59 @@ async def test_cleanup_uses_exact_replied_to_requester_not_latest_thread_speaker
 
 
 @pytest.mark.asyncio
+async def test_cleanup_uses_latest_thread_event_for_threaded_edit_fallback(tmp_path: Path) -> None:
+    """Cleanup edits should target the latest event in the thread for MSC3440 fallback semantics."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Start here",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$original",
+            body="Needs cleanup",
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+        _make_message_event(
+            event_id="$latest-edit",
+            body="* Needs cleanup",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to={"rel_type": "m.replace", "event_id": "$original"},
+            new_content={"body": "Needs cleanup", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
+        ),
+        _make_message_event(
+            event_id="$later-user-message",
+            body="Later thread message",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS - 1_000),
+            relates_to=_thread_reply_relation("$thread-root", "$original"),
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.build_threaded_edit_content",
+            new=AsyncMock(return_value={"body": "cleanup", "msgtype": "m.text"}),
+        ) as mock_build,
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.edit_message",
+            new=AsyncMock(return_value="$edit"),
+        ),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert len(interrupted) == 1
+    assert mock_build.await_args.kwargs["latest_thread_event_id"] == "$later-user-message"
+
+
+@pytest.mark.asyncio
 async def test_cleanup_uses_scanned_history_when_edited_bot_message_lacks_visible_reply_target(tmp_path: Path) -> None:
     """Edited bot messages should recover requester from scanned history before any API fetch."""
     config = _make_config(tmp_path)

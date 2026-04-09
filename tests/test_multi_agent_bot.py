@@ -747,8 +747,8 @@ class TestAgentBot:
         assert mock_login.called
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         assert (
-            mock_client.add_event_callback.call_count == 11
-        )  # invite, message, reaction, audio, image/file/video callbacks
+            mock_client.add_event_callback.call_count == 12
+        )  # invite, message, redaction, reaction, audio, image/file/video callbacks
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
@@ -5318,15 +5318,18 @@ class TestAgentBot:
                 "type": "m.room.message",
             },
         )
-        snapshot = [
-            {
-                "event_id": "$thread_root",
-                "sender": "@user:localhost",
-                "body": "Root",
-                "timestamp": 1234567889,
-                "content": {"body": "Root"},
-            },
-        ]
+        snapshot = ThreadHistoryResult(
+            [
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="Root",
+                    event_id="$thread_root",
+                    timestamp=1234567889,
+                    content={"body": "Root"},
+                ),
+            ],
+            is_full_history=False,
+        )
 
         with (
             patch("mindroom.bot.fetch_thread_snapshot", new=AsyncMock(return_value=snapshot)) as mock_snapshot,
@@ -5336,7 +5339,7 @@ class TestAgentBot:
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
-        assert context.thread_history == snapshot
+        assert [message.event_id for message in context.thread_history] == ["$thread_root"]
         assert context.requires_full_thread_history is True
         mock_snapshot.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
         mock_history.assert_not_awaited()
