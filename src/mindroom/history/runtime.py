@@ -23,12 +23,9 @@ from mindroom.history.compaction import (
     compact_scope_history,
     completed_top_level_runs,
     estimate_agent_static_tokens,
-    estimate_message_media_chars,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
     estimate_team_static_tokens,
-    history_skip_roles,
-    render_message_content,
     runs_for_scope,
 )
 from mindroom.history.policy import (
@@ -53,7 +50,7 @@ from mindroom.history.types import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.token_budget import estimate_text_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -61,9 +58,6 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
     from agno.models.base import Model
-    from agno.models.message import Message
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
     from agno.team import Team
 
     from mindroom.config.main import Config
@@ -1024,13 +1018,14 @@ def plan_replay_that_fits(
         max_limit=max_limit,
     )
     if fitting_limit > 0:
+        num_history_runs, num_history_messages = _history_limit_fields(limit_mode, fitting_limit)
         return ResolvedReplayPlan(
             mode="limited",
             estimated_tokens=fitting_tokens,
             add_history_to_context=True,
             add_session_summary_to_context=True,
-            num_history_runs=fitting_limit if limit_mode == "runs" else None,
-            num_history_messages=fitting_limit if limit_mode == "messages" else None,
+            num_history_runs=num_history_runs,
+            num_history_messages=num_history_messages,
             history_limit_mode=limit_mode,
             history_limit=fitting_limit,
         )
@@ -1072,13 +1067,14 @@ def _context_window_guard_limit_bounds(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> tuple[Literal["runs", "messages"], int]:
+    configured_limit = history_settings.policy.limit or 0
     if history_settings.policy.mode == "messages":
-        return "messages", history_settings.policy.limit or 0
+        return "messages", configured_limit
 
     visible_run_count = len(runs_for_scope(completed_top_level_runs(session), scope))
     if history_settings.policy.mode == "all":
         return "runs", visible_run_count
-    return "runs", min(history_settings.policy.limit or 0, visible_run_count)
+    return "runs", min(configured_limit, visible_run_count)
 
 
 def _find_fitting_history_limit_for_budget(
@@ -1093,20 +1089,21 @@ def _find_fitting_history_limit_for_budget(
     if max_limit <= 0 or available_history_budget <= 0:
         return 0, 0
 
-    estimated_tokens_by_limit = _estimated_history_tokens_by_limit(
-        session=session,
-        scope=scope,
-        history_settings=history_settings,
-        limit_mode=limit_mode,
-        max_limit=max_limit,
-    )
     low = 1
     high = max_limit
     best = 0
     best_tokens = 0
     while low <= high:
         mid = (low + high) // 2
-        candidate_tokens = estimated_tokens_by_limit[mid]
+        candidate_tokens = estimate_prompt_visible_history_tokens(
+            session=session,
+            scope=scope,
+            history_settings=_history_settings_with_limit(
+                history_settings,
+                mode=limit_mode,
+                limit=mid,
+            ),
+        )
         if candidate_tokens <= available_history_budget:
             best = mid
             best_tokens = candidate_tokens
@@ -1114,266 +1111,6 @@ def _find_fitting_history_limit_for_budget(
         else:
             high = mid - 1
     return best, best_tokens
-
-
-def _estimated_history_tokens_by_limit(
-    *,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    history_settings: ResolvedHistorySettings,
-    limit_mode: Literal["runs", "messages"],
-    max_limit: int,
-) -> list[int]:
-    summary_tokens = estimate_session_summary_tokens(session.summary.summary if session.summary is not None else None)
-    if max_limit <= 0:
-        return [summary_tokens]
-
-    visible_runs = runs_for_scope(completed_top_level_runs(session), scope)
-    skip_roles = history_skip_roles(history_settings)
-    if limit_mode == "messages":
-        return _message_limit_history_tokens(
-            visible_runs=visible_runs,
-            skip_roles=skip_roles,
-            summary_tokens=summary_tokens,
-            max_limit=max_limit,
-            max_tool_calls=history_settings.max_tool_calls_from_history,
-        )
-    return _run_limit_history_tokens(
-        visible_runs=visible_runs,
-        skip_roles=skip_roles,
-        summary_tokens=summary_tokens,
-        max_limit=max_limit,
-        max_tool_calls=history_settings.max_tool_calls_from_history,
-    )
-
-
-def _message_limit_history_tokens(
-    *,
-    visible_runs: list[RunOutput | TeamRunOutput],
-    skip_roles: list[str] | None,
-    summary_tokens: int,
-    max_limit: int,
-    max_tool_calls: int | None,
-) -> list[int]:
-    non_system_messages: list[Message] = []
-    system_message_chars: int | None = None
-    for run in visible_runs:
-        run_non_system_messages, run_system_message_chars = _split_run_history_messages(
-            run=run,
-            skip_roles=skip_roles,
-        )
-        if system_message_chars is None:
-            system_message_chars = run_system_message_chars
-        non_system_messages.extend(run_non_system_messages)
-
-    history_chars = _history_char_caches(
-        messages=non_system_messages,
-        max_tool_calls=max_tool_calls,
-    )
-    total_non_system_messages = len(non_system_messages)
-    estimated_tokens = [summary_tokens] * (max_limit + 1)
-
-    if system_message_chars is not None:
-        for limit in range(1, max_limit + 1):
-            start_index = 0 if limit == 1 else max(0, total_non_system_messages - (limit - 1))
-            candidate_history_chars = system_message_chars + _suffix_history_chars(history_chars, start_index)
-            estimated_tokens[limit] = summary_tokens + candidate_history_chars // 4
-        return estimated_tokens
-
-    next_non_tool_indexes = _next_non_tool_indexes(non_system_messages)
-    for limit in range(1, max_limit + 1):
-        start_index = next_non_tool_indexes[max(0, total_non_system_messages - limit)]
-        candidate_history_chars = _suffix_history_chars(history_chars, start_index)
-        estimated_tokens[limit] = summary_tokens + candidate_history_chars // 4
-
-    return estimated_tokens
-
-
-def _run_limit_history_tokens(
-    *,
-    visible_runs: list[RunOutput | TeamRunOutput],
-    skip_roles: list[str] | None,
-    summary_tokens: int,
-    max_limit: int,
-    max_tool_calls: int | None,
-) -> list[int]:
-    selected_runs = visible_runs[-max_limit:]
-    non_system_messages: list[Message] = []
-    run_start_indexes = [0]
-    first_system_message_chars_by_run: list[int | None] = []
-
-    for run in selected_runs:
-        run_non_system_messages, run_system_message_chars = _split_run_history_messages(
-            run=run,
-            skip_roles=skip_roles,
-        )
-        non_system_messages.extend(run_non_system_messages)
-        run_start_indexes.append(len(non_system_messages))
-        first_system_message_chars_by_run.append(run_system_message_chars)
-
-    history_chars = _history_char_caches(
-        messages=non_system_messages,
-        max_tool_calls=max_tool_calls,
-    )
-    first_system_message_chars_by_suffix = _first_system_message_chars_by_suffix(first_system_message_chars_by_run)
-    estimated_tokens = [summary_tokens] * (max_limit + 1)
-
-    for limit in range(1, max_limit + 1):
-        suffix_run_start = len(selected_runs) - limit
-        start_index = run_start_indexes[suffix_run_start]
-        candidate_history_chars = first_system_message_chars_by_suffix[suffix_run_start] + _suffix_history_chars(
-            history_chars,
-            start_index,
-        )
-        estimated_tokens[limit] = summary_tokens + candidate_history_chars // 4
-
-    return estimated_tokens
-
-
-@dataclass(frozen=True)
-class _HistoryCharCaches:
-    full_suffix_chars: list[int]
-    filtered_suffix_chars: list[int]
-    tool_message_suffix_counts: list[int]
-    max_tool_calls: int | None
-
-
-def _history_char_caches(
-    *,
-    messages: list[Message],
-    max_tool_calls: int | None,
-) -> _HistoryCharCaches:
-    message_count = len(messages)
-    full_suffix_chars = [0] * (message_count + 1)
-    tool_message_suffix_counts = [0] * (message_count + 1)
-
-    for index in range(message_count - 1, -1, -1):
-        full_suffix_chars[index] = full_suffix_chars[index + 1] + _full_history_message_chars(messages[index])
-        tool_message_suffix_counts[index] = tool_message_suffix_counts[index + 1] + int(messages[index].role == "tool")
-
-    if max_tool_calls is None:
-        return _HistoryCharCaches(
-            full_suffix_chars=full_suffix_chars,
-            filtered_suffix_chars=full_suffix_chars,
-            tool_message_suffix_counts=tool_message_suffix_counts,
-            max_tool_calls=None,
-        )
-
-    filtered_suffix_chars = [0] * (message_count + 1)
-    kept_tool_call_ids: set[str] = set()
-    kept_tool_call_ids_in_order: list[str] = []
-
-    for index in range(message_count - 1, -1, -1):
-        # Walking backward keeps the most recent tool call IDs for the current
-        # suffix, matching filter_tool_calls() for every tail slice.
-        filtered_suffix_chars[index] = filtered_suffix_chars[index + 1] + _filtered_history_message_chars(
-            message=messages[index],
-            kept_tool_call_ids=kept_tool_call_ids,
-            kept_tool_call_ids_in_order=kept_tool_call_ids_in_order,
-            max_tool_calls=max_tool_calls,
-        )
-
-    return _HistoryCharCaches(
-        full_suffix_chars=full_suffix_chars,
-        filtered_suffix_chars=filtered_suffix_chars,
-        tool_message_suffix_counts=tool_message_suffix_counts,
-        max_tool_calls=max_tool_calls,
-    )
-
-
-def _suffix_history_chars(history_chars: _HistoryCharCaches, start_index: int) -> int:
-    if history_chars.max_tool_calls is None:
-        return history_chars.full_suffix_chars[start_index]
-    if history_chars.tool_message_suffix_counts[start_index] <= history_chars.max_tool_calls:
-        return history_chars.full_suffix_chars[start_index]
-    return history_chars.filtered_suffix_chars[start_index]
-
-
-def _split_run_history_messages(
-    *,
-    run: RunOutput | TeamRunOutput,
-    skip_roles: list[str] | None,
-) -> tuple[list[Message], int | None]:
-    non_system_messages: list[Message] = []
-    first_system_message_chars: int | None = None
-
-    for message in run.messages or []:
-        if message.from_history:
-            continue
-        if skip_roles and message.role in skip_roles:
-            continue
-        if message.role == "system":
-            if first_system_message_chars is None:
-                first_system_message_chars = _full_history_message_chars(message)
-            continue
-        non_system_messages.append(message)
-
-    return non_system_messages, first_system_message_chars
-
-
-def _first_system_message_chars_by_suffix(system_message_chars_by_run: list[int | None]) -> list[int]:
-    first_system_message_chars = [0] * (len(system_message_chars_by_run) + 1)
-    current_first_system_chars = 0
-
-    for index in range(len(system_message_chars_by_run) - 1, -1, -1):
-        run_system_message_chars = system_message_chars_by_run[index]
-        if run_system_message_chars is not None:
-            current_first_system_chars = run_system_message_chars
-        first_system_message_chars[index] = current_first_system_chars
-
-    return first_system_message_chars
-
-
-def _next_non_tool_indexes(messages: list[Message]) -> list[int]:
-    next_indexes = [len(messages)] * (len(messages) + 1)
-    next_non_tool_index = len(messages)
-
-    for index in range(len(messages) - 1, -1, -1):
-        if messages[index].role != "tool":
-            next_non_tool_index = index
-        next_indexes[index] = next_non_tool_index
-
-    return next_indexes
-
-
-def _full_history_message_chars(message: Message) -> int:
-    base_chars = _message_base_chars(message)
-    if not message.tool_calls:
-        return base_chars
-    return base_chars + len(stable_serialize(message.tool_calls))
-
-
-def _filtered_history_message_chars(
-    *,
-    message: Message,
-    kept_tool_call_ids: set[str],
-    kept_tool_call_ids_in_order: list[str],
-    max_tool_calls: int,
-) -> int:
-    if message.role == "tool":
-        tool_call_id = message.tool_call_id
-        if isinstance(tool_call_id, str) and tool_call_id:
-            if len(kept_tool_call_ids_in_order) < max_tool_calls:
-                kept_tool_call_ids_in_order.append(tool_call_id)
-                kept_tool_call_ids.add(tool_call_id)
-            if tool_call_id in kept_tool_call_ids:
-                return _message_base_chars(message)
-        return 0
-
-    base_chars = _message_base_chars(message)
-    if message.role != "assistant" or not message.tool_calls:
-        return base_chars
-
-    selected_tool_calls = [tool_call for tool_call in message.tool_calls if tool_call.get("id") in kept_tool_call_ids]
-    if selected_tool_calls:
-        return base_chars + len(stable_serialize(selected_tool_calls))
-    if message.content:
-        return base_chars
-    return 0
-
-
-def _message_base_chars(message: Message) -> int:
-    return len(render_message_content(message)) + estimate_message_media_chars(message)
 
 
 def _log_replay_plan(
@@ -1413,32 +1150,43 @@ def _configured_replay_plan(
     history_settings: ResolvedHistorySettings,
     estimated_tokens: int,
 ) -> ResolvedReplayPlan:
-    if history_settings.policy.mode == "messages":
-        return ResolvedReplayPlan(
-            mode="configured",
-            estimated_tokens=estimated_tokens,
-            add_history_to_context=True,
-            add_session_summary_to_context=True,
-            num_history_runs=None,
-            num_history_messages=history_settings.policy.limit,
-        )
-    if history_settings.policy.mode == "runs":
-        return ResolvedReplayPlan(
-            mode="configured",
-            estimated_tokens=estimated_tokens,
-            add_history_to_context=True,
-            add_session_summary_to_context=True,
-            num_history_runs=history_settings.policy.limit,
-            num_history_messages=None,
-        )
+    num_history_runs, num_history_messages = _history_limit_fields(
+        history_settings.policy.mode,
+        history_settings.policy.limit,
+    )
     return ResolvedReplayPlan(
         mode="configured",
         estimated_tokens=estimated_tokens,
         add_history_to_context=True,
         add_session_summary_to_context=True,
-        num_history_runs=None,
-        num_history_messages=None,
+        num_history_runs=num_history_runs,
+        num_history_messages=num_history_messages,
     )
+
+
+def _history_settings_with_limit(
+    history_settings: ResolvedHistorySettings,
+    *,
+    mode: Literal["runs", "messages"],
+    limit: int,
+) -> ResolvedHistorySettings:
+    return ResolvedHistorySettings(
+        policy=HistoryPolicy(mode=mode, limit=limit),
+        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
+        system_message_role=history_settings.system_message_role,
+        skip_history_system_role=history_settings.skip_history_system_role,
+    )
+
+
+def _history_limit_fields(
+    mode: Literal["all", "runs", "messages"],
+    limit: int | None,
+) -> tuple[int | None, int | None]:
+    if mode == "runs":
+        return limit, None
+    if mode == "messages":
+        return None, limit
+    return None, None
 
 
 def _has_effective_persisted_replay(

@@ -7,10 +7,9 @@ correct thread.
 
 from __future__ import annotations
 
-import asyncio
 from collections import OrderedDict
 from collections.abc import Callable, Coroutine, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -125,19 +124,19 @@ async def _history_message_from_event_source(
     from mindroom.matrix.client import ResolvedVisibleMessage  # noqa: PLC0415
 
     resolved_source = await resolve_event_source_content(event_source, client) if hydrate_sidecars else event_source
-    content = resolved_source.get("content", {})
+    content = resolved_source.get("content")
+    content_dict = content if isinstance(content, dict) else {}
     event_info = EventInfo.from_event(resolved_source)
     visible_fallback_body = fallback_body
-    if isinstance(content, dict):
-        raw_body = content.get("body")
-        if isinstance(raw_body, str):
-            visible_fallback_body = raw_body
+    raw_body = content_dict.get("body")
+    if isinstance(raw_body, str):
+        visible_fallback_body = raw_body
     return ResolvedVisibleMessage.synthetic(
         sender=sender,
         body=visible_body_from_event_source(resolved_source, visible_fallback_body),
         timestamp=timestamp,
         event_id=event_id,
-        content=content if isinstance(content, dict) else {},
+        content=content_dict,
         thread_id=event_info.thread_id,
     )
 
@@ -181,27 +180,6 @@ async def _hydrate_cached_node_message(
     node.content_hydrated = True
 
 
-async def _node_to_history_message(
-    node: _ReplyChainNode,
-    client: nio.AsyncClient,
-) -> ResolvedVisibleMessage:
-    """Convert one cached reply-chain node into a visible history message."""
-    await _hydrate_cached_node_message(node, client)
-    return node.message
-
-
-async def _materialize_chain_history(
-    chain_nodes: Sequence[_ReplyChainNode],
-    content_client: nio.AsyncClient,
-) -> list[ResolvedVisibleMessage]:
-    """Convert cached reply-chain nodes into visible history messages."""
-    return list(
-        await asyncio.gather(
-            *(_node_to_history_message(node, content_client) for node in chain_nodes),
-        ),
-    )
-
-
 def _history_message_event_id(message: _HistoryMessage) -> str | None:
     """Return the event ID for one history message."""
     return message.event_id
@@ -239,9 +217,12 @@ def _unique_history_event_ids(messages: Sequence[_HistoryMessage]) -> list[str]:
 
 def _history_messages_by_event_id(messages: Sequence[_HistoryMessage]) -> dict[str, _HistoryMessage]:
     """Index history messages by event ID."""
-    return {
-        event_id: message for message in messages if isinstance((event_id := _history_message_event_id(message)), str)
-    }
+    messages_by_event_id: dict[str, _HistoryMessage] = {}
+    for message in messages:
+        event_id = _history_message_event_id(message)
+        if isinstance(event_id, str):
+            messages_by_event_id[event_id] = message
+    return messages_by_event_id
 
 
 def _shortest_common_supersequence_ids(thread_ids: list[str], chain_ids: list[str]) -> list[str]:
@@ -300,6 +281,15 @@ def _merge_thread_and_chain_history(
     chain_messages = _history_messages_by_event_id(chain_history)
     merged_ids = _shortest_common_supersequence_ids(thread_ids, chain_ids)
     return [thread_messages.get(event_id) or chain_messages[event_id] for event_id in merged_ids]
+
+
+def _merged_thread_history(
+    thread_history: Sequence[_HistoryMessage],
+    chain_history: Sequence[_HistoryMessage],
+) -> list[_HistoryMessage]:
+    if not chain_history:
+        return list(thread_history)
+    return _merge_thread_and_chain_history(thread_history, chain_history)
 
 
 # ---------------------------------------------------------------------------
@@ -402,14 +392,7 @@ async def _resolve_direct_thread_root(
     caches.nodes.put(
         room_id,
         event_id,
-        _ReplyChainNode(
-            message=node.message,
-            parent_event_id=node.parent_event_id,
-            thread_root_id=event_id,
-            has_relations=node.has_relations,
-            event_source=node.event_source,
-            content_hydrated=node.content_hydrated,
-        ),
+        replace(node, thread_root_id=event_id),
     )
     _cache_roots(caches, room_id, visited_event_ids, event_id, points_to_thread=True)
     return (
@@ -590,6 +573,20 @@ async def _resolve_reply_chain(
 # ---------------------------------------------------------------------------
 
 
+def _thread_root_id_from_event_info(event_info: EventInfo) -> str | None:
+    if event_info.thread_id is not None:
+        return event_info.thread_id
+    if event_info.is_edit:
+        # Edit events use top-level m.replace, but thread relation may still
+        # exist in m.new_content for thread edits.
+        return event_info.thread_id_from_edit
+    return None
+
+
+def _reply_chain_seed(event_info: EventInfo) -> str | None:
+    return event_info.original_event_id if event_info.is_edit else event_info.reply_to_event_id
+
+
 async def derive_conversation_context(
     client: nio.AsyncClient,
     room_id: str,
@@ -601,16 +598,12 @@ async def derive_conversation_context(
     event_cache: EventCache | None = None,
 ) -> tuple[bool, str | None, list[_HistoryMessage]]:
     """Derive conversation context from threads or reply chains."""
-    thread_root_id = event_info.thread_id
-    if thread_root_id is None and event_info.is_edit:
-        # Edit events use top-level m.replace, but thread relation may still
-        # exist in m.new_content for thread edits.
-        thread_root_id = event_info.thread_id_from_edit
+    thread_root_id = _thread_root_id_from_event_info(event_info)
     if thread_root_id is not None:
         thread_history = await fetch_history(client, room_id, thread_root_id)
         return True, thread_root_id, list(thread_history)
 
-    reply_chain_seed = event_info.original_event_id if event_info.is_edit else event_info.reply_to_event_id
+    reply_chain_seed = _reply_chain_seed(event_info)
     if not reply_chain_seed:
         return False, None, []
 
@@ -635,9 +628,7 @@ async def derive_conversation_context(
             return True, context_root_id, list(chain_history)
 
         thread_history = await fetch_history(client, room_id, context_root_id)
-        if chain_history:
-            thread_history = await asyncio.to_thread(_merge_thread_and_chain_history, thread_history, chain_history)
-        return True, context_root_id, list(thread_history)
+        return True, context_root_id, _merged_thread_history(thread_history, chain_history)
 
     # Policy choice: reply-only chains are still treated as one conversation
     # context so responder selection and memory use a stable root.
@@ -660,9 +651,7 @@ async def derive_conversation_target(
         Tuple of (is_thread, thread_id, thread_history, requires_full_thread_history)
 
     """
-    thread_root_id = event_info.thread_id
-    if thread_root_id is None and event_info.is_edit:
-        thread_root_id = event_info.thread_id_from_edit
+    thread_root_id = _thread_root_id_from_event_info(event_info)
     if thread_root_id is not None:
         thread_history = await fetch_snapshot(client, room_id, thread_root_id)
         return (
@@ -672,7 +661,7 @@ async def derive_conversation_target(
             not _thread_history_is_full(thread_history, default=False),
         )
 
-    reply_chain_seed = event_info.original_event_id if event_info.is_edit else event_info.reply_to_event_id
+    reply_chain_seed = _reply_chain_seed(event_info)
     if not reply_chain_seed:
         return False, None, [], False
 
@@ -698,8 +687,11 @@ async def derive_conversation_target(
 
         thread_history = await fetch_snapshot(client, room_id, context_root_id)
         requires_full_thread_history = not _thread_history_is_full(thread_history, default=False)
-        if chain_history:
-            thread_history = await asyncio.to_thread(_merge_thread_and_chain_history, thread_history, chain_history)
-        return True, context_root_id, list(thread_history), requires_full_thread_history
+        return (
+            True,
+            context_root_id,
+            _merged_thread_history(thread_history, chain_history),
+            requires_full_thread_history,
+        )
 
     return True, context_root_id, list(chain_history), False
