@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
+from mindroom.history.types import HistoryScope
+from mindroom.message_target import MessageTarget
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -36,6 +38,9 @@ def _record_handled_turn(
     *,
     response_event_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
+    response_owner: str | None = None,
+    history_scope: HistoryScope | None = None,
+    conversation_target: MessageTarget | None = None,
 ) -> None:
     """Record one normalized handled turn through the typed carrier."""
     tracker.record_handled_turn(
@@ -43,6 +48,9 @@ def _record_handled_turn(
             source_event_ids,
             response_event_id=response_event_id,
             source_event_prompts=source_event_prompts,
+            response_owner=response_owner,
+            history_scope=history_scope,
+            conversation_target=conversation_target,
         ),
     )
 
@@ -81,6 +89,27 @@ def test_handled_turn_state_normalizes_ids_and_prompt_map() -> None:
     assert handled_turn.is_coalesced
 
 
+def test_handled_turn_state_preserves_response_context() -> None:
+    """The handled-turn carrier should keep response owner, history scope, and target intact."""
+    conversation_target = MessageTarget.resolve(
+        room_id="!room:example.com",
+        thread_id="$thread:example.com",
+        reply_to_event_id="$reply:example.com",
+    )
+    history_scope = HistoryScope(kind="team", scope_id="team_scope")
+
+    handled_turn = HandledTurnState.create(
+        ["$event:example.com"],
+        response_owner="test_agent",
+        history_scope=history_scope,
+        conversation_target=conversation_target,
+    )
+
+    assert handled_turn.response_owner == "test_agent"
+    assert handled_turn.history_scope == history_scope
+    assert handled_turn.conversation_target == conversation_target
+
+
 def test_record_outcome_marks_single_source_event(temp_dir: Path) -> None:
     """A single-source outcome should mark the event terminally handled."""
     tracker = HandledTurnLedger("test_mark", base_path=temp_dir)
@@ -105,12 +134,21 @@ def test_record_outcome_marks_single_source_event(temp_dir: Path) -> None:
 def test_record_handled_turn_tracks_typed_carrier(temp_dir: Path) -> None:
     """The ledger should record the typed handled-turn carrier without losing prompt metadata."""
     tracker = HandledTurnLedger("test_state_record", base_path=temp_dir)
+    history_scope = HistoryScope(kind="agent", scope_id="test_state_record")
+    conversation_target = MessageTarget.resolve(
+        room_id="!room:example.com",
+        thread_id="$thread:example.com",
+        reply_to_event_id="$reply:example.com",
+    )
 
     tracker.record_handled_turn(
         HandledTurnState.create(
             ["$first", "$second"],
             response_event_id="$response",
             source_event_prompts={"$first": "first prompt", "$second": "second prompt"},
+            response_owner="test_state_record",
+            history_scope=history_scope,
+            conversation_target=conversation_target,
         ),
     )
 
@@ -122,6 +160,9 @@ def test_record_handled_turn_tracks_typed_carrier(temp_dir: Path) -> None:
         "$first": "first prompt",
         "$second": "second prompt",
     }
+    assert turn_record.response_owner == "test_state_record"
+    assert turn_record.history_scope == history_scope
+    assert turn_record.conversation_target == conversation_target
 
 
 def test_record_outcome_tracks_response_event_id(temp_dir: Path) -> None:
@@ -327,6 +368,40 @@ def test_persistence_round_trip(temp_dir: Path) -> None:
         "$first": "first",
         "$second": "second",
     }
+
+
+def test_persistence_round_trip_preserves_response_context(temp_dir: Path) -> None:
+    """Reloaded ledgers should preserve response owner, history scope, and target metadata."""
+    tracker1 = HandledTurnLedger("test_persist_context", base_path=temp_dir)
+    history_scope = HistoryScope(kind="team", scope_id="team_scope")
+    conversation_target = MessageTarget.resolve(
+        room_id="!room:example.com",
+        thread_id="$thread:example.com",
+        reply_to_event_id="$reply:example.com",
+    )
+    _record_handled_turn(
+        tracker1,
+        ["$original", "$reply"],
+        response_event_id="$response",
+        source_event_prompts={"$original": "original", "$reply": "reply"},
+        response_owner="test_team",
+        history_scope=history_scope,
+        conversation_target=conversation_target,
+    )
+
+    tracker2 = HandledTurnLedger("test_persist_context", base_path=temp_dir)
+
+    turn_record = tracker2.get_turn_record("$reply")
+    assert turn_record is not None
+    assert turn_record.response_event_id == "$response"
+    assert turn_record.source_event_ids == ("$original", "$reply")
+    assert turn_record.source_event_prompts == {
+        "$original": "original",
+        "$reply": "reply",
+    }
+    assert turn_record.response_owner == "test_team"
+    assert turn_record.history_scope == history_scope
+    assert turn_record.conversation_target == conversation_target
 
 
 def test_loads_legacy_response_tracker_shape(temp_dir: Path) -> None:

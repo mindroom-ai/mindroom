@@ -12,11 +12,30 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
+from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
+from mindroom.message_target import MessageTarget
 
 logger = get_logger(__name__)
+
+
+class _SerializedHistoryScope(TypedDict):
+    """JSON-safe persisted history-scope identity."""
+
+    kind: Literal["agent", "team"]
+    scope_id: str
+
+
+class _SerializedConversationTarget(TypedDict):
+    """JSON-safe persisted conversation target."""
+
+    room_id: str
+    thread_id: str | None
+    resolved_thread_id: str | None
+    reply_to_event_id: str | None
+    session_id: str
 
 
 class _SerializedHandledTurnRecord(TypedDict):
@@ -28,6 +47,9 @@ class _SerializedHandledTurnRecord(TypedDict):
     visible_echo_event_id: NotRequired[str | None]
     source_event_ids: NotRequired[list[str]]
     source_event_prompts: NotRequired[dict[str, str] | None]
+    response_owner: NotRequired[str | None]
+    history_scope: NotRequired[_SerializedHistoryScope | None]
+    conversation_target: NotRequired[_SerializedConversationTarget | None]
 
 
 type _SerializedHandledTurnRecordLike = _SerializedHandledTurnRecord | dict[str, Any]
@@ -41,6 +63,9 @@ class HandledTurnState:
     response_event_id: str | None = None
     visible_echo_event_id: str | None = None
     source_event_prompts: dict[str, str] | None = None
+    response_owner: str | None = None
+    history_scope: HistoryScope | None = None
+    conversation_target: MessageTarget | None = None
 
     @classmethod
     def create(
@@ -50,6 +75,9 @@ class HandledTurnState:
         response_event_id: str | None = None,
         visible_echo_event_id: str | None = None,
         source_event_prompts: typing.Mapping[str, str] | None = None,
+        response_owner: str | None = None,
+        history_scope: HistoryScope | None = None,
+        conversation_target: MessageTarget | None = None,
     ) -> HandledTurnState:
         """Normalize one handled-turn state carrier."""
         normalized_source_event_ids = _normalize_source_event_ids(source_event_ids)
@@ -61,6 +89,9 @@ class HandledTurnState:
                 normalized_source_event_ids,
                 source_event_prompts,
             ),
+            response_owner=_normalized_response_owner(response_owner),
+            history_scope=_normalized_history_scope(history_scope),
+            conversation_target=_normalized_conversation_target(conversation_target),
         )
 
     @classmethod
@@ -71,6 +102,9 @@ class HandledTurnState:
         response_event_id: str | None = None,
         visible_echo_event_id: str | None = None,
         source_event_prompts: typing.Mapping[str, str] | None = None,
+        response_owner: str | None = None,
+        history_scope: HistoryScope | None = None,
+        conversation_target: MessageTarget | None = None,
     ) -> HandledTurnState:
         """Build handled-turn state for one source event."""
         return cls.create(
@@ -78,6 +112,9 @@ class HandledTurnState:
             response_event_id=response_event_id,
             visible_echo_event_id=visible_echo_event_id,
             source_event_prompts=source_event_prompts,
+            response_owner=response_owner,
+            history_scope=history_scope,
+            conversation_target=conversation_target,
         )
 
     @property
@@ -97,6 +134,9 @@ class HandledTurnState:
             response_event_id=response_event_id,
             visible_echo_event_id=self.visible_echo_event_id,
             source_event_prompts=self.source_event_prompts,
+            response_owner=self.response_owner,
+            history_scope=self.history_scope,
+            conversation_target=self.conversation_target,
         )
 
     def with_visible_echo_event_id(self, visible_echo_event_id: str | None) -> HandledTurnState:
@@ -106,6 +146,9 @@ class HandledTurnState:
             response_event_id=self.response_event_id,
             visible_echo_event_id=visible_echo_event_id,
             source_event_prompts=self.source_event_prompts,
+            response_owner=self.response_owner,
+            history_scope=self.history_scope,
+            conversation_target=self.conversation_target,
         )
 
     def with_source_event_prompts(
@@ -118,6 +161,27 @@ class HandledTurnState:
             response_event_id=self.response_event_id,
             visible_echo_event_id=self.visible_echo_event_id,
             source_event_prompts=source_event_prompts,
+            response_owner=self.response_owner,
+            history_scope=self.history_scope,
+            conversation_target=self.conversation_target,
+        )
+
+    def with_response_context(
+        self,
+        *,
+        response_owner: str | None,
+        history_scope: HistoryScope | None,
+        conversation_target: MessageTarget | None,
+    ) -> HandledTurnState:
+        """Return a copy with persisted regeneration context attached."""
+        return HandledTurnState.create(
+            self.source_event_ids,
+            response_event_id=self.response_event_id,
+            visible_echo_event_id=self.visible_echo_event_id,
+            source_event_prompts=self.source_event_prompts,
+            response_owner=response_owner,
+            history_scope=history_scope,
+            conversation_target=conversation_target,
         )
 
 
@@ -131,6 +195,9 @@ class HandledTurnRecord:
     completed: bool = True
     visible_echo_event_id: str | None = None
     source_event_prompts: dict[str, str] | None = None
+    response_owner: str | None = None
+    history_scope: HistoryScope | None = None
+    conversation_target: MessageTarget | None = None
     timestamp: float = 0.0
 
     @property
@@ -174,6 +241,18 @@ class HandledTurnLedger:
                 normalized_source_event_ids,
                 handled_turn.source_event_prompts,
             )
+            response_owner = self._normalized_response_owner(
+                normalized_source_event_ids,
+                handled_turn.response_owner,
+            )
+            history_scope = self._normalized_history_scope(
+                normalized_source_event_ids,
+                handled_turn.history_scope,
+            )
+            conversation_target = self._normalized_conversation_target(
+                normalized_source_event_ids,
+                handled_turn.conversation_target,
+            )
             for event_id in normalized_source_event_ids:
                 self._responses[event_id] = _serialized_record(
                     timestamp=timestamp,
@@ -182,6 +261,9 @@ class HandledTurnLedger:
                     source_event_ids=normalized_source_event_ids,
                     visible_echo_event_id=visible_echo_event_id,
                     source_event_prompts=prompt_map,
+                    response_owner=response_owner,
+                    history_scope=history_scope,
+                    conversation_target=conversation_target,
                 )
             self._save_responses_locked()
         logger.debug(f"Recorded handled outcome for {len(normalized_source_event_ids)} source events")
@@ -193,6 +275,9 @@ class HandledTurnLedger:
             existing_record = self._responses.get(source_event_id)
             source_event_ids = _source_event_ids_for_record(source_event_id, existing_record)
             prompt_map = _prompt_map_for_record(source_event_ids, existing_record)
+            response_owner = _response_owner_for_record(existing_record)
+            history_scope = _history_scope_for_record(existing_record)
+            conversation_target = _conversation_target_for_record(existing_record)
             self._responses[source_event_id] = _serialized_record(
                 timestamp=time.time(),
                 response_event_id=_response_event_id_for_record(existing_record),
@@ -200,6 +285,9 @@ class HandledTurnLedger:
                 source_event_ids=source_event_ids,
                 visible_echo_event_id=echo_event_id,
                 source_event_prompts=prompt_map,
+                response_owner=response_owner,
+                history_scope=history_scope,
+                conversation_target=conversation_target,
             )
             self._save_responses_locked()
         logger.debug(f"Tracked visible echo for event {source_event_id} on agent {self.agent_name}")
@@ -248,6 +336,9 @@ class HandledTurnLedger:
                 completed=_completed_for_record(record),
                 visible_echo_event_id=_visible_echo_event_id_for_record(record),
                 source_event_prompts=_prompt_map_for_record(source_event_ids, record),
+                response_owner=_response_owner_for_record(record),
+                history_scope=_history_scope_for_record(record),
+                conversation_target=_conversation_target_for_record(record),
                 timestamp=record["timestamp"],
             )
 
@@ -410,6 +501,51 @@ class HandledTurnLedger:
                 return existing_prompt_map
         return None
 
+    def _normalized_response_owner(
+        self,
+        source_event_ids: tuple[str, ...],
+        response_owner: str | None,
+    ) -> str | None:
+        """Return the explicit response owner or preserve an existing one."""
+        normalized_response_owner = _normalized_response_owner(response_owner)
+        if normalized_response_owner is not None:
+            return normalized_response_owner
+        for event_id in source_event_ids:
+            existing_response_owner = _response_owner_for_record(self._responses.get(event_id))
+            if existing_response_owner is not None:
+                return existing_response_owner
+        return None
+
+    def _normalized_history_scope(
+        self,
+        source_event_ids: tuple[str, ...],
+        history_scope: HistoryScope | None,
+    ) -> HistoryScope | None:
+        """Return the explicit history scope or preserve an existing one."""
+        normalized_history_scope = _normalized_history_scope(history_scope)
+        if normalized_history_scope is not None:
+            return normalized_history_scope
+        for event_id in source_event_ids:
+            existing_history_scope = _history_scope_for_record(self._responses.get(event_id))
+            if existing_history_scope is not None:
+                return existing_history_scope
+        return None
+
+    def _normalized_conversation_target(
+        self,
+        source_event_ids: tuple[str, ...],
+        conversation_target: MessageTarget | None,
+    ) -> MessageTarget | None:
+        """Return the explicit conversation target or preserve an existing one."""
+        normalized_conversation_target = _normalized_conversation_target(conversation_target)
+        if normalized_conversation_target is not None:
+            return normalized_conversation_target
+        for event_id in source_event_ids:
+            existing_conversation_target = _conversation_target_for_record(self._responses.get(event_id))
+            if existing_conversation_target is not None:
+                return existing_conversation_target
+        return None
+
 
 def _normalize_source_event_ids(source_event_ids: typing.Sequence[str]) -> tuple[str, ...]:
     """Deduplicate source event IDs while preserving order."""
@@ -426,6 +562,45 @@ def _normalize_source_event_ids(source_event_ids: typing.Sequence[str]) -> tuple
 def _normalized_event_id(event_id: str | None) -> str | None:
     """Return a non-empty Matrix event ID or None."""
     return event_id if isinstance(event_id, str) and event_id else None
+
+
+def _normalized_response_owner(response_owner: str | None) -> str | None:
+    """Return a non-empty response owner or None."""
+    return response_owner if isinstance(response_owner, str) and response_owner else None
+
+
+def _normalized_history_scope(history_scope: HistoryScope | None) -> HistoryScope | None:
+    """Return one normalized persisted history scope."""
+    if not isinstance(history_scope, HistoryScope):
+        return None
+    if history_scope.kind not in {"agent", "team"}:
+        return None
+    if not isinstance(history_scope.scope_id, str) or not history_scope.scope_id:
+        return None
+    return HistoryScope(kind=history_scope.kind, scope_id=history_scope.scope_id)
+
+
+def _normalized_conversation_target(conversation_target: MessageTarget | None) -> MessageTarget | None:
+    """Return one normalized persisted conversation target."""
+    if not isinstance(conversation_target, MessageTarget):
+        return None
+    if not isinstance(conversation_target.room_id, str) or not conversation_target.room_id:
+        return None
+    session_id = (
+        conversation_target.session_id
+        if isinstance(conversation_target.session_id, str) and conversation_target.session_id
+        else MessageTarget._build_session_id(
+            conversation_target.room_id,
+            conversation_target.resolved_thread_id,
+        )
+    )
+    return MessageTarget(
+        room_id=conversation_target.room_id,
+        thread_id=_normalized_event_id(conversation_target.thread_id),
+        resolved_thread_id=_normalized_event_id(conversation_target.resolved_thread_id),
+        reply_to_event_id=_normalized_event_id(conversation_target.reply_to_event_id),
+        session_id=session_id,
+    )
 
 
 def _explicit_prompt_map_for_sources(
@@ -451,6 +626,9 @@ def _serialized_record(
     source_event_ids: tuple[str, ...],
     visible_echo_event_id: str | None = None,
     source_event_prompts: typing.Mapping[str, str] | None = None,
+    response_owner: str | None = None,
+    history_scope: HistoryScope | None = None,
+    conversation_target: MessageTarget | None = None,
 ) -> _SerializedHandledTurnRecord:
     """Build one persisted handled-turn record from normalized fields."""
     record: _SerializedHandledTurnRecord = {
@@ -463,6 +641,21 @@ def _serialized_record(
         record["visible_echo_event_id"] = visible_echo_event_id
     if source_event_prompts is not None:
         record["source_event_prompts"] = dict(source_event_prompts)
+    if response_owner is not None:
+        record["response_owner"] = response_owner
+    if history_scope is not None:
+        record["history_scope"] = {
+            "kind": history_scope.kind,
+            "scope_id": history_scope.scope_id,
+        }
+    if conversation_target is not None:
+        record["conversation_target"] = {
+            "room_id": conversation_target.room_id,
+            "thread_id": conversation_target.thread_id,
+            "resolved_thread_id": conversation_target.resolved_thread_id,
+            "reply_to_event_id": conversation_target.reply_to_event_id,
+            "session_id": conversation_target.session_id,
+        }
     return record
 
 
@@ -553,6 +746,9 @@ def _normalize_serialized_record(
     if not normalized_source_event_ids:
         normalized_source_event_ids = (event_id,)
     prompt_map = _prompt_map_for_record(normalized_source_event_ids, raw_record)
+    response_owner = _response_owner_for_record(raw_record)
+    history_scope = _history_scope_for_record(raw_record)
+    conversation_target = _conversation_target_for_record(raw_record)
     normalized_record: _SerializedHandledTurnRecord = {
         "timestamp": float(timestamp) if isinstance(timestamp, int | float) else 0.0,
         "response_event_id": response_event_id if isinstance(response_event_id, str) else None,
@@ -563,6 +759,21 @@ def _normalize_serialized_record(
         normalized_record["visible_echo_event_id"] = visible_echo_event_id
     if prompt_map is not None:
         normalized_record["source_event_prompts"] = prompt_map
+    if response_owner is not None:
+        normalized_record["response_owner"] = response_owner
+    if history_scope is not None:
+        normalized_record["history_scope"] = {
+            "kind": history_scope.kind,
+            "scope_id": history_scope.scope_id,
+        }
+    if conversation_target is not None:
+        normalized_record["conversation_target"] = {
+            "room_id": conversation_target.room_id,
+            "thread_id": conversation_target.thread_id,
+            "resolved_thread_id": conversation_target.resolved_thread_id,
+            "reply_to_event_id": conversation_target.reply_to_event_id,
+            "session_id": conversation_target.session_id,
+        }
     return normalized_record
 
 
@@ -595,6 +806,53 @@ def _prompt_map_for_record(
         event_id: prompt for event_id in source_event_ids if isinstance((prompt := raw_prompt_map.get(event_id)), str)
     }
     return normalized_prompt_map or None
+
+
+def _response_owner_for_record(record: _SerializedHandledTurnRecordLike | None) -> str | None:
+    """Return the normalized response owner for one record."""
+    if record is None:
+        return None
+    return _normalized_response_owner(record.get("response_owner"))
+
+
+def _history_scope_for_record(record: _SerializedHandledTurnRecordLike | None) -> HistoryScope | None:
+    """Return the normalized history scope for one record."""
+    if record is None:
+        return None
+    raw_history_scope = record.get("history_scope")
+    if not isinstance(raw_history_scope, dict):
+        return None
+    kind = raw_history_scope.get("kind")
+    scope_id = raw_history_scope.get("scope_id")
+    if kind not in {"agent", "team"} or not isinstance(scope_id, str) or not scope_id:
+        return None
+    return HistoryScope(kind=kind, scope_id=scope_id)
+
+
+def _conversation_target_for_record(record: _SerializedHandledTurnRecordLike | None) -> MessageTarget | None:
+    """Return the normalized conversation target for one record."""
+    if record is None:
+        return None
+    raw_target = record.get("conversation_target")
+    if not isinstance(raw_target, dict):
+        return None
+    room_id = raw_target.get("room_id")
+    session_id = raw_target.get("session_id")
+    if not isinstance(room_id, str) or not room_id:
+        return None
+    resolved_thread_id = _normalized_event_id(raw_target.get("resolved_thread_id"))
+    normalized_target = MessageTarget(
+        room_id=room_id,
+        thread_id=_normalized_event_id(raw_target.get("thread_id")),
+        resolved_thread_id=resolved_thread_id,
+        reply_to_event_id=_normalized_event_id(raw_target.get("reply_to_event_id")),
+        session_id=(
+            session_id
+            if isinstance(session_id, str) and session_id
+            else MessageTarget._build_session_id(room_id, resolved_thread_id)
+        ),
+    )
+    return _normalized_conversation_target(normalized_target)
 
 
 def _response_event_id_for_record(record: _SerializedHandledTurnRecordLike | None) -> str | None:

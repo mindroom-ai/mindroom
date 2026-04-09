@@ -232,7 +232,7 @@ from .dispatch_planner import (
 from .dispatch_planner import (
     ResponseAction as _ResponseAction,
 )
-from .handled_turns import HandledTurnLedger, HandledTurnState
+from .handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
 from .history.runtime import create_scope_session_storage
 from .inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
@@ -294,6 +294,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.history import CompactionOutcome
+    from mindroom.history.types import HistoryScope
     from mindroom.hooks.types import HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.matrix.client import ResolvedVisibleMessage
@@ -685,21 +686,6 @@ class AgentBot:
             upload_grace_seconds=self._coalescing_upload_grace_seconds,
             is_shutting_down=lambda: self._sync_shutting_down,
         )
-        self._conversation_state_writer = ConversationStateWriter(
-            ConversationStateWriterDeps(
-                config_getter=lambda: self.config,
-                runtime_paths=self.runtime_paths,
-                agent_name=self.agent_name,
-                logger_getter=lambda: self.logger,
-                event_cache_getter=lambda: self._event_cache,
-                fetch_thread_history=lambda client, room_id, thread_id: fetch_thread_history(
-                    client,
-                    room_id,
-                    thread_id,
-                    event_cache=self._event_cache,
-                ),
-            ),
-        )
         self._conversation_resolver = ConversationResolver(
             ConversationResolverDeps(
                 client_getter=lambda: self.client,
@@ -716,7 +702,12 @@ class AgentBot:
                     *args,
                     **kwargs,
                 ),
-                fetch_thread_history=self._conversation_state_writer.fetch_thread_history,
+                fetch_thread_history=lambda client, room_id, thread_id: fetch_thread_history(
+                    client,
+                    room_id,
+                    thread_id,
+                    event_cache=self._event_cache,
+                ),
                 fetch_thread_snapshot=lambda client, room_id, thread_id: fetch_thread_snapshot(
                     client,
                     room_id,
@@ -728,6 +719,21 @@ class AgentBot:
                     **kwargs,
                 ),
                 event_cache_getter=lambda: self._event_cache,
+            ),
+        )
+        self._conversation_state_writer = ConversationStateWriter(
+            ConversationStateWriterDeps(
+                config_getter=lambda: self.config,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                logger_getter=lambda: self.logger,
+                event_cache_getter=lambda: self._event_cache,
+                fetch_thread_history=lambda client, room_id, thread_id: fetch_thread_history(
+                    client,
+                    room_id,
+                    thread_id,
+                    event_cache=self._event_cache,
+                ),
             ),
         )
         self._inbound_turn_normalizer = InboundTurnNormalizer(
@@ -1361,6 +1367,32 @@ class AgentBot:
         """Build run metadata extras for one dispatch turn."""
         return matrix_run_metadata_for_handled_turn(handled_turn)
 
+    def _response_history_scope_for_action(
+        self,
+        response_action: _ResponseAction,
+    ) -> HistoryScope | None:
+        """Return the persisted history scope used by one response action."""
+        if response_action.kind == "team":
+            assert response_action.form_team is not None
+            return self._conversation_state_writer.team_history_scope(response_action.form_team.eligible_members)
+        if response_action.kind == "individual":
+            return self._conversation_state_writer.history_scope()
+        return None
+
+    def _handled_turn_with_response_context(
+        self,
+        handled_turn: HandledTurnState,
+        *,
+        history_scope: HistoryScope | None,
+        conversation_target: MessageTarget | None,
+    ) -> HandledTurnState:
+        """Attach the persisted regeneration context for one response."""
+        return handled_turn.with_response_context(
+            response_owner=self.agent_name,
+            history_scope=history_scope,
+            conversation_target=conversation_target,
+        )
+
     async def _register_interactive_delivery(
         self,
         *,
@@ -1560,6 +1592,36 @@ class AgentBot:
             build_tool_execution_identity=self._build_tool_execution_identity,
         )
 
+    async def _edit_regeneration_context(
+        self,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+        *,
+        conversation_target: MessageTarget | None,
+    ) -> _MessageContext:
+        """Return edit context, reusing the recorded thread root when available."""
+        context = await self._extract_message_context(room, event)
+        if conversation_target is None or conversation_target.resolved_thread_id is None:
+            return context
+        if context.thread_id == conversation_target.resolved_thread_id:
+            return context
+        assert self.client is not None
+        return _MessageContext(
+            am_i_mentioned=context.am_i_mentioned,
+            is_thread=True,
+            thread_id=conversation_target.resolved_thread_id,
+            thread_history=await self._fetch_thread_history(
+                self.client,
+                room.room_id,
+                conversation_target.resolved_thread_id,
+            ),
+            mentioned_agents=context.mentioned_agents,
+            has_non_agent_mentions=context.has_non_agent_mentions,
+            requires_full_thread_history=(
+                context.requires_full_thread_history if isinstance(context, _MessageContext) else False
+            ),
+        )
+
     def _persist_response_event_id_in_session_run(
         self,
         *,
@@ -1576,6 +1638,36 @@ class AgentBot:
             session_type=session_type,
             run_id=run_id,
             response_event_id=response_event_id,
+        )
+
+    def _remove_stale_runs_for_turn_record(
+        self,
+        *,
+        turn_record: HandledTurnRecord,
+        recorded_turn_context_available: bool,
+        room: nio.MatrixRoom,
+        thread_id: str | None,
+        original_event_id: str,
+        requester_user_id: str,
+    ) -> None:
+        """Remove stale persisted runs using the recorded turn context when possible."""
+        if (
+            recorded_turn_context_available
+            and turn_record.conversation_target is not None
+            and turn_record.history_scope is not None
+        ):
+            self._conversation_state_writer.remove_stale_runs_for_turn_record(
+                turn_record=turn_record,
+                requester_user_id=requester_user_id,
+                build_tool_execution_identity=self._build_tool_execution_identity,
+                remove_run_by_event_id_fn=remove_run_by_event_id,
+            )
+            return
+        self._remove_stale_runs_for_edited_message(
+            room=room,
+            thread_id=thread_id,
+            original_event_id=original_event_id,
+            requester_user_id=requester_user_id,
         )
 
     def _hook_base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
@@ -2141,7 +2233,7 @@ class AgentBot:
             return
 
         if isinstance(_response, nio.SyncResponse):
-            await self._conversation_state_writer.cache_sync_timeline_events(_response)
+            await self._cache_sync_timeline_events(_response)
 
         self._first_sync_done = True
 
@@ -2167,7 +2259,8 @@ class AgentBot:
         await self.leave_unconfigured_rooms()
 
     async def _initialize_event_cache(self) -> None:
-        """Initialize the persistent Matrix event cache when enabled."""
+        """Initialize and attach the persistent Matrix event cache when enabled."""
+        assert self.client is not None
         if not self.config.cache.enabled:
             return
 
@@ -2181,7 +2274,7 @@ class AgentBot:
         self._event_cache = event_cache
 
     async def _close_event_cache(self) -> None:
-        """Close the persistent Matrix event cache when present."""
+        """Detach and close the persistent Matrix event cache when present."""
         event_cache = self._event_cache
         self._event_cache = None
         if event_cache is None:
@@ -2191,6 +2284,121 @@ class AgentBot:
             await event_cache.close()
         except Exception as exc:
             self.logger.warning("Failed to close event cache", error=str(exc))
+
+    async def _cache_thread_event(
+        self,
+        room_id: str,
+        event: nio.RoomMessageText,
+        *,
+        event_info: EventInfo,
+    ) -> None:
+        """Append live thread events to the cache when the thread was already hydrated."""
+        event_cache = self._event_cache
+        if event_cache is None:
+            return
+
+        thread_id = event_info.thread_id
+        if thread_id is None and event_info.is_edit and event_info.original_event_id is not None:
+            thread_id = event_info.thread_id_from_edit or await event_cache.get_thread_id_for_event(
+                room_id,
+                event_info.original_event_id,
+            )
+        if thread_id is None:
+            return
+
+        server_timestamp = event.server_timestamp
+        event_source = normalize_event_source_for_cache(
+            event.source,
+            event_id=event.event_id,
+            sender=event.sender,
+            origin_server_ts=server_timestamp
+            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
+            else None,
+        )
+
+        try:
+            await event_cache.append_event(room_id, thread_id, event_source)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to append live thread event to cache",
+                room_id=room_id,
+                thread_id=thread_id,
+                event_id=event.event_id,
+                error=str(exc),
+            )
+
+    async def _cache_redaction_event(self, room_id: str, event: nio.RedactionEvent) -> None:
+        """Apply live redactions to cached thread history when relevant."""
+        event_cache = self._event_cache
+        if event_cache is None:
+            return
+
+        thread_id = await event_cache.get_thread_id_for_event(room_id, event.redacts)
+        server_timestamp = event.server_timestamp
+        redaction_source = normalize_event_source_for_cache(
+            event.source,
+            event_id=event.event_id,
+            sender=event.sender,
+            origin_server_ts=server_timestamp
+            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
+            else None,
+        )
+
+        try:
+            redacted = await event_cache.redact_event(
+                room_id,
+                event.redacts,
+                thread_id=thread_id,
+                redaction_event=redaction_source,
+            )
+            if not redacted:
+                return
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to apply live redaction to cache",
+                room_id=room_id,
+                thread_id=thread_id,
+                redacted_event_id=event.redacts,
+                error=str(exc),
+            )
+
+    async def _cache_sync_timeline_events(self, response: nio.SyncResponse) -> None:
+        """Persist timeline events from sync so later point lookups can hit SQLite."""
+        event_cache = self._event_cache
+        if event_cache is None:
+            return
+
+        cached_events: list[tuple[str, str, dict[str, Any]]] = []
+        for room_id, room_info in response.rooms.join.items():
+            for event in room_info.timeline.events:
+                if not isinstance(event, nio.Event):
+                    continue
+                if not isinstance(event.source, dict):
+                    continue
+                if not isinstance(event.event_id, str):
+                    continue
+                server_timestamp = event.server_timestamp
+                cached_events.append(
+                    (
+                        event.event_id,
+                        room_id,
+                        normalize_event_source_for_cache(
+                            event.source,
+                            event_id=event.event_id,
+                            sender=event.sender if isinstance(event.sender, str) else None,
+                            origin_server_ts=server_timestamp
+                            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
+                            else None,
+                        ),
+                    ),
+                )
+        if not cached_events:
+            return
+
+        try:
+            await event_cache.store_events_batch(cached_events)
+        except Exception as exc:
+            self.logger.warning("Failed to cache sync timeline events", error=str(exc), events=len(cached_events))
 
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
@@ -2520,7 +2728,7 @@ class AgentBot:
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
         event_info = EventInfo.from_event(event.source)
-        await self._conversation_state_writer.cache_thread_event(room.room_id, event, event_info=event_info)
+        await self._cache_thread_event(room.room_id, event, event_info=event_info)
         if not isinstance(event.body, str):
             return
         # Skip messages that are still being streamed (use metadata, not text pattern)
@@ -2717,6 +2925,11 @@ class AgentBot:
                 )
                 return
             assert plan.response_action is not None
+            handled_turn = self._handled_turn_with_response_context(
+                handled_turn,
+                history_scope=self._response_history_scope_for_action(plan.response_action),
+                conversation_target=dispatch.target,
+            )
             matrix_run_metadata = self._dispatch_matrix_run_metadata(handled_turn)
 
             async def build_payload(context: _MessageContext) -> _DispatchPayload:
@@ -2759,7 +2972,7 @@ class AgentBot:
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Keep cached thread history consistent when Matrix redactions arrive."""
-        await self._conversation_state_writer.cache_redaction_event(room.room_id, event)
+        await self._cache_redaction_event(room.room_id, event)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
@@ -3817,6 +4030,7 @@ class AgentBot:
         correlation_id: str | None = None,
         reason_prefix: str = "Team request",
         matrix_run_metadata: dict[str, Any] | None = None,
+        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot)."""
         return await self._response_coordinator().generate_team_response_helper(
@@ -3838,6 +4052,7 @@ class AgentBot:
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
                 strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
+                on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
             team_agents=team_agents,
             team_mode=team_mode,
@@ -4116,6 +4331,7 @@ class AgentBot:
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         received_monotonic: float | None = None,
+        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate and send/edit a response using AI.
 
@@ -4143,6 +4359,8 @@ class AgentBot:
             matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
                 for unseen-message tracking, coalesced edit regeneration, and cleanup.
             received_monotonic: Optional receive timestamp used for queued-message signaling.
+            on_lifecycle_lock_acquired: Optional callback that runs after the response
+                lifecycle lock is acquired and before response generation starts.
 
         Returns:
             Event ID of the response message, or None if failed
@@ -4168,6 +4386,7 @@ class AgentBot:
                 system_enrichment_items=system_enrichment_items,
                 strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
                 received_monotonic=received_monotonic,
+                on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
         )
 
@@ -4362,6 +4581,7 @@ class AgentBot:
         if not event_info.original_event_id:
             self.logger.debug("Edit event has no original event ID")
             return
+        original_event_id = event_info.original_event_id
 
         # Skip edits from other agents
         sender_agent_name = extract_agent_name(event.sender, self.config, self.runtime_paths)
@@ -4369,48 +4589,87 @@ class AgentBot:
             self.logger.debug(f"Ignoring edit from other agent: {sender_agent_name}")
             return
 
-        turn_record = self.handled_turn_ledger.get_turn_record(event_info.original_event_id)
-        ledger_response_event_id = turn_record.response_event_id if turn_record is not None else None
-        context = await self._extract_message_context(room, event)
+        # Known limitations for edit regeneration (ISSUE-110 Phase 5):
+        # - Team-scoped responses regenerate with canonical history scope, not recorded scope.
+        # - Router relay edits regenerate as AI responses instead of re-running router dispatch.
+        # - Missing-ledger recovery loses response_owner/history_scope/conversation_target metadata.
+        # These are acceptable because these edge cases do not occur in current usage.
+        turn_record = self.handled_turn_ledger.get_turn_record(original_event_id)
+        context = await self._edit_regeneration_context(
+            room,
+            event,
+            conversation_target=turn_record.conversation_target if turn_record is not None else None,
+        )
         persisted_turn_metadata = self._load_persisted_turn_metadata(
             room=room,
             thread_id=context.thread_id,
-            original_event_id=event_info.original_event_id,
+            original_event_id=original_event_id,
             requester_user_id=requester_user_id,
         )
-        persisted_response_event_id = (
-            persisted_turn_metadata.response_event_id if persisted_turn_metadata is not None else None
+        if turn_record is None:
+            if persisted_turn_metadata is None:
+                self.logger.debug(
+                    "No handled turn record found for edited message",
+                    original_event_id=original_event_id,
+                )
+                return
+            turn_record = HandledTurnRecord(
+                anchor_event_id=persisted_turn_metadata.anchor_event_id,
+                source_event_ids=persisted_turn_metadata.source_event_ids,
+                response_event_id=persisted_turn_metadata.response_event_id,
+                source_event_prompts=persisted_turn_metadata.source_event_prompts,
+            )
+        recorded_turn_context_available = bool(
+            turn_record.conversation_target is not None and turn_record.history_scope is not None,
         )
-        response_event_id = persisted_response_event_id or ledger_response_event_id
+        response_owner_missing = turn_record.response_owner is None
+        if response_owner_missing and persisted_turn_metadata is not None:
+            turn_record = replace(turn_record, response_owner=self.agent_name)
+        response_event_id = (
+            persisted_turn_metadata.response_event_id
+            if persisted_turn_metadata is not None and persisted_turn_metadata.response_event_id is not None
+            else turn_record.response_event_id
+        )
         if response_event_id is None:
-            self.logger.debug(f"No previous response found for edited message {event_info.original_event_id}")
+            self.logger.debug(f"No previous response found for edited message {original_event_id}")
             return
-
+        regeneration_target = turn_record.conversation_target or self._build_message_target(
+            room_id=room.room_id,
+            thread_id=context.thread_id,
+            reply_to_event_id=turn_record.anchor_event_id,
+        )
+        regeneration_history_scope = turn_record.history_scope or self._conversation_state_writer.history_scope()
+        regeneration_response_owner = turn_record.response_owner or self.agent_name
+        if regeneration_response_owner != self.agent_name:
+            self.logger.debug(
+                "Ignoring edited message for turn owned by another entity",
+                original_event_id=original_event_id,
+                response_owner=regeneration_response_owner,
+            )
+            return
         needs_turn_record_backfill = (
-            turn_record is None
-            or (persisted_response_event_id is not None and ledger_response_event_id != persisted_response_event_id)
+            turn_record.response_event_id != response_event_id
+            or response_owner_missing
+            or turn_record.history_scope is None
+            or turn_record.conversation_target is None
             or (
-                turn_record is not None
-                and turn_record.is_coalesced
+                turn_record.is_coalesced
                 and turn_record.source_event_prompts is None
                 and persisted_turn_metadata is not None
                 and persisted_turn_metadata.source_event_prompts is not None
             )
         )
-        coalesced_turn_metadata: _PersistedTurnMetadata | None = None
-        if turn_record is not None and turn_record.is_coalesced and turn_record.source_event_prompts is not None:
-            coalesced_turn_metadata = _PersistedTurnMetadata(
-                anchor_event_id=turn_record.anchor_event_id,
-                source_event_ids=turn_record.source_event_ids,
-                response_event_id=response_event_id,
-                source_event_prompts=turn_record.source_event_prompts,
-            )
-        elif persisted_turn_metadata is not None and persisted_turn_metadata.is_coalesced:
-            coalesced_turn_metadata = persisted_turn_metadata
+        coalesced_source_event_prompts = turn_record.source_event_prompts
+        if (
+            coalesced_source_event_prompts is None
+            and persisted_turn_metadata is not None
+            and persisted_turn_metadata.is_coalesced
+        ):
+            coalesced_source_event_prompts = persisted_turn_metadata.source_event_prompts
 
         self.logger.info(
             "Regenerating response for edited message",
-            original_event_id=event_info.original_event_id,
+            original_event_id=original_event_id,
             response_event_id=response_event_id,
         )
 
@@ -4418,49 +4677,62 @@ class AgentBot:
         if edited_content is None:
             self.logger.debug("Edited message missing resolved body", event_id=event.event_id)
             return
-        regeneration_handled_turn = HandledTurnState.from_source_event_id(
-            event_info.original_event_id,
+        regeneration_handled_turn = HandledTurnState.create(
+            turn_record.source_event_ids,
             response_event_id=response_event_id,
+            response_owner=regeneration_response_owner,
+            history_scope=regeneration_history_scope,
+            conversation_target=regeneration_target,
         )
-        if coalesced_turn_metadata is not None:
-            if coalesced_turn_metadata.source_event_prompts is None:
+        regeneration_turn_record = replace(
+            turn_record,
+            response_event_id=response_event_id,
+            response_owner=regeneration_response_owner,
+            history_scope=regeneration_history_scope,
+            conversation_target=regeneration_target,
+        )
+        if regeneration_turn_record.is_coalesced:
+            if coalesced_source_event_prompts is None:
                 self.logger.warning(
                     "Skipping edited coalesced turn regeneration without persisted source prompts",
-                    original_event_id=event_info.original_event_id,
-                    anchor_event_id=coalesced_turn_metadata.anchor_event_id,
+                    original_event_id=original_event_id,
+                    anchor_event_id=regeneration_turn_record.anchor_event_id,
                 )
                 return
-            updated_prompt_map = dict(coalesced_turn_metadata.source_event_prompts)
-            updated_prompt_map[event_info.original_event_id] = edited_content
+            updated_prompt_map = dict(coalesced_source_event_prompts)
+            updated_prompt_map[original_event_id] = edited_content
             rebuilt_prompt_parts: list[str] = []
-            for source_event_id in coalesced_turn_metadata.source_event_ids:
+            for source_event_id in regeneration_turn_record.source_event_ids:
                 prompt_part = updated_prompt_map.get(source_event_id)
                 if prompt_part is None:
                     self.logger.warning(
                         "Skipping edited coalesced turn regeneration with incomplete prompt map",
-                        original_event_id=event_info.original_event_id,
+                        original_event_id=original_event_id,
                         missing_source_event_id=source_event_id,
-                        anchor_event_id=coalesced_turn_metadata.anchor_event_id,
+                        anchor_event_id=regeneration_turn_record.anchor_event_id,
                     )
                     return
                 rebuilt_prompt_parts.append(prompt_part)
             regeneration_prompt = coalesced_prompt(rebuilt_prompt_parts)
-            regeneration_reply_to_event_id = coalesced_turn_metadata.anchor_event_id
             regeneration_handled_turn = HandledTurnState.create(
-                coalesced_turn_metadata.source_event_ids,
+                regeneration_turn_record.source_event_ids,
                 response_event_id=response_event_id,
                 source_event_prompts=updated_prompt_map,
+                response_owner=regeneration_response_owner,
+                history_scope=regeneration_history_scope,
+                conversation_target=regeneration_target,
             )
+            regeneration_turn_record = replace(regeneration_turn_record, source_event_prompts=updated_prompt_map)
             regeneration_matrix_run_metadata = self._dispatch_matrix_run_metadata(regeneration_handled_turn)
         else:
             regeneration_prompt = edited_content
-            regeneration_reply_to_event_id = event_info.original_event_id
             regeneration_matrix_run_metadata = None
         envelope = self._build_message_envelope(
             room_id=room.room_id,
             event=event,
             requester_user_id=requester_user_id,
             context=context,
+            target=regeneration_target,
             body=edited_content,
             source_kind="edit",
         )
@@ -4473,48 +4745,32 @@ class AgentBot:
             self._mark_source_events_responded(regeneration_handled_turn)
             return
 
-        # Check if we should respond to the edited message
-        # KNOWN LIMITATION: This doesn't work correctly for the router suggestion case.
-        # When: User asks question → Router suggests agent → Agent responds → User edits
-        # The agent won't regenerate because it's not mentioned in the edited message.
-        # Proper fix would require tracking response chains (user → router → agent).
-        should_respond = should_agent_respond(
-            agent_name=self.agent_name,
-            am_i_mentioned=context.am_i_mentioned,
-            is_thread=context.is_thread,
-            room=room,
-            thread_history=context.thread_history,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            mentioned_agents=context.mentioned_agents,
-            has_non_agent_mentions=context.has_non_agent_mentions,
-            sender_id=requester_user_id,
-        )
-
-        if not should_respond and coalesced_turn_metadata is None:
-            self.logger.debug("Agent should not respond to edited message")
-            if needs_turn_record_backfill:
-                self._mark_source_events_responded(regeneration_handled_turn)
-            return
-
-        self._remove_stale_runs_for_edited_message(
-            room=room,
-            thread_id=context.thread_id,
-            original_event_id=event_info.original_event_id,
-            requester_user_id=requester_user_id,
-        )
+        if turn_record.response_owner is None:
+            should_respond = should_agent_respond(
+                agent_name=self.agent_name,
+                am_i_mentioned=context.am_i_mentioned,
+                is_thread=context.is_thread,
+                room=room,
+                thread_history=context.thread_history,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                mentioned_agents=context.mentioned_agents,
+                has_non_agent_mentions=context.has_non_agent_mentions,
+                sender_id=requester_user_id,
+            )
+            if not should_respond and not regeneration_turn_record.is_coalesced:
+                self.logger.debug("Agent should not respond to edited message")
+                if needs_turn_record_backfill:
+                    self._mark_source_events_responded(regeneration_handled_turn)
+                return
 
         # Generate new response
         regenerated_event_id = await self._generate_response(
             room_id=room.room_id,
             prompt=regeneration_prompt,
-            reply_to_event_id=regeneration_reply_to_event_id,
-            thread_id=context.thread_id,
-            target=self._build_message_target(
-                room_id=room.room_id,
-                thread_id=context.thread_id,
-                reply_to_event_id=event_info.original_event_id,
-            ),
+            reply_to_event_id=regeneration_turn_record.anchor_event_id,
+            thread_id=regeneration_target.thread_id,
+            target=regeneration_target,
             thread_history=context.thread_history,
             existing_event_id=response_event_id,
             existing_event_is_placeholder=False,
@@ -4522,6 +4778,14 @@ class AgentBot:
             response_envelope=envelope,
             correlation_id=event.event_id,
             matrix_run_metadata=regeneration_matrix_run_metadata,
+            on_lifecycle_lock_acquired=lambda: self._remove_stale_runs_for_turn_record(
+                turn_record=regeneration_turn_record,
+                recorded_turn_context_available=recorded_turn_context_available,
+                room=room,
+                thread_id=context.thread_id,
+                original_event_id=original_event_id,
+                requester_user_id=requester_user_id,
+            ),
         )
 
         # Update the handled-turn ledger linkage for the edited source turn.
@@ -4535,7 +4799,7 @@ class AgentBot:
                 self._mark_source_events_responded(regeneration_handled_turn)
             self.logger.info(
                 "Suppressed regeneration left existing response unchanged",
-                original_event_id=event_info.original_event_id,
+                original_event_id=original_event_id,
                 response_event_id=response_event_id,
             )
 
@@ -4610,6 +4874,7 @@ class TeamBot(AgentBot):
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         received_monotonic: float | None = None,
+        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response instead of individual agent response."""
         del received_monotonic
@@ -4715,6 +4980,7 @@ class TeamBot(AgentBot):
             correlation_id=correlation_id or reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
             matrix_run_metadata=matrix_run_metadata,
+            on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
         )
         if thread_id is not None and event_id is not None:
             self._queue_timed_thread_summary(

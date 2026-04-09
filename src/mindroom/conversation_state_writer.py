@@ -1,4 +1,4 @@
-"""Conversation-state persistence and cache-write helpers for bot flows."""
+"""Conversation-state persistence plus cache-write helpers for bot flows."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from mindroom.agents import (
     get_agent_session,
     get_team_session,
 )
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.event_cache import normalize_event_source_for_cache
@@ -195,6 +195,29 @@ class ConversationStateWriter:
             runtime_paths=self.deps.runtime_paths,
             execution_identity=execution_identity,
         )
+
+    def create_storage_for_history_scope(
+        self,
+        *,
+        scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> SqliteDb:
+        """Create storage for one exact persisted history scope."""
+        normalized_scope = HistoryScope(kind=scope.kind, scope_id=scope.scope_id)
+        if normalized_scope == self.history_scope():
+            return self.create_history_scope_storage(execution_identity)
+        return create_scope_session_storage(
+            agent_name=self.deps.agent_name,
+            scope=normalized_scope,
+            config=self._config(),
+            runtime_paths=self.deps.runtime_paths,
+            execution_identity=execution_identity,
+        )
+
+    @staticmethod
+    def session_type_for_history_scope(scope: HistoryScope) -> SessionType:
+        """Return the Agno session type used by one persisted history scope."""
+        return SessionType.TEAM if scope.kind == "team" else SessionType.AGENT
 
     def team_history_scope(self, team_agents: list[MatrixID]) -> HistoryScope:
         """Return the persisted team-history scope for one team response."""
@@ -412,6 +435,51 @@ class ConversationStateWriter:
                     event_id=request.original_event_id,
                     session_id=session_id,
                 )
+
+    def remove_stale_runs_for_turn_record(
+        self,
+        *,
+        turn_record: HandledTurnRecord,
+        requester_user_id: str,
+        build_tool_execution_identity: Callable[..., ToolExecutionIdentity],
+        remove_run_by_event_id_fn: Callable[..., bool],
+    ) -> bool:
+        """Remove persisted runs using the exact recorded target and history scope."""
+        if turn_record.conversation_target is None or turn_record.history_scope is None:
+            return False
+        session_id = turn_record.conversation_target.session_id
+        execution_identity = build_tool_execution_identity(
+            target=turn_record.conversation_target,
+            user_id=requester_user_id,
+            session_id=session_id,
+        )
+        storage = self.create_storage_for_history_scope(
+            scope=turn_record.history_scope,
+            execution_identity=execution_identity,
+        )
+        removed_any = False
+        try:
+            session_type = self.session_type_for_history_scope(turn_record.history_scope)
+            for source_event_id in turn_record.source_event_ids:
+                removed_any = (
+                    remove_run_by_event_id_fn(
+                        storage,
+                        session_id,
+                        source_event_id,
+                        session_type=session_type,
+                    )
+                    or removed_any
+                )
+        finally:
+            storage.close()
+        if removed_any:
+            self._logger().info(
+                "Removed stale run for edited handled turn",
+                source_event_ids=list(turn_record.source_event_ids),
+                session_id=session_id,
+                history_scope=turn_record.history_scope.key,
+            )
+        return removed_any
 
     async def fetch_thread_history(
         self,

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import nio
@@ -24,6 +26,7 @@ from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.handled_turns import HandledTurnLedger, HandledTurnState
+from mindroom.history.types import HistoryScope
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.message_content import _clear_mxc_cache
@@ -31,6 +34,9 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import create_session_id
 from tests.conftest import bind_runtime_paths, runtime_paths_for
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 
 
 def _room_send_response(event_id: str) -> MagicMock:
@@ -119,6 +125,9 @@ def _record_handled_turn(
     *,
     response_event_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
+    response_owner: str | None = None,
+    history_scope: HistoryScope | None = None,
+    conversation_target: MessageTarget | None = None,
 ) -> None:
     """Record one handled turn through the typed ledger API."""
     ledger.record_handled_turn(
@@ -126,8 +135,21 @@ def _record_handled_turn(
             source_event_ids,
             response_event_id=response_event_id,
             source_event_prompts=source_event_prompts,
+            response_owner=response_owner,
+            history_scope=history_scope,
+            conversation_target=conversation_target,
         ),
     )
+
+
+def _agent_history_scope(agent_name: str) -> HistoryScope:
+    """Return the persisted agent history scope used in edit-regeneration tests."""
+    return HistoryScope(kind="agent", scope_id=agent_name)
+
+
+def _team_history_scope(team_name: str) -> HistoryScope:
+    """Return the persisted team history scope used in edit-regeneration tests."""
+    return HistoryScope(kind="team", scope_id=team_name)
 
 
 def _team_test_config(tmp_path: Path) -> Config:
@@ -150,6 +172,20 @@ def _team_test_config(tmp_path: Path) -> Config:
         mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
     )
     return _bind_runtime_paths(config, tmp_path)
+
+
+def _generate_response_with_locked_callback(
+    response_event_id: str | None,
+) -> Callable[..., Awaitable[str | None]]:
+    """Execute locked edit cleanup in mocked response generation paths."""
+
+    async def _generate_response(*_args: object, **kwargs: object) -> str | None:
+        locked_callback = kwargs.get("on_lifecycle_lock_acquired")
+        if locked_callback is not None:
+            locked_callback()
+        return response_event_id
+
+    return _generate_response
 
 
 @pytest.mark.asyncio
@@ -213,7 +249,19 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
 
     # Simulate that the bot has already responded to the original message
     response_event_id = "$response:example.com"
-    _record_handled_turn(bot.handled_turn_ledger, [original_event.event_id], response_event_id=response_event_id)
+    stored_target = MessageTarget.resolve(
+        room_id=room.room_id,
+        thread_id=None,
+        reply_to_event_id=original_event.event_id,
+    )
+    _record_handled_turn(
+        bot.handled_turn_ledger,
+        [original_event.event_id],
+        response_event_id=response_event_id,
+        response_owner="test_agent",
+        history_scope=_agent_history_scope("test_agent"),
+        conversation_target=stored_target,
+    )
 
     # Create an edit event
     edit_event = nio.RoomMessageText.from_dict(
@@ -265,8 +313,8 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         # Setup mocks
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
-            is_thread=False,
-            thread_id=None,
+            is_thread=True,
+            thread_id=stored_target.resolved_thread_id,
             thread_history=[],
             mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
         )
@@ -279,22 +327,17 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
 
         # Verify that the bot attempted to regenerate the response
         mock_context.assert_called_once()
-        mock_should_respond.assert_called_once()
+        mock_should_respond.assert_not_called()
         mock_ai_response.assert_called_once()
 
         # Verify that the bot edited the existing response message
-        expected_target = MessageTarget.resolve(
-            room_id=room.room_id,
-            thread_id=None,
-            reply_to_event_id=original_event.event_id,
-        )
         mock_edit.assert_called_once()
         edit_args = mock_edit.call_args.args
         assert edit_args[0] is bot.client
         assert edit_args[1] == room.room_id
         assert edit_args[2] == response_event_id
         assert edit_args[4] == "The answer is 6"
-        assert edit_args[3]["m.relates_to"]["event_id"] == expected_target.resolved_thread_id
+        assert edit_args[3]["m.relates_to"]["event_id"] == stored_target.resolved_thread_id
         assert edit_args[3]["m.relates_to"]["m.in_reply_to"]["event_id"] == original_event.event_id
 
         # Verify that the response tracker still maps to the same response
@@ -345,7 +388,18 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
-    _record_handled_turn(bot.handled_turn_ledger, ["$original:example.com"], response_event_id="$response:example.com")
+    _record_handled_turn(
+        bot.handled_turn_ledger,
+        ["$original:example.com"],
+        response_event_id="$response:example.com",
+        response_owner="test_agent",
+        history_scope=_agent_history_scope("test_agent"),
+        conversation_target=MessageTarget.resolve(
+            room_id=room.room_id,
+            thread_id=None,
+            reply_to_event_id="$original:example.com",
+        ),
+    )
 
     edit_event = nio.RoomMessageText.from_dict(
         {
@@ -383,8 +437,8 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
-            is_thread=False,
-            thread_id=None,
+            is_thread=True,
+            thread_id="$original:example.com",
             thread_history=[],
             mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
             has_non_agent_mentions=False,
@@ -393,7 +447,7 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
 
         await bot._on_message(room, edit_event)
 
-    mock_should_respond.assert_called_once()
+    mock_should_respond.assert_not_called()
     emitted_envelope = mock_emit_hooks.await_args.kwargs["envelope"]
     assert emitted_envelope.body == "@test_agent what is 99+1?"
 
@@ -492,6 +546,125 @@ async def test_bot_edit_regeneration_uses_hydrated_mentions_for_response_gating(
     ]
 
 
+@pytest.mark.asyncio
+async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
+    tmp_path: Path,
+) -> None:
+    """Edit regeneration should reuse the recorded target instead of rebuilding it from live heuristics."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path)
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    bot.logger = MagicMock()
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    stored_target = MessageTarget.resolve(
+        room_id=room.room_id,
+        thread_id="$original:example.com",
+        reply_to_event_id="$router-echo:example.com",
+    )
+    _record_handled_turn(
+        bot.handled_turn_ledger,
+        ["$original:example.com"],
+        response_event_id="$response:example.com",
+        response_owner="test_agent",
+        history_scope=_agent_history_scope("test_agent"),
+        conversation_target=stored_target,
+    )
+
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* updated question",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "updated question",
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {
+                    "event_id": "$original:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": room.room_id,
+        },
+    )
+    edit_event.source = {
+        "content": {
+            "body": "* updated question",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "updated question",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "event_id": "$original:example.com",
+                "rel_type": "m.replace",
+            },
+        },
+        "event_id": "$edit:example.com",
+        "sender": "@user:example.com",
+    }
+
+    with (
+        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot, "_fetch_thread_history", new_callable=AsyncMock, return_value=[]) as mock_fetch_history,
+        patch("mindroom.bot.should_agent_respond") as mock_should_respond,
+        patch.object(
+            bot._conversation_state_writer,
+            "remove_stale_runs_for_turn_record",
+            return_value=True,
+        ) as mock_remove_stale_runs,
+        patch.object(
+            bot,
+            "_generate_response",
+            new_callable=AsyncMock,
+            side_effect=_generate_response_with_locked_callback("$response:example.com"),
+        ) as mock_generate_response,
+    ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
+        await bot._handle_message_edit(
+            room,
+            edit_event,
+            EventInfo.from_event(edit_event.source),
+            requester_user_id="@user:example.com",
+        )
+
+    mock_fetch_history.assert_awaited_once_with(bot.client, room.room_id, stored_target.resolved_thread_id)
+    mock_should_respond.assert_not_called()
+    mock_remove_stale_runs.assert_called_once()
+    call_kwargs = mock_generate_response.call_args.kwargs
+    assert call_kwargs["reply_to_event_id"] == "$original:example.com"
+    assert call_kwargs["thread_id"] == stored_target.thread_id
+    assert call_kwargs["target"] == stored_target
+
+
 def test_remove_run_by_event_id_removes_team_runs() -> None:
     """Team edit regeneration should be able to delete stale runs from TeamSession storage."""
     session = TeamSession(
@@ -577,10 +750,27 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     bot.client.user_id = "@mindroom_test_team:example.com"
     bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_team", base_path=tmp_path)
     bot.logger = MagicMock()
+    bot.orchestrator = MagicMock(
+        current_config=config,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_team:example.com")
     response_event_id = "$response:example.com"
-    _record_handled_turn(bot.handled_turn_ledger, ["$original:example.com"], response_event_id=response_event_id)
+    stored_target = MessageTarget.resolve(
+        room_id=room.room_id,
+        thread_id=None,
+        reply_to_event_id="$original:example.com",
+    )
+    _record_handled_turn(
+        bot.handled_turn_ledger,
+        ["$original:example.com"],
+        response_event_id=response_event_id,
+        response_owner="test_team",
+        history_scope=_team_history_scope("test_team"),
+        conversation_target=stored_target,
+    )
     edit_event = nio.RoomMessageText.from_dict(
         {
             "content": {
@@ -620,15 +810,47 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     }
 
     storage = MagicMock()
+    scheduled_tasks: list[asyncio.Task[None]] = []
+
+    @asynccontextmanager
+    async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
+        yield
+
+    async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def schedule_background_task(
+        coro: Coroutine[object, object, None],
+        *,
+        name: str,
+        error_handler: object | None = None,  # noqa: ARG001
+    ) -> asyncio.Task[None]:
+        task = asyncio.create_task(coro, name=name)
+        scheduled_tasks.append(task)
+        return task
+
     with (
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.should_agent_respond", return_value=True),
+        patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.bot.typing_indicator", new=noop_typing_indicator),
+        patch("mindroom.bot.team_response", new=AsyncMock(return_value="team response")) as mock_team_response,
+        patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
+        patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+        patch(
+            "mindroom.response_coordinator.apply_post_response_effects",
+            new=AsyncMock(),
+        ),
         patch.object(
             bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            return_value=response_event_id,
-        ) as mock_generate,
+            "_deliver_generated_response",
+            new=AsyncMock(
+                return_value=_ResponseDispatchResult(
+                    event_id=response_event_id,
+                    response_text="team response",
+                    delivery_kind="edited",
+                ),
+            ),
+        ),
         patch.object(
             bot._conversation_state_writer,
             "create_history_scope_storage",
@@ -638,22 +860,26 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
-            is_thread=False,
-            thread_id=None,
+            is_thread=True,
+            thread_id=stored_target.resolved_thread_id,
             thread_history=[],
             mentioned_agents=[MatrixID.from_agent("test_team", "example.com", runtime_paths)],
         )
 
         await bot._on_message(room, edit_event)
+
+    if scheduled_tasks:
+        await asyncio.gather(*scheduled_tasks)
+
     assert mock_remove_run.call_args_list == [
         call(
             storage,
-            create_session_id("!test:example.com", None),
+            stored_target.session_id,
             "$original:example.com",
             session_type=SessionType.TEAM,
         ),
     ]
-    mock_generate.assert_awaited_once()
+    mock_team_response.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -911,6 +1137,11 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
+    stored_target = MessageTarget.resolve(
+        room_id="!test:example.com",
+        thread_id=None,
+        reply_to_event_id="$primary:example.com",
+    )
     bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
     _record_handled_turn(
         bot.handled_turn_ledger,
@@ -920,6 +1151,9 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             "$first:example.com": "first",
             "$primary:example.com": "primary",
         },
+        response_owner="test_agent",
+        history_scope=_agent_history_scope("test_agent"),
+        conversation_target=stored_target,
     )
     bot.logger = MagicMock()
 
@@ -974,13 +1208,13 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             bot,
             "_generate_response",
             new_callable=AsyncMock,
-            return_value="$response:example.com",
+            side_effect=_generate_response_with_locked_callback("$response:example.com"),
         ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
-            is_thread=False,
-            thread_id=None,
+            is_thread=True,
+            thread_id=stored_target.resolved_thread_id,
             thread_history=[],
             mentioned_agents=[],
             has_non_agent_mentions=False,
@@ -993,7 +1227,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             requester_user_id=edit_event.sender,
         )
 
-        mock_should_respond.assert_called_once()
+        mock_should_respond.assert_not_called()
         mock_generate_response.assert_awaited_once()
         call_kwargs = mock_generate_response.call_args.kwargs
         assert call_kwargs["prompt"] == (
@@ -1001,6 +1235,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             "Treat them as one turn and respond once:\n\nupdated first\nprimary"
         )
         assert call_kwargs["reply_to_event_id"] == "$primary:example.com"
+        assert call_kwargs["target"] == stored_target
         assert call_kwargs["matrix_run_metadata"] == {
             "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
             "matrix_source_event_prompts": {
@@ -1010,8 +1245,24 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
         }
         assert bot.handled_turn_ledger.get_response_event_id("$first:example.com") == "$response:example.com"
         assert bot.handled_turn_ledger.get_response_event_id("$primary:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 2
-        assert mock_remove_run.call_count == 1
+        assert mock_create_storage.call_count == 3
+        assert mock_remove_run.call_count == 2
+        mock_remove_run.assert_has_calls(
+            [
+                call(
+                    mock_create_storage.return_value,
+                    "!test:example.com:$primary:example.com",
+                    "$first:example.com",
+                    session_type=SessionType.AGENT,
+                ),
+                call(
+                    mock_create_storage.return_value,
+                    "!test:example.com:$primary:example.com",
+                    "$primary:example.com",
+                    session_type=SessionType.AGENT,
+                ),
+            ],
+        )
 
 
 @pytest.mark.asyncio
@@ -1043,7 +1294,19 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
-    _record_handled_turn(bot.handled_turn_ledger, ["$original:example.com"], response_event_id="$response:example.com")
+    stored_target = MessageTarget.resolve(
+        room_id=room.room_id,
+        thread_id=None,
+        reply_to_event_id="$original:example.com",
+    )
+    _record_handled_turn(
+        bot.handled_turn_ledger,
+        ["$original:example.com"],
+        response_event_id="$response:example.com",
+        response_owner="test_agent",
+        history_scope=_agent_history_scope("test_agent"),
+        conversation_target=stored_target,
+    )
 
     edit_event = nio.RoomMessageText.from_dict(
         {
@@ -1085,7 +1348,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
 
     with (
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.should_agent_respond", return_value=True),
+        patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
             "create_history_scope_storage",
@@ -1095,13 +1358,13 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
             bot,
             "_generate_response",
             new_callable=AsyncMock,
-            return_value="$response:example.com",
+            side_effect=_generate_response_with_locked_callback("$response:example.com"),
         ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
-            is_thread=False,
-            thread_id=None,
+            is_thread=True,
+            thread_id=stored_target.resolved_thread_id,
             thread_history=[],
             mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
             has_non_agent_mentions=False,
@@ -1114,14 +1377,16 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
             requester_user_id="@user:example.com",
         )
 
+        assert not mock_should_respond.called
         mock_generate_response.assert_awaited_once()
         call_kwargs = mock_generate_response.call_args.kwargs
         assert call_kwargs["reply_to_event_id"] == "$original:example.com"
         assert call_kwargs["existing_event_id"] == "$response:example.com"
         assert call_kwargs["existing_event_is_placeholder"] is False
+        assert call_kwargs["target"] == stored_target
         assert bot.handled_turn_ledger.get_response_event_id("$original:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 2
-        assert mock_remove_run.call_count == 1
+        assert mock_create_storage.call_count == 3
+        mock_remove_run.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1149,7 +1414,19 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
     bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    _record_handled_turn(bot.handled_turn_ledger, ["$original:example.com"], response_event_id="$response:example.com")
+    stored_target = MessageTarget.resolve(
+        room_id="!test:example.com",
+        thread_id=None,
+        reply_to_event_id="$original:example.com",
+    )
+    _record_handled_turn(
+        bot.handled_turn_ledger,
+        ["$original:example.com"],
+        response_event_id="$response:example.com",
+        response_owner="test_agent",
+        history_scope=_agent_history_scope("test_agent"),
+        conversation_target=stored_target,
+    )
     bot.handled_turn_ledger.record_handled_turn = MagicMock(wraps=bot.handled_turn_ledger.record_handled_turn)
     bot.logger = MagicMock()
 
@@ -1194,18 +1471,23 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
 
     with (
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.should_agent_respond", return_value=True),
+        patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
             "create_history_scope_storage",
         ) as mock_create_storage,
         patch("mindroom.bot.remove_run_by_event_id", return_value=False) as mock_remove_run,
-        patch.object(bot, "_generate_response", new_callable=AsyncMock, return_value=None) as mock_generate_response,
+        patch.object(
+            bot,
+            "_generate_response",
+            new_callable=AsyncMock,
+            side_effect=_generate_response_with_locked_callback(None),
+        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
-            is_thread=False,
-            thread_id=None,
+            is_thread=True,
+            thread_id=stored_target.resolved_thread_id,
             thread_history=[],
             mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
             has_non_agent_mentions=False,
@@ -1218,11 +1500,12 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
             requester_user_id=edit_event.sender,
         )
 
+        assert not mock_should_respond.called
         mock_generate_response.assert_awaited_once()
         assert bot.handled_turn_ledger.record_handled_turn.call_count == 0
         assert bot.handled_turn_ledger.get_response_event_id("$original:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 2
-        assert mock_remove_run.call_count == 1
+        assert mock_create_storage.call_count == 3
+        mock_remove_run.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1250,10 +1533,18 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
     bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    stored_target = MessageTarget.resolve(
+        room_id="!test:example.com",
+        thread_id=None,
+        reply_to_event_id="$primary:example.com",
+    )
     _record_handled_turn(
         bot.handled_turn_ledger,
         ["$first:example.com", "$primary:example.com"],
         response_event_id="$response:example.com",
+        response_owner="test_agent",
+        history_scope=_agent_history_scope("test_agent"),
+        conversation_target=stored_target,
     )
     bot.logger = MagicMock()
 
@@ -1328,7 +1619,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             bot,
             "_generate_response",
             new_callable=AsyncMock,
-            return_value="$response:example.com",
+            side_effect=_generate_response_with_locked_callback("$response:example.com"),
         ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
@@ -1347,7 +1638,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             requester_user_id=edit_event.sender,
         )
 
-        mock_should_respond.assert_called_once()
+        mock_should_respond.assert_not_called()
         mock_generate_response.assert_awaited_once()
         call_kwargs = mock_generate_response.call_args.kwargs
         assert call_kwargs["prompt"] == (
@@ -1355,6 +1646,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             "Treat them as one turn and respond once:\n\nupdated first\nprimary"
         )
         assert call_kwargs["reply_to_event_id"] == "$primary:example.com"
+        assert call_kwargs["target"] == stored_target
         assert call_kwargs["matrix_run_metadata"] == {
             "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
             "matrix_source_event_prompts": {
@@ -1364,8 +1656,24 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
         }
         assert bot.handled_turn_ledger.get_response_event_id("$first:example.com") == "$response:example.com"
         assert bot.handled_turn_ledger.get_response_event_id("$primary:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 2
-        assert mock_remove_run.call_count == 1
+        assert mock_create_storage.call_count == 3
+        assert mock_remove_run.call_count == 2
+        mock_remove_run.assert_has_calls(
+            [
+                call(
+                    storage,
+                    "!test:example.com:$primary:example.com",
+                    "$first:example.com",
+                    session_type=SessionType.AGENT,
+                ),
+                call(
+                    storage,
+                    "!test:example.com:$primary:example.com",
+                    "$primary:example.com",
+                    session_type=SessionType.AGENT,
+                ),
+            ],
+        )
 
 
 def test_load_persisted_turn_metadata_prefers_newest_matching_run(tmp_path: Path) -> None:
@@ -1582,6 +1890,127 @@ def test_remove_stale_runs_for_edited_message_uses_internal_state_writer_helpers
 
 
 @pytest.mark.asyncio
+async def test_handle_message_edit_uses_fallback_cleanup_when_turn_context_was_reconstructed(
+    tmp_path: Path,
+) -> None:
+    """Legacy rows without stored target/scope should still use broad stale-run cleanup."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    config = _test_config(tmp_path)
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    bot.logger = MagicMock()
+    _record_handled_turn(
+        bot.handled_turn_ledger,
+        ["$original:example.com"],
+        response_event_id="$response:example.com",
+        response_owner="test_agent",
+    )
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* updated original",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "updated original",
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {
+                    "event_id": "$original:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = {
+        "content": {
+            "body": "* updated original",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "updated original",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "event_id": "$original:example.com",
+                "rel_type": "m.replace",
+            },
+        },
+        "event_id": "$edit:example.com",
+        "sender": "@user:example.com",
+    }
+    cleanup_called = False
+
+    async def generate_response_with_locked_cleanup(*_args: object, **kwargs: object) -> str:
+        nonlocal cleanup_called
+        locked_cleanup = kwargs["on_lifecycle_lock_acquired"]
+        assert locked_cleanup is not None
+        locked_cleanup()
+        cleanup_called = True
+        return "$response:example.com"
+
+    with (
+        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot, "_remove_stale_runs_for_edited_message") as mock_fallback_cleanup,
+        patch.object(
+            bot._conversation_state_writer,
+            "remove_stale_runs_for_turn_record",
+        ) as mock_recorded_cleanup,
+        patch.object(
+            bot,
+            "_generate_response",
+            new_callable=AsyncMock,
+            side_effect=generate_response_with_locked_cleanup,
+        ) as mock_generate_response,
+    ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
+        await bot._handle_message_edit(
+            room,
+            edit_event,
+            EventInfo.from_event(edit_event.source),
+            requester_user_id=edit_event.sender,
+        )
+
+    mock_fallback_cleanup.assert_called_once_with(
+        room=room,
+        thread_id=None,
+        original_event_id="$original:example.com",
+        requester_user_id=edit_event.sender,
+    )
+    assert cleanup_called is True
+    mock_recorded_cleanup.assert_not_called()
+    mock_generate_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_run_metadata(
     tmp_path: Path,
 ) -> None:
@@ -1750,7 +2179,134 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
 
 
 @pytest.mark.asyncio
-async def test_handle_message_edit_prefers_persisted_response_event_id_after_restart(
+async def test_handle_message_edit_recovers_missing_single_turn_without_rerunning_response_gating(
+    tmp_path: Path,
+) -> None:
+    """Persisted single-turn recovery should not re-run should-respond heuristics."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    config = _test_config(tmp_path)
+    config.agents["test_agent"].thread_mode = "room"
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    bot.logger = MagicMock()
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* updated question",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "updated question",
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {
+                    "event_id": "$original:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = {
+        "content": {
+            "body": "* updated question",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "updated question",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "event_id": "$original:example.com",
+                "rel_type": "m.replace",
+            },
+        },
+        "event_id": "$edit:example.com",
+        "sender": "@user:example.com",
+    }
+
+    session_id = create_session_id("!test:example.com", None)
+    storage = MagicMock()
+    storage.get_session.return_value = AgentSession(
+        session_id=session_id,
+        runs=[
+            RunOutput(
+                session_id=session_id,
+                metadata={
+                    "matrix_event_id": "$original:example.com",
+                    "matrix_source_event_ids": ["$original:example.com"],
+                    "matrix_source_event_prompts": {
+                        "$original:example.com": "original question",
+                    },
+                    "matrix_response_event_id": "$response:example.com",
+                },
+            ),
+        ],
+    )
+
+    with (
+        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+        patch.object(
+            bot._conversation_state_writer,
+            "create_history_scope_storage",
+            return_value=storage,
+        ),
+        patch("mindroom.bot.remove_run_by_event_id", return_value=True),
+        patch.object(
+            bot,
+            "_generate_response",
+            new_callable=AsyncMock,
+            side_effect=_generate_response_with_locked_callback("$response:example.com"),
+        ) as mock_generate_response,
+    ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
+        await bot._handle_message_edit(
+            room,
+            edit_event,
+            EventInfo.from_event(edit_event.source),
+            requester_user_id=edit_event.sender,
+        )
+
+    mock_should_respond.assert_not_called()
+    mock_generate_response.assert_awaited_once()
+    call_kwargs = mock_generate_response.call_args.kwargs
+    assert call_kwargs["existing_event_id"] == "$response:example.com"
+    assert call_kwargs["reply_to_event_id"] == "$original:example.com"
+    assert call_kwargs["prompt"] == "updated question"
+    assert bot.handled_turn_ledger.get_response_event_id("$original:example.com") == "$response:example.com"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_edit_prefers_persisted_response_event_id_after_restart(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
     """A fresh bot should prefer the newest persisted response linkage over a stale ledger row."""
@@ -1777,10 +2333,20 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
     bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
     bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
     bot.logger = MagicMock()
+    stored_target = MessageTarget.resolve(
+        room_id="!test:example.com",
+        thread_id=None,
+        reply_to_event_id="$original:example.com",
+        room_mode=True,
+    )
+    assert stored_target.session_id == "!test:example.com"
     _record_handled_turn(
         bot.handled_turn_ledger,
         ["$original:example.com"],
         response_event_id="$response-old:example.com",
+        response_owner="test_agent",
+        history_scope=_agent_history_scope("test_agent"),
+        conversation_target=stored_target,
     )
 
     async def process_and_respond(*_args: object, **kwargs: object) -> _ResponseDispatchResult:
@@ -1910,7 +2476,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
 
     with (
         patch.object(restarted_bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.should_agent_respond", return_value=True),
+        patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
         patch("mindroom.bot.remove_run_by_event_id", return_value=True),
         patch.object(
             restarted_bot,
@@ -1935,8 +2501,11 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
             requester_user_id=edit_event.sender,
         )
 
+    mock_should_respond.assert_not_called()
     mock_generate_response.assert_awaited_once()
-    assert mock_generate_response.call_args.kwargs["existing_event_id"] == "$response-new:example.com"
+    call_kwargs = mock_generate_response.call_args.kwargs
+    assert call_kwargs["existing_event_id"] == "$response-new:example.com"
+    assert call_kwargs["target"].session_id == "!test:example.com"
     assert (
         restarted_bot.handled_turn_ledger.get_response_event_id("$original:example.com") == "$response-new:example.com"
     )
@@ -2083,7 +2652,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
-        patch("mindroom.bot.fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
+        patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
     ):
         mock_handle_reaction.return_value = ("Option 1", "thread_id")
         mock_send_response.return_value = "$ack_event:example.com"

@@ -62,6 +62,7 @@ from mindroom.constants import (
 from mindroom.dispatch_planner import DispatchPlan
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionOutcome
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -126,6 +127,31 @@ def _room_send_response(event_id: str) -> MagicMock:
     response = MagicMock(spec=nio.RoomSendResponse, event_id=event_id)
     response.__class__ = nio.RoomSendResponse
     return response
+
+
+def _agent_response_handled_turn(
+    *,
+    agent_name: str,
+    room_id: str,
+    event_id: str,
+    response_event_id: str,
+    thread_id: str | None = None,
+    source_event_prompts: dict[str, str] | None = None,
+) -> HandledTurnState:
+    """Return the handled-turn state persisted for one direct agent response."""
+    return HandledTurnState.from_source_event_id(
+        event_id,
+        response_event_id=response_event_id,
+        source_event_prompts=source_event_prompts,
+    ).with_response_context(
+        response_owner=agent_name,
+        history_scope=HistoryScope(kind="agent", scope_id=agent_name),
+        conversation_target=MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=event_id,
+        ),
+    )
 
 
 def _response_request(
@@ -3865,8 +3891,10 @@ class TestAgentBot:
         assert list(media.videos) == []
         assert generate_kwargs["attachment_ids"] == [attachment_id]
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(
-                "$img_event",
+            _agent_response_handled_turn(
+                agent_name=mock_agent_user.agent_name,
+                room_id=room.room_id,
+                event_id="$img_event",
                 response_event_id="$response",
                 source_event_prompts={"$img_event": "[Attached image]"},
             ),
@@ -3967,9 +3995,12 @@ class TestAgentBot:
         assert current_attachment_id in generate_kwargs["prompt"]
         assert history_attachment_id in generate_kwargs["prompt"]
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(
-                "$img_event_history",
+            _agent_response_handled_turn(
+                agent_name=mock_agent_user.agent_name,
+                room_id=room.room_id,
+                event_id="$img_event_history",
                 response_event_id="$response",
+                thread_id="$thread_root",
                 source_event_prompts={"$img_event_history": "[Attached image]"},
             ),
         )
@@ -4154,8 +4185,10 @@ class TestAgentBot:
         assert str(media.files[0].filepath) == str(local_media_path)
         assert list(media.videos) == []
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(
-                "$file_event",
+            _agent_response_handled_turn(
+                agent_name=mock_agent_user.agent_name,
+                room_id=room.room_id,
+                event_id="$file_event",
                 response_event_id="$response",
                 source_event_prompts={"$file_event": "[Attached file]"},
             ),
@@ -6125,6 +6158,10 @@ class TestAgentBot:
                     ["$voice", "$text"],
                     response_event_id="$route",
                     source_event_prompts={"$voice": "voice prompt", "$text": "hello"},
+                ).with_response_context(
+                    response_owner="router",
+                    history_scope=None,
+                    conversation_target=dispatch.target,
                 ),
             ),
         ]
@@ -6401,8 +6438,10 @@ class TestAgentBot:
         assert edit_args[1] == "$placeholder"
         assert "Failed to download image" in edit_args[2]
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(
-                "$img_event_fail",
+            _agent_response_handled_turn(
+                agent_name=mock_agent_user.agent_name,
+                room_id=room.room_id,
+                event_id="$img_event_fail",
                 response_event_id="$placeholder",
                 source_event_prompts={"$img_event_fail": "[Attached image]"},
             ),

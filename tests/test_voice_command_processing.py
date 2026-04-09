@@ -23,7 +23,9 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.handled_turns import HandledTurnState
+from mindroom.history.types import HistoryScope
 from mindroom.matrix.identity import MatrixID
+from mindroom.message_target import MessageTarget
 from mindroom.voice_handler import prepare_voice_message
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
@@ -707,6 +709,14 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
             "$voice_event",
             response_event_id="$response",
             source_event_prompts={"$voice_event": f"{VOICE_PREFIX}[Attached voice message]"},
+        ).with_response_context(
+            response_owner="home",
+            history_scope=HistoryScope(kind="agent", scope_id="home"),
+            conversation_target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id="$voice_event",
+                reply_to_event_id="$voice_event",
+            ),
         ),
     )
 
@@ -1065,7 +1075,18 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
     }
     bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id("$voice_event", response_event_id="$response"),
+        HandledTurnState.from_source_event_id(
+            "$voice_event",
+            response_event_id="$response",
+        ).with_response_context(
+            response_owner=ROUTER_AGENT_NAME,
+            history_scope=None,
+            conversation_target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id="$voice_event",
+                reply_to_event_id="$voice_event",
+            ),
+        ),
     )
 
 
