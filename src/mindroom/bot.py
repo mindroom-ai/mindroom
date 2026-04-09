@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from functools import cached_property
@@ -85,6 +87,7 @@ from mindroom.matrix.presence import (
     should_use_streaming,
 )
 from mindroom.matrix.reply_chain import ReplyChainCaches, derive_conversation_context, derive_conversation_target
+from mindroom.matrix.room_cache import cached_room
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import (
     is_dm_room,
@@ -328,6 +331,21 @@ class _QueuedMessageState:
 
     def is_set(self) -> bool:
         return self._event.is_set()
+
+
+def _thread_summary_message_count_hint(
+    thread_history: Sequence[ResolvedVisibleMessage],
+) -> int:
+    """Return a lower-bound post-response thread size without refetching history.
+
+    The summary task runs only after this bot has already appended one visible
+    reply to the thread, so the hint must account for that new non-summary
+    message. Existing summary notices do not count toward the thresholds.
+    """
+    existing_non_summary_messages = sum(
+        1 for message in thread_history if not isinstance(message.content.get("io.mindroom.thread_summary"), dict)
+    )
+    return existing_non_summary_messages + 1
 
 
 def _create_task_wrapper(
@@ -679,6 +697,11 @@ class AgentBot:
     _thread_queued_signals: dict[tuple[str, str | None], _QueuedMessageState] = field(
         default_factory=dict,
         init=False,
+    )
+    _turn_thread_cache: ContextVar[dict[str, list[ResolvedVisibleMessage]] | None] = field(
+        default_factory=lambda: ContextVar("mindroom_turn_thread_cache", default=None),
+        init=False,
+        repr=False,
     )
     in_flight_response_count: int = field(default=0, init=False)
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -1210,7 +1233,11 @@ class AgentBot:
                 elif target_info.thread_id_from_edit:
                     thread_id = target_info.thread_id_from_edit
                 elif not target_info.has_relations:
-                    thread_history = await fetch_thread_history(self.client, room_id, normalized_target_event_id)
+                    thread_history = await self._fetch_thread_history(
+                        self.client,
+                        room_id,
+                        normalized_target_event_id,
+                    )
                     if len(thread_history) > 1:
                         thread_id = normalized_target_event_id
             else:
@@ -1892,15 +1919,21 @@ class AgentBot:
     async def _dispatch_coalesced_batch(self, batch: _CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
         dispatch_event = _build_batch_dispatch_event(batch)
-        await self._dispatch_text_message(
-            batch.room,
-            dispatch_event,
-            batch.requester_user_id,
-            media_events=batch.media_events or None,
-            source_event_ids=batch.source_event_ids,
-        )
+        async with self._turn_thread_cache_scope():
+            await self._dispatch_text_message(
+                batch.room,
+                dispatch_event,
+                batch.requester_user_id,
+                media_events=batch.media_events or None,
+                source_event_ids=batch.source_event_ids,
+            )
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+        async with self._turn_thread_cache_scope():
+            await self._handle_message_inner(room, event)
+
+    async def _handle_message_inner(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+        """Handle one text message inside the per-turn thread-history cache scope."""
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
         if not isinstance(event.body, str):
@@ -1918,7 +1951,6 @@ class AgentBot:
         if prechecked_event is None:
             return
 
-        # Handle edit events
         if event_info.is_edit:
             await self._handle_message_edit(
                 room,
@@ -2099,9 +2131,13 @@ class AgentBot:
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
+        async with self._turn_thread_cache_scope():
+            await self._handle_reaction_inner(room, event)
+
+    async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
+        """Handle one reaction inside the per-turn thread-history cache scope."""
         assert self.client is not None
 
-        # Check if sender is authorized to interact with agents
         if not is_authorized_sender(
             event.sender,
             self.config,
@@ -2112,42 +2148,24 @@ class AgentBot:
             self.logger.debug(f"Ignoring reaction from unauthorized sender: {event.sender}")
             return
 
-        # Check per-agent reply permissions before handling any reaction type
-        # so disallowed senders cannot trigger stop confirmations, config
-        # confirmations, or consume interactive questions.
         if not self._can_reply_to_sender(event.sender):
             self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
             return
 
-        # Check if this is a stop button reaction for a message currently being generated
-        # Only process stop functionality if:
-        # 1. The reaction is 🛑
-        # 2. The sender is not an agent (users only)
-        # 3. The message is currently being generated by this agent
         if event.key == "🛑":
-            # Check if this is from a bot/agent
             sender_agent_name = extract_agent_name(event.sender, self.config, self.runtime_paths)
-            # Only handle stop from users, not agents, and only if tracking this message
             if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
                 self.logger.info(
                     "Stop requested for message",
                     message_id=event.reacts_to,
                     requested_by=event.sender,
                 )
-                # Remove the stop button immediately for user feedback
                 await self.stop_manager.remove_stop_button(self.client, event.reacts_to)
-                # Acknowledge immediately without claiming the task has fully exited yet.
                 await self._send_response(room.room_id, event.reacts_to, _STOPPING_RESPONSE_TEXT, None)
                 return
-            # Message is not being generated - let the reaction be handled for other purposes
-            # (e.g., interactive questions). Don't return here so it can fall through!
-            # Agent reactions with 🛑 also fall through to other handlers
 
-        # Then check if this is a config confirmation reaction
         pending_change = config_confirmation.get_pending_change(event.reacts_to)
-
         if pending_change and self.agent_name == ROUTER_AGENT_NAME:
-            # Only router handles config confirmations
             await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
             return
 
@@ -2158,7 +2176,6 @@ class AgentBot:
             self.config,
             self.runtime_paths,
         )
-
         if result:
             await self._handle_interactive_reaction_result(room, event, result)
             return
@@ -2178,7 +2195,7 @@ class AgentBot:
         """Handle one validated interactive reaction selection."""
         assert self.client is not None
         selected_value, thread_id = result
-        thread_history = await fetch_thread_history(self.client, room.room_id, thread_id) if thread_id else []
+        thread_history = await self._fetch_thread_history(self.client, room.room_id, thread_id) if thread_id else []
 
         ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
         # Matrix doesn't allow reply relations to events that already have relations (reactions).
@@ -2363,6 +2380,15 @@ class AgentBot:
         event: _MediaDispatchEvent,
     ) -> None:
         """Handle image/file/video/audio events and dispatch media-aware responses."""
+        async with self._turn_thread_cache_scope():
+            await self._handle_media_message_inner(room, event)
+
+    async def _handle_media_message_inner(
+        self,
+        room: nio.MatrixRoom,
+        event: _MediaDispatchEvent,
+    ) -> None:
+        """Handle one media event inside the per-turn thread-history cache scope."""
         assert self.client is not None
 
         prechecked_event = self._precheck_dispatch_event(room, event)
@@ -2371,7 +2397,6 @@ class AgentBot:
 
         if await self._dispatch_special_media_as_text(room, prechecked_event):
             return
-
         event = prechecked_event.event
         await self._enqueue_for_dispatch(
             event,
@@ -2574,7 +2599,7 @@ class AgentBot:
             event_info,
             self._reply_chain,
             self.logger,
-            fetch_thread_history,
+            self._fetch_thread_history,
         )
         return is_thread, thread_id, thread_history
 
@@ -3510,7 +3535,38 @@ class AgentBot:
         client = self.client
         if client is None:
             return None
-        return client.rooms.get(room_id)
+        return cached_room(client, room_id)
+
+    @asynccontextmanager
+    async def _turn_thread_cache_scope(self) -> AsyncIterator[None]:
+        """Cache thread history for the lifetime of one message-handling turn."""
+        existing_cache = self._turn_thread_cache.get()
+        if existing_cache is not None:
+            yield
+            return
+
+        token = self._turn_thread_cache.set({})
+        try:
+            yield
+        finally:
+            self._turn_thread_cache.reset(token)
+
+    async def _fetch_thread_history(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+        thread_id: str,
+    ) -> list[ResolvedVisibleMessage]:
+        """Fetch thread history once per turn for the same room/thread pair."""
+        cache = self._turn_thread_cache.get()
+        cache_key = f"{room_id}:{thread_id}"
+        if cache is not None and cache_key in cache:
+            return cache[cache_key]
+
+        thread_history = await fetch_thread_history(client, room_id, thread_id)
+        if cache is not None:
+            cache[cache_key] = thread_history
+        return thread_history
 
     def _build_tool_runtime_context(
         self,
@@ -4409,7 +4465,7 @@ class AgentBot:
                 show_stop_button = self.config.defaults.show_stop_button
                 if show_stop_button and user_id:
                     # Check if user is online - same logic as streaming decision
-                    user_is_online = await is_user_online(self.client, user_id)
+                    user_is_online = await is_user_online(self.client, user_id, room_id=room_id)
                     show_stop_button = user_is_online
                     self.logger.info(
                         "Stop button decision",
@@ -5526,6 +5582,7 @@ class AgentBot:
                     thread_id=thread_id,
                     config=self.config,
                     runtime_paths=self.runtime_paths,
+                    message_count_hint=_thread_summary_message_count_hint(thread_history),
                 ),
                 name=f"thread_summary_{room_id}_{thread_id}",
             )
@@ -6269,6 +6326,7 @@ class TeamBot(AgentBot):
                     thread_id=thread_id,
                     config=self.config,
                     runtime_paths=self.runtime_paths,
+                    message_count_hint=_thread_summary_message_count_hint(thread_history),
                 ),
                 name=f"thread_summary_{room_id}_{thread_id}",
             )

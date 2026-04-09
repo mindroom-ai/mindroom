@@ -245,7 +245,6 @@ async def maybe_generate_thread_summary(
 
     async with thread_summary_lock(room_id, thread_id):
         cache_key = thread_summary_cache_key(room_id, thread_id)
-
         # Recover from existing summary events on cache miss (e.g., after restart)
         if cache_key not in _last_summary_counts:
             recovered = await _recover_last_summary_count(client, room_id, thread_id)
@@ -259,11 +258,13 @@ async def maybe_generate_thread_summary(
             subsequent_interval=subsequent_interval,
         )
 
-        if message_count_hint is not None and message_count_hint < threshold:
-            return
-
+        # message_count_hint comes from a pre-send snapshot and is only a
+        # lower bound. Other agents or humans can post before this background
+        # task runs, so a stale hint must never suppress the live re-fetch.
         thread_history = await fetch_thread_history(client, room_id, thread_id)
         message_count = _count_non_summary_messages(thread_history)
+        if message_count_hint is not None:
+            message_count = max(message_count, message_count_hint)
         if message_count < threshold:
             return
         try:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -12,6 +12,7 @@ from google.genai import types
 
 import mindroom.constants as constants_mod
 from mindroom import avatar_generation as generate_avatars
+from mindroom.matrix import avatar as avatar_module
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -81,6 +82,64 @@ def test_get_avatar_path_uses_workspace_avatars_dir(workspace_avatar_dir: Path) 
 def test_get_console_returns_shared_console_instance() -> None:
     """Avatar generation should reuse one Rich console instance across prints and progress."""
     assert generate_avatars.get_console() is generate_avatars.get_console()
+
+
+@pytest.mark.asyncio
+async def test_room_has_avatar_rechecks_state_even_when_cached_avatar_exists() -> None:
+    """Room avatar checks should not trust a cached avatar URL without state confirmation."""
+    client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_avatar_url = "mxc://example.com/avatar"
+    client.rooms = {"!room:example.com": room}
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={},
+        event_type="m.room.avatar",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await avatar_module.room_has_avatar(client, "!room:example.com")
+
+    assert result is False
+    client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.avatar")
+
+
+@pytest.mark.asyncio
+async def test_room_has_avatar_falls_back_to_state_event_when_room_missing() -> None:
+    """Room avatar checks should still read state when the room cache is unavailable."""
+    client = AsyncMock()
+    client.rooms = {}
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"url": "mxc://example.com/avatar"},
+        event_type="m.room.avatar",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await avatar_module.room_has_avatar(client, "!room:example.com")
+
+    assert result is True
+    client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.avatar")
+
+
+@pytest.mark.asyncio
+async def test_room_has_avatar_falls_back_to_state_event_when_cached_avatar_missing() -> None:
+    """A cached room without an avatar URL should still fall back to room state."""
+    client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_avatar_url = None
+    client.rooms = {"!room:example.com": room}
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"url": "mxc://example.com/avatar"},
+        event_type="m.room.avatar",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await avatar_module.room_has_avatar(client, "!room:example.com")
+
+    assert result is True
+    client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.avatar")
 
 
 def test_extract_image_bytes_returns_first_inline_image() -> None:

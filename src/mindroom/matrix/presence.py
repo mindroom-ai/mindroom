@@ -8,6 +8,7 @@ import nio
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
+from mindroom.matrix.room_cache import cached_room, cached_rooms
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -88,18 +89,38 @@ def build_agent_status_message(
 async def is_user_online(
     client: nio.AsyncClient,
     user_id: str,
+    room_id: str | None = None,
 ) -> bool:
     """Check if a Matrix user is currently online.
 
     Args:
         client: The Matrix client to use for the presence check
         user_id: The Matrix user ID string (e.g., "@user:example.com")
+        room_id: Optional room ID whose synced membership cache should be checked first
 
     Returns:
         True if the user is online or unavailable (active but busy),
         False if offline or presence check fails
 
     """
+    candidate_rooms = [cached_room(client, room_id)] if room_id is not None else cached_rooms(client).values()
+    for room in candidate_rooms:
+        if room is None or user_id not in room.users:
+            continue
+        cached_user = room.users[user_id]
+        if cached_user.presence not in ("online", "unavailable"):
+            continue
+        is_online = True
+        logger.debug(
+            "User presence check from room cache",
+            user_id=user_id,
+            room_id=room.room_id,
+            presence=cached_user.presence,
+            is_online=is_online,
+            last_active_ago=cached_user.last_active_ago,
+        )
+        return is_online
+
     try:
         response = await client.get_presence(user_id)
 
@@ -169,7 +190,7 @@ async def should_use_streaming(
         return True
 
     # Check if the requester is online
-    is_online = await is_user_online(client, requester_user_id)
+    is_online = await is_user_online(client, requester_user_id, room_id=room_id)
 
     logger.info(
         "Streaming decision",

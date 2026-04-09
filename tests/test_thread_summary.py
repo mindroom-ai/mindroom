@@ -481,6 +481,58 @@ class TestMaybeGenerateThreadSummary:
         )
         assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
 
+    async def test_stale_below_threshold_hint_still_fetches_live_thread_history(self) -> None:
+        """A stale low hint must not suppress a fetch when concurrent posts crossed the threshold."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary", room_id="!room:x"))
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        thread_history = _make_thread_history(5)
+
+        with (
+            patch("mindroom.thread_summary.fetch_thread_history", return_value=thread_history) as mock_fetch,
+            patch("mindroom.thread_summary._generate_summary", return_value="Summary") as mock_gen,
+            patch("mindroom.thread_summary._recover_last_summary_count", return_value=0),
+        ):
+            await maybe_generate_thread_summary(
+                client,
+                "!room:x",
+                "$thread1",
+                config,
+                rp,
+                message_count_hint=4,
+            )
+
+        mock_fetch.assert_awaited_once_with(client, "!room:x", "$thread1")
+        mock_gen.assert_awaited_once_with(thread_history, config, rp)
+        client.room_send.assert_awaited_once()
+
+    async def test_threshold_hint_fetches_on_boundary(self) -> None:
+        """A hint at the threshold should still fetch and generate the summary."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary", room_id="!room:x"))
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        thread_history = _make_thread_history(5)
+
+        with (
+            patch("mindroom.thread_summary.fetch_thread_history", return_value=thread_history) as mock_fetch,
+            patch("mindroom.thread_summary._generate_summary", return_value="Summary") as mock_gen,
+            patch("mindroom.thread_summary._recover_last_summary_count", return_value=0),
+        ):
+            await maybe_generate_thread_summary(
+                client,
+                "!room:x",
+                "$thread1",
+                config,
+                rp,
+                message_count_hint=5,
+            )
+
+        mock_fetch.assert_awaited_once_with(client, "!room:x", "$thread1")
+        mock_gen.assert_awaited_once_with(thread_history, config, rp)
+        client.room_send.assert_awaited_once()
+
     async def test_already_summarized_skips(self) -> None:
         """No LLM call when count hasn't crossed the next threshold."""
         update_last_summary_count("!room:x", "$thread1", 5)

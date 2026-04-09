@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
+from mindroom import topic_generator
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
+from mindroom.matrix.presence import is_user_online
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from tests.conftest import TEST_ACCESS_TOKEN, bind_runtime_paths, runtime_paths_for
 
@@ -309,6 +311,67 @@ async def test_ensure_thread_tags_power_level_preserves_existing_content() -> No
 
 
 @pytest.mark.asyncio
+async def test_ensure_thread_tags_power_level_always_fetches_fresh_power_levels() -> None:
+    """Write-back reconciliation must fetch fresh power levels, not use cached ones."""
+    mock_client = AsyncMock()
+    room = nio.MatrixRoom("!room:example.com", "@router:example.com")
+    room.power_levels.defaults.state_default = 50
+    room.power_levels.users["@router:example.com"] = 100
+    room.power_levels.events["m.room.name"] = 50
+    mock_client.rooms = {"!room:example.com": room}
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={
+            "events": {"m.room.name": 50},
+            "state_default": 50,
+            "users": {"@router:example.com": 100},
+        },
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id="!room:example.com",
+    )
+    mock_client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state"},
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.ensure_thread_tags_power_level(mock_client, "!room:example.com")
+
+    assert result is True
+    mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.power_levels")
+    mock_client.room_put_state.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ensure_thread_tags_power_level_does_not_restore_removed_overrides() -> None:
+    """Stale cached overrides must not be written back when adding thread-tags PL."""
+    mock_client = AsyncMock()
+    room = nio.MatrixRoom("!room:example.com", "@router:example.com")
+    room.power_levels.users["@router:example.com"] = 100
+    room.power_levels.users["@removed:example.com"] = 50
+    mock_client.rooms = {"!room:example.com": room}
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={
+            "events": {},
+            "state_default": 50,
+            "users": {"@router:example.com": 100},
+        },
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id="!room:example.com",
+    )
+    mock_client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state"},
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.ensure_thread_tags_power_level(mock_client, "!room:example.com")
+
+    assert result is True
+    _, kwargs = mock_client.room_put_state.await_args
+    assert "@removed:example.com" not in kwargs["content"].get("users", {})
+
+
+@pytest.mark.asyncio
 async def test_ensure_thread_tags_power_level_idempotent() -> None:
     """Reconciliation should skip writes when the override already exists."""
     mock_client = AsyncMock()
@@ -344,6 +407,43 @@ async def test_ensure_room_join_rule_idempotent(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
+async def test_get_room_join_rule_falls_back_to_state_event_when_room_missing() -> None:
+    """Join-rule reads should still hit the homeserver when the room cache is unavailable."""
+    mock_client = AsyncMock()
+    mock_client.rooms = {}
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"join_rule": "public"},
+        event_type="m.room.join_rules",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client._get_room_join_rule(mock_client, "!room:example.com")
+
+    assert result == "public"
+    mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.join_rules")
+
+
+@pytest.mark.asyncio
+async def test_get_room_join_rule_falls_back_to_state_event_when_room_not_synced() -> None:
+    """Unsynced rooms should not trust nio's default `invite` join rule."""
+    mock_client = AsyncMock()
+    room = nio.MatrixRoom("!room:example.com", "@router:example.com")
+    mock_client.rooms = {"!room:example.com": room}
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"join_rule": "public"},
+        event_type="m.room.join_rules",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client._get_room_join_rule(mock_client, "!room:example.com")
+
+    assert result == "public"
+    mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.join_rules")
+
+
+@pytest.mark.asyncio
 async def test_ensure_room_directory_visibility_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     """Directory visibility reconciliation should be idempotent when already in desired state."""
     mock_client = AsyncMock()
@@ -372,6 +472,206 @@ async def test_set_room_join_rule_logs_actionable_permission_error(monkeypatch: 
     assert warning.call_count == 1
     _, kwargs = warning.call_args
     assert "service account" in kwargs["hint"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_room_has_topic_repairs_missing_state_even_when_cache_is_stale() -> None:
+    """Topic generation should repair missing state instead of trusting cached room metadata."""
+    mock_client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.topic = "Existing topic"
+    mock_client.rooms = {"!room:example.com": room}
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={},
+        event_type="m.room.topic",
+        state_key="",
+        room_id="!room:example.com",
+    )
+    mock_client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$topic"},
+        room_id="!room:example.com",
+    )
+
+    with patch("mindroom.topic_generator.generate_room_topic_ai", new=AsyncMock(return_value="Fresh topic")):
+        result = await topic_generator.ensure_room_has_topic(
+            mock_client,
+            "!room:example.com",
+            "lobby",
+            "Lobby",
+            MagicMock(),
+            MagicMock(),
+        )
+
+    assert result is True
+    mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.topic")
+    mock_client.room_put_state.assert_awaited_once_with(
+        room_id="!room:example.com",
+        event_type="m.room.topic",
+        content={"topic": "Fresh topic"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_room_has_topic_falls_back_to_state_event_when_room_missing() -> None:
+    """Topic generation should still read room state when the nio room cache is empty."""
+    mock_client = AsyncMock()
+    mock_client.rooms = {}
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"topic": "Existing topic"},
+        event_type="m.room.topic",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await topic_generator.ensure_room_has_topic(
+        mock_client,
+        "!room:example.com",
+        "lobby",
+        "Lobby",
+        MagicMock(),
+        MagicMock(),
+    )
+
+    assert result is True
+    mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.topic")
+
+
+@pytest.mark.asyncio
+async def test_ensure_room_has_topic_falls_back_to_state_event_when_cached_topic_missing() -> None:
+    """A cached room without a topic should still read the topic state event."""
+    mock_client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.topic = None
+    mock_client.rooms = {"!room:example.com": room}
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"topic": "Existing topic"},
+        event_type="m.room.topic",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await topic_generator.ensure_room_has_topic(
+        mock_client,
+        "!room:example.com",
+        "lobby",
+        "Lobby",
+        MagicMock(),
+        MagicMock(),
+    )
+
+    assert result is True
+    mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.topic")
+
+
+@pytest.mark.asyncio
+async def test_ensure_room_name_repairs_stale_cache_hit() -> None:
+    """Room-name reconciliation should not trust a stale cached name match."""
+    mock_client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.name = "Lobby"
+    mock_client.rooms = {"!room:example.com": room}
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"name": "Old lobby"},
+        event_type="m.room.name",
+        state_key="",
+        room_id="!room:example.com",
+    )
+    mock_client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$name"},
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.ensure_room_name(mock_client, "!room:example.com", "Lobby")
+
+    assert result is True
+    mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.name")
+    mock_client.room_put_state.assert_awaited_once_with(
+        room_id="!room:example.com",
+        event_type="m.room.name",
+        content={"name": "Lobby"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_room_name_falls_back_to_state_event_when_cached_name_missing() -> None:
+    """A cached room without `room.name` should still read the state event before writing."""
+    mock_client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.name = None
+    mock_client.rooms = {"!room:example.com": room}
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"name": "Lobby"},
+        event_type="m.room.name",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.ensure_room_name(mock_client, "!room:example.com", "Lobby")
+
+    assert result is True
+    mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.name")
+    mock_client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_room_name_confirms_stale_cached_mismatch_before_writing() -> None:
+    """A stale cached name should not trigger a write when the homeserver already matches."""
+    mock_client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.name = "Old lobby"
+    mock_client.rooms = {"!room:example.com": room}
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"name": "Lobby"},
+        event_type="m.room.name",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.ensure_room_name(mock_client, "!room:example.com", "Lobby")
+
+    assert result is True
+    mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.name")
+    mock_client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_room_name_rechecks_state_even_when_cache_has_name() -> None:
+    """Room-name reads should prefer the homeserver over a potentially stale cache hit."""
+    mock_client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.name = "Lobby"
+    mock_client.rooms = {"!room:example.com": room}
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"name": "Server lobby"},
+        event_type="m.room.name",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.get_room_name(mock_client, "!room:example.com")
+
+    assert result == "Server lobby"
+    mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.name")
+
+
+@pytest.mark.asyncio
+async def test_get_room_name_falls_back_to_state_event_when_cached_name_missing() -> None:
+    """A cached room without `room.name` should still read the name state event."""
+    mock_client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.name = None
+    mock_client.rooms = {"!room:example.com": room}
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"name": "Lobby"},
+        event_type="m.room.name",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.get_room_name(mock_client, "!room:example.com")
+
+    assert result == "Lobby"
+    mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.name")
 
 
 @pytest.mark.asyncio
@@ -658,3 +958,25 @@ async def test_ensure_all_rooms_exist_continues_after_room_failure(monkeypatch: 
     assert room_ids == {"ops": "!ops:example.com"}
     assert ensure_room_exists_mock.await_count == 2
     logger_exception.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_is_user_online_scans_cached_rooms_when_room_id_is_none() -> None:
+    """Presence checks without a room hint should still use cached room membership first."""
+    mock_client = AsyncMock(spec=nio.AsyncClient)
+    mock_client.rooms = {
+        "!room:example.com": MagicMock(
+            room_id="!room:example.com",
+            users={
+                "@user:example.com": MagicMock(
+                    presence="online",
+                    last_active_ago=1000,
+                ),
+            },
+        ),
+    }
+
+    result = await is_user_online(mock_client, "@user:example.com", room_id=None)
+
+    assert result is True
+    mock_client.get_presence.assert_not_called()

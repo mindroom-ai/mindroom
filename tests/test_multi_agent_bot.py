@@ -41,6 +41,7 @@ from mindroom.bot import (
     _ResponseAction,
     _ResponseDispatchResult,
     _SuppressedPlaceholderCleanupError,
+    _thread_summary_message_count_hint,
 )
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -3089,6 +3090,7 @@ class TestAgentBot:
             thread_id="$thread",
             config=config,
             runtime_paths=bot.runtime_paths,
+            message_count_hint=1,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
@@ -3171,8 +3173,42 @@ class TestAgentBot:
             thread_id="$thread",
             config=config,
             runtime_paths=bot.runtime_paths,
+            message_count_hint=1,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
+
+    def test_thread_summary_message_count_hint_excludes_existing_summaries(self) -> None:
+        """Thread-summary hints should count the post-response non-summary total."""
+        thread_history = [
+            ResolvedVisibleMessage.synthetic(
+                sender=f"@user{i}:localhost",
+                body=f"Message {i}",
+                timestamp=1700000000 + i,
+                event_id=f"$message{i}",
+            )
+            for i in range(4)
+        ]
+        thread_history.append(
+            ResolvedVisibleMessage.synthetic(
+                sender="@mindroom_general:localhost",
+                body="🧵 Existing summary",
+                timestamp=1700000005,
+                event_id="$summary",
+                content={
+                    "msgtype": "m.notice",
+                    "body": "🧵 Existing summary",
+                    "io.mindroom.thread_summary": {
+                        "version": 1,
+                        "summary": "🧵 Existing summary",
+                        "message_count": 4,
+                        "model": "default",
+                    },
+                },
+                thread_id="$thread",
+            ),
+        )
+
+        assert _thread_summary_message_count_hint(thread_history) == 5
 
     @pytest.mark.asyncio
     async def test_generate_team_response_streams_into_placeholder_event(

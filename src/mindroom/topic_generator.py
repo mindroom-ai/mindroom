@@ -133,7 +133,6 @@ async def ensure_room_has_topic(
         True if topic was set or already exists, False on error
 
     """
-    # Check if room already has a topic
     response = await client.room_get_state_event(room_id, "m.room.topic")
     if isinstance(response, nio.RoomGetStateEventResponse) and response.content.get("topic"):
         logger.debug(f"Room {room_key} already has topic: {response.content['topic']}")

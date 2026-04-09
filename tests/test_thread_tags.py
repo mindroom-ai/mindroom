@@ -198,6 +198,64 @@ def _write_operation(
 
 
 @pytest.mark.asyncio
+async def test_set_thread_tag_fetches_fresh_membership_and_power_levels_even_with_synced_cache() -> None:
+    """Thread-tag writes should re-check current membership and power levels from Matrix."""
+    client = AsyncMock()
+    client.user_id = "@mindroom_general:localhost"
+    room = nio.MatrixRoom("!room:localhost", "@mindroom_general:localhost")
+    room.members_synced = True
+    room.users = {
+        "@mindroom_general:localhost": object(),
+        "@alice:localhost": object(),
+    }
+    room.power_levels.defaults.state_default = 50
+    room.power_levels.users["@mindroom_general:localhost"] = 50
+    room.power_levels.users["@alice:localhost"] = 50
+    client.rooms = {"!room:localhost": room}
+    client.joined_members.return_value = _joined_members_response(
+        "@mindroom_general:localhost",
+        "@alice:localhost",
+    )
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={
+            "@mindroom_general:localhost": 50,
+            "@alice:localhost": 50,
+        },
+    )
+
+    current_events: dict[str, dict[str, object]] = {}
+
+    async def room_get_state(room_id: str) -> object:
+        assert room_id == "!room:localhost"
+        return _thread_tags_room_state_from_current(current_events)
+
+    async def room_put_state(**kwargs: object) -> object:
+        current_events[kwargs["state_key"]] = kwargs["content"]
+        return nio.RoomPutStateResponse.from_dict(
+            {"event_id": "$state"},
+            room_id="!room:localhost",
+        )
+
+    client.room_get_state.side_effect = room_get_state
+    client.room_put_state.side_effect = room_put_state
+
+    state = await set_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "resolved",
+        set_by="@alice:localhost",
+    )
+
+    assert state.tags["resolved"].set_by == "@alice:localhost"
+    client.joined_members.assert_awaited_once_with("!room:localhost")
+    client.room_get_state_event.assert_awaited_once_with(
+        room_id="!room:localhost",
+        event_type="m.room.power_levels",
+    )
+
+
+@pytest.mark.asyncio
 async def test_set_thread_tag_writes_state_and_returns_state() -> None:
     """Thread tags should be written to the expected room state key."""
     client = AsyncMock()

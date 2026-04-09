@@ -28,6 +28,7 @@ from mindroom.matrix.message_content import (
     extract_and_resolve_message,
     extract_edit_body,
 )
+from mindroom.matrix.room_cache import cached_room
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 logger = get_logger(__name__)
@@ -467,6 +468,10 @@ async def ensure_thread_tags_power_level(
     room_id: str,
 ) -> bool:
     """Ensure managed rooms allow PL0 users to send the thread-tags state event."""
+    # Always fetch fresh power levels from the homeserver because the content is
+    # used as the base for a write-back. nio's cached PowerLevels can retain
+    # stale user/event overrides that were already removed server-side, and
+    # writing those back would silently restore revoked permissions.
     current_response = await client.room_get_state_event(room_id, _POWER_LEVELS_EVENT_TYPE)
     if not isinstance(current_response, nio.RoomGetStateEventResponse):
         logger.error(
@@ -482,9 +487,10 @@ async def ensure_thread_tags_power_level(
             content=current_response.content,
         )
         return False
+    current_content = current_response.content
 
-    desired_content = _with_thread_tags_power_level(current_response.content)
-    if desired_content == current_response.content:
+    desired_content = _with_thread_tags_power_level(current_content)
+    if desired_content == current_content:
         logger.debug(
             "Thread tags power level already configured",
             room_id=room_id,
@@ -877,22 +883,18 @@ async def get_room_name(client: nio.AsyncClient, room_id: str) -> str:
         Room name if found, fallback name for DM/unnamed rooms
 
     """
-    # Try to get the room name directly
     response = await client.room_get_state_event(room_id, "m.room.name")
     if isinstance(response, nio.RoomGetStateEventResponse) and response.content.get("name"):
         return str(response.content["name"])
 
-    # Get room state for fallback naming
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
         return "Unnamed Room"
 
-    # Check for room name in state events
     for event in response.events:
         if event.get("type") == "m.room.name" and event.get("content", {}).get("name"):
             return str(event["content"]["name"])
 
-    # Build member list for DM/group room names
     members = [
         event.get("content", {}).get("displayname", event.get("state_key", ""))
         for event in response.events
@@ -902,11 +904,12 @@ async def get_room_name(client: nio.AsyncClient, room_id: str) -> str:
     ]
 
     if len(members) == 1:
-        return f"DM with {members[0]}"
-    if members:
-        return f"Room with {', '.join(members[:3])}" + (" and others" if len(members) > 3 else "")
-
-    return "Unnamed Room"
+        room_name = f"DM with {members[0]}"
+    elif members:
+        room_name = f"Room with {', '.join(members[:3])}" + (" and others" if len(members) > 3 else "")
+    else:
+        room_name = "Unnamed Room"
+    return room_name
 
 
 async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
@@ -978,7 +981,7 @@ async def _upload_file_as_mxc(
         return None, None
 
     info: dict[str, Any] = {"size": len(file_bytes), "mimetype": mimetype}
-    room = client.rooms.get(room_id)
+    room = cached_room(client, room_id)
     if room is None:
         logger.error("Cannot determine encryption state for unknown room", room_id=room_id)
         return None, None

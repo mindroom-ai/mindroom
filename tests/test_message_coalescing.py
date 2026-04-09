@@ -88,6 +88,28 @@ def _make_context(thread_history: list[ResolvedVisibleMessage] | None = None) ->
     )
 
 
+@pytest.mark.asyncio
+async def test_turn_thread_history_cache_dedups_fetches_and_clears_after_turn(tmp_path: Path) -> None:
+    """Per-turn thread history should be fetched once, then cleared for the next turn."""
+    bot = _make_bot(tmp_path)
+    history = [_message(sender="@user:localhost", event_id="$m1", timestamp=1000, body="hello")]
+
+    with patch(
+        "mindroom.bot.fetch_thread_history",
+        new=AsyncMock(side_effect=[history, history]),
+    ) as mock_fetch:
+        async with bot._turn_thread_cache_scope():
+            first = await bot._fetch_thread_history(bot.client, "!room:localhost", "$thread")
+            second = await bot._fetch_thread_history(bot.client, "!room:localhost", "$thread")
+        async with bot._turn_thread_cache_scope():
+            third = await bot._fetch_thread_history(bot.client, "!room:localhost", "$thread")
+
+    assert first == history
+    assert second == history
+    assert third == history
+    assert mock_fetch.await_count == 2
+
+
 class TestHasNewerUnrespondedInScope:
     """Tests for AgentBot._has_newer_unresponded_in_scope."""
 
