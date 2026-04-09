@@ -11,6 +11,7 @@ from mindroom.constants import RuntimePaths
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
+from mindroom.timing import timed
 
 logger = get_logger(__name__)
 _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
@@ -144,18 +145,26 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
     }
 
 
-async def create_memory_instance(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> AsyncMemory:
+@timed("system_prompt_assembly.memory_search.mem0.async_memory_from_config")
+async def create_memory_instance(
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    timing_scope: str | None = None,
+) -> AsyncMemory:
     """Create a Mem0 memory instance with ChromaDB backend.
 
     Args:
         storage_path: Base directory for memory storage
         config: Application configuration
         runtime_paths: Explicit runtime context for credential-backed provider settings.
+        timing_scope: Optional correlated timing scope id for nested logs.
 
     Returns:
         Configured AsyncMemory instance
 
     """
+    del timing_scope
     config_dict = _get_memory_config(storage_path, config, runtime_paths)
     if config.memory.embedder.provider == "sentence_transformers":
         ensure_sentence_transformers_dependencies(runtime_paths)

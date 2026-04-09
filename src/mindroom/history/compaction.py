@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from mindroom.history.storage import clear_force_compaction_state, update_scope_seen_event_ids, write_scope_state
 from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
 from mindroom.logging_config import get_logger
+from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 
 if TYPE_CHECKING:
@@ -101,6 +102,7 @@ class _CompactionRewriteResult:
     compacted_run_count: int
 
 
+@timed("system_prompt_assembly.history_prepare.compaction")
 async def compact_scope_history(
     *,
     storage: SqliteDb,
@@ -117,6 +119,7 @@ async def compact_scope_history(
     threshold_tokens: int | None,
     reserve_tokens: int,
     notify: bool,
+    timing_scope: str | None = None,
 ) -> tuple[HistoryScopeState, CompactionOutcome | None]:
     """Compact one scope by rewriting session.summary and session.runs."""
     visible_runs = runs_for_scope(completed_top_level_runs(session), scope)
@@ -151,6 +154,7 @@ async def compact_scope_history(
         history_settings=history_settings,
         available_history_budget=available_history_budget,
         summary_input_budget=summary_input_budget,
+        timing_scope=timing_scope,
     )
     if rewrite_result is None:
         cleared_state = clear_force_compaction_state(session, scope, state)
@@ -205,6 +209,7 @@ async def compact_scope_history(
     return new_state, outcome
 
 
+@timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
 async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
     *,
     working_session: AgentSession | TeamSession,
@@ -215,6 +220,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
     history_settings: ResolvedHistorySettings,
     available_history_budget: int | None,
     summary_input_budget: int,
+    timing_scope: str | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     total_compacted_run_count = 0
@@ -265,7 +271,11 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
                 return None
             break
 
-        new_summary = await _generate_compaction_summary(model=summary_model, summary_input=summary_input)
+        new_summary = await _generate_compaction_summary(
+            model=summary_model,
+            summary_input=summary_input,
+            timing_scope=timing_scope,
+        )
         final_summary_text = new_summary.summary
         compacted_run_ids = {run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id}
         compacted_seen_event_ids = _seen_event_ids_for_runs(included_runs)
@@ -606,7 +616,14 @@ def resolve_compaction_runtime_settings(
     )
 
 
-async def _generate_compaction_summary(*, model: Model, summary_input: str) -> SessionSummary:
+@timed("system_prompt_assembly.history_prepare.compaction.summary_model_request")
+async def _generate_compaction_summary(
+    *,
+    model: Model,
+    summary_input: str,
+    timing_scope: str | None = None,
+) -> SessionSummary:
+    del timing_scope
     response = await model.aresponse(
         messages=[
             Message(role="system", content=_COMPACTION_SUMMARY_PROMPT),
@@ -632,6 +649,7 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
     return normalized
 
 
+@timed("system_prompt_assembly.history_prepare.compaction.summary_input_build")
 def _build_summary_input(
     *,
     previous_summary: str | None,

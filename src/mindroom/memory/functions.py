@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.memory.config import create_memory_instance
+from mindroom.timing import timed
 
 from ._file_backend import (
     add_file_agent_memory,
@@ -57,8 +58,79 @@ logger = get_logger(__name__)
 
 def _create_memory_factory(
     runtime_paths: RuntimePaths,
-) -> Callable[[Path, Config], Awaitable[ScopedMemoryCrud]]:
+) -> Callable[..., Awaitable[ScopedMemoryCrud]]:
     return partial(create_memory_instance, runtime_paths=runtime_paths)
+
+
+@timed("system_prompt_assembly.memory_search.file_backend")
+def _search_file_backend_memories(
+    query: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    limit: int,
+    execution_identity: ToolExecutionIdentity | None,
+    timing_scope: str | None,
+) -> list[MemoryResult]:
+    return search_file_agent_memories(
+        query,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths,
+        limit=limit,
+        execution_identity=execution_identity,
+        timing_scope=timing_scope,
+    )
+
+
+@timed("system_prompt_assembly.memory_search.mem0_backend")
+async def _search_mem0_backend_memories(
+    query: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    limit: int,
+    execution_identity: ToolExecutionIdentity | None,
+    timing_scope: str | None,
+) -> list[MemoryResult]:
+    return await search_mem0_agent_memories(
+        query,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths,
+        limit=limit,
+        create_memory=_create_memory_factory(runtime_paths),
+        execution_identity=execution_identity,
+        timing_scope=timing_scope,
+    )
+
+
+@timed("system_prompt_assembly.memory_file_entrypoint_load")
+def _load_agent_file_entrypoint_context(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    timing_scope: str | None,
+) -> str:
+    resolution = resolve_file_memory_resolution(
+        storage_path,
+        config,
+        runtime_paths,
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+    )
+    return load_scope_entrypoint_context(
+        agent_scope_user_id(agent_name),
+        resolution,
+        config,
+        timing_scope=timing_scope,
+    )
 
 
 async def add_agent_memory(
@@ -115,6 +187,7 @@ def append_agent_daily_memory(
     )
 
 
+@timed("system_prompt_assembly.memory_search")
 async def search_agent_memories(
     query: str,
     agent_name: str,
@@ -123,10 +196,11 @@ async def search_agent_memories(
     runtime_paths: RuntimePaths,
     limit: int = 3,
     execution_identity: ToolExecutionIdentity | None = None,
+    timing_scope: str | None = None,
 ) -> list[MemoryResult]:
     """Search agent memories including team memories."""
     if use_file_memory_backend(config, agent_name=agent_name):
-        return search_file_agent_memories(
+        return _search_file_backend_memories(
             query,
             agent_name,
             storage_path,
@@ -134,16 +208,17 @@ async def search_agent_memories(
             runtime_paths,
             limit=limit,
             execution_identity=execution_identity,
+            timing_scope=timing_scope,
         )
-    return await search_mem0_agent_memories(
+    return await _search_mem0_backend_memories(
         query,
         agent_name,
         storage_path,
         config,
         runtime_paths,
         limit=limit,
-        create_memory=_create_memory_factory(runtime_paths),
         execution_identity=execution_identity,
+        timing_scope=timing_scope,
     )
 
 
@@ -271,6 +346,7 @@ async def delete_agent_memory(
     )
 
 
+@timed("system_prompt_assembly.memory_enhancement")
 async def build_memory_enhanced_prompt(
     prompt: str,
     agent_name: str,
@@ -278,6 +354,7 @@ async def build_memory_enhanced_prompt(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
+    timing_scope: str | None = None,
 ) -> str:
     """Build a prompt enhanced with relevant memories."""
     logger.debug("Building enhanced prompt", agent=agent_name)
@@ -288,19 +365,20 @@ async def build_memory_enhanced_prompt(
         config,
         runtime_paths,
         execution_identity=execution_identity,
+        timing_scope=timing_scope,
     )
     if agent_memories:
         logger.debug("Agent memories added", count=len(agent_memories))
 
     if use_file_memory_backend(config, agent_name=agent_name):
-        resolution = resolve_file_memory_resolution(
+        agent_entrypoint = _load_agent_file_entrypoint_context(
+            agent_name,
             storage_path,
             config,
             runtime_paths,
-            agent_name=agent_name,
-            execution_identity=execution_identity,
+            execution_identity,
+            timing_scope,
         )
-        agent_entrypoint = load_scope_entrypoint_context(agent_scope_user_id(agent_name), resolution, config)
         context_chunks: list[str] = []
         if agent_entrypoint:
             context_chunks.append(f"[File memory entrypoint (agent)]\n{agent_entrypoint}")

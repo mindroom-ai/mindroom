@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import os
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -73,6 +75,7 @@ from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_enhanced_prompt
+from mindroom.timing import timed
 from mindroom.tool_system.events import (
     complete_pending_tool_block,
     extract_tool_completed_info,
@@ -341,10 +344,45 @@ def _next_retry_run_id(run_id: str | None) -> str | None:
     return str(uuid4())
 
 
+def _build_timing_scope(
+    *,
+    reply_to_event_id: str | None,
+    run_id: str | None,
+    session_id: str,
+    agent_name: str,
+) -> str:
+    """Return one short identifier for correlating AI timing logs."""
+    for candidate in (reply_to_event_id, run_id, session_id, agent_name):
+        if candidate:
+            return candidate[:20]
+    return "unknown"
+
+
 def _note_attempt_run_id(run_id_callback: Callable[[str], None] | None, run_id: str | None) -> None:
     """Publish the current run_id before starting a real Agno run attempt."""
     if run_id_callback is not None and run_id is not None:
         run_id_callback(run_id)
+
+
+@timed("system_prompt_assembly.system_enrichment_render")
+def _render_system_enrichment_context(
+    system_enrichment_items: Sequence[EnrichmentItem],
+    *,
+    timing_scope: str | None = None,
+) -> str:
+    del timing_scope
+    return render_system_enrichment_block(system_enrichment_items)
+
+
+@timed("system_prompt_assembly.compaction_token_breakdown")
+def _compute_compaction_token_breakdown(
+    agent: Agent,
+    full_prompt: str,
+    *,
+    timing_scope: str | None = None,
+) -> dict[str, int]:
+    del timing_scope
+    return compute_prompt_token_breakdown(agent=agent, full_prompt=full_prompt)
 
 
 @dataclass
@@ -360,6 +398,7 @@ class _StreamingAttemptState:
     completed_run_event: RunCompletedEvent | None = None
     request_metric_totals: dict[str, int] = field(default_factory=_empty_request_metric_totals)
     first_token_latency: float | None = None
+    first_token_logged: bool = False
     retry_requested: bool = False
     user_error: Exception | None = None
     stream_exception: Exception | None = None
@@ -861,6 +900,34 @@ async def cached_agent_run(
     )
 
 
+@timed("model_request_to_completion")
+async def _run_cached_agent_attempt(
+    agent: Agent,
+    full_prompt: str,
+    session_id: str,
+    *,
+    user_id: str | None = None,
+    run_id: str | None = None,
+    run_id_callback: Callable[[str], None] | None = None,
+    media: MediaInputs | None = None,
+    metadata: dict[str, Any] | None = None,
+    timing_scope: str | None = None,
+) -> RunOutput:
+    """Run one non-streaming Agno request with timing instrumentation."""
+    del timing_scope
+    return await cached_agent_run(
+        agent,
+        full_prompt,
+        session_id,
+        user_id=user_id,
+        run_id=run_id,
+        run_id_callback=run_id_callback,
+        media=media,
+        metadata=metadata,
+    )
+
+
+@timed("system_prompt_assembly")
 async def _prepare_agent_and_prompt(
     agent_name: str,
     prompt: str,
@@ -878,6 +945,7 @@ async def _prepare_agent_and_prompt(
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
+    timing_scope: str | None = None,
 ) -> tuple[Agent, str, list[str], PreparedHistoryState]:
     """Prepare agent and full prompt for AI processing.
 
@@ -895,6 +963,7 @@ async def _prepare_agent_and_prompt(
         config,
         runtime_paths,
         execution_identity=execution_identity,
+        timing_scope=timing_scope,
     )
 
     runtime_model = config.resolve_runtime_model(
@@ -917,9 +986,13 @@ async def _prepare_agent_and_prompt(
         include_interactive_questions=include_interactive_questions,
         execution_identity=execution_identity,
         delegation_depth=delegation_depth,
+        timing_scope=timing_scope,
     )
     if system_enrichment_items:
-        agent.additional_context = render_system_enrichment_block(system_enrichment_items)
+        agent.additional_context = _render_system_enrichment_context(
+            system_enrichment_items,
+            timing_scope=timing_scope,
+        )
 
     prepared_execution = await prepare_agent_execution_context(
         scope_context=scope_context,
@@ -933,6 +1006,7 @@ async def _prepare_agent_and_prompt(
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
         compaction_outcomes_collector=compaction_outcomes_collector,
+        timing_scope=timing_scope,
     )
     prepared_history = PreparedHistoryState(
         compaction_outcomes=prepared_execution.compaction_outcomes,
@@ -945,7 +1019,11 @@ async def _prepare_agent_and_prompt(
     unseen_event_ids = prepared_execution.unseen_event_ids
 
     if prepared_history.compaction_outcomes:
-        breakdown = compute_prompt_token_breakdown(agent=agent, full_prompt=full_prompt)
+        breakdown = _compute_compaction_token_breakdown(
+            agent,
+            full_prompt,
+            timing_scope=timing_scope,
+        )
         enriched_outcomes = [replace(o, **breakdown) for o in prepared_history.compaction_outcomes]
         prepared_history = PreparedHistoryState(
             compaction_outcomes=enriched_outcomes,
@@ -953,7 +1031,8 @@ async def _prepare_agent_and_prompt(
             replays_persisted_history=prepared_history.replays_persisted_history,
         )
         if compaction_outcomes_collector is not None:
-            compaction_outcomes_collector[:] = enriched_outcomes
+            compaction_outcomes_collector.clear()
+            compaction_outcomes_collector.extend(enriched_outcomes)
 
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
     return agent, full_prompt, unseen_event_ids, prepared_history
@@ -1027,6 +1106,12 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
 
     """
     logger.info("AI request", agent=agent_name, room_id=room_id)
+    timing_scope = _build_timing_scope(
+        reply_to_event_id=reply_to_event_id,
+        run_id=run_id,
+        session_id=session_id,
+        agent_name=agent_name,
+    )
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
@@ -1062,6 +1147,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     compaction_outcomes_collector=compaction_outcomes_collector,
                     delegation_depth=delegation_depth,
                     system_enrichment_items=system_enrichment_items,
+                    timing_scope=timing_scope,
                 )
             except Exception as e:
                 logger.exception("Error preparing agent", agent=agent_name)
@@ -1084,7 +1170,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 for retried_without_inline_media in (False, True):
                     response = None
                     try:
-                        response = await cached_agent_run(
+                        response = await _run_cached_agent_attempt(
                             agent,
                             attempt_prompt,
                             session_id,
@@ -1093,6 +1179,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                             run_id_callback=run_id_callback,
                             media=attempt_media_inputs,
                             metadata=metadata,
+                            timing_scope=timing_scope,
                         )
                     except Exception as e:
                         if not retried_without_inline_media and should_retry_without_inline_media(
@@ -1130,7 +1217,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
 
                         logger.warning("AI response returned errored run output", agent=agent_name, error=error_text)
 
-                    break
+                    if response.status is not RunStatus.cancelled:
+                        break
 
                 assert response is not None
             finally:
@@ -1177,7 +1265,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         )
 
 
-async def _process_stream_events(  # noqa: C901
+@timed("model_request_to_completion")
+async def _process_stream_events(  # noqa: C901, PLR0912
     stream_generator: AsyncIterator[object],
     *,
     state: _StreamingAttemptState,
@@ -1185,11 +1274,26 @@ async def _process_stream_events(  # noqa: C901
     agent_name: str,
     media_inputs: MediaInputs,
     retried_without_inline_media: bool,
+    timing_scope: str,
+    request_started_at: float,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Consume one streaming attempt, yielding chunks and mutating *state*."""
     try:
         async for event in stream_generator:
             if isinstance(event, RunContentEvent) and event.content:
+                if not state.first_token_logged:
+                    state.first_token_logged = True
+                    if os.environ.get("MINDROOM_TIMING") == "1":
+                        elapsed_seconds = time.monotonic() - request_started_at
+                        prefix = f"[{timing_scope}] " if timing_scope else ""
+                        logger.info(
+                            f"TIMING {prefix}model_request_to_first_token: {elapsed_seconds:.3f}s",
+                            timing_scope=timing_scope,
+                            timing_step="model_request_to_first_token",
+                            elapsed_s=round(elapsed_seconds, 3),
+                            retried_without_inline_media=retried_without_inline_media,
+                            agent=agent_name,
+                        )
                 chunk_text = str(event.content)
                 state.full_response += chunk_text
                 yield event
@@ -1321,6 +1425,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
     """
     logger.info("AI streaming request", agent=agent_name, room_id=room_id)
+    timing_scope = _build_timing_scope(
+        reply_to_event_id=reply_to_event_id,
+        run_id=run_id,
+        session_id=session_id,
+        agent_name=agent_name,
+    )
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
@@ -1357,6 +1467,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     compaction_outcomes_collector=compaction_outcomes_collector,
                     delegation_depth=delegation_depth,
                     system_enrichment_items=system_enrichment_items,
+                    timing_scope=timing_scope,
                 )
             except Exception as e:
                 logger.exception("Error preparing agent for streaming", agent=agent_name)
@@ -1381,6 +1492,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     state = _StreamingAttemptState()
 
                     try:
+                        request_started_at = time.monotonic()
                         _note_attempt_run_id(run_id_callback, attempt_run_id)
                         stream_generator = agent.arun(
                             attempt_prompt,
@@ -1419,6 +1531,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         agent_name=agent_name,
                         media_inputs=attempt_media_inputs,
                         retried_without_inline_media=retried_without_inline_media,
+                        timing_scope=timing_scope,
+                        request_started_at=request_started_at,
                     ):
                         yield stream_chunk
 

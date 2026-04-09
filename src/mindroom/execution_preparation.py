@@ -30,6 +30,7 @@ from mindroom.matrix.client import (
     replace_visible_message,
 )
 from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply
+from mindroom.timing import timed
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Sequence
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.history import CompactionOutcome
     from mindroom.history.runtime import PreparedScopeHistory
-    from mindroom.history.types import ResolvedReplayPlan
+    from mindroom.history.types import PreparedHistoryState, ResolvedReplayPlan
 
 logger = get_logger(__name__)
 
@@ -276,6 +277,60 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
     return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
 
 
+@timed("system_prompt_assembly.history_prepare.unseen_context_initial")
+def _build_initial_unseen_context(
+    prompt: str,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    seen_event_ids: set[str],
+    current_event_id: str,
+    active_event_ids: Collection[str],
+    response_sender_id: str | None,
+) -> tuple[str, list[str]]:
+    return build_prompt_with_unseen_thread_context(
+        prompt,
+        thread_history,
+        seen_event_ids=seen_event_ids,
+        current_event_id=current_event_id,
+        active_event_ids=active_event_ids,
+        response_sender_id=response_sender_id,
+    )
+
+
+@timed("system_prompt_assembly.history_prepare.unseen_context_final")
+def _build_final_unseen_context(
+    prompt: str,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    seen_event_ids: set[str],
+    current_event_id: str,
+    active_event_ids: Collection[str],
+    response_sender_id: str | None,
+) -> tuple[str, list[str]]:
+    return build_prompt_with_unseen_thread_context(
+        prompt,
+        thread_history,
+        seen_event_ids=seen_event_ids,
+        current_event_id=current_event_id,
+        active_event_ids=active_event_ids,
+        response_sender_id=response_sender_id,
+    )
+
+
+@timed("system_prompt_assembly.history_prepare.finalize")
+def _finalize_prepared_history(
+    *,
+    prepared_scope_history: PreparedScopeHistory,
+    config: Config,
+    static_prompt_tokens: int,
+) -> PreparedHistoryState:
+    return finalize_history_preparation(
+        prepared_scope_history=prepared_scope_history,
+        config=config,
+        static_prompt_tokens=static_prompt_tokens,
+    )
+
+
 async def _prepare_execution_context_common(
     *,
     scope_context: ScopeSessionContext | None,
@@ -288,14 +343,16 @@ async def _prepare_execution_context_common(
     config: Config,
     prepare_scope_history_fn: Callable[[str, str | None], Awaitable[PreparedScopeHistory]],
     estimate_static_tokens_fn: Callable[[str, str | None], int],
+    timing_scope: str | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
+    del timing_scope
     seen_event_ids = _scope_seen_event_ids(scope_context)
     replay_fallback_prompt = None if reply_to_event_id and thread_history else fallback_prompt
 
     provisional_prompt = prompt
     if reply_to_event_id and thread_history:
-        provisional_prompt, _ = build_prompt_with_unseen_thread_context(
+        provisional_prompt, _ = _build_initial_unseen_context(
             prompt,
             thread_history,
             seen_event_ids=seen_event_ids,
@@ -310,7 +367,7 @@ async def _prepare_execution_context_common(
     )
 
     if reply_to_event_id and thread_history:
-        final_prompt, unseen_event_ids = build_prompt_with_unseen_thread_context(
+        final_prompt, unseen_event_ids = _build_final_unseen_context(
             prompt,
             thread_history,
             seen_event_ids=_scope_seen_event_ids(scope_context),
@@ -322,7 +379,7 @@ async def _prepare_execution_context_common(
         final_prompt = prompt
         unseen_event_ids = []
 
-    prepared_history = finalize_history_preparation(
+    prepared_history = _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
         config=config,
         static_prompt_tokens=estimate_static_tokens_fn(
@@ -342,6 +399,7 @@ async def _prepare_execution_context_common(
     )
 
 
+@timed("system_prompt_assembly.history_prepare")
 async def prepare_agent_execution_context(
     *,
     scope_context: ScopeSessionContext | None,
@@ -355,6 +413,7 @@ async def prepare_agent_execution_context(
     reply_to_event_id: str | None,
     active_event_ids: Collection[str],
     compaction_outcomes_collector: list[CompactionOutcome] | None,
+    timing_scope: str | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
     response_sender_id = config.get_ids(runtime_paths).get(agent_name)
@@ -392,6 +451,7 @@ async def prepare_agent_execution_context(
                 full_prompt=prepared_prompt,
                 fallback_full_prompt=replay_fallback_prompt,
             ),
+            timing_scope=timing_scope,
         )
 
     return await _prepare_execution_context_common(
@@ -409,6 +469,7 @@ async def prepare_agent_execution_context(
             full_prompt=prepared_prompt,
             fallback_full_prompt=replay_fallback_prompt,
         ),
+        timing_scope=timing_scope,
     )
 
 

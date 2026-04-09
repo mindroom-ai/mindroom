@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
+from mindroom.timing import timed
 
 from ._policy import (
     agent_name_from_scope_user_id,
@@ -161,6 +162,15 @@ def _load_scope_id_entries(
     return results, id_to_file
 
 
+@timed("system_prompt_assembly.memory_search.file.id_entries_load")
+def _load_scope_entries_for_search(
+    scope_user_id: str,
+    resolution: FileMemoryResolution,
+    config: Config,
+) -> tuple[list[MemoryResult], dict[str, Path]]:
+    return _load_scope_id_entries(scope_user_id, resolution, config)
+
+
 def _extract_query_tokens(query: str) -> set[str]:
     return {token for token in re.findall(r"[a-z0-9_]+", query.lower()) if len(token) > 1}
 
@@ -220,15 +230,17 @@ def _append_scope_memory_entry(
     }
 
 
-def _search_scope_memory_entries(  # noqa: C901
+def _search_scope_memory_entries(
     scope_user_id: str,
     query: str,
     resolution: FileMemoryResolution,
     config: Config,
     *,
     limit: int,
+    timing_scope: str | None = None,
 ) -> list[MemoryResult]:
-    id_entries, _ = _load_scope_id_entries(scope_user_id, resolution, config)
+    del timing_scope
+    id_entries, _ = _load_scope_entries_for_search(scope_user_id, resolution, config)
     query_tokens = _extract_query_tokens(query)
 
     scored_entries: list[MemoryResult] = []
@@ -260,6 +272,27 @@ def _search_scope_memory_entries(  # noqa: C901
     existing_memory_text = {
         memory_text for entry in scored_entries if (memory_text := entry.get("memory", "").strip().lower())
     }
+    snippet_results = _scan_scope_memory_snippets(
+        scope_user_id,
+        query_tokens,
+        scope_path,
+        entrypoint_path,
+        existing_memory_text,
+    )
+
+    snippet_results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+    return scored_entries + snippet_results[:remaining_limit]
+
+
+@timed("system_prompt_assembly.memory_search.file.snippet_scan")
+def _scan_scope_memory_snippets(
+    scope_user_id: str,
+    query_tokens: set[str],
+    scope_path: Path,
+    entrypoint_path: Path,
+    existing_memory_text: set[str],
+) -> list[MemoryResult]:
+    snippet_results: list[MemoryResult] = []
     for file_path in _scope_markdown_files(scope_path):
         if file_path == entrypoint_path:
             continue
@@ -286,9 +319,7 @@ def _search_scope_memory_entries(  # noqa: C901
                     "score": score,
                 },
             )
-
-    snippet_results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
-    return scored_entries + snippet_results[:remaining_limit]
+    return snippet_results
 
 
 def _get_scope_memory_by_path_id(
@@ -371,12 +402,15 @@ def _replace_scope_memory_entry(
     return True
 
 
+@timed("system_prompt_assembly.memory_file_entrypoint_read")
 def load_scope_entrypoint_context(
     scope_user_id: str,
     resolution: FileMemoryResolution,
     config: Config,
+    timing_scope: str | None = None,
 ) -> str:
     """Load the scoped `MEMORY.md` entrypoint text."""
+    del timing_scope
     entrypoint_path = _scope_entrypoint_path(_scope_dir(scope_user_id, resolution, config, create=False))
     if not entrypoint_path.exists():
         return ""
@@ -548,6 +582,44 @@ def append_agent_daily_file_memory(
     return result
 
 
+@timed("system_prompt_assembly.memory_search.file.agent_scope")
+def _search_agent_file_scope_memories(
+    query: str,
+    agent_name: str,
+    resolution: FileMemoryResolution,
+    config: Config,
+    limit: int,
+    timing_scope: str | None,
+) -> list[MemoryResult]:
+    return _search_scope_memory_entries(
+        agent_scope_user_id(agent_name),
+        query,
+        resolution,
+        config,
+        limit=limit,
+        timing_scope=timing_scope,
+    )
+
+
+@timed("system_prompt_assembly.memory_search.file.team_scope")
+def _search_team_file_scope_memories(
+    team_id: str,
+    query: str,
+    resolution: FileMemoryResolution,
+    config: Config,
+    limit: int,
+    timing_scope: str | None,
+) -> list[MemoryResult]:
+    return _search_scope_memory_entries(
+        team_id,
+        query,
+        resolution,
+        config,
+        limit=limit,
+        timing_scope=timing_scope,
+    )
+
+
 def search_file_agent_memories(
     query: str,
     agent_name: str,
@@ -557,6 +629,7 @@ def search_file_agent_memories(
     execution_identity: ToolExecutionIdentity | None = None,
     *,
     limit: int,
+    timing_scope: str | None = None,
 ) -> list[MemoryResult]:
     """Search file-backed memories visible to an agent."""
     agent_resolution = resolve_file_memory_resolution(
@@ -566,12 +639,13 @@ def search_file_agent_memories(
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
-    results = _search_scope_memory_entries(
-        agent_scope_user_id(agent_name),
+    results = _search_agent_file_scope_memories(
         query,
+        agent_name,
         agent_resolution,
         config,
-        limit=limit,
+        limit,
+        timing_scope,
     )
     existing_memories = {result.get("memory", "") for result in results}
     for team_id in get_team_ids_for_agent(agent_name, config):
@@ -589,7 +663,14 @@ def search_file_agent_memories(
                 original_storage_path=storage_path,
                 execution_identity=execution_identity,
             )
-            team_results = _search_scope_memory_entries(team_id, query, team_resolution, config, limit=limit)
+            team_results = _search_team_file_scope_memories(
+                team_id,
+                query,
+                team_resolution,
+                config,
+                limit,
+                timing_scope,
+            )
             for memory in team_results:
                 memory_text = memory.get("memory", "")
                 if memory_text in existing_memories:

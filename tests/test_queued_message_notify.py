@@ -179,7 +179,7 @@ class _PrelockBarrierLock:
     def locked(self) -> bool:
         return self._locked
 
-    async def __aenter__(self) -> Self:
+    async def acquire(self) -> None:
         if not self.first_waiting.is_set():
             self.first_waiting.set()
             await self._allow_first_entry.wait()
@@ -189,11 +189,17 @@ class _PrelockBarrierLock:
         self._locked = True
         self._released.clear()
         self._first_entered.set()
+
+    def release(self) -> None:
+        self._locked = False
+        self._released.set()
+
+    async def __aenter__(self) -> Self:
+        await self.acquire()
         return self
 
     async def __aexit__(self, *_args: object) -> None:
-        self._locked = False
-        self._released.set()
+        self.release()
 
 
 @pytest.mark.asyncio

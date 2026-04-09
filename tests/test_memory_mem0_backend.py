@@ -89,8 +89,9 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
         _config: Config,
         *,
         runtime_paths: object,
+        timing_scope: str | None = None,
     ) -> FakeScopedMemory:
-        del runtime_paths
+        del runtime_paths, timing_scope
         return FakeScopedMemory(scope_storage_path)
 
     execution_identity = ToolExecutionIdentity(
@@ -140,8 +141,9 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
         _config: Config,
         *,
         runtime_paths: object,
+        timing_scope: str | None = None,
     ) -> FakeMem0ScopedMemory:
-        del runtime_paths
+        del runtime_paths, timing_scope
         return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=scope_storage_path.name))
 
     execution_identity = ToolExecutionIdentity(
@@ -305,8 +307,9 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
         _config: Config,
         *,
         runtime_paths: object,
+        timing_scope: str | None = None,
     ) -> FakeScopedMemory:
-        del runtime_paths
+        del runtime_paths, timing_scope
         return FakeScopedMemory(scope_storage_path)
 
     with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
@@ -385,8 +388,9 @@ async def test_mixed_private_team_mem0_member_crud_is_rejected(
         _config: Config,
         *,
         runtime_paths: object,
+        timing_scope: str | None = None,
     ) -> FakeMem0ScopedMemory:
-        del runtime_paths
+        del runtime_paths, timing_scope
         id_prefix = scope_storage_path.name.replace("/", "_") or "mem"
         return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=id_prefix))
 
@@ -446,8 +450,9 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
         _config: Config,
         *,
         runtime_paths: object,
+        timing_scope: str | None = None,
     ) -> FakeMem0ScopedMemory:
-        del runtime_paths
+        del runtime_paths, timing_scope
         id_prefix = scope_storage_path.name.replace("/", "_") or "mem"
         return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=id_prefix))
 

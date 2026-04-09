@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -17,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 import nio
 from agno.db.base import SessionType
-from agno.run.agent import RunOutput
+from agno.run.agent import RunContentEvent, RunOutput
 from agno.run.team import TeamRunOutput
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
@@ -137,6 +138,8 @@ from mindroom.thread_utils import (
     has_multiple_non_agent_users_in_thread,
     should_agent_respond,
 )
+from mindroom.timing import timed
+from mindroom.timing import timing_scope as timing_scope_context
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -278,6 +281,7 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
+_RECEIVED_MONOTONIC_KEY = "com.mindroom.received_monotonic"
 
 
 def _get_or_create_lock(
@@ -355,6 +359,16 @@ def _thread_summary_message_count_hint(
         1 for message in thread_history if not isinstance(message.content.get("io.mindroom.thread_summary"), dict)
     )
     return existing_non_summary_messages + 1
+
+
+def _received_monotonic_from_source(source: dict[str, Any] | None) -> float | None:
+    """Return the inbound receipt timestamp persisted on one event source."""
+    if not isinstance(source, dict):
+        return None
+    raw_received_monotonic = source.get(_RECEIVED_MONOTONIC_KEY)
+    if isinstance(raw_received_monotonic, float | int):
+        return float(raw_received_monotonic)
+    return None
 
 
 def _create_task_wrapper(
@@ -713,6 +727,21 @@ def _collect_room_sync_timeline_cache_updates(
         )
 
 
+@dataclass(frozen=True)
+class _PreparedResponseRuntime:
+    """Resolved runtime context shared by streaming and non-streaming responses."""
+
+    resolved_target: MessageTarget
+    response_thread_id: str | None
+    media_inputs: MediaInputs
+    session_id: str
+    model_prompt: str
+    tool_context: ToolRuntimeContext | None
+    execution_identity: ToolExecutionIdentity
+    request_knowledge_managers: dict[str, KnowledgeManager]
+    room_mode: bool = False
+
+
 @dataclass
 class AgentBot:
     """Represents a single agent bot with its own Matrix account."""
@@ -802,30 +831,6 @@ class AgentBot:
         """Return whether one canonical conversation target currently holds the response lock."""
         lock = self._response_lifecycle_locks.get((target.room_id, target.resolved_thread_id))
         return lock.locked() if lock is not None else False
-
-    def _build_message_target(
-        self,
-        *,
-        room_id: str,
-        thread_id: str | None,
-        reply_to_event_id: str | None,
-        event_source: dict[str, Any] | None = None,
-        thread_mode_override: Literal["thread", "room"] | None = None,
-    ) -> MessageTarget:
-        """Build the canonical delivery target for one outbound response."""
-        effective_thread_mode = thread_mode_override or self.config.get_entity_thread_mode(
-            self.agent_name,
-            self.runtime_paths,
-            room_id=room_id,
-        )
-        safe_thread_root = EventInfo.from_event(event_source).safe_thread_root if event_source is not None else None
-        return MessageTarget.resolve(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-            safe_thread_root=safe_thread_root,
-            room_mode=effective_thread_mode == "room",
-        )
 
     def _resolved_conversation_thread_id(
         self,
@@ -1237,6 +1242,7 @@ class AgentBot:
             source_kind="message",
         )
 
+    @timed("message_received_hooks")
     async def _emit_message_received_hooks(
         self,
         *,
@@ -2118,7 +2124,7 @@ class AgentBot:
         await self._cache_thread_event(room.room_id, event, event_info=event_info)
         if not isinstance(event.body, str):
             return
-        # Skip messages that are still being streamed (use metadata, not text pattern).
+        # Skip messages that are still being streamed (use metadata, not text pattern)
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
         if isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in {
             STREAM_STATUS_PENDING,
@@ -2126,6 +2132,8 @@ class AgentBot:
         }:
             return
 
+        if isinstance(event.source, dict):
+            event.source[_RECEIVED_MONOTONIC_KEY] = time.monotonic()
         prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
         if prechecked_event is None:
             return
@@ -2197,119 +2205,119 @@ class AgentBot:
             raise TypeError(msg)
         router_event: _DispatchEvent = raw_event
         event = await self._resolve_text_dispatch_event(raw_event)
-        dispatch_started_monotonic = time.monotonic()
-        tracked_source_event_ids = source_event_ids or [event.event_id]
+        timing_scope_token = timing_scope_context.set(event.event_id[:20] if event.event_id else "unknown")
+        try:
+            dispatch_started_at = time.monotonic()
+            tracked_source_event_ids = source_event_ids or [event.event_id]
 
-        dispatch = await self._prepare_dispatch(
-            room,
-            _PrecheckedEvent(
-                event=event,
-                requester_user_id=requester_user_id,
-            ),
-            event_label="message",
-            source_event_ids=tracked_source_event_ids,
-        )
-        if dispatch is None:
-            return
-        if self._should_skip_deep_synthetic_full_dispatch(
-            event_id=event.event_id,
-            envelope=dispatch.envelope,
-        ):
-            return
-
-        # Router handles commands exclusively
-        command = command_parser.parse(event.body) if not media_events else None
-        if command:
-            if self.agent_name == ROUTER_AGENT_NAME:
-                # Router always handles commands, even in single-agent rooms
-                # Commands like !schedule, !help, etc. need to work regardless
-                await self._handle_command(
-                    room,
-                    _PrecheckedEvent(
-                        event=event,
-                        requester_user_id=requester_user_id,
-                    ),
-                    command,
-                    source_envelope=dispatch.envelope,
-                )
-            return
-        if dispatch.context.requires_full_thread_history:
-            await self._hydrate_dispatch_context(room, event, dispatch.context)
-        if not media_events and self._has_newer_unresponded_in_scope(event, dispatch.context):
-            self._mark_source_events_responded(tracked_source_event_ids)
-            return
-
-        content = event.source.get("content") if isinstance(event.source, dict) else None
-        message_attachment_ids = parse_attachment_ids_from_event_source(event.source)
-        message_extra_content: dict[str, Any] = {}
-        if message_attachment_ids:
-            message_extra_content[ATTACHMENT_IDS_KEY] = message_attachment_ids
-        if isinstance(content, dict):
-            original_sender = content.get(ORIGINAL_SENDER_KEY)
-            if isinstance(original_sender, str):
-                message_extra_content[ORIGINAL_SENDER_KEY] = original_sender
-            raw_audio_fallback = content.get(VOICE_RAW_AUDIO_FALLBACK_KEY)
-            if isinstance(raw_audio_fallback, bool) and raw_audio_fallback:
-                message_extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
-        router_extra_content = dict(message_extra_content)
-        if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
-            router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
-        router_source_event_ids = (
-            tracked_source_event_ids
-            if len(tracked_source_event_ids) > 1 or tracked_source_event_ids[0] != event.event_id
-            else None
-        )
-
-        action = await self._resolve_dispatch_action(
-            room,
-            event,
-            dispatch,
-            message_for_decision=event.body,
-            router_message=event.body if media_events else None,
-            extra_content=router_extra_content or None,
-            media_events=media_events,
-            source_event_ids=router_source_event_ids,
-            router_event=media_events[0] if media_events and len(tracked_source_event_ids) == 1 else router_event,
-        )
-        if action is None:
-            return
-        matrix_run_metadata = self._dispatch_matrix_run_metadata(event, tracked_source_event_ids)
-
-        async def build_payload(context: _MessageContext) -> _DispatchPayload:
-            effective_thread_id = self._build_message_target(
-                room_id=room.room_id,
-                thread_id=context.thread_id,
-                reply_to_event_id=event.event_id,
-                event_source=event.source,
-            ).resolved_thread_id
-            media_attachment_ids: list[str] = []
-            fallback_images: list[Image] | None = None
-            if media_events:
-                media_attachment_ids, fallback_images = await self._register_batch_media_attachments(
-                    room_id=room.room_id,
-                    thread_id=effective_thread_id,
-                    media_events=media_events,
-                )
-            return await self._build_dispatch_payload_with_attachments(
-                room_id=room.room_id,
-                context=context,
-                prompt=event.body,
-                current_attachment_ids=merge_attachment_ids(message_attachment_ids, media_attachment_ids),
-                media_thread_id=effective_thread_id,
-                fallback_images=fallback_images,
+            dispatch = await self._prepare_dispatch(
+                room,
+                _PrecheckedEvent(
+                    event=event,
+                    requester_user_id=requester_user_id,
+                ),
+                event_label="message",
+                source_event_ids=tracked_source_event_ids,
             )
+            if dispatch is None:
+                return
+            if self._should_skip_deep_synthetic_full_dispatch(
+                event_id=event.event_id,
+                envelope=dispatch.envelope,
+            ):
+                return
 
-        await self._execute_dispatch_action(
-            room,
-            event,
-            dispatch,
-            action,
-            build_payload,
-            processing_log="Processing",
-            dispatch_started_monotonic=dispatch_started_monotonic,
-            source_event_ids=tracked_source_event_ids,
-            matrix_run_metadata=matrix_run_metadata,
-        )
+            command = command_parser.parse(event.body) if not media_events else None
+            if command:
+                if self.agent_name == ROUTER_AGENT_NAME:
+                    await self._handle_command(
+                        room,
+                        _PrecheckedEvent(
+                            event=event,
+                            requester_user_id=requester_user_id,
+                        ),
+                        command,
+                        source_envelope=dispatch.envelope,
+                    )
+                return
+            if dispatch.context.requires_full_thread_history:
+                await self._hydrate_dispatch_context(room, event, dispatch.context)
+            if not media_events and self._has_newer_unresponded_in_scope(event, dispatch.context):
+                self._mark_source_events_responded(tracked_source_event_ids)
+                return
+
+            content = event.source.get("content") if isinstance(event.source, dict) else None
+            message_attachment_ids = parse_attachment_ids_from_event_source(event.source)
+            message_extra_content: dict[str, Any] = {}
+            if message_attachment_ids:
+                message_extra_content[ATTACHMENT_IDS_KEY] = message_attachment_ids
+            if isinstance(content, dict):
+                original_sender = content.get(ORIGINAL_SENDER_KEY)
+                if isinstance(original_sender, str):
+                    message_extra_content[ORIGINAL_SENDER_KEY] = original_sender
+                raw_audio_fallback = content.get(VOICE_RAW_AUDIO_FALLBACK_KEY)
+                if isinstance(raw_audio_fallback, bool) and raw_audio_fallback:
+                    message_extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+            router_extra_content = dict(message_extra_content)
+            if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
+                router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
+            router_source_event_ids = (
+                tracked_source_event_ids
+                if len(tracked_source_event_ids) > 1 or tracked_source_event_ids[0] != event.event_id
+                else None
+            )
+            action = await self._resolve_dispatch_action(
+                room,
+                event,
+                dispatch,
+                message_for_decision=event.body,
+                router_message=event.body if media_events else None,
+                extra_content=router_extra_content or None,
+                media_events=media_events,
+                source_event_ids=router_source_event_ids,
+                router_event=media_events[0] if media_events and len(tracked_source_event_ids) == 1 else router_event,
+            )
+            if action is None:
+                return
+            matrix_run_metadata = self._dispatch_matrix_run_metadata(event, tracked_source_event_ids)
+
+            async def build_payload(context: _MessageContext) -> _DispatchPayload:
+                effective_thread_id = self._build_message_target(
+                    room_id=room.room_id,
+                    thread_id=context.thread_id,
+                    reply_to_event_id=event.event_id,
+                    event_source=event.source,
+                ).resolved_thread_id
+                media_attachment_ids: list[str] = []
+                fallback_images: list[Image] | None = None
+                if media_events:
+                    media_attachment_ids, fallback_images = await self._register_batch_media_attachments(
+                        room_id=room.room_id,
+                        thread_id=effective_thread_id,
+                        media_events=media_events,
+                    )
+                return await self._build_dispatch_payload_with_attachments(
+                    room_id=room.room_id,
+                    context=context,
+                    prompt=event.body,
+                    current_attachment_ids=merge_attachment_ids(message_attachment_ids, media_attachment_ids),
+                    media_thread_id=effective_thread_id,
+                    fallback_images=fallback_images,
+                )
+
+            await self._execute_dispatch_action(
+                room,
+                event,
+                dispatch,
+                action,
+                build_payload,
+                processing_log="Processing",
+                dispatch_started_at=dispatch_started_at,
+                source_event_ids=tracked_source_event_ids,
+                matrix_run_metadata=matrix_run_metadata,
+            )
+        finally:
+            timing_scope_context.reset(timing_scope_token)
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Keep cached thread history consistent when Matrix redactions arrive."""
@@ -2779,6 +2787,7 @@ class AgentBot:
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
         """Derive conversation context from threads or reply chains."""
         assert self.client is not None
+
         is_thread, thread_id, thread_history = await derive_conversation_context(
             self.client,
             room_id,
@@ -3043,11 +3052,12 @@ class AgentBot:
             target=target,
         )
         ingress_policy = hook_ingress_policy(envelope)
-        if await self._emit_message_received_hooks(
+        suppressed = await self._emit_message_received_hooks(
             envelope=envelope,
             correlation_id=correlation_id,
             policy=ingress_policy,
-        ):
+        )
+        if suppressed:
             self._mark_source_events_responded(source_event_ids or [event.event_id])
             return None
 
@@ -3090,6 +3100,7 @@ class AgentBot:
             server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
         )
 
+    @timed("dispatch_action_resolution")
     async def _resolve_dispatch_action(
         self,
         room: nio.MatrixRoom,
@@ -3152,7 +3163,7 @@ class AgentBot:
         payload_builder: _DispatchPayloadBuilder,
         *,
         processing_log: str,
-        dispatch_started_monotonic: float,
+        dispatch_started_at: float,
         source_event_ids: list[str] | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
     ) -> None:
@@ -3196,7 +3207,7 @@ class AgentBot:
             if dispatch.context.requires_full_thread_history:
                 await self._hydrate_dispatch_context(room, event, dispatch.context)
             context_ready_monotonic = time.monotonic()
-            payload = await payload_builder(dispatch.context)
+            payload = await self._build_dispatch_payload(payload_builder, dispatch.context)
             prepared_payload = await self._apply_message_enrichment(
                 dispatch,
                 payload,
@@ -3231,13 +3242,14 @@ class AgentBot:
             event_id=event.event_id,
             action_kind=action.kind,
             placeholder_event_id=placeholder_event_id,
-            dispatch_started_monotonic=dispatch_started_monotonic,
+            dispatch_started_at=dispatch_started_at,
             placeholder_ready_monotonic=placeholder_ready_monotonic,
             context_ready_monotonic=context_ready_monotonic,
             payload_ready_monotonic=payload_ready_monotonic,
         )
 
         self.logger.info(processing_log, event_id=event.event_id)
+        received_monotonic = _received_monotonic_from_source(event.source)
         try:
             if action.kind == "team":
                 assert action.form_team is not None
@@ -3279,6 +3291,7 @@ class AgentBot:
                     response_envelope=prepared_payload.envelope,
                     correlation_id=dispatch.correlation_id,
                     matrix_run_metadata=matrix_run_metadata,
+                    received_monotonic=received_monotonic,
                 )
         except _SuppressedPlaceholderCleanupError:
             self.logger.warning(
@@ -3336,7 +3349,7 @@ class AgentBot:
         event_id: str,
         action_kind: str,
         placeholder_event_id: str | None,
-        dispatch_started_monotonic: float,
+        dispatch_started_at: float,
         placeholder_ready_monotonic: float,
         context_ready_monotonic: float,
         payload_ready_monotonic: float,
@@ -3347,10 +3360,10 @@ class AgentBot:
             event_id=event_id,
             action_kind=action_kind,
             placeholder_event_id=placeholder_event_id,
-            placeholder_visible_ms=round((placeholder_ready_monotonic - dispatch_started_monotonic) * 1000, 1),
+            placeholder_visible_ms=round((placeholder_ready_monotonic - dispatch_started_at) * 1000, 1),
             context_hydration_ms=round((context_ready_monotonic - placeholder_ready_monotonic) * 1000, 1),
             payload_hydration_ms=round((payload_ready_monotonic - context_ready_monotonic) * 1000, 1),
-            startup_total_ms=round((payload_ready_monotonic - dispatch_started_monotonic) * 1000, 1),
+            startup_total_ms=round((payload_ready_monotonic - dispatch_started_at) * 1000, 1),
         )
 
     def _can_reply_to_sender(self, sender_id: str) -> bool:
@@ -3622,7 +3635,11 @@ class AgentBot:
             materializable_agent_names=materializable_agent_names,
         )
 
-    async def _extract_dispatch_context(self, room: nio.MatrixRoom, event: _DispatchEvent) -> _MessageContext:
+    async def _extract_dispatch_context(
+        self,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+    ) -> _MessageContext:
         """Extract lightweight routing context without hydrating full thread history."""
         return await self._extract_message_context(room, event, full_history=False)
 
@@ -3710,6 +3727,7 @@ class AgentBot:
             requires_full_thread_history=requires_full_thread_history,
         )
 
+    @timed("hydrate_dispatch_context")
     async def _hydrate_dispatch_context(
         self,
         room: nio.MatrixRoom,
@@ -3747,6 +3765,7 @@ class AgentBot:
         finally:
             self._turn_thread_cache.reset(token)
 
+    @timed("fetch_thread_history")
     async def _fetch_thread_history(
         self,
         client: nio.AsyncClient,
@@ -3763,6 +3782,14 @@ class AgentBot:
         if cache is not None:
             cache[cache_key] = thread_history
         return thread_history
+
+    @timed("dispatch_payload_builder")
+    async def _build_dispatch_payload(
+        self,
+        payload_builder: _DispatchPayloadBuilder,
+        context: _MessageContext,
+    ) -> _DispatchPayload:
+        return await payload_builder(context)
 
     def _build_tool_runtime_context(
         self,
@@ -3944,6 +3971,7 @@ class AgentBot:
         """Return model-facing prompt/history with local timestamps added to user turns."""
         return self._prefix_user_turn_time(prompt), self._timestamp_thread_history_user_turns(thread_history)
 
+    @timed("prepare_memory_and_model_context")
     def _prepare_memory_and_model_context(
         self,
         prompt: str,
@@ -3958,6 +3986,7 @@ class AgentBot:
         )
         return prompt, thread_history, model_prompt_text, model_thread_history
 
+    @timed("message_enrich_hooks")
     async def _apply_message_enrichment(
         self,
         dispatch: _PreparedDispatch,
@@ -4131,22 +4160,28 @@ class AgentBot:
         )
         if queued_human_message:
             queued_signal.add_waiting_human_message()
+        lock_acquired = False
         try:
-            async with lifecycle_lock:
+            await AgentBot._acquire_response_lifecycle_lock(
+                self,
+                lifecycle_lock,
+            )
+            lock_acquired = True
+            try:
                 if queued_human_message:
                     queued_signal.consume_waiting_human_message()
                     queued_human_message = False
                 with queued_message_signal_context(queued_signal):
                     return await self._generate_team_response_helper_locked(
-                        room_id=room_id,
-                        reply_to_event_id=reply_to_event_id,
-                        thread_id=thread_id,
-                        team_agents=team_agents,
-                        team_mode=team_mode,
-                        thread_history=thread_history,
-                        requester_user_id=requester_user_id,
-                        existing_event_id=existing_event_id,
-                        existing_event_is_placeholder=existing_event_is_placeholder,
+                        room_id,
+                        reply_to_event_id,
+                        thread_id,
+                        team_agents,
+                        team_mode,
+                        thread_history,
+                        requester_user_id,
+                        existing_event_id,
+                        existing_event_is_placeholder,
                         target=resolved_target,
                         payload=payload,
                         response_envelope=resolved_response_envelope,
@@ -4156,6 +4191,9 @@ class AgentBot:
                         reason_prefix=reason_prefix,
                         matrix_run_metadata=matrix_run_metadata,
                     )
+            finally:
+                if lock_acquired:
+                    lifecycle_lock.release()
         finally:
             if queued_human_message:
                 queued_signal.consume_waiting_human_message()
@@ -4576,7 +4614,8 @@ class AgentBot:
                     room_id,
                     reply_to_event_id,
                     thinking_message,
-                    resolved_target.resolved_thread_id,
+                    thread_id,
+                    target=resolved_target,
                     extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
                 )
 
@@ -4644,6 +4683,379 @@ class AgentBot:
         finally:
             self.in_flight_response_count -= 1
 
+    async def _stream_response_with_first_token_log(
+        self,
+        response_stream: object,
+        *,
+        room_id: str,
+        received_monotonic: float | None = None,
+    ) -> AsyncIterator[object]:
+        """Proxy one streaming response and log time-to-first visible token."""
+        first_visible_token_logged = False
+        async for chunk in cast("Any", response_stream):
+            if (
+                received_monotonic is not None
+                and os.environ.get("MINDROOM_TIMING") == "1"
+                and not first_visible_token_logged
+                and isinstance(chunk, RunContentEvent)
+                and chunk.content
+            ):
+                first_visible_token_logged = True
+                elapsed_seconds = time.monotonic() - received_monotonic
+                scope = timing_scope_context.get()
+                prefix = f"[{scope}] " if scope else ""
+                self.logger.info(
+                    f"TIMING {prefix}message_receipt_to_first_stream_token: {elapsed_seconds:.3f}s",
+                    timing_scope=scope,
+                    timing_step="message_receipt_to_first_stream_token",
+                    elapsed_s=round(elapsed_seconds, 3),
+                    room_id=room_id,
+                )
+            yield chunk
+
+    @timed("maybe_generate_thread_summary")
+    async def _timed_thread_summary(
+        self,
+        *,
+        thread_id: str,
+        summary_coro: Awaitable[None],
+    ) -> None:
+        """Run thread-summary generation with a duration log."""
+        del thread_id
+        await summary_coro
+
+    def _queue_timed_thread_summary(
+        self,
+        *,
+        room_id: str,
+        thread_id: str,
+        message_count_hint: int | None = None,
+    ) -> None:
+        """Queue background thread summarization with timing instrumentation."""
+        assert self.client is not None
+        summary_coro = maybe_generate_thread_summary(
+            client=self.client,
+            room_id=room_id,
+            thread_id=thread_id,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            message_count_hint=message_count_hint,
+        )
+        create_background_task(
+            self._timed_thread_summary(
+                thread_id=thread_id,
+                summary_coro=summary_coro,
+            ),
+            name=f"thread_summary_{room_id}_{thread_id}",
+        )
+
+    @timed("response_lifecycle_lock_wait")
+    async def _acquire_response_lifecycle_lock(
+        self,
+        lifecycle_lock: asyncio.Lock,
+    ) -> None:
+        """Wait for one response lifecycle lock acquisition."""
+        await lifecycle_lock.acquire()
+
+    async def _prepare_response_runtime_common(
+        self,
+        *,
+        room_id: str,
+        prompt: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        existing_event_id: str | None,
+        existing_event_uses_thread_id: bool,
+        resolved_thread_id: str | None,
+        user_id: str | None,
+        media: MediaInputs | None,
+        attachment_ids: list[str] | None,
+        model_prompt: str | None,
+        response_envelope: MessageEnvelope | None,
+        correlation_id: str | None,
+        target: MessageTarget | None,
+        room_mode: bool,
+    ) -> _PreparedResponseRuntime:
+        resolved_target = target or (
+            response_envelope.target
+            if response_envelope is not None
+            else self._build_message_target(
+                room_id=room_id,
+                thread_id=thread_id,
+                reply_to_event_id=reply_to_event_id,
+            )
+        )
+        response_thread_id = (
+            resolved_target.resolved_thread_id
+            if target is not None
+            else thread_id
+            if existing_event_id is not None and existing_event_uses_thread_id
+            else resolved_thread_id
+            if resolved_thread_id is not None
+            else self._resolve_response_thread_root(
+                thread_id,
+                reply_to_event_id,
+                room_id=room_id,
+                response_envelope=response_envelope,
+            )
+        )
+        resolved_target = resolved_target.with_thread_root(response_thread_id)
+        media_inputs = media or MediaInputs()
+        session_id = resolved_target.session_id
+        resolved_model_prompt = self._append_matrix_prompt_context(
+            model_prompt or prompt,
+            target=resolved_target,
+            include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
+        )
+        tool_context = self._build_tool_runtime_context(
+            resolved_target,
+            user_id=user_id,
+            session_id=session_id,
+            attachment_ids=attachment_ids,
+            correlation_id=correlation_id,
+            source_envelope=response_envelope,
+        )
+        execution_identity = self._build_tool_execution_identity(
+            target=resolved_target,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        request_knowledge_managers = await self._ensure_request_knowledge_managers(
+            [self.agent_name],
+            execution_identity,
+        )
+        return _PreparedResponseRuntime(
+            resolved_target=resolved_target,
+            response_thread_id=response_thread_id,
+            media_inputs=media_inputs,
+            session_id=session_id,
+            model_prompt=resolved_model_prompt,
+            tool_context=tool_context,
+            execution_identity=execution_identity,
+            request_knowledge_managers=request_knowledge_managers,
+            room_mode=room_mode,
+        )
+
+    @timed("prepare_non_streaming_runtime")
+    async def _prepare_non_streaming_runtime(
+        self,
+        *,
+        room_id: str,
+        prompt: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        existing_event_id: str | None,
+        existing_event_is_placeholder: bool,
+        user_id: str | None,
+        media: MediaInputs | None,
+        attachment_ids: list[str] | None,
+        model_prompt: str | None,
+        response_envelope: MessageEnvelope | None,
+        correlation_id: str | None,
+        resolved_thread_id: str | None,
+        target: MessageTarget | None,
+    ) -> _PreparedResponseRuntime:
+        """Resolve non-streaming runtime context."""
+        return await AgentBot._prepare_response_runtime_common(
+            self,
+            room_id=room_id,
+            prompt=prompt,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            existing_event_id=existing_event_id,
+            existing_event_uses_thread_id=not existing_event_is_placeholder,
+            resolved_thread_id=resolved_thread_id,
+            user_id=user_id,
+            media=media,
+            attachment_ids=attachment_ids,
+            model_prompt=model_prompt,
+            response_envelope=response_envelope,
+            correlation_id=correlation_id,
+            target=target,
+            room_mode=False,
+        )
+
+    @timed("prepare_streaming_runtime")
+    async def _prepare_streaming_runtime(
+        self,
+        *,
+        room_id: str,
+        prompt: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        existing_event_id: str | None,
+        adopt_existing_placeholder: bool,
+        user_id: str | None,
+        media: MediaInputs | None,
+        attachment_ids: list[str] | None,
+        model_prompt: str | None,
+        response_envelope: MessageEnvelope | None,
+        correlation_id: str | None,
+        resolved_thread_id: str | None,
+        target: MessageTarget | None,
+    ) -> _PreparedResponseRuntime:
+        """Resolve streaming runtime context."""
+        room_mode = self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room_id) == "room"
+        return await AgentBot._prepare_response_runtime_common(
+            self,
+            room_id=room_id,
+            prompt=prompt,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            existing_event_id=existing_event_id,
+            existing_event_uses_thread_id=not adopt_existing_placeholder,
+            resolved_thread_id=resolved_thread_id,
+            user_id=user_id,
+            media=media,
+            attachment_ids=attachment_ids,
+            model_prompt=model_prompt,
+            response_envelope=response_envelope,
+            correlation_id=correlation_id,
+            target=target,
+            room_mode=room_mode,
+        )
+
+    @timed("non_streaming_response_generation")
+    async def _generate_non_streaming_ai_response(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_history: Sequence[ResolvedVisibleMessage],
+        user_id: str | None,
+        run_id: str | None,
+        existing_event_id: str | None,
+        runtime: _PreparedResponseRuntime,
+        active_event_ids: set[str],
+        tool_trace: list[ToolTraceEntry],
+        run_metadata_content: dict[str, Any],
+        compaction_outcomes: list[CompactionOutcome],
+        matrix_run_metadata: dict[str, Any] | None,
+        system_enrichment_items: tuple[EnrichmentItem, ...],
+    ) -> str:
+        """Run one non-streaming AI request."""
+
+        def _note_attempt_run_id(current_run_id: str) -> None:
+            self.stop_manager.update_run_id(existing_event_id, current_run_id)
+
+        assert self.client is not None
+        async with typing_indicator(self.client, room_id):
+            with (
+                tool_execution_identity(runtime.execution_identity),
+                tool_runtime_context(runtime.tool_context),
+            ):
+                knowledge = self._knowledge_for_agent(
+                    self.agent_name,
+                    request_knowledge_managers=runtime.request_knowledge_managers,
+                )
+                return await ai_response(
+                    agent_name=self.agent_name,
+                    prompt=runtime.model_prompt,
+                    session_id=runtime.session_id,
+                    runtime_paths=self.runtime_paths,
+                    config=self.config,
+                    thread_history=thread_history,
+                    room_id=room_id,
+                    knowledge=knowledge,
+                    user_id=user_id,
+                    run_id=run_id,
+                    run_id_callback=_note_attempt_run_id,
+                    media=runtime.media_inputs,
+                    reply_to_event_id=reply_to_event_id,
+                    active_event_ids=active_event_ids,
+                    show_tool_calls=self.show_tool_calls,
+                    tool_trace_collector=tool_trace,
+                    run_metadata_collector=run_metadata_content,
+                    execution_identity=runtime.execution_identity,
+                    compaction_outcomes_collector=compaction_outcomes,
+                    matrix_run_metadata=matrix_run_metadata,
+                    system_enrichment_items=system_enrichment_items,
+                )
+
+    @timed("streaming_response_generation")
+    async def _generate_streaming_ai_response(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_history: Sequence[ResolvedVisibleMessage],
+        user_id: str | None,
+        run_id: str | None,
+        existing_event_id: str | None,
+        adopt_existing_placeholder: bool,
+        attachment_ids: list[str] | None,
+        runtime: _PreparedResponseRuntime,
+        active_event_ids: set[str],
+        tool_trace: list[ToolTraceEntry],
+        run_metadata_content: dict[str, Any],
+        compaction_outcomes: list[CompactionOutcome],
+        matrix_run_metadata: dict[str, Any] | None,
+        system_enrichment_items: tuple[EnrichmentItem, ...],
+        received_monotonic: float | None = None,
+    ) -> tuple[str | None, str]:
+        """Run one streaming AI request and send the streamed Matrix response."""
+
+        def _note_attempt_run_id(current_run_id: str) -> None:
+            self.stop_manager.update_run_id(existing_event_id, current_run_id)
+
+        assert self.client is not None
+        async with typing_indicator(self.client, room_id):
+            with (
+                tool_execution_identity(runtime.execution_identity),
+                tool_runtime_context(runtime.tool_context),
+            ):
+                knowledge = self._knowledge_for_agent(
+                    self.agent_name,
+                    request_knowledge_managers=runtime.request_knowledge_managers,
+                )
+                response_stream = stream_agent_response(
+                    agent_name=self.agent_name,
+                    prompt=runtime.model_prompt,
+                    session_id=runtime.session_id,
+                    runtime_paths=self.runtime_paths,
+                    config=self.config,
+                    thread_history=thread_history,
+                    room_id=room_id,
+                    knowledge=knowledge,
+                    user_id=user_id,
+                    run_id=run_id,
+                    run_id_callback=_note_attempt_run_id,
+                    media=runtime.media_inputs,
+                    reply_to_event_id=reply_to_event_id,
+                    active_event_ids=active_event_ids,
+                    show_tool_calls=self.show_tool_calls,
+                    run_metadata_collector=run_metadata_content,
+                    execution_identity=runtime.execution_identity,
+                    compaction_outcomes_collector=compaction_outcomes,
+                    matrix_run_metadata=matrix_run_metadata,
+                    system_enrichment_items=system_enrichment_items,
+                )
+                timed_response_stream = AgentBot._stream_response_with_first_token_log(
+                    self,
+                    response_stream,
+                    room_id=room_id,
+                    received_monotonic=received_monotonic,
+                )
+                response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
+                return await send_streaming_response(
+                    self.client,
+                    room_id,
+                    reply_to_event_id,
+                    runtime.response_thread_id,
+                    self.matrix_id.domain,
+                    self.config,
+                    self.runtime_paths,
+                    timed_response_stream,
+                    streaming_cls=StreamingResponse,
+                    existing_event_id=existing_event_id,
+                    adopt_existing_placeholder=adopt_existing_placeholder,
+                    target=runtime.resolved_target,
+                    room_mode=runtime.room_mode,
+                    show_tool_calls=self.show_tool_calls,
+                    extra_content=response_extra_content,
+                    tool_trace_collector=tool_trace,
+                )
+
     async def _process_and_respond(
         self,
         room_id: str,
@@ -4672,96 +5084,45 @@ class AgentBot:
         if not prompt.strip():
             return _ResponseDispatchResult(event_id=existing_event_id, response_text="", delivery_kind=None)
 
-        resolved_target = target or (
-            response_envelope.target
-            if response_envelope is not None
-            else self._build_message_target(
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=reply_to_event_id,
-            )
-        )
-        response_thread_id = (
-            resolved_target.resolved_thread_id
-            if target is not None
-            else thread_id
-            if existing_event_id is not None and not existing_event_is_placeholder
-            else resolved_thread_id
-            if resolved_thread_id is not None
-            else self._resolve_response_thread_root(
-                thread_id,
-                reply_to_event_id,
-                room_id=room_id,
-                response_envelope=response_envelope,
-            )
-        )
-        resolved_target = resolved_target.with_thread_root(response_thread_id)
-        media_inputs = media or MediaInputs()
-        session_id = resolved_target.session_id
-        model_prompt = self._append_matrix_prompt_context(
-            model_prompt or prompt,
-            target=resolved_target,
-            include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
-        )
-        tool_context = self._build_tool_runtime_context(
-            resolved_target,
+        runtime = await AgentBot._prepare_non_streaming_runtime(
+            self,
+            room_id=room_id,
+            prompt=prompt,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            existing_event_id=existing_event_id,
+            existing_event_is_placeholder=existing_event_is_placeholder,
             user_id=user_id,
-            session_id=session_id,
+            media=media,
             attachment_ids=attachment_ids,
+            model_prompt=model_prompt,
+            response_envelope=response_envelope,
             correlation_id=correlation_id,
-            source_envelope=response_envelope,
-        )
-        execution_identity = self._build_tool_execution_identity(
-            target=resolved_target,
-            user_id=user_id,
-            session_id=session_id,
-        )
-        request_knowledge_managers = await self._ensure_request_knowledge_managers(
-            [self.agent_name],
-            execution_identity,
+            resolved_thread_id=resolved_thread_id,
+            target=target,
         )
         tool_trace: list[ToolTraceEntry] = []
         compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(room_id)
 
-        def _note_attempt_run_id(current_run_id: str) -> None:
-            self.stop_manager.update_run_id(existing_event_id, current_run_id)
-
         try:
-            # Show typing indicator while generating response
-            async with typing_indicator(self.client, room_id):
-                with (
-                    tool_execution_identity(execution_identity),
-                    tool_runtime_context(tool_context),
-                ):
-                    knowledge = self._knowledge_for_agent(
-                        self.agent_name,
-                        request_knowledge_managers=request_knowledge_managers,
-                    )
-                    response_text = await ai_response(
-                        agent_name=self.agent_name,
-                        prompt=model_prompt,
-                        session_id=session_id,
-                        runtime_paths=self.runtime_paths,
-                        config=self.config,
-                        thread_history=thread_history,
-                        room_id=room_id,
-                        knowledge=knowledge,
-                        user_id=user_id,
-                        run_id=run_id,
-                        run_id_callback=_note_attempt_run_id,
-                        media=media_inputs,
-                        reply_to_event_id=reply_to_event_id,
-                        active_event_ids=active_event_ids,
-                        show_tool_calls=self.show_tool_calls,
-                        tool_trace_collector=tool_trace,
-                        run_metadata_collector=run_metadata_content,
-                        execution_identity=execution_identity,
-                        compaction_outcomes_collector=compaction_outcomes,
-                        matrix_run_metadata=matrix_run_metadata,
-                        system_enrichment_items=system_enrichment_items,
-                    )
+            response_text = await AgentBot._generate_non_streaming_ai_response(
+                self,
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                thread_history=thread_history,
+                user_id=user_id,
+                run_id=run_id,
+                existing_event_id=existing_event_id,
+                runtime=runtime,
+                active_event_ids=active_event_ids,
+                tool_trace=tool_trace,
+                run_metadata_content=run_metadata_content,
+                compaction_outcomes=compaction_outcomes,
+                matrix_run_metadata=matrix_run_metadata,
+                system_enrichment_items=system_enrichment_items,
+            )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
             self.logger.warning(
@@ -4770,7 +5131,12 @@ class AgentBot:
                 exc_info=True,
             )
             if existing_event_id:
-                await self._edit_message(room_id, existing_event_id, _CANCELLED_RESPONSE_TEXT, response_thread_id)
+                await self._edit_message(
+                    room_id,
+                    existing_event_id,
+                    _CANCELLED_RESPONSE_TEXT,
+                    runtime.response_thread_id,
+                )
             raise
         except Exception as e:
             self.logger.exception("Error in non-streaming response", error=str(e))
@@ -4781,7 +5147,7 @@ class AgentBot:
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
-            target=resolved_target,
+            target=runtime.resolved_target,
             existing_event_id=existing_event_id,
             existing_event_is_placeholder=existing_event_is_placeholder,
             response_text=response_text,
@@ -4790,7 +5156,7 @@ class AgentBot:
             or MessageEnvelope(
                 source_event_id=reply_to_event_id,
                 room_id=room_id,
-                target=resolved_target,
+                target=runtime.resolved_target,
                 requester_id=user_id or self.matrix_id.full_id,
                 sender_id=user_id or self.matrix_id.full_id,
                 body=prompt,
@@ -4810,7 +5176,7 @@ class AgentBot:
             interactive.register_interactive_question(
                 delivery.event_id,
                 room_id,
-                resolved_target.resolved_thread_id,
+                runtime.resolved_target.resolved_thread_id,
                 delivery.option_map,
                 self.agent_name,
             )
@@ -5195,7 +5561,7 @@ class AgentBot:
             reason="Suppressed streamed response",
         )
 
-    async def _process_and_respond_streaming(  # noqa: C901, PLR0911, PLR0915
+    async def _process_and_respond_streaming(  # noqa: C901, PLR0911
         self,
         room_id: str,
         prompt: str,
@@ -5217,122 +5583,55 @@ class AgentBot:
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
+        received_monotonic: float | None = None,
     ) -> _ResponseDispatchResult:
         """Process a message and send a response (streaming)."""
         assert self.client is not None
         if not prompt.strip():
             return _ResponseDispatchResult(event_id=existing_event_id, response_text="", delivery_kind=None)
 
-        resolved_target = target or (
-            response_envelope.target
-            if response_envelope is not None
-            else self._build_message_target(
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=reply_to_event_id,
-            )
-        )
-        response_thread_id = (
-            resolved_target.resolved_thread_id
-            if target is not None
-            else thread_id
-            if existing_event_id is not None and not adopt_existing_placeholder
-            else resolved_thread_id
-            if resolved_thread_id is not None
-            else self._resolve_response_thread_root(
-                thread_id,
-                reply_to_event_id,
-                room_id=room_id,
-                response_envelope=response_envelope,
-            )
-        )
-        resolved_target = resolved_target.with_thread_root(response_thread_id)
-        media_inputs = media or MediaInputs()
-        session_id = resolved_target.session_id
-        room_mode = self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room_id) == "room"
-        model_prompt = self._append_matrix_prompt_context(
-            model_prompt or prompt,
-            target=resolved_target,
-            include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
-        )
-        tool_context = self._build_tool_runtime_context(
-            resolved_target,
+        runtime = await AgentBot._prepare_streaming_runtime(
+            self,
+            room_id=room_id,
+            prompt=prompt,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            existing_event_id=existing_event_id,
+            adopt_existing_placeholder=adopt_existing_placeholder,
             user_id=user_id,
-            session_id=session_id,
+            media=media,
             attachment_ids=attachment_ids,
+            model_prompt=model_prompt,
+            response_envelope=response_envelope,
             correlation_id=correlation_id,
-            source_envelope=response_envelope,
-        )
-        execution_identity = self._build_tool_execution_identity(
-            target=resolved_target,
-            user_id=user_id,
-            session_id=session_id,
-        )
-        request_knowledge_managers = await self._ensure_request_knowledge_managers(
-            [self.agent_name],
-            execution_identity,
+            resolved_thread_id=resolved_thread_id,
+            target=target,
         )
         compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(room_id)
         tool_trace: list[ToolTraceEntry] = []
 
-        def _note_attempt_run_id(current_run_id: str) -> None:
-            self.stop_manager.update_run_id(existing_event_id, current_run_id)
-
         try:
-            # Show typing indicator while generating response
-            async with typing_indicator(self.client, room_id):
-                with (
-                    tool_execution_identity(execution_identity),
-                    tool_runtime_context(tool_context),
-                ):
-                    knowledge = self._knowledge_for_agent(
-                        self.agent_name,
-                        request_knowledge_managers=request_knowledge_managers,
-                    )
-                    response_stream = stream_agent_response(
-                        agent_name=self.agent_name,
-                        prompt=model_prompt,
-                        session_id=session_id,
-                        runtime_paths=self.runtime_paths,
-                        config=self.config,
-                        thread_history=thread_history,
-                        room_id=room_id,
-                        knowledge=knowledge,
-                        user_id=user_id,
-                        run_id=run_id,
-                        run_id_callback=_note_attempt_run_id,
-                        media=media_inputs,
-                        reply_to_event_id=reply_to_event_id,
-                        active_event_ids=active_event_ids,
-                        show_tool_calls=self.show_tool_calls,
-                        run_metadata_collector=run_metadata_content,
-                        execution_identity=execution_identity,
-                        compaction_outcomes_collector=compaction_outcomes,
-                        matrix_run_metadata=matrix_run_metadata,
-                        system_enrichment_items=system_enrichment_items,
-                    )
-                    response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
-
-                    event_id, accumulated = await send_streaming_response(
-                        self.client,
-                        room_id,
-                        reply_to_event_id,
-                        response_thread_id,
-                        self.matrix_id.domain,
-                        self.config,
-                        self.runtime_paths,
-                        response_stream,
-                        streaming_cls=StreamingResponse,
-                        existing_event_id=existing_event_id,
-                        adopt_existing_placeholder=adopt_existing_placeholder,
-                        target=resolved_target,
-                        room_mode=room_mode,
-                        show_tool_calls=self.show_tool_calls,
-                        extra_content=response_extra_content,
-                        tool_trace_collector=tool_trace,
-                    )
+            event_id, accumulated = await AgentBot._generate_streaming_ai_response(
+                self,
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                thread_history=thread_history,
+                user_id=user_id,
+                run_id=run_id,
+                existing_event_id=existing_event_id,
+                adopt_existing_placeholder=adopt_existing_placeholder,
+                attachment_ids=attachment_ids,
+                runtime=runtime,
+                active_event_ids=active_event_ids,
+                tool_trace=tool_trace,
+                run_metadata_content=run_metadata_content,
+                compaction_outcomes=compaction_outcomes,
+                matrix_run_metadata=matrix_run_metadata,
+                system_enrichment_items=system_enrichment_items,
+                received_monotonic=received_monotonic,
+            )
         except asyncio.CancelledError:
             # send_streaming_response already preserves partial text and appends
             # a cancellation marker for the final edit.
@@ -5350,6 +5649,7 @@ class AgentBot:
         if event_id is None:
             return _ResponseDispatchResult(event_id=None, response_text=accumulated, delivery_kind=None)
 
+        response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
         delivery_kind: Literal["sent", "edited"] = "edited" if existing_event_id else "sent"
         if response_envelope is None or correlation_id is None:
             interactive_response = interactive.parse_and_format_interactive(accumulated, extract_mapping=True)
@@ -5357,7 +5657,7 @@ class AgentBot:
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
-                    resolved_target.resolved_thread_id,
+                    runtime.resolved_target.resolved_thread_id,
                     interactive_response.option_map,
                     self.agent_name,
                 )
@@ -5415,7 +5715,7 @@ class AgentBot:
                 room_id=room_id,
                 reply_to_event_id=reply_to_event_id,
                 thread_id=thread_id,
-                target=resolved_target,
+                target=runtime.resolved_target,
                 existing_event_id=event_id,
                 existing_event_is_placeholder=adopt_existing_placeholder,
                 response_text=draft.response_text,
@@ -5448,7 +5748,7 @@ class AgentBot:
             interactive.register_interactive_question(
                 delivery.event_id,
                 room_id,
-                resolved_target.resolved_thread_id,
+                runtime.resolved_target.resolved_thread_id,
                 delivery.option_map,
                 self.agent_name,
             )
@@ -5500,6 +5800,7 @@ class AgentBot:
         correlation_id: str | None = None,
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
+        received_monotonic: float | None = None,
     ) -> str | None:
         """Generate and send/edit a response using AI.
 
@@ -5523,10 +5824,10 @@ class AgentBot:
                 apply for this response before optional post-run scrubbing.
             response_envelope: Optional normalized inbound envelope for response hooks.
             correlation_id: Optional request correlation ID propagated to hook logging.
-            target: Optional canonical delivery target used for lifecycle locking, session
-                identity, and room-mode vs thread-mode routing.
+            target: Optional canonical response target used for lifecycle locking and delivery.
             matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
                 for unseen-message tracking, coalesced edit regeneration, and cleanup.
+            received_monotonic: Optional receive timestamp used for queued-message signaling.
 
         Returns:
             Event ID of the response message, or None if failed
@@ -5558,8 +5859,14 @@ class AgentBot:
         )
         if queued_human_message:
             queued_signal.add_waiting_human_message()
+        lock_acquired = False
         try:
-            async with lifecycle_lock:
+            await AgentBot._acquire_response_lifecycle_lock(
+                self,
+                lifecycle_lock,
+            )
+            lock_acquired = True
+            try:
                 if queued_human_message:
                     queued_signal.consume_waiting_human_message()
                     queued_human_message = False
@@ -5582,7 +5889,11 @@ class AgentBot:
                         correlation_id=correlation_id,
                         target=resolved_target,
                         matrix_run_metadata=matrix_run_metadata,
+                        received_monotonic=received_monotonic,
                     )
+            finally:
+                if lock_acquired:
+                    lifecycle_lock.release()
         finally:
             if queued_human_message:
                 queued_signal.consume_waiting_human_message()
@@ -5607,6 +5918,7 @@ class AgentBot:
         correlation_id: str | None = None,
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
+        received_monotonic: float | None = None,
     ) -> str | None:
         """Generate one agent response after acquiring the per-thread lock."""
         assert self.client is not None
@@ -5691,6 +6003,7 @@ class AgentBot:
                     resolved_thread_id=delivery_thread_id,
                     matrix_run_metadata=matrix_run_metadata,
                     system_enrichment_items=system_enrichment_items,
+                    received_monotonic=received_monotonic,
                 )
             else:
                 delivery_result = await self._process_and_respond(
@@ -5792,16 +6105,10 @@ class AgentBot:
             and resolved_event_id is not None
             and not (delivery_result is not None and delivery_result.suppressed)
         ):
-            create_background_task(
-                maybe_generate_thread_summary(
-                    client=self.client,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    config=self.config,
-                    runtime_paths=self.runtime_paths,
-                    message_count_hint=_thread_summary_message_count_hint(thread_history),
-                ),
-                name=f"thread_summary_{room_id}_{thread_id}",
+            self._queue_timed_thread_summary(
+                room_id=room_id,
+                thread_id=thread_id,
+                message_count_hint=_thread_summary_message_count_hint(thread_history),
             )
 
         return resolved_event_id
@@ -6488,8 +6795,10 @@ class TeamBot(AgentBot):
         correlation_id: str | None = None,
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
+        received_monotonic: float | None = None,
     ) -> str | None:
         """Generate a team response instead of individual agent response."""
+        del received_monotonic
         if not prompt.strip():
             return None
 
@@ -6599,16 +6908,10 @@ class TeamBot(AgentBot):
         )
 
         if thread_id is not None and event_id is not None:
-            create_background_task(
-                maybe_generate_thread_summary(
-                    client=self.client,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    config=self.config,
-                    runtime_paths=self.runtime_paths,
-                    message_count_hint=_thread_summary_message_count_hint(thread_history),
-                ),
-                name=f"thread_summary_{room_id}_{thread_id}",
+            self._queue_timed_thread_summary(
+                room_id=room_id,
+                thread_id=thread_id,
+                message_count_hint=_thread_summary_message_count_hint(thread_history),
             )
 
         return event_id
