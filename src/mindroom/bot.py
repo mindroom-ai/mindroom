@@ -142,7 +142,7 @@ from mindroom.tool_system.worker_routing import (
 
 from . import constants, interactive, voice_handler
 from .agents import create_agent, get_agent_session, get_team_session, remove_run_by_event_id
-from .ai import ai_response, stream_agent_response
+from .ai import ai_response, queued_message_signal_context, stream_agent_response
 from .attachment_media import resolve_attachment_media
 from .attachments import (
     append_attachment_ids_prompt,
@@ -268,7 +268,13 @@ _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
 
 
-def _get_or_create_lock(locks: dict[object, asyncio.Lock], key: object, *, max_entries: int = 100) -> asyncio.Lock:
+def _get_or_create_lock(
+    locks: dict[object, asyncio.Lock],
+    key: object,
+    *,
+    max_entries: int = 100,
+    on_evict: Callable[[object], None] | None = None,
+) -> asyncio.Lock:
     """Return a cached lock for one key with bounded best-effort eviction."""
     lock = locks.get(key)
     if lock is not None:
@@ -280,9 +286,48 @@ def _get_or_create_lock(locks: dict[object, asyncio.Lock], key: object, *, max_e
             if candidate_lock.locked():
                 continue
             locks.pop(candidate, None)
+            if on_evict is not None:
+                on_evict(candidate)
     lock = asyncio.Lock()
     locks[key] = lock
     return lock
+
+
+@dataclass
+class _QueuedMessageState:
+    pending_human_messages: int = 0
+    _active_response_turns: int = 0
+    _event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def begin_response_turn(self) -> bool:
+        existing_turn = self._active_response_turns > 0
+        self._active_response_turns += 1
+        return existing_turn
+
+    def finish_response_turn(self) -> None:
+        if self._active_response_turns == 0:
+            return
+        self._active_response_turns -= 1
+
+    def add_waiting_human_message(self) -> None:
+        self.pending_human_messages += 1
+        self._event.set()
+
+    def consume_waiting_human_message(self) -> None:
+        if self.pending_human_messages == 0:
+            return
+        self.pending_human_messages -= 1
+        if self.pending_human_messages == 0:
+            self._event.clear()
+
+    def has_pending_human_messages(self) -> bool:
+        return self.pending_human_messages > 0
+
+    async def wait(self) -> None:
+        await self._event.wait()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
 
 
 def _create_task_wrapper(
@@ -631,6 +676,10 @@ class AgentBot:
         init=False,
     )
     _coalescing_gate: CoalescingGate = field(init=False)
+    _thread_queued_signals: dict[tuple[str, str | None], _QueuedMessageState] = field(
+        default_factory=dict,
+        init=False,
+    )
     in_flight_response_count: int = field(default=0, init=False)
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None = field(default=None, init=False)
 
@@ -677,7 +726,16 @@ class AgentBot:
         return _get_or_create_lock(
             cast("dict[object, asyncio.Lock]", self._response_lifecycle_locks),
             (target.room_id, target.resolved_thread_id),
+            on_evict=lambda candidate: self._thread_queued_signals.pop(
+                cast("tuple[str, str | None]", candidate),
+                None,
+            ),
         )
+
+    def has_active_response_for_target(self, target: MessageTarget) -> bool:
+        """Return whether one canonical conversation target currently holds the response lock."""
+        lock = self._response_lifecycle_locks.get((target.room_id, target.resolved_thread_id))
+        return lock.locked() if lock is not None else False
 
     def _build_message_target(
         self,
@@ -734,6 +792,24 @@ class AgentBot:
         if resolved_thread_id is not None and target.resolved_thread_id != resolved_thread_id:
             target = target.with_thread_root(resolved_thread_id)
         return target.session_id
+
+    def _get_or_create_queued_signal(
+        self,
+        target: MessageTarget,
+    ) -> _QueuedMessageState:
+        """Return the queued-message signal for one canonical conversation thread."""
+        thread_key = (target.room_id, target.resolved_thread_id)
+        signal = self._thread_queued_signals.get(thread_key)
+        if signal is not None:
+            return signal
+        signal = _QueuedMessageState()
+        self._thread_queued_signals[thread_key] = signal
+        return signal
+
+    @staticmethod
+    def _should_signal_queued_message(response_envelope: MessageEnvelope | None) -> bool:
+        """Return whether one queued ingress should interrupt the active turn."""
+        return response_envelope is not None and not is_automation_source_kind(response_envelope.source_kind)
 
     def _coalescing_enabled(self) -> bool:
         """Return whether live coalescing is enabled for this bot."""
@@ -1865,12 +1941,29 @@ class AgentBot:
             return
         if should_handle_interactive_text_response(envelope):
             await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
+        if self._should_bypass_coalescing_for_active_thread_follow_up(envelope):
+            await self._dispatch_text_message(
+                room,
+                prepared_event,
+                prechecked_event.requester_user_id,
+            )
+            return
         await self._enqueue_for_dispatch(
             prechecked_event.event,
             room,
             source_kind="message",
             requester_user_id=prechecked_event.requester_user_id,
         )
+
+    def _should_bypass_coalescing_for_active_thread_follow_up(self, envelope: MessageEnvelope) -> bool:
+        """Return whether one human thread follow-up should skip IN_FLIGHT coalescing."""
+        if envelope.target.resolved_thread_id is None:
+            return False
+        if is_automation_source_kind(envelope.source_kind):
+            return False
+        if is_agent_id(envelope.sender_id, self.config, self.runtime_paths):
+            return False
+        return self.has_active_response_for_target(envelope.target)
 
     async def _dispatch_text_message(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -2825,6 +2918,8 @@ class AgentBot:
             dispatch.requester_user_id,
             message_for_decision,
             dm_room,
+            target=dispatch.target,
+            source_envelope=dispatch.envelope,
         )
         if action.kind == "skip":
             return None
@@ -3198,6 +3293,9 @@ class AgentBot:
         requester_user_id: str,
         message: str,
         is_dm: bool,
+        *,
+        target: MessageTarget | None = None,
+        source_envelope: MessageEnvelope | None = None,
     ) -> _ResponseAction:
         """Decide whether to respond as a team, individually, or skip.
 
@@ -3242,9 +3340,33 @@ class AgentBot:
             has_non_agent_mentions=context.has_non_agent_mentions,
             sender_id=requester_user_id,
         ):
+            if self._should_queue_follow_up_in_active_response_thread(
+                context=context,
+                target=target,
+                source_envelope=source_envelope,
+            ):
+                return _ResponseAction(kind="individual")
             return _ResponseAction(kind="skip")
 
         return _ResponseAction(kind="individual")
+
+    def _should_queue_follow_up_in_active_response_thread(
+        self,
+        *,
+        context: _MessageContext,
+        target: MessageTarget | None,
+        source_envelope: MessageEnvelope | None,
+    ) -> bool:
+        """Return whether one human follow-up should enter the queued-response path."""
+        if target is None or source_envelope is None or not context.is_thread:
+            return False
+        if context.mentioned_agents or context.has_non_agent_mentions:
+            return False
+        if is_automation_source_kind(source_envelope.source_kind):
+            return False
+        if is_agent_id(source_envelope.sender_id, self.config, self.runtime_paths):
+            return False
+        return self.has_active_response_for_target(target)
 
     async def _decide_team_for_sender(
         self,
@@ -3837,26 +3959,42 @@ class AgentBot:
             response_envelope=response_envelope,
         )
         lifecycle_lock = self._response_lifecycle_lock(effective_response_target.target)
-        async with lifecycle_lock:
-            return await self._generate_team_response_helper_locked(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
-                response_target=effective_response_target,
-                team_agents=team_agents,
-                team_mode=team_mode,
-                thread_history=thread_history,
-                requester_user_id=requester_user_id,
-                existing_event_id=existing_event_id,
-                existing_event_is_placeholder=existing_event_is_placeholder,
-                payload=payload,
-                response_envelope=response_envelope,
-                strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
-                system_enrichment_items=system_enrichment_items,
-                correlation_id=correlation_id,
-                reason_prefix=reason_prefix,
-                matrix_run_metadata=matrix_run_metadata,
-            )
+        queued_signal = self._get_or_create_queued_signal(effective_response_target.target)
+        existing_turn = queued_signal.begin_response_turn()
+        queued_human_message = (existing_turn or lifecycle_lock.locked()) and self._should_signal_queued_message(
+            response_envelope,
+        )
+        if queued_human_message:
+            queued_signal.add_waiting_human_message()
+        try:
+            async with lifecycle_lock:
+                if queued_human_message:
+                    queued_signal.consume_waiting_human_message()
+                    queued_human_message = False
+                with queued_message_signal_context(queued_signal):
+                    return await self._generate_team_response_helper_locked(
+                        room_id=room_id,
+                        reply_to_event_id=reply_to_event_id,
+                        thread_id=thread_id,
+                        response_target=effective_response_target,
+                        team_agents=team_agents,
+                        team_mode=team_mode,
+                        thread_history=thread_history,
+                        requester_user_id=requester_user_id,
+                        existing_event_id=existing_event_id,
+                        existing_event_is_placeholder=existing_event_is_placeholder,
+                        payload=payload,
+                        response_envelope=response_envelope,
+                        strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
+                        system_enrichment_items=system_enrichment_items,
+                        correlation_id=correlation_id,
+                        reason_prefix=reason_prefix,
+                        matrix_run_metadata=matrix_run_metadata,
+                    )
+        finally:
+            if queued_human_message:
+                queued_signal.consume_waiting_human_message()
+            queued_signal.finish_response_turn()
 
     async def _generate_team_response_helper_locked(  # noqa: C901, PLR0915
         self,
@@ -5156,26 +5294,42 @@ class AgentBot:
             response_envelope=response_envelope,
         )
         lifecycle_lock = self._response_lifecycle_lock(response_target.target)
-        async with lifecycle_lock:
-            return await self._generate_response_locked(
-                room_id=room_id,
-                prompt=prompt,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
-                response_target=response_target,
-                thread_history=thread_history,
-                existing_event_id=existing_event_id,
-                existing_event_is_placeholder=existing_event_is_placeholder,
-                user_id=user_id,
-                media=media,
-                attachment_ids=attachment_ids,
-                model_prompt=model_prompt,
-                strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
-                system_enrichment_items=system_enrichment_items,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                matrix_run_metadata=matrix_run_metadata,
-            )
+        queued_signal = self._get_or_create_queued_signal(response_target.target)
+        existing_turn = queued_signal.begin_response_turn()
+        queued_human_message = (existing_turn or lifecycle_lock.locked()) and self._should_signal_queued_message(
+            response_envelope,
+        )
+        if queued_human_message:
+            queued_signal.add_waiting_human_message()
+        try:
+            async with lifecycle_lock:
+                if queued_human_message:
+                    queued_signal.consume_waiting_human_message()
+                    queued_human_message = False
+                with queued_message_signal_context(queued_signal):
+                    return await self._generate_response_locked(
+                        room_id=room_id,
+                        prompt=prompt,
+                        reply_to_event_id=reply_to_event_id,
+                        thread_id=thread_id,
+                        response_target=response_target,
+                        thread_history=thread_history,
+                        existing_event_id=existing_event_id,
+                        existing_event_is_placeholder=existing_event_is_placeholder,
+                        user_id=user_id,
+                        media=media,
+                        attachment_ids=attachment_ids,
+                        model_prompt=model_prompt,
+                        strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
+                        system_enrichment_items=system_enrichment_items,
+                        response_envelope=response_envelope,
+                        correlation_id=correlation_id,
+                        matrix_run_metadata=matrix_run_metadata,
+                    )
+        finally:
+            if queued_human_message:
+                queued_signal.consume_waiting_human_message()
+            queued_signal.finish_response_turn()
 
     async def _generate_response_locked(
         self,

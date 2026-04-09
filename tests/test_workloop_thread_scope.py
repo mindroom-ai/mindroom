@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -71,6 +72,21 @@ def _copy_plugin_root(tmp_path: Path) -> Path:
     source_root = _plugin_root()
     copied_root = tmp_path / "plugins" / "workloop"
     shutil.copytree(source_root, copied_root)
+    (tmp_path / "plugins" / "__init__.py").write_text("", encoding="utf-8")
+    (copied_root / "__init__.py").write_text("", encoding="utf-8")
+    package_prefix = "plugins.workloop"
+    for module_path in copied_root.glob("*.py"):
+        module_text = module_path.read_text(encoding="utf-8")
+        module_text = module_text.replace(
+            "from . import commands, formatting, poke, state, todos, types as workloop_types",
+            f"from {package_prefix} import commands, formatting, poke, state, todos, types as workloop_types",
+        )
+        module_text = module_text.replace("from .formatting import ", f"from {package_prefix}.formatting import ")
+        module_text = module_text.replace("from .poke import ", f"from {package_prefix}.poke import ")
+        module_text = module_text.replace("from .state import ", f"from {package_prefix}.state import ")
+        module_text = module_text.replace("from .todos import ", f"from {package_prefix}.todos import ")
+        module_text = module_text.replace("from .types import ", f"from {package_prefix}.types import ")
+        module_path.write_text(module_text, encoding="utf-8")
     types_path = copied_root / "types.py"
     types_text = types_path.read_text(encoding="utf-8")
     if "ROUTER_AGENT_NAME" not in types_text:
@@ -168,10 +184,12 @@ def _message_envelope(
 def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
     """Load the workloop plugin into an isolated runtime rooted at tmp_path."""
     runtime_paths = test_runtime_paths(tmp_path)
+    plugin_root = _copy_plugin_root(tmp_path)
+    sys.path.insert(0, str(tmp_path))
     config = bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])},
-            plugins=[str(_copy_plugin_root(tmp_path))],
+            plugins=[str(plugin_root)],
         ),
         runtime_paths,
     )
@@ -202,6 +220,8 @@ def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
         set_plugin_skill_roots(original_plugin_roots)
+        if sys.path and sys.path[0] == str(tmp_path):
+            sys.path.pop(0)
 
 
 def test_tool_scope_uses_resolved_thread_id(loaded_workloop: _LoadedWorkloop) -> None:

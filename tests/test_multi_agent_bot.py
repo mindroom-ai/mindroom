@@ -37,6 +37,7 @@ from mindroom.bot import (
     _MessageContext,
     _PrecheckedEvent,
     _PreparedDispatch,
+    _PreparedTextEvent,
     _ResponseAction,
     _ResponseDispatchResult,
     _SuppressedPlaceholderCleanupError,
@@ -5303,6 +5304,96 @@ class TestAgentBot:
         mock_should_respond.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_resolve_response_action_keeps_human_follow_up_in_active_thread(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Human follow-ups in an actively responding thread should bypass the normal multi-agent skip."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        ids = config.get_ids(runtime_paths)
+        room.users = {
+            bot.matrix_id.full_id: MagicMock(),
+            ids[ROUTER_AGENT_NAME].full_id: MagicMock(),
+            ids["general"].full_id: MagicMock(),
+        }
+        target = MessageTarget.resolve(room.room_id, "$thread", "$event")
+        context = _MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=[
+                ResolvedVisibleMessage(
+                    sender=ids[ROUTER_AGENT_NAME].full_id,
+                    body="routing",
+                    timestamp=1,
+                    event_id="$router",
+                    content={"body": "routing"},
+                    thread_id="$thread",
+                    latest_event_id="$router",
+                ),
+                ResolvedVisibleMessage(
+                    sender=bot.matrix_id.full_id,
+                    body="working",
+                    timestamp=2,
+                    event_id="$agent",
+                    content={"body": "working"},
+                    thread_id="$thread",
+                    latest_event_id="$agent",
+                ),
+            ],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        envelope = MessageEnvelope(
+            source_event_id="$followup",
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="stop if you see this",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=bot.agent_name,
+            source_kind="live",
+        )
+
+        with (
+            patch.object(bot, "_decide_team_for_sender", new=AsyncMock(return_value=TeamResolution.none())),
+            patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+            patch.object(
+                bot,
+                "has_active_response_for_target",
+                return_value=True,
+            ) as mock_has_active_response,
+        ):
+            action = await bot._resolve_response_action(
+                context,
+                room,
+                "@user:localhost",
+                "stop if you see this",
+                False,
+                target=target,
+                source_envelope=envelope,
+            )
+
+        assert action.kind == "individual"
+        mock_should_respond.assert_called_once()
+        mock_has_active_response.assert_called_once_with(target)
+
+    @pytest.mark.asyncio
     async def test_execute_dispatch_action_sends_visible_rejection_for_unsupported_team_request(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -5764,6 +5855,90 @@ class TestAgentBot:
             await bot._enqueue_for_dispatch(event, room, source_kind="message")
 
         mock_dispatch.assert_awaited_once_with(room, event, "@user:localhost")
+        mock_enqueue.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_inner_bypasses_coalescing_for_active_thread_follow_up(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Human follow-ups in an actively responding thread must bypass IN_FLIGHT coalescing."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$followup",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "stop right now!",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread_root",
+                        "is_falling_back": True,
+                        "m.in_reply_to": {"event_id": "$thread_root"},
+                    },
+                },
+            },
+        )
+        prepared_event = _PreparedTextEvent(
+            sender="@user:localhost",
+            event_id="$followup",
+            body="stop right now!",
+            source=event.source,
+            server_timestamp=1234567890,
+        )
+        target = MessageTarget.resolve(room.room_id, "$thread_root", event.event_id)
+        envelope = MessageEnvelope(
+            source_event_id=event.event_id,
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="stop right now!",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=bot.agent_name,
+            source_kind="message",
+        )
+
+        with (
+            patch.object(
+                bot,
+                "_precheck_dispatch_event",
+                return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            ),
+            patch.object(
+                bot,
+                "_resolve_text_dispatch_event",
+                new=AsyncMock(return_value=prepared_event),
+            ),
+            patch.object(
+                bot,
+                "_build_dispatch_envelope",
+                new=AsyncMock(return_value=envelope),
+            ),
+            patch.object(bot, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.bot.should_handle_interactive_text_response", return_value=False),
+            patch.object(
+                bot,
+                "has_active_response_for_target",
+                return_value=True,
+            ) as mock_has_active_response,
+            patch.object(bot, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+        ):
+            await bot._on_message(room, event)
+
+        mock_has_active_response.assert_called_once_with(target)
+        mock_dispatch.assert_awaited_once_with(room, prepared_event, "@user:localhost")
         mock_enqueue.assert_not_awaited()
 
     @pytest.mark.asyncio
