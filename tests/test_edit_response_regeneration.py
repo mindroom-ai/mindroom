@@ -921,10 +921,6 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             return_value=_PersistedTurnMetadata(
                 anchor_event_id="$primary:example.com",
                 source_event_ids=("$first:example.com", "$primary:example.com"),
-                batch_prompt=(
-                    "The user sent the following messages in quick succession. "
-                    "Treat them as one turn and respond once:\n\nfirst\nprimary"
-                ),
                 source_event_prompts={
                     "$first:example.com": "first",
                     "$primary:example.com": "primary",
@@ -968,10 +964,6 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
                 "$first:example.com": "updated first",
                 "$primary:example.com": "primary",
             },
-            "matrix_batch_prompt": (
-                "The user sent the following messages in quick succession. "
-                "Treat them as one turn and respond once:\n\nupdated first\nprimary"
-            ),
         }
         assert bot.response_tracker.get_response_event_id("$first:example.com") == "$response:example.com"
         assert bot.response_tracker.get_response_event_id("$primary:example.com") == "$response:example.com"

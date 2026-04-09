@@ -42,7 +42,6 @@ from agno.session.team import TeamSession
 from mindroom.agents import create_agent
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
-    MATRIX_BATCH_PROMPT_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
@@ -764,8 +763,6 @@ def build_matrix_run_metadata(
         dict,
     ):
         metadata.pop(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY, None)
-    if MATRIX_BATCH_PROMPT_METADATA_KEY in metadata and not isinstance(metadata[MATRIX_BATCH_PROMPT_METADATA_KEY], str):
-        metadata.pop(MATRIX_BATCH_PROMPT_METADATA_KEY, None)
     return metadata or None
 
 

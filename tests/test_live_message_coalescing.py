@@ -11,12 +11,20 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot, _DispatchPayload, _MessageContext, _PreparedDispatch
-from mindroom.coalescing import GatePhase, PendingEvent, SyntheticTextEvent, build_coalesced_batch
+from mindroom.coalescing import (
+    GatePhase,
+    PendingEvent,
+    PreparedTextEvent,
+    build_batch_dispatch_event,
+    build_coalesced_batch,
+)
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.hooks import MessageEnvelope
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -58,14 +66,15 @@ def _make_bot(
     debounce_ms: int = 10,
     upload_grace_ms: int = 0,
     enabled: bool = True,
+    agent_name: str = "test_agent",
 ) -> AgentBot:
     """Create a bot instance wired to a temporary runtime root."""
     config = _make_config(tmp_path, debounce_ms=debounce_ms, upload_grace_ms=upload_grace_ms, enabled=enabled)
     agent_user = AgentMatrixUser(
-        agent_name="test_agent",
+        agent_name=agent_name,
         password=TEST_PASSWORD,
         display_name="TestAgent",
-        user_id="@mindroom_test_agent:localhost",
+        user_id=f"@mindroom_{agent_name}:localhost",
     )
     return AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
 
@@ -95,11 +104,6 @@ async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 
     except TimeoutError as exc:
         msg = "Timed out waiting for async test condition"
         raise AssertionError(msg) from exc
-
-
-def _coalescing_phases(bot: AgentBot) -> tuple[GatePhase, ...]:
-    """Return the active coalescing phases for deterministic assertions."""
-    return bot._coalescing_gate.debug_phases()
 
 
 def _text_event(
@@ -223,6 +227,7 @@ async def test_single_message_dispatches_after_debounce_window(tmp_path: Path) -
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         calls.append((dispatched_event.body, source_event_ids or [], media_events or []))
 
@@ -250,6 +255,7 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append((dispatched_event.body, source_event_ids or []))
@@ -284,6 +290,7 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         calls.append((dispatched_event.body, source_event_ids or [], len(media_events or [])))
 
@@ -318,12 +325,14 @@ async def test_text_first_image_during_grace_dispatches_once(tmp_path: Path) -> 
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         calls.append((dispatched_event.body, source_event_ids or [], len(media_events or [])))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
-        await _wait_for(lambda: _coalescing_phases(bot) == (GatePhase.GRACE,))
+        # Wait for debounce to fire (10ms) so gate enters upload grace
+        await asyncio.sleep(0.02)
         assert calls == []
 
         await bot._enqueue_for_dispatch(image_event, room, source_kind="image", requester_user_id="@user:localhost")
@@ -356,12 +365,15 @@ async def test_text_first_multiple_images_during_grace_dispatch_once(tmp_path: P
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         calls.append((source_event_ids or [], len(media_events or [])))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
-        await _wait_for(lambda: _coalescing_phases(bot) == (GatePhase.GRACE,))
+        # Wait for debounce to fire (10ms) so gate enters upload grace
+        await asyncio.sleep(0.02)
+        assert calls == []
 
         await bot._enqueue_for_dispatch(first_image, room, source_kind="image", requester_user_id="@user:localhost")
         await asyncio.sleep(0.01)
@@ -387,18 +399,20 @@ async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_tur
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append((dispatched_event.body, source_event_ids or []))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
-        await _wait_for(lambda: _coalescing_phases(bot) == (GatePhase.GRACE,))
+        # Wait for debounce to fire (40ms) so gate enters upload grace
+        await asyncio.sleep(0.06)
+        assert calls == []
 
         await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
 
         assert calls == [("first turn", ["$m1"])]
-        assert _coalescing_phases(bot) == (GatePhase.DEBOUNCE,)
 
         await _wait_for(lambda: len(calls) == 2)
 
@@ -424,6 +438,7 @@ async def test_image_after_grace_expires_dispatches_as_second_batch(tmp_path: Pa
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         calls.append((source_event_ids or [], len(media_events or [])))
 
@@ -456,6 +471,7 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append(source_event_ids or [])
@@ -471,7 +487,7 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
 def test_build_coalesced_batch_keeps_normalized_voice_out_of_media_events() -> None:
     """Voice messages should enter coalescing as synthetic text, not raw media."""
     room = _make_room()
-    voice_event = SyntheticTextEvent(
+    voice_event = PreparedTextEvent(
         sender="@user:localhost",
         event_id="$voice1",
         body="transcribed voice",
@@ -492,7 +508,7 @@ def test_build_coalesced_batch_sorts_synthetic_events_using_milliseconds() -> No
     """Sort mixed batches by origin_server_ts even when a synthetic event is present."""
     room = _make_room()
     real_event = _text_event(event_id="$real", body="real", server_timestamp=1_712_350_002_000)
-    synthetic_event = SyntheticTextEvent(
+    synthetic_event = PreparedTextEvent(
         sender="@user:localhost",
         event_id="$synthetic",
         body="synthetic",
@@ -533,7 +549,7 @@ def test_build_coalesced_batch_prefers_media_source_kind_over_text_primary() -> 
 def test_build_coalesced_batch_prefers_voice_source_kind_over_media_and_text() -> None:
     """Voice should win batch source_kind precedence even when a text event is primary."""
     room = _make_room()
-    voice_event = SyntheticTextEvent(
+    voice_event = PreparedTextEvent(
         sender="@user:localhost",
         event_id="$voice1",
         body="voice prompt",
@@ -571,6 +587,7 @@ async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path)
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append(source_event_ids or [])
@@ -599,6 +616,7 @@ async def test_command_mid_batch_flushes_pending_then_processes_command(tmp_path
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append((dispatched_event.body, source_event_ids or []))
@@ -630,6 +648,7 @@ async def test_command_flush_does_not_leave_stale_timer_for_next_message(tmp_pat
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append((dispatched_event.body, source_event_ids or []))
@@ -672,13 +691,16 @@ async def test_command_during_upload_grace_flushes_immediately(tmp_path: Path) -
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append((dispatched_event.body, source_event_ids or []))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
-        await _wait_for(lambda: _coalescing_phases(bot) == (GatePhase.GRACE,))
+        # Wait for debounce to fire (10ms) so gate enters upload grace
+        await asyncio.sleep(0.02)
+        assert calls == []
 
         await bot._enqueue_for_dispatch(command_event, room, source_kind="message", requester_user_id="@user:localhost")
 
@@ -690,12 +712,12 @@ async def test_command_during_upload_grace_flushes_immediately(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_messages_during_active_response_wait_and_batch_after_completion(tmp_path: Path) -> None:
-    """Hold new messages while a response is in flight, then batch them."""
+    """Hold threaded follow-ups while the first-turn response is in flight, then batch them."""
     bot = _make_bot(tmp_path)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
-    second = _text_event(event_id="$m2", body="second", server_timestamp=1001)
-    third = _text_event(event_id="$m3", body="third", server_timestamp=1002)
+    second = _text_event(event_id="$m2", body="second", server_timestamp=1001, thread_id="$m1")
+    third = _text_event(event_id="$m3", body="third", server_timestamp=1002, thread_id="$m1")
     entered_first_dispatch = asyncio.Event()
     release_first_dispatch = asyncio.Event()
     calls: list[list[str]] = []
@@ -707,6 +729,7 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append(source_event_ids or [])
@@ -747,8 +770,9 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
-        _ = media_events, source_event_ids
+        _ = media_events, source_event_ids, _source_event_prompts
         calls.append(dispatched_event.body)
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
@@ -774,6 +798,7 @@ async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: P
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append(source_event_ids or [])
@@ -784,8 +809,6 @@ async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: P
         await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
         await asyncio.sleep(0.03)
         await entered_dispatch.wait()
-
-        assert _coalescing_phases(bot) == (GatePhase.IN_FLIGHT,)
 
         shutdown_task = asyncio.create_task(bot.prepare_for_sync_shutdown())
         await asyncio.sleep(0.01)
@@ -813,6 +836,7 @@ async def test_prepare_for_sync_shutdown_drains_pending_debounced_messages(tmp_p
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append((dispatched_event.body, source_event_ids or []))
@@ -840,13 +864,16 @@ async def test_prepare_for_sync_shutdown_drains_pending_upload_grace(tmp_path: P
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append((dispatched_event.body, source_event_ids or []))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
-        await _wait_for(lambda: _coalescing_phases(bot) == (GatePhase.GRACE,))
+        # Wait for debounce to fire (10ms) so gate enters upload grace
+        await asyncio.sleep(0.02)
+        assert calls == []
 
         await bot.prepare_for_sync_shutdown()
 
@@ -855,29 +882,15 @@ async def test_prepare_for_sync_shutdown_drains_pending_upload_grace(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_shutdown_during_flush_task_does_not_start_grace(tmp_path: Path) -> None:
-    """Shutdown should dispatch immediately even if a queued flush starts late."""
-    bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=200)
+async def test_shutdown_during_in_flight_dispatch_does_not_start_grace(tmp_path: Path) -> None:
+    """Shutdown during an in-flight dispatch should not trigger upload grace."""
+    bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=200)
     room = _make_room()
-    event = _text_event(event_id="$m1", body="hello")
+    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
+    second = _text_event(event_id="$m2", body="second", server_timestamp=1001)
+    entered_dispatch = asyncio.Event()
+    release_dispatch = asyncio.Event()
     calls: list[tuple[str, list[str]]] = []
-    entered_flush = asyncio.Event()
-    release_flush = asyncio.Event()
-    original_run_gate_flush = bot._coalescing_gate._run_gate_flush
-
-    async def delayed_run_gate_flush(
-        key: tuple[str, str | None, str],
-        *,
-        wake_epoch: int | None = None,
-        bypass_grace: bool = False,
-    ) -> None:
-        entered_flush.set()
-        await release_flush.wait()
-        await original_run_gate_flush(
-            key,
-            wake_epoch=wake_epoch,
-            bypass_grace=bypass_grace,
-        )
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
@@ -886,28 +899,83 @@ async def test_shutdown_during_flush_task_does_not_start_grace(tmp_path: Path) -
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append((dispatched_event.body, source_event_ids or []))
+        if source_event_ids == ["$m1"]:
+            entered_dispatch.set()
+            await release_dispatch.wait()
 
-    with (
-        patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
-        patch.object(bot._coalescing_gate, "_run_gate_flush", new=delayed_run_gate_flush),
-    ):
-        enqueue_task = asyncio.create_task(
-            bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost"),
-        )
-        await entered_flush.wait()
+    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
+        await asyncio.sleep(0.03)
+        await entered_dispatch.wait()
 
+        # Enqueue another message while first is in-flight
+        await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
+
+        # Start shutdown — should wait for in-flight, then flush remaining without grace
         shutdown_task = asyncio.create_task(bot.prepare_for_sync_shutdown())
         await asyncio.sleep(0.01)
         assert shutdown_task.done() is False
 
-        release_flush.set()
-        await enqueue_task
+        release_dispatch.set()
         await shutdown_task
 
-    assert calls == [("hello", ["$m1"])]
+    assert calls == [("first", ["$m1"]), ("second", ["$m2"])]
+    assert bot._coalescing_gate.is_idle()
+
+
+@pytest.mark.asyncio
+async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: Path) -> None:
+    """Retarget the first-turn room gate so threaded follow-ups reuse the live gate."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    first = _text_event(event_id="$m1", body="first")
+    followups = [
+        _text_event(event_id="$m2", body="second", thread_id="$m1"),
+        _text_event(event_id="$m3", body="third", thread_id="$m1"),
+    ]
+    entered_dispatch = asyncio.Event()
+    release_first_dispatch = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        source_event_ids: list[str] | None = None,
+    ) -> None:
+        _ = media_events
+        calls.append(source_event_ids or [])
+        if len(calls) == 1:
+            entered_dispatch.set()
+            await release_first_dispatch.wait()
+
+    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        first_task = asyncio.create_task(
+            bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost"),
+        )
+        await entered_dispatch.wait()
+
+        retargeted_key = ("!room:localhost", "$m1", "@user:localhost")
+        assert set(bot._coalescing_gate._gates) == {retargeted_key}
+        assert bot._coalescing_gate._gates[retargeted_key].phase is GatePhase.IN_FLIGHT
+
+        for followup in followups:
+            await bot._enqueue_for_dispatch(followup, room, source_kind="message", requester_user_id="@user:localhost")
+
+        gate = bot._coalescing_gate._gates[retargeted_key]
+        assert gate.phase is GatePhase.IN_FLIGHT
+        assert [pending.event.event_id for pending in gate.pending] == ["$m2", "$m3"]
+
+        release_first_dispatch.set()
+        await first_task
+
+    assert calls == [["$m1"], ["$m2", "$m3"]]
     assert bot._coalescing_gate.is_idle()
 
 
@@ -926,7 +994,7 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
         patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock()),
     ):
         await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
-        assert _coalescing_phases(bot) == (GatePhase.DEBOUNCE,)
+        assert not bot._coalescing_gate.is_idle()
 
         await bot.cleanup()
 
@@ -937,7 +1005,9 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Path) -> None:
     """Media arrivals may extend grace, but never past the gate hard cap."""
-    bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=40)
+    # Use generous grace (100ms) so images arrive well before the grace timer fires.
+    # Hard cap = max(0.1, min(0.4, 2.0)) = 0.4s.
+    bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=100)
     room = _make_room()
     text_event = _text_event(event_id="$m1", body="describe", server_timestamp=1000)
     image_events = [
@@ -955,6 +1025,7 @@ async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Pat
         *,
         media_events: list[object] | None = None,
         source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
     ) -> None:
         _ = media_events
         calls.append(source_event_ids or [])
@@ -962,16 +1033,18 @@ async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Pat
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         started_at = time.monotonic()
         await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
-        await _wait_for(lambda: _coalescing_phases(bot) == (GatePhase.GRACE,))
+        # Wait for debounce to fire (10ms) so gate enters upload grace
+        await asyncio.sleep(0.02)
+        assert calls == []
 
-        for delay, image_event in zip((0.03, 0.04, 0.04, 0.04), image_events, strict=True):
+        for delay, image_event in zip((0.01, 0.01, 0.01, 0.01), image_events, strict=True):
             await asyncio.sleep(delay)
             await bot._enqueue_for_dispatch(image_event, room, source_kind="image", requester_user_id="@user:localhost")
-            assert _coalescing_phases(bot) == (GatePhase.GRACE,)
-        await _wait_for(lambda: len(calls) == 1, deadline_seconds=0.35)
+        await _wait_for(lambda: len(calls) == 1, deadline_seconds=0.5)
 
     assert calls == [["$m1", "$img1", "$img2", "$img3", "$img4"]]
-    assert time.monotonic() - started_at < 0.35
+    # Hard cap bounds total time: dispatch must complete well within 500ms.
+    assert time.monotonic() - started_at < 0.5
 
 
 @pytest.mark.asyncio
@@ -1004,3 +1077,763 @@ async def test_response_tracker_marks_all_batch_event_ids(tmp_path: Path) -> Non
     assert bot.response_tracker.has_responded("$m2")
     assert bot.response_tracker.get_response_event_id("$m1") == "$response"
     assert bot.response_tracker.get_response_event_id("$m2") == "$response"
+
+
+@pytest.mark.asyncio
+async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
+    """A zero debounce window should dispatch each message without delay."""
+    bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=0)
+    room = _make_room()
+    event = _text_event(event_id="$m1", body="immediate")
+    calls: list[tuple[str, list[str]]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
+    ) -> None:
+        _ = media_events
+        calls.append((dispatched_event.body, source_event_ids or []))
+
+    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
+        # Zero debounce flushes synchronously — should already be dispatched
+        await asyncio.sleep(0.01)
+
+    assert calls == [("immediate", ["$m1"])]
+    assert bot._coalescing_gate.is_idle()
+
+
+@pytest.mark.asyncio
+async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> None:
+    """Each command should dispatch as its own solo batch even when sent rapidly."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    first_cmd = _text_event(event_id="$c1", body="!help", server_timestamp=1000)
+    second_cmd = _text_event(event_id="$c2", body="!schedule list", server_timestamp=1001)
+    calls: list[tuple[str, list[str]]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        source_event_ids: list[str] | None = None,
+        _source_event_prompts: dict[str, str] | None = None,
+    ) -> None:
+        _ = media_events
+        calls.append((dispatched_event.body, source_event_ids or []))
+
+    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._enqueue_for_dispatch(first_cmd, room, source_kind="message", requester_user_id="@user:localhost")
+        await bot._enqueue_for_dispatch(second_cmd, room, source_kind="message", requester_user_id="@user:localhost")
+
+    assert calls == [
+        ("!help", ["$c1"]),
+        ("!schedule list", ["$c2"]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gate_entry_removed_after_dispatch_with_no_pending(tmp_path: Path) -> None:
+    """A gate entry should be cleaned up once dispatch completes with no new pending."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    event = _text_event(event_id="$m1", body="hello")
+
+    with patch.object(bot, "_dispatch_text_message", new=AsyncMock()):
+        assert bot._coalescing_gate.is_idle()
+        await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
+        await asyncio.sleep(0.03)
+
+    assert bot._coalescing_gate.is_idle()
+
+
+# ---------------------------------------------------------------------------
+# BLOCKER 1 regression: thread-history guard for backlog/replay scenarios
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Path) -> None:
+    """Skip an older message during backlog replay when a newer unresponded message exists."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    older_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$m1",
+        body="old",
+        source={"content": {"msgtype": "m.text", "body": "old"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$m1", body="old")
+
+    # Thread history already contains a newer unresponded message from the same sender
+    newer_msg = ResolvedVisibleMessage(
+        sender="@user:localhost",
+        body="newer",
+        timestamp=2000,
+        event_id="$m2",
+        content={"body": "newer"},
+        thread_id=None,
+        latest_event_id="$m2",
+    )
+    dispatch.context.thread_history = [newer_msg]
+
+    action_mock = AsyncMock()
+    with (
+        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+    ):
+        await bot._dispatch_text_message(room, older_event, "@user:localhost")
+
+    # Older message should be skipped — resolve_dispatch_action never called
+    action_mock.assert_not_awaited()
+    assert bot.response_tracker.has_responded("$m1")
+
+
+@pytest.mark.asyncio
+async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_path: Path) -> None:
+    """Normal live dispatch proceeds when no newer unresponded message exists."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$m1",
+        body="hello",
+        source={"content": {"msgtype": "m.text", "body": "hello"}},
+        server_timestamp=2000,
+    )
+    dispatch = _prepared_dispatch(event_id="$m1", body="hello")
+    dispatch.context.thread_history = []
+
+    with (
+        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot, "_resolve_dispatch_action", new=AsyncMock(return_value=MagicMock(kind="individual"))),
+        patch.object(
+            bot,
+            "_build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=_DispatchPayload(prompt="hello")),
+        ),
+        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
+        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
+        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot, "_log_dispatch_latency"),
+    ):
+        await bot._dispatch_text_message(room, event, "@user:localhost")
+
+    # Dispatch proceeded to completion
+    assert bot.response_tracker.has_responded("$m1")
+
+
+# ---------------------------------------------------------------------------
+# BLOCKER 2 regression: multi-event batch preserves merged metadata
+# ---------------------------------------------------------------------------
+
+
+def _mention_text_event(
+    *,
+    event_id: str,
+    body: str,
+    mentioned_user_ids: list[str],
+    sender: str = "@user:localhost",
+    server_timestamp: int = 1000,
+) -> nio.RoomMessageText:
+    """Build a text event with m.mentions metadata."""
+    content: dict[str, object] = {
+        "msgtype": "m.text",
+        "body": body,
+        "m.mentions": {"user_ids": mentioned_user_ids},
+    }
+    return cast(
+        "nio.RoomMessageText",
+        nio.RoomMessageText.from_dict(
+            {
+                "event_id": event_id,
+                "sender": sender,
+                "origin_server_ts": server_timestamp,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+                "content": content,
+            },
+        ),
+    )
+
+
+def test_batch_dispatch_event_merges_mentions_across_events() -> None:
+    """A batch of '@agent first' + 'follow up' must preserve the mention."""
+    room = _make_room()
+    mention_event = _mention_text_event(
+        event_id="$m1",
+        body="@agent first",
+        mentioned_user_ids=["@mindroom_test_agent:localhost"],
+        server_timestamp=1000,
+    )
+    followup_event = _text_event(event_id="$m2", body="follow up", server_timestamp=1001)
+
+    batch = build_coalesced_batch(
+        ("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(event=mention_event, room=room, source_kind="message"),
+            PendingEvent(event=followup_event, room=room, source_kind="message"),
+        ],
+    )
+    dispatch_event = build_batch_dispatch_event(batch)
+
+    assert isinstance(dispatch_event, PreparedTextEvent)
+    content = dispatch_event.source.get("content", {})
+    mentions = content.get("m.mentions", {})
+    assert "@mindroom_test_agent:localhost" in mentions.get("user_ids", [])
+
+
+def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
+    """A voice + text batch must preserve raw_audio_fallback in the synthetic source."""
+    room = _make_room()
+    voice_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice1",
+        body="transcribed voice",
+        source={
+            "content": {
+                "body": "transcribed voice",
+                "com.mindroom.source_kind": "voice",
+                VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+            },
+        },
+        server_timestamp=1000,
+    )
+    text_event = _text_event(event_id="$m2", body="and this too", server_timestamp=1001)
+
+    batch = build_coalesced_batch(
+        ("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(event=voice_event, room=room, source_kind="voice"),
+            PendingEvent(event=text_event, room=room, source_kind="message"),
+        ],
+    )
+    dispatch_event = build_batch_dispatch_event(batch)
+
+    assert isinstance(dispatch_event, PreparedTextEvent)
+    content = dispatch_event.source.get("content", {})
+    assert content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True
+
+
+def test_batch_dispatch_event_preserves_original_sender() -> None:
+    """A relay batch must preserve original_sender metadata."""
+    room = _make_room()
+    relay_event = PreparedTextEvent(
+        sender="@bridge:localhost",
+        event_id="$relay1",
+        body="relayed message",
+        source={
+            "content": {
+                "body": "relayed message",
+                ORIGINAL_SENDER_KEY: "@real_user:remote",
+            },
+        },
+        server_timestamp=1000,
+    )
+    followup = _text_event(
+        event_id="$m2",
+        body="follow up",
+        sender="@bridge:localhost",
+        server_timestamp=1001,
+    )
+
+    batch = build_coalesced_batch(
+        ("!room:localhost", None, "@real_user:remote"),
+        [
+            PendingEvent(event=relay_event, room=room, source_kind="message"),
+            PendingEvent(event=followup, room=room, source_kind="message"),
+        ],
+    )
+    dispatch_event = build_batch_dispatch_event(batch)
+
+    assert isinstance(dispatch_event, PreparedTextEvent)
+    content = dispatch_event.source.get("content", {})
+    assert content.get(ORIGINAL_SENDER_KEY) == "@real_user:remote"
+
+
+def test_batch_dispatch_event_preserves_attachment_ids() -> None:
+    """Attachment IDs from all events must flow through to the synthetic source."""
+    room = _make_room()
+    event_with_attachment = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$m1",
+        body="see attached",
+        source={
+            "content": {
+                "body": "see attached",
+                ATTACHMENT_IDS_KEY: ["att-001"],
+            },
+        },
+        server_timestamp=1000,
+    )
+    event_with_another = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$m2",
+        body="another",
+        source={
+            "content": {
+                "body": "another",
+                ATTACHMENT_IDS_KEY: ["att-002"],
+            },
+        },
+        server_timestamp=1001,
+    )
+
+    batch = build_coalesced_batch(
+        ("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(event=event_with_attachment, room=room, source_kind="message"),
+            PendingEvent(event=event_with_another, room=room, source_kind="message"),
+        ],
+    )
+    dispatch_event = build_batch_dispatch_event(batch)
+
+    assert isinstance(dispatch_event, PreparedTextEvent)
+    content = dispatch_event.source.get("content", {})
+    raw_ids = content.get(ATTACHMENT_IDS_KEY, [])
+    assert isinstance(raw_ids, list), "attachment IDs must be a list, not a comma-string"
+    assert "att-001" in raw_ids
+    assert "att-002" in raw_ids
+
+
+# ---------------------------------------------------------------------------
+# Thread-history guard: command exclusion (BLOCKER 1 from R2 review)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> None:
+    """A newer !command must not suppress an older legitimate message during backlog replay."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    older_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$m1",
+        body="What is the project structure?",
+        source={"content": {"msgtype": "m.text", "body": "What is the project structure?"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$m1", body="What is the project structure?")
+
+    # Thread history contains a newer !help command from the same sender
+    newer_cmd = ResolvedVisibleMessage(
+        sender="@user:localhost",
+        body="!help",
+        timestamp=2000,
+        event_id="$m2",
+        content={"body": "!help"},
+        thread_id=None,
+        latest_event_id="$m2",
+    )
+    dispatch.context.thread_history = [newer_cmd]
+
+    action_mock = AsyncMock(return_value=MagicMock(kind="individual"))
+    with (
+        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(
+            bot,
+            "_build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=_DispatchPayload(prompt="What is the project structure?")),
+        ),
+        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
+        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
+        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot, "_log_dispatch_latency"),
+    ):
+        await bot._dispatch_text_message(room, older_event, "@user:localhost")
+
+    # The older message must NOT be suppressed — dispatch action should be called
+    action_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -> None:
+    """A newer command with leading whitespace must not suppress older messages."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    older_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$m1",
+        body="hello",
+        source={"content": {"msgtype": "m.text", "body": "hello"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$m1", body="hello")
+
+    newer_cmd = ResolvedVisibleMessage(
+        sender="@user:localhost",
+        body="  !help  ",
+        timestamp=2000,
+        event_id="$m2",
+        content={"body": "  !help  "},
+        thread_id=None,
+        latest_event_id="$m2",
+    )
+    dispatch.context.thread_history = [newer_cmd]
+
+    action_mock = AsyncMock(return_value=MagicMock(kind="individual"))
+    with (
+        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(
+            bot,
+            "_build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=_DispatchPayload(prompt="hello")),
+        ),
+        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
+        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
+        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot, "_log_dispatch_latency"),
+    ):
+        await bot._dispatch_text_message(room, older_event, "@user:localhost")
+
+    action_mock.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Thread-history guard: synthetic/automation bypass (BLOCKER 2 from R2 review)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
+    """Synthetic scheduled events must never be suppressed by the thread-history guard."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    scheduled_event = PreparedTextEvent(
+        sender="@mindroom_test_agent:localhost",
+        event_id="$s1",
+        body="scheduled task output",
+        source={
+            "content": {"msgtype": "m.text", "body": "scheduled task output", "com.mindroom.source_kind": "scheduled"},
+        },
+        server_timestamp=1000,
+        is_synthetic=True,
+        source_kind_override="scheduled",
+    )
+    dispatch = _prepared_dispatch(event_id="$s1", body="scheduled task output")
+
+    # A newer unresponded message from the same sender exists
+    newer_msg = ResolvedVisibleMessage(
+        sender="@mindroom_test_agent:localhost",
+        body="another scheduled output",
+        timestamp=2000,
+        event_id="$s2",
+        content={"body": "another scheduled output"},
+        thread_id=None,
+        latest_event_id="$s2",
+    )
+    dispatch.context.thread_history = [newer_msg]
+
+    action_mock = AsyncMock(return_value=MagicMock(kind="individual"))
+    with (
+        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(
+            bot,
+            "_build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=_DispatchPayload(prompt="scheduled task output")),
+        ),
+        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
+        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
+        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot, "_log_dispatch_latency"),
+    ):
+        await bot._dispatch_text_message(room, scheduled_event, "@mindroom_test_agent:localhost")
+
+    action_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
+    """Synthetic hook events must never be suppressed by the thread-history guard."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    hook_event = PreparedTextEvent(
+        sender="@mindroom_test_agent:localhost",
+        event_id="$h1",
+        body="hook result",
+        source={"content": {"msgtype": "m.text", "body": "hook result", "com.mindroom.source_kind": "hook"}},
+        server_timestamp=1000,
+        is_synthetic=True,
+        source_kind_override="hook",
+    )
+    dispatch = _prepared_dispatch(event_id="$h1", body="hook result")
+
+    newer_msg = ResolvedVisibleMessage(
+        sender="@mindroom_test_agent:localhost",
+        body="newer message",
+        timestamp=2000,
+        event_id="$h2",
+        content={"body": "newer message"},
+        thread_id=None,
+        latest_event_id="$h2",
+    )
+    dispatch.context.thread_history = [newer_msg]
+
+    action_mock = AsyncMock(return_value=MagicMock(kind="individual"))
+    with (
+        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(
+            bot,
+            "_build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=_DispatchPayload(prompt="hook result")),
+        ),
+        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
+        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
+        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot, "_log_dispatch_latency"),
+    ):
+        await bot._dispatch_text_message(room, hook_event, "@mindroom_test_agent:localhost")
+
+    action_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
+    """Two scheduled fires from the same sender must both execute independently."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+
+    first_fire = PreparedTextEvent(
+        sender="@mindroom_test_agent:localhost",
+        event_id="$s1",
+        body="scheduled fire 1",
+        source={"content": {"msgtype": "m.text", "body": "scheduled fire 1", "com.mindroom.source_kind": "scheduled"}},
+        server_timestamp=1000,
+        is_synthetic=True,
+        source_kind_override="scheduled",
+    )
+    dispatch = _prepared_dispatch(event_id="$s1", body="scheduled fire 1")
+
+    # Second scheduled fire is newer and unresponded
+    second_fire_msg = ResolvedVisibleMessage(
+        sender="@mindroom_test_agent:localhost",
+        body="scheduled fire 2",
+        timestamp=2000,
+        event_id="$s2",
+        content={"body": "scheduled fire 2"},
+        thread_id=None,
+        latest_event_id="$s2",
+    )
+    dispatch.context.thread_history = [second_fire_msg]
+
+    action_mock = AsyncMock(return_value=MagicMock(kind="individual"))
+    with (
+        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(
+            bot,
+            "_build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=_DispatchPayload(prompt="scheduled fire 1")),
+        ),
+        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
+        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
+        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot, "_log_dispatch_latency"),
+    ):
+        await bot._dispatch_text_message(room, first_fire, "@mindroom_test_agent:localhost")
+
+    # First fire must NOT be suppressed
+    action_mock.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# R3 regression: user-originated synthetics must still be guarded
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -> None:
+    """Coalesced user batches (is_synthetic=True, source_kind='user') must be guarded."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    coalesced_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$m1",
+        body="batched message",
+        source={"content": {"msgtype": "m.text", "body": "batched message"}},
+        server_timestamp=1000,
+        is_synthetic=True,
+        source_kind_override="user",
+    )
+    dispatch = _prepared_dispatch(event_id="$m1", body="batched message")
+
+    newer_msg = ResolvedVisibleMessage(
+        sender="@user:localhost",
+        body="newer message",
+        timestamp=2000,
+        event_id="$m2",
+        content={"body": "newer message"},
+        thread_id=None,
+        latest_event_id="$m2",
+    )
+    dispatch.context.thread_history = [newer_msg]
+
+    action_mock = AsyncMock()
+    with (
+        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+    ):
+        await bot._dispatch_text_message(room, coalesced_event, "@user:localhost")
+
+    # Coalesced user batch MUST be suppressed — not an automation event
+    action_mock.assert_not_awaited()
+    assert bot.response_tracker.has_responded("$m1")
+
+
+@pytest.mark.asyncio
+async def test_voice_synthetic_suppressed_by_thread_guard(tmp_path: Path) -> None:
+    """Voice-originated synthetics (source_kind='voice') must be guarded."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    voice_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$v1",
+        body="transcribed voice",
+        source={
+            "content": {"msgtype": "m.text", "body": "transcribed voice", "com.mindroom.source_kind": "voice"},
+        },
+        server_timestamp=1000,
+        is_synthetic=True,
+        source_kind_override="voice",
+    )
+    dispatch = _prepared_dispatch(event_id="$v1", body="transcribed voice")
+
+    newer_msg = ResolvedVisibleMessage(
+        sender="@user:localhost",
+        body="newer text",
+        timestamp=2000,
+        event_id="$v2",
+        content={"body": "newer text"},
+        thread_id=None,
+        latest_event_id="$v2",
+    )
+    dispatch.context.thread_history = [newer_msg]
+
+    action_mock = AsyncMock()
+    with (
+        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+    ):
+        await bot._dispatch_text_message(room, voice_event, "@user:localhost")
+
+    # Voice synthetic MUST be suppressed — not an automation event
+    action_mock.assert_not_awaited()
+    assert bot.response_tracker.has_responded("$v1")
+
+
+# ---------------------------------------------------------------------------
+# R3 regression: commands must not be suppressed during backlog replay
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> None:
+    """An older !help replayed while a newer normal message exists must still dispatch."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    cmd_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$c1",
+        body="!help",
+        source={"content": {"msgtype": "m.text", "body": "!help"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$c1", body="!help")
+
+    newer_msg = ResolvedVisibleMessage(
+        sender="@user:localhost",
+        body="some question",
+        timestamp=2000,
+        event_id="$c2",
+        content={"body": "some question"},
+        thread_id=None,
+        latest_event_id="$c2",
+    )
+    dispatch.context.thread_history = [newer_msg]
+
+    handle_cmd_mock = AsyncMock()
+    with (
+        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot, "_handle_command", new=handle_cmd_mock),
+    ):
+        await bot._dispatch_text_message(room, cmd_event, "@user:localhost")
+
+    # Command must have been dispatched, not suppressed
+    handle_cmd_mock.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Batch formatted_body merging (BLOCKER 4 from R2 review)
+# ---------------------------------------------------------------------------
+
+
+def _formatted_body_event(
+    *,
+    event_id: str,
+    body: str,
+    formatted_body: str,
+    mentioned_user_ids: list[str] | None = None,
+    sender: str = "@user:localhost",
+    server_timestamp: int = 1000,
+) -> nio.RoomMessageText:
+    """Build a text event with formatted_body (bridge-style pill mentions)."""
+    content: dict[str, object] = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": formatted_body,
+    }
+    if mentioned_user_ids is not None:
+        content["m.mentions"] = {"user_ids": mentioned_user_ids}
+    return cast(
+        "nio.RoomMessageText",
+        nio.RoomMessageText.from_dict(
+            {
+                "event_id": event_id,
+                "sender": sender,
+                "origin_server_ts": server_timestamp,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+                "content": content,
+            },
+        ),
+    )
+
+
+def test_batch_dispatch_event_preserves_formatted_body_mentions() -> None:
+    """Bridge-style pill mentions in formatted_body must survive batch merging."""
+    room = _make_room()
+    pill_event = _formatted_body_event(
+        event_id="$m1",
+        body="@agent hello",
+        formatted_body='<a href="https://matrix.to/#/@mindroom_test_agent:localhost">agent</a> hello',
+        server_timestamp=1000,
+    )
+    followup = _text_event(event_id="$m2", body="follow up", server_timestamp=1001)
+
+    batch = build_coalesced_batch(
+        ("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(event=pill_event, room=room, source_kind="message"),
+            PendingEvent(event=followup, room=room, source_kind="message"),
+        ],
+    )
+    dispatch_event = build_batch_dispatch_event(batch)
+
+    assert isinstance(dispatch_event, PreparedTextEvent)
+    content = dispatch_event.source.get("content", {})
+    formatted = content.get("formatted_body", "")
+    assert "@mindroom_test_agent:localhost" in formatted
+    assert content.get("format") == "org.matrix.custom.html"

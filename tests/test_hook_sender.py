@@ -17,10 +17,9 @@ from mindroom.bot import (
     _MessageContext,
     _PrecheckedEvent,
     _PreparedDispatch,
-    _PreparedTextEvent,
     _ResponseAction,
 )
-from mindroom.coalescing import SyntheticTextEvent
+from mindroom.coalescing import PreparedTextEvent
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -680,7 +679,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
 async def test_voice_prepared_text_does_not_trust_hook_metadata_from_user_content(tmp_path: Path) -> None:
     """Voice-normalized user events must not be able to inject internal hook provenance."""
     bot = _agent_bot(tmp_path)
-    prepared_voice = _PreparedTextEvent(
+    prepared_voice = PreparedTextEvent(
         sender="@user:localhost",
         event_id="$voice-event",
         body="voice text",
@@ -787,11 +786,13 @@ async def test_prepare_dispatch_marks_all_source_events_when_hooks_suppress_batc
 async def test_resolve_text_dispatch_event_preserves_voice_source_kind_for_synthetic_events(tmp_path: Path) -> None:
     """Synthetic voice events should keep their source kind through preparation for hooks."""
     bot = _agent_bot(tmp_path)
-    synthetic_voice = SyntheticTextEvent(
+    synthetic_voice = PreparedTextEvent(
         sender="@user:localhost",
         event_id="$voice-event",
         body="voice text",
         source={"content": {"body": "voice text", "com.mindroom.source_kind": "voice"}},
+        is_synthetic=True,
+        source_kind_override="voice",
     )
 
     prepared = await bot._resolve_text_dispatch_event(synthetic_voice)
@@ -1322,7 +1323,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             },
         },
     )
-    prepared_text_event = _PreparedTextEvent(
+    prepared_text_event = PreparedTextEvent(
         sender="@mindroom_router:localhost",
         event_id="$sidecar-hook-dispatch",
         body="1",
@@ -1390,7 +1391,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
             },
         },
     )
-    prepared_text_event = _PreparedTextEvent(
+    prepared_text_event = PreparedTextEvent(
         sender="@mindroom_router:localhost",
         event_id="$sidecar-deep-hook-dispatch",
         body="follow-up",
@@ -1429,7 +1430,7 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
     """Prepared synthetic text should keep first-hop hook dispatch behavior."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
-    event = _PreparedTextEvent(
+    event = PreparedTextEvent(
         sender="@mindroom_router:localhost",
         event_id="$prepared-hook-dispatch",
         body="@mindroom_code:localhost follow up",
@@ -1463,7 +1464,7 @@ async def test_deep_prepared_text_hook_dispatch_stops_before_dispatch(tmp_path: 
     """Prepared synthetic text should stop at the same deep-relay boundary as raw text."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
-    event = _PreparedTextEvent(
+    event = PreparedTextEvent(
         sender="@mindroom_router:localhost",
         event_id="$prepared-deep-hook-dispatch",
         body="follow-up automation",
