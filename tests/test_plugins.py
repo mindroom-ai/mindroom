@@ -519,6 +519,41 @@ def test_load_plugins_skips_missing_plugin_directory_with_warning(
         set_plugin_skill_roots(original_plugin_roots)
 
 
+def test_load_plugins_warns_once_for_repeated_missing_plugin_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated runtime loads should not spam the same missing-plugin warning."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    mock_logger = MagicMock()
+    missing_root = (tmp_path / "plugins" / "missing").resolve()
+    original_warned_messages = plugin_module._WARNED_PLUGIN_MESSAGES.copy()
+
+    monkeypatch.setattr(plugin_module, "logger", mock_logger)
+
+    try:
+        assert load_plugins(Config(plugins=["./plugins/missing"]), runtime_paths) == []
+        assert load_plugins(Config(plugins=["./plugins/missing"]), runtime_paths) == []
+        matching_calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args == ("Plugin path does not exist, skipping",) and call.kwargs == {"path": str(missing_root)}
+        ]
+        assert len(matching_calls) == 1
+    finally:
+        plugin_module._WARNED_PLUGIN_MESSAGES.clear()
+        plugin_module._WARNED_PLUGIN_MESSAGES.update(original_warned_messages)
+
+
 def test_load_plugins_rejects_missing_tools_module(tmp_path: Path) -> None:
     """A declared plugin tools module must exist."""
     plugin_root = tmp_path / "plugins" / "bad-plugin"
@@ -557,6 +592,71 @@ def test_validate_with_runtime_does_not_mutate_plugin_skill_roots(tmp_path: Path
         _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
         assert _get_plugin_skill_roots() == [sentinel_root.resolve()]
     finally:
+        set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_load_plugins_warns_once_for_repeated_non_bundled_plugin_loads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated plugin registry rebuilds should not repeat the same non-bundled warning."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo-plugin", "tools_module": None, "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text(
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook(event='message:received')\n"
+        "async def demo_hook(context):\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    config = Config(plugins=["./plugins/demo"])
+
+    mock_logger = MagicMock()
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_warned_messages = plugin_module._WARNED_PLUGIN_MESSAGES.copy()
+
+    monkeypatch.setattr(plugin_module, "logger", mock_logger)
+
+    try:
+        assert [plugin.name for plugin in load_plugins(config, runtime_paths)] == ["demo-plugin"]
+        assert [plugin.name for plugin in load_plugins(config, runtime_paths)] == ["demo-plugin"]
+        matching_calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args == ("Loading non-bundled plugin",) and call.kwargs == {"path": str(plugin_root.resolve())}
+        ]
+        assert len(matching_calls) == 1
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        plugin_module._WARNED_PLUGIN_MESSAGES.clear()
+        plugin_module._WARNED_PLUGIN_MESSAGES.update(original_warned_messages)
         set_plugin_skill_roots(original_plugin_roots)
 
 
