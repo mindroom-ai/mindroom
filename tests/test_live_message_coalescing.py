@@ -17,6 +17,7 @@ from mindroom.coalescing import (
     PreparedTextEvent,
     build_batch_dispatch_event,
     build_coalesced_batch,
+    is_coalescing_exempt_source_kind,
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -142,6 +143,7 @@ def _text_event(
     server_timestamp: int = 1000,
     thread_id: str | None = None,
     source_kind: str | None = None,
+    original_sender: str | None = None,
 ) -> nio.RoomMessageText:
     """Build a synthetic inbound text event for coalescing tests."""
     content: dict[str, object] = {
@@ -152,6 +154,8 @@ def _text_event(
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     if source_kind is not None:
         content["com.mindroom.source_kind"] = source_kind
+    if original_sender is not None:
+        content[ORIGINAL_SENDER_KEY] = original_sender
     return cast(
         "nio.RoomMessageText",
         nio.RoomMessageText.from_dict(
@@ -796,10 +800,21 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
     assert calls == [["$m1"], ["$m2", "$m3"]]
 
 
+def test_scheduled_events_not_coalescing_exempt() -> None:
+    """Scheduled turns should pass through the gate while hook ingress still bypasses it."""
+    scheduled = _text_event(event_id="$scheduled", body="scheduled", source_kind="scheduled")
+    hook = _text_event(event_id="$hook", body="hook", source_kind="hook")
+    hook_dispatch = _text_event(event_id="$hook_dispatch", body="hook dispatch", source_kind="hook_dispatch")
+
+    assert is_coalescing_exempt_source_kind(scheduled, "scheduled") is False
+    assert is_coalescing_exempt_source_kind(hook, "hook") is True
+    assert is_coalescing_exempt_source_kind(hook_dispatch, "hook_dispatch") is True
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source_kind", ["scheduled", "hook", "hook_dispatch"])
+@pytest.mark.parametrize("source_kind", ["hook", "hook_dispatch"])
 async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source_kind: str) -> None:
-    """Bypass the gate for synthetic scheduled and hook-originated events."""
+    """Bypass the gate only for hook-originated synthetic events."""
     bot = _make_bot(tmp_path)
     room = _make_room()
     event = _text_event(event_id=f"${source_kind}", body=f"{source_kind} task", source_kind=source_kind)
@@ -820,6 +835,63 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
         await bot._enqueue_for_dispatch(event, room, source_kind=source_kind, requester_user_id="@user:localhost")
 
     assert calls == [f"{source_kind} task"]
+
+
+@pytest.mark.asyncio
+async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
+    """Scheduled turns should buffer behind an in-flight dispatch instead of bypassing the gate."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    first = _text_event(
+        event_id="$m1",
+        body="first scheduled",
+        sender="@mindroom_test_agent:localhost",
+        server_timestamp=1000,
+        thread_id="$thread_root",
+        source_kind="scheduled",
+        original_sender="@user:localhost",
+    )
+    second = _text_event(
+        event_id="$m2",
+        body="second scheduled",
+        sender="@mindroom_test_agent:localhost",
+        server_timestamp=1001,
+        thread_id="$thread_root",
+        source_kind="scheduled",
+        original_sender="@user:localhost",
+    )
+    entered_first_dispatch = asyncio.Event()
+    release_first_dispatch = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        handled_turn: HandledTurnState | None = None,
+    ) -> None:
+        _ = media_events, handled_turn
+        calls.append(_handled_turn_source_event_ids(handled_turn))
+        if _handled_turn_source_event_ids(handled_turn) == ["$m1"]:
+            entered_first_dispatch.set()
+            await release_first_dispatch.wait()
+
+    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._enqueue_for_dispatch(first, room, source_kind="scheduled", requester_user_id="@user:localhost")
+        await asyncio.sleep(0.03)
+        await entered_first_dispatch.wait()
+
+        await bot._enqueue_for_dispatch(second, room, source_kind="scheduled", requester_user_id="@user:localhost")
+        await asyncio.sleep(0.03)
+
+        assert calls == [["$m1"]]
+
+        release_first_dispatch.set()
+        await asyncio.sleep(0.05)
+
+    assert calls == [["$m1"], ["$m2"]]
 
 
 @pytest.mark.asyncio

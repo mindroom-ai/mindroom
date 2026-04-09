@@ -568,6 +568,25 @@ class ResponseCoordinator:
                     current_task.uncancel()
             await finalize_task
 
+    async def _refresh_thread_history_after_lock(
+        self,
+        request: ResponseRequest,
+    ) -> ResponseRequest:
+        """Refresh cached thread history once this turn owns the lifecycle lock."""
+        if request.thread_id is None:
+            return request
+
+        cache = self.deps.resolver.turn_thread_cache.get()
+        if cache is not None:
+            cache.pop(f"{request.room_id}:{request.thread_id}", None)
+
+        refreshed_history = await self.deps.resolver.fetch_thread_history(
+            self._client(),
+            request.room_id,
+            request.thread_id,
+        )
+        return replace(request, thread_history=refreshed_history)
+
     def _response_envelope_for_request(
         self,
         request: ResponseRequest,
@@ -653,6 +672,8 @@ class ResponseCoordinator:
         request = team_request.request
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
+        request = await self._refresh_thread_history_after_lock(request)
+        team_request = replace(team_request, request=request)
         requester_user_id = request.user_id or ""
         prepared_prompt = _prefix_user_turn_time(
             request.model_prompt or request.prompt,
@@ -1746,6 +1767,7 @@ class ResponseCoordinator:
         resolved_target = resolved_target.with_thread_root(delivery_thread_id)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
+        request = await self._refresh_thread_history_after_lock(request)
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,

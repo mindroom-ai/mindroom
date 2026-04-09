@@ -29,7 +29,6 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
-    STREAM_STATUS_PENDING,
     RuntimePaths,
 )
 from mindroom.conversation_resolver import (
@@ -41,7 +40,6 @@ from mindroom.conversation_resolver import (
 )
 from mindroom.delivery_gateway import (
     DeliveryGateway,
-    EditTextRequest,
     SendTextRequest,
     SuppressedPlaceholderCleanupError,
 )
@@ -1013,27 +1011,14 @@ class DispatchPlanner:
         if not dispatch.context.am_i_mentioned:
             self.deps.logger.info("Will respond: only agent in thread")
 
-        placeholder_text = "Thinking..."
         target_member_names: tuple[str, ...] | None = None
         if action.kind == "team":
-            placeholder_text = "🤝 Team Response: Thinking..."
             assert action.form_team is not None
             assert action.form_team.mode is not None
             target_member_names = tuple(
                 member.agent_name(self.deps.runtime.config, self.deps.runtime_paths) or member.username
                 for member in action.form_team.eligible_members
             )
-
-        placeholder_event_id = await self.deps.delivery_gateway.send_text(
-            SendTextRequest(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                response_text=placeholder_text,
-                thread_id=dispatch.context.thread_id,
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
-            ),
-        )
-        placeholder_ready_monotonic = time.monotonic()
 
         try:
             if dispatch.context.requires_full_thread_history:
@@ -1065,7 +1050,6 @@ class DispatchPlanner:
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=dispatch.context.thread_id,
-                placeholder_event_id=placeholder_event_id,
                 error=error,
             )
             if response_event_id is not None:
@@ -1077,9 +1061,7 @@ class DispatchPlanner:
         self.log_dispatch_latency(
             event_id=event.event_id,
             action_kind=action.kind,
-            placeholder_event_id=placeholder_event_id,
             dispatch_started_at=dispatch_started_at,
-            placeholder_ready_monotonic=placeholder_ready_monotonic,
             context_ready_monotonic=context_ready_monotonic,
             payload_ready_monotonic=payload_ready_monotonic,
         )
@@ -1098,8 +1080,8 @@ class DispatchPlanner:
                         thread_history=dispatch.context.thread_history,
                         prompt=prepared_payload.payload.prompt,
                         model_prompt=prepared_payload.payload.model_prompt,
-                        existing_event_id=placeholder_event_id,
-                        existing_event_is_placeholder=placeholder_event_id is not None,
+                        existing_event_id=None,
+                        existing_event_is_placeholder=False,
                         user_id=dispatch.requester_user_id,
                         media=prepared_payload.payload.media,
                         attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
@@ -1123,8 +1105,8 @@ class DispatchPlanner:
                         thread_history=dispatch.context.thread_history,
                         prompt=prepared_payload.payload.prompt,
                         model_prompt=prepared_payload.payload.model_prompt,
-                        existing_event_id=placeholder_event_id,
-                        existing_event_is_placeholder=placeholder_event_id is not None,
+                        existing_event_id=None,
+                        existing_event_is_placeholder=False,
                         user_id=dispatch.requester_user_id,
                         media=prepared_payload.payload.media,
                         attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
@@ -1141,7 +1123,6 @@ class DispatchPlanner:
             self.deps.logger.warning(
                 "Suppressed placeholder cleanup failed",
                 source_event_id=event.event_id,
-                placeholder_event_id=placeholder_event_id,
                 correlation_id=dispatch.correlation_id,
             )
             raise
@@ -1156,35 +1137,11 @@ class DispatchPlanner:
         room_id: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        placeholder_event_id: str | None,
         error: Exception,
     ) -> str | None:
         """Convert post-placeholder setup failures into a visible terminal message."""
         error_text = get_user_friendly_error_message(error, self.deps.agent_name)
         terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
-        if placeholder_event_id is None:
-            return await self.deps.delivery_gateway.send_text(
-                SendTextRequest(
-                    room_id=room_id,
-                    reply_to_event_id=reply_to_event_id,
-                    response_text=error_text,
-                    thread_id=thread_id,
-                    extra_content=terminal_extra_content,
-                ),
-            )
-
-        placeholder_updated = await self.deps.delivery_gateway.edit_text(
-            EditTextRequest(
-                room_id=room_id,
-                event_id=placeholder_event_id,
-                new_text=error_text,
-                thread_id=thread_id,
-                extra_content=terminal_extra_content,
-            ),
-        )
-        if placeholder_updated:
-            return placeholder_event_id
-
         return await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 room_id=room_id,
@@ -1200,9 +1157,7 @@ class DispatchPlanner:
         *,
         event_id: str,
         action_kind: str,
-        placeholder_event_id: str | None,
         dispatch_started_at: float,
-        placeholder_ready_monotonic: float,
         context_ready_monotonic: float,
         payload_ready_monotonic: float,
     ) -> None:
@@ -1211,9 +1166,7 @@ class DispatchPlanner:
             "Response startup latency",
             event_id=event_id,
             action_kind=action_kind,
-            placeholder_event_id=placeholder_event_id,
-            placeholder_visible_ms=round((placeholder_ready_monotonic - dispatch_started_at) * 1000, 1),
-            context_hydration_ms=round((context_ready_monotonic - placeholder_ready_monotonic) * 1000, 1),
+            context_hydration_ms=round((context_ready_monotonic - dispatch_started_at) * 1000, 1),
             payload_hydration_ms=round((payload_ready_monotonic - context_ready_monotonic) * 1000, 1),
             startup_total_ms=round((payload_ready_monotonic - dispatch_started_at) * 1000, 1),
         )

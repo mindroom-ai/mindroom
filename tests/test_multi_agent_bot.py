@@ -48,6 +48,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
     RuntimePaths,
     resolve_runtime_paths,
 )
@@ -2895,6 +2896,11 @@ class TestAgentBot:
                 side_effect=fake_store_conversation_memory,
             ),
             patch("mindroom.response_coordinator.datetime") as mock_datetime,
+            patch.object(
+                bot._conversation_state_writer,
+                "fetch_thread_history",
+                new=AsyncMock(return_value=thread_history),
+            ),
         ):
             mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
             mock_datetime.fromtimestamp.side_effect = lambda seconds, tz: datetime.fromtimestamp(seconds, tz)
@@ -3000,6 +3006,11 @@ class TestAgentBot:
                 create_background_task=schedule_background_task,
                 store_conversation_memory=fake_store_conversation_memory,
             ),
+            patch.object(
+                bot._conversation_state_writer,
+                "fetch_thread_history",
+                new=AsyncMock(return_value=thread_history),
+            ),
         ):
             mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
             mock_datetime.fromtimestamp.side_effect = lambda seconds, tz: datetime.fromtimestamp(seconds, tz)
@@ -3100,6 +3111,104 @@ class TestAgentBot:
         request = mock_process.await_args.args[0]
         assert request.existing_event_id == "$thinking"
         assert request.existing_event_is_placeholder is True
+
+    @pytest.mark.asyncio
+    async def test_generate_response_refreshes_thread_history_after_lock(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Queued turns should replace stale pending history with a fresh post-lock snapshot."""
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_function = cast("Callable[[str | None], Awaitable[None]]", kwargs["response_function"])
+            await response_function(None)
+            return "$response"
+
+        def passthrough_prepare_context(
+            prompt: str,
+            thread_history: Sequence[ResolvedVisibleMessage],
+            *,
+            config: Config,
+            runtime_paths: RuntimePaths,
+            model_prompt: str | None = None,
+        ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
+            _ = config, runtime_paths
+            return prompt, thread_history, model_prompt or prompt, list(thread_history)
+
+        stale_history = [
+            _visible_message(
+                sender=mock_agent_user.user_id,
+                body="Thinking...",
+                event_id="$stale",
+                timestamp=1,
+                content={"body": "Thinking...", STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+            ),
+        ]
+        fresh_history = [
+            _visible_message(
+                sender=mock_agent_user.user_id,
+                body="Completed",
+                event_id="$stale",
+                timestamp=1,
+                content={"body": "Completed", STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+            ),
+        ]
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+
+        with (
+            patch.object(
+                ResponseCoordinator,
+                "process_and_respond",
+                new=AsyncMock(
+                    return_value=DeliveryResult(
+                        event_id="$response",
+                        response_text="ok",
+                        delivery_kind="sent",
+                    ),
+                ),
+            ) as mock_process,
+            patch.object(
+                ResponseCoordinator,
+                "run_cancellable_response",
+                new=AsyncMock(side_effect=run_cancellable_response),
+            ),
+            patch.object(
+                bot._conversation_state_writer,
+                "fetch_thread_history",
+                new=AsyncMock(return_value=fresh_history),
+            ) as mock_fetch_thread_history,
+            patch_response_coordinator_module(
+                should_use_streaming=AsyncMock(return_value=False),
+                prepare_memory_and_model_context=passthrough_prepare_context,
+                reprioritize_auto_flush_sessions=MagicMock(),
+                apply_post_response_effects=AsyncMock(),
+            ),
+        ):
+            async with bot._conversation_resolver.turn_thread_cache_scope():
+                cache = bot._conversation_resolver.turn_thread_cache.get()
+                assert cache is not None
+                cache["!test:localhost:$thread"] = stale_history
+
+                event_id = await bot._generate_response(
+                    room_id="!test:localhost",
+                    prompt="Continue",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    thread_history=stale_history,
+                    user_id="@alice:localhost",
+                )
+
+                assert cache["!test:localhost:$thread"] == fresh_history
+
+        assert event_id == "$response"
+        mock_fetch_thread_history.assert_awaited_once_with(bot.client, "!test:localhost", "$thread")
+        request = mock_process.await_args.args[0]
+        assert list(request.thread_history) == fresh_history
+        assert request.thread_history[0].stream_status == STREAM_STATUS_COMPLETED
 
     @pytest.mark.asyncio
     async def test_generate_response_uses_resolved_thread_root_for_thinking_placeholder(
@@ -6136,10 +6245,6 @@ class TestAgentBot:
                 response_action=ResponseAction(kind="individual"),
             )
 
-        async def fake_send_response(*_args: object, **_kwargs: object) -> str:
-            call_order.append("placeholder")
-            return "$placeholder"
-
         async def fake_hydrate(_room: nio.MatrixRoom, _event: nio.RoomMessageText, context: MessageContext) -> None:
             call_order.append("hydrate")
             context.thread_history = full_history
@@ -6152,17 +6257,14 @@ class TestAgentBot:
         async def fake_generate_response(*_args: object, **kwargs: object) -> str:
             call_order.append("generate")
             assert kwargs["thread_history"] == full_history
-            assert kwargs["existing_event_id"] == "$placeholder"
-            assert kwargs["existing_event_is_placeholder"] is True
-            return "$placeholder"
+            assert kwargs["existing_event_id"] is None
+            assert kwargs["existing_event_is_placeholder"] is False
+            return "$response"
 
-        send_response = AsyncMock(side_effect=fake_send_response)
         generate_response = AsyncMock(side_effect=fake_generate_response)
-        install_send_response_mock(bot, send_response)
         install_generate_response_mock(bot, generate_response)
         _replace_dispatch_planner_deps(
             bot,
-            delivery_gateway=bot._delivery_gateway,
             response_coordinator=bot._response_coordinator,
             handled_turn_ledger=bot.handled_turn_ledger,
         )
@@ -6187,7 +6289,7 @@ class TestAgentBot:
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
 
-        assert call_order == ["hydrate", "action", "placeholder", "payload", "generate"]
+        assert call_order == ["hydrate", "action", "payload", "generate"]
         assert dispatch.context.thread_history == full_history
         assert dispatch.context.requires_full_thread_history is False
 
@@ -6572,12 +6674,12 @@ class TestAgentBot:
         mock_enqueue.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_execute_dispatch_action_team_reuses_placeholder_event(
+    async def test_execute_dispatch_action_team_defers_placeholder_creation_to_coordinator(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Team dispatch should reuse the early placeholder event for the final answer."""
+        """Planner-side team dispatch should hand placeholder ownership to the coordinator."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -6626,8 +6728,8 @@ class TestAgentBot:
             ),
         )
 
-        mock_send_response = AsyncMock(return_value="$placeholder")
-        mock_generate_team_response = AsyncMock(return_value="$placeholder")
+        mock_send_response = AsyncMock()
+        mock_generate_team_response = AsyncMock(return_value="$team-response")
         install_send_response_mock(bot, mock_send_response)
         bot._response_coordinator.generate_team_response_helper = mock_generate_team_response
         _replace_dispatch_planner_deps(
@@ -6654,22 +6756,98 @@ class TestAgentBot:
             )
 
         team_request = mock_generate_team_response.await_args.args[0]
-        assert team_request.existing_event_id == "$placeholder"
-        assert team_request.existing_event_is_placeholder is True
+        assert team_request.existing_event_id is None
+        assert team_request.existing_event_is_placeholder is False
+        mock_send_response.assert_not_awaited()
         bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
-                response_event_id="$placeholder",
+                response_event_id="$team-response",
             ),
         )
 
     @pytest.mark.asyncio
-    async def test_media_download_failure_edits_visible_placeholder(
+    async def test_execute_dispatch_action_does_not_send_placeholder_before_response_coordinator(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Media setup failures after placeholder send should finalize the placeholder with an error."""
+        """Planner-side execution should pass placeholder ownership to the coordinator."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.handled_turn_ledger = MagicMock()
+        bot.logger = MagicMock()
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$event"
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=MessageContext(
+                am_i_mentioned=True,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[bot.matrix_id],
+                has_non_agent_mentions=False,
+                requires_full_thread_history=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=event.event_id,
+            ),
+            correlation_id="corr-individual-dispatch",
+            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+        )
+
+        mock_send_response = AsyncMock()
+        mock_generate_response = AsyncMock(return_value="$response")
+        install_send_response_mock(bot, mock_send_response)
+        install_generate_response_mock(bot, mock_generate_response)
+        _replace_dispatch_planner_deps(
+            bot,
+            delivery_gateway=bot._delivery_gateway,
+            response_coordinator=bot._response_coordinator,
+            handled_turn_ledger=bot.handled_turn_ledger,
+        )
+
+        with patch.object(DispatchPlanner, "log_dispatch_latency"):
+
+            async def payload_builder(_context: MessageContext) -> DispatchPayload:
+                return DispatchPayload(prompt="help me")
+
+            await bot._dispatch_planner.execute_response_action(
+                room,
+                event,
+                dispatch,
+                ResponseAction(kind="individual"),
+                payload_builder,
+                processing_log="processing",
+                dispatch_started_at=0.0,
+                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+            )
+
+        mock_send_response.assert_not_awaited()
+        assert mock_generate_response.await_args.kwargs["existing_event_id"] is None
+        assert mock_generate_response.await_args.kwargs["existing_event_is_placeholder"] is False
+        bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+            HandledTurnState.from_source_event_id(
+                "$event",
+                response_event_id="$response",
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_media_download_failure_sends_terminal_error_without_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Media setup failures before response generation should send one terminal error reply."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -6705,7 +6883,7 @@ class TestAgentBot:
         install_edit_message_mock(bot, bot._edit_message)
         bot._generate_response = AsyncMock()
         install_generate_response_mock(bot, bot._generate_response)
-        send_response_mock = AsyncMock(return_value="$placeholder")
+        send_response_mock = AsyncMock(return_value="$error")
         install_send_response_mock(bot, send_response_mock)
         wrap_extracted_collaborators(bot, "_dispatch_planner")
         bot._dispatch_planner.plan_dispatch = AsyncMock(
@@ -6730,34 +6908,34 @@ class TestAgentBot:
             await bot._on_media_message(room, event)
 
         bot._generate_response.assert_not_called()
-        bot._edit_message.assert_awaited_once()
-        edit_args = bot._edit_message.await_args.args
-        assert edit_args[1] == "$placeholder"
-        assert "Failed to download image" in edit_args[2]
+        bot._edit_message.assert_not_awaited()
+        send_response_mock.assert_awaited_once()
+        send_args = send_response_mock.await_args.args
+        assert send_args[0] == room.room_id
+        assert send_args[1] == "$img_event_fail"
+        assert "Failed to download image" in send_args[2]
         tracker.record_handled_turn.assert_called_once_with(
             _agent_response_handled_turn(
                 agent_name=mock_agent_user.agent_name,
                 room_id=room.room_id,
                 event_id="$img_event_fail",
-                response_event_id="$placeholder",
+                response_event_id="$error",
                 source_event_prompts={"$img_event_fail": "[Attached image]"},
             ),
         )
 
     @pytest.mark.asyncio
-    async def test_finalize_dispatch_failure_sends_terminal_error_when_placeholder_edit_fails(
+    async def test_finalize_dispatch_failure_sends_terminal_error_message(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Placeholder cleanup should send a new terminal error message if editing fails."""
+        """Dispatch setup failures should send a terminal error message in-thread."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        mock_edit_message = AsyncMock(return_value=False)
         mock_send_response = AsyncMock(return_value="$error")
-        install_edit_message_mock(bot, mock_edit_message)
         install_send_response_mock(bot, mock_send_response)
         _replace_dispatch_planner_deps(bot, delivery_gateway=bot._delivery_gateway)
 
@@ -6765,19 +6943,10 @@ class TestAgentBot:
             room_id="!test:localhost",
             reply_to_event_id="$event",
             thread_id="$thread_root",
-            placeholder_event_id="$placeholder",
             error=RuntimeError("boom"),
         )
 
         assert response_event_id == "$error"
-        mock_edit_message.assert_awaited_once_with(
-            "!test:localhost",
-            "$placeholder",
-            "[calculator] ⚠️ Error: boom",
-            "$thread_root",
-            tool_trace=None,
-            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
-        )
         mock_send_response.assert_awaited_once_with(
             "!test:localhost",
             "$event",
@@ -6792,12 +6961,12 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
-    async def test_execute_dispatch_action_marks_new_error_event_when_placeholder_edit_fails(
+    async def test_execute_dispatch_action_marks_terminal_error_event_without_placeholder(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Dispatch failure fallback should track the new terminal error event."""
+        """Dispatch setup failures should track the terminal error event even without a placeholder."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
@@ -6833,7 +7002,7 @@ class TestAgentBot:
         async def payload_builder(_context: MessageContext) -> DispatchPayload:
             raise RuntimeError(failure_message)
 
-        mock_send_response = AsyncMock(side_effect=["$placeholder", "$error"])
+        mock_send_response = AsyncMock(return_value="$error")
         mock_edit = AsyncMock(return_value=False)
         install_send_response_mock(bot, mock_send_response)
         install_edit_message_mock(bot, mock_edit)
@@ -6855,7 +7024,8 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
 
-        mock_edit.assert_awaited_once()
+        mock_edit.assert_not_awaited()
+        mock_send_response.assert_awaited_once()
         bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
@@ -6906,10 +7076,7 @@ class TestAgentBot:
         async def payload_builder(_context: MessageContext) -> DispatchPayload:
             raise RuntimeError(failure_message)
 
-        with (
-            patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
-            patch("mindroom.bot.DispatchPlanner.finalize_dispatch_failure", new=AsyncMock(return_value=None)),
-        ):
+        with patch("mindroom.bot.DispatchPlanner.finalize_dispatch_failure", new=AsyncMock(return_value=None)):
             await bot._dispatch_planner.execute_response_action(
                 room,
                 event,
@@ -7050,7 +7217,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Dispatch execution should log placeholder and hydration timing fields."""
+        """Dispatch execution should log setup timing fields before coordinator handoff."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
@@ -7082,19 +7249,16 @@ class TestAgentBot:
         )
 
         monotonic_values = itertools.count(start=10.0, step=0.1)
-        mock_send_response = AsyncMock(return_value="$placeholder")
-        mock_generate_response = AsyncMock(return_value="$placeholder")
-        install_send_response_mock(bot, mock_send_response)
+        mock_generate_response = AsyncMock(return_value="$response")
         install_generate_response_mock(bot, mock_generate_response)
         _replace_dispatch_planner_deps(
             bot,
             logger=bot.logger,
-            delivery_gateway=bot._delivery_gateway,
             response_coordinator=bot._response_coordinator,
             handled_turn_ledger=bot.handled_turn_ledger,
         )
 
-        with patch("mindroom.bot.time.monotonic", side_effect=lambda: next(monotonic_values)):
+        with patch("mindroom.dispatch_planner.time.monotonic", side_effect=lambda: next(monotonic_values)):
 
             async def payload_builder(_context: MessageContext) -> DispatchPayload:
                 return DispatchPayload(prompt="help me")
@@ -7115,11 +7279,13 @@ class TestAgentBot:
         ]
         assert latency_logs
         latency_kwargs = latency_logs[-1].kwargs
-        assert latency_kwargs["placeholder_event_id"] == "$placeholder"
-        assert latency_kwargs["placeholder_visible_ms"] == 500.0
-        assert latency_kwargs["context_hydration_ms"] >= 0.0
+        assert "placeholder_event_id" not in latency_kwargs
+        assert "placeholder_visible_ms" not in latency_kwargs
+        assert latency_kwargs["context_hydration_ms"] == 500.0
         assert latency_kwargs["payload_hydration_ms"] >= 0.0
-        assert latency_kwargs["startup_total_ms"] >= latency_kwargs["placeholder_visible_ms"]
+        assert latency_kwargs["startup_total_ms"] == (
+            latency_kwargs["context_hydration_ms"] + latency_kwargs["payload_hydration_ms"]
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
