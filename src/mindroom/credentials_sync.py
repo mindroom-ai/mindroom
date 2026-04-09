@@ -153,6 +153,46 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
     return creds_manager.get_api_key(provider)
 
 
+def resolve_configured_api_key(
+    *,
+    runtime_paths: RuntimePaths,
+    provider: str | None = None,
+    configured_api_key: str | None = None,
+    api_key_env_var: str | None = None,
+    default_env_var: str | None = None,
+    credentials_service: str | None = None,
+) -> str | None:
+    """Resolve one API key from config, env, credentials, and provider defaults.
+
+    Precedence is:
+    1. Inline ``configured_api_key``
+    2. Explicit ``api_key_env_var``
+    3. ``default_env_var`` when provided
+    4. ``credentials_service`` in the shared credentials store
+    5. Provider-level shared credentials
+    """
+    if configured_api_key:
+        return configured_api_key
+
+    for env_var in (api_key_env_var, default_env_var):
+        if env_var:
+            env_value = get_secret_from_env(env_var, runtime_paths)
+            if env_value:
+                return env_value
+
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    if credentials_service:
+        scoped_creds = creds_manager.load_credentials(credentials_service)
+        scoped_api_key = scoped_creds.get("api_key") if scoped_creds else None
+        if isinstance(scoped_api_key, str) and scoped_api_key:
+            return scoped_api_key
+
+    if provider:
+        return get_api_key_for_provider(provider, runtime_paths=runtime_paths)
+
+    return None
+
+
 def get_ollama_host(runtime_paths: RuntimePaths) -> str | None:
     """Get Ollama host configuration.
 

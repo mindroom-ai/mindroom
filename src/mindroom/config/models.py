@@ -403,6 +403,10 @@ class EmbedderConfig(BaseModel):
 
     model: str = Field(default="text-embedding-3-small", description="Model name for embeddings")
     api_key: str | None = Field(default=None, description="API key (usually from environment variable)")
+    api_key_env_var: str | None = Field(
+        default=None,
+        description="Optional environment variable name to read the API key from at runtime",
+    )
     host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
     dimensions: int | None = Field(
         default=None,
@@ -420,6 +424,10 @@ class ModelConfig(BaseModel):
     id: str = Field(description="Model ID specific to the provider")
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
     api_key: str | None = Field(default=None, description="Optional API key (usually from env vars)")
+    api_key_env_var: str | None = Field(
+        default=None,
+        description="Optional environment variable name to read the API key from at runtime",
+    )
     extra_kwargs: dict[str, Any] | None = Field(
         default=None,
         description="Additional provider-specific parameters passed directly to the model",

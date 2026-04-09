@@ -27,7 +27,7 @@ from watchfiles import Change, awatch
 
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.credentials_sync import get_ollama_host, resolve_configured_api_key
 from mindroom.embeddings import (
     MindRoomOpenAIEmbedder,
     create_sentence_transformers_embedder,
@@ -126,7 +126,12 @@ def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
     if provider == "openai":
         return MindRoomOpenAIEmbedder(
             id=embedder_config.model,
-            api_key=get_api_key_for_provider("openai", runtime_paths=runtime_paths),
+            api_key=resolve_configured_api_key(
+                runtime_paths=runtime_paths,
+                provider="openai",
+                configured_api_key=embedder_config.api_key,
+                api_key_env_var=embedder_config.api_key_env_var,
+            ),
             base_url=embedder_config.host,
             dimensions=embedder_config.dimensions,
         )

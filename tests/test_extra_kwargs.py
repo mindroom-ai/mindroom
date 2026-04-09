@@ -217,7 +217,6 @@ def test_different_providers_with_extra_kwargs() -> None:
 def test_model_without_extra_kwargs() -> None:
     """Test that models work fine without extra_kwargs."""
     os.environ["OPENAI_API_KEY"] = "test-key"
-
     config_data = {
         "models": {
             "simple_model": {
@@ -249,6 +248,60 @@ def test_model_without_extra_kwargs() -> None:
     model = get_model_instance(config, runtime_paths, "simple_model")
     assert model.id == "gpt-3.5-turbo"
     assert model.provider == "OpenAI"
+
+
+def test_get_model_instance_uses_explicit_api_key_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Model config can select a non-default env var for its API key."""
+    config_data = {
+        "models": {
+            "test_model": {
+                "provider": "openai",
+                "id": "gpt-5.4",
+                "api_key_env_var": "LITELLM_MASTER_KEY",
+            },
+        },
+        "defaults": {"markdown": True},
+        "router": {"model": "test_model"},
+        "memory": {
+            "embedder": {
+                "provider": "openai",
+                "config": {"model": "text-embedding-3-small"},
+            },
+        },
+        "agents": {},
+    }
+    runtime_root = Path(tempfile.mkdtemp())
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={"LITELLM_MASTER_KEY": "litellm-key"},
+    )
+    config = Config(**config_data)
+
+    captured: dict[str, object] = {}
+
+    def _fake_create_model_for_provider(
+        provider: str,
+        model_id: str,
+        model_config: ModelConfig,
+        extra_kwargs: dict,
+        runtime_paths_arg: RuntimePaths,
+    ) -> object:
+        captured["provider"] = provider
+        captured["model_id"] = model_id
+        captured["model_config"] = model_config
+        captured["extra_kwargs"] = dict(extra_kwargs)
+        captured["runtime_paths"] = runtime_paths_arg
+        return object()
+
+    monkeypatch.setattr("mindroom.ai._create_model_for_provider", _fake_create_model_for_provider)
+
+    get_model_instance(config, runtime_paths, "test_model")
+
+    assert captured["provider"] == "openai"
+    assert captured["model_id"] == "gpt-5.4"
+    assert captured["runtime_paths"] == runtime_paths
+    assert captured["extra_kwargs"] == {"api_key": "litellm-key"}
 
 
 def test_vertexai_claude_provider() -> None:

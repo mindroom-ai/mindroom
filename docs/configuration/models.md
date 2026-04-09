@@ -28,6 +28,7 @@ Each model configuration supports the following fields:
 | `id` | Yes | - | Model ID specific to the provider |
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
 | `api_key` | No | `null` | API key (usually read from environment variables) |
+| `api_key_env_var` | No | `null` | Specific environment variable name to read the API key from at runtime |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
 | `context_window` | No | `null` | Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit `compaction.model` also needs its own `context_window` for destructive compaction |
 
@@ -50,6 +51,12 @@ models:
   gpt:
     provider: openai
     id: gpt-5.4
+
+  # Route OpenAI-compatible traffic through a gateway with a non-default env var
+  gpt_via_gateway:
+    provider: openai
+    id: gpt-5.4
+    api_key_env_var: LITELLM_MASTER_KEY
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
@@ -144,6 +151,16 @@ OPENROUTER_API_KEY=...
 CEREBRAS_API_KEY=...
 DEEPSEEK_API_KEY=...
 ```
+
+If you need one model to use a different secret than the provider default, set `api_key_env_var` on that model.
+MindRoom resolves model credentials in this order:
+
+1. `models.<name>.api_key`
+2. `models.<name>.api_key_env_var`
+3. shared credentials stored for `model:<name>`
+4. shared provider credentials for the model provider
+
+This is useful when one runtime needs, for example, OpenAI-compatible chat traffic to use a gateway key while other OpenAI-compatible features use the real OpenAI key.
 
 For Ollama, you can also set:
 

@@ -47,6 +47,7 @@ memory:
     provider: openai
     config:
       model: text-embedding-3-small
+      api_key_env_var: OPENAI_EMBEDDER_KEY  # Optional: dedicated env var for the embedder key
       dimensions: null             # Optional: embedding dimension override (e.g., 256)
 ```
 
@@ -90,6 +91,13 @@ memory:
 ```
 
 Supported LLM providers: `ollama` (default), `openai`, `anthropic`.
+
+When `memory.llm.provider` or `memory.embedder.provider` needs a different key than the provider default, set `api_key_env_var` in that config block.
+MindRoom resolves those API keys in this order:
+
+1. inline `api_key`
+2. explicit `api_key_env_var`
+3. shared provider credentials for that provider
 
 ## Backend: `file`
 

@@ -192,6 +192,7 @@ models:
     id: claude-sonnet-4-6            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
+    api_key_env_var: null          # Optional: specific env var to read the API key from at runtime
     extra_kwargs: null             # Optional: Provider-specific parameters
     context_window: null           # Optional: Needed on the active runtime model for replay safety; explicit compaction.model also needs its own window for summary generation
 
@@ -280,11 +281,13 @@ memory:
     config:
       model: text-embedding-3-small  # Default embedding model
       api_key: null                # Optional: From env var
+      api_key_env_var: null        # Optional: explicit env var name for the embedder API key
       host: null                   # Optional: For self-hosted
       dimensions: null             # Optional: Embedding dimension override (e.g., 256)
   llm:                             # Optional: LLM for memory operations
     provider: ollama
-    config: {}
+    config:
+      api_key_env_var: null        # Optional: explicit env var name for the memory LLM API key
   file:                            # File-backed memory settings (when backend: file)
     path: null                     # Optional: fallback root for file memory paths
     max_entrypoint_lines: 200      # Default: 200 (max lines preloaded from MEMORY.md)
@@ -337,8 +340,9 @@ voice:
   stt:
     provider: openai               # Default: openai
     model: whisper-1               # Default: whisper-1
-    api_key: null
-    host: null
+    api_key: null                  # Optional: inline STT API key
+    api_key_env_var: null          # Optional: explicit env var name for the STT API key
+    host: null                     # Optional: custom OpenAI-compatible STT host
   intelligence:
     model: default                 # Model for command recognition
 

@@ -23,7 +23,7 @@ from mindroom.constants import (
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
-from mindroom.credentials_sync import get_secret_from_env
+from mindroom.credentials_sync import resolve_configured_api_key
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import agent_username_localpart
 from mindroom.matrix.media import download_media_bytes, extract_media_caption, media_mime_type
@@ -358,7 +358,12 @@ async def _transcribe_audio(audio_data: bytes, config: Config, runtime_paths: Ru
         stt_host = config.voice.stt.host
         url = f"{stt_host}/v1/audio/transcriptions" if stt_host else "https://api.openai.com/v1/audio/transcriptions"
 
-        api_key = config.voice.stt.api_key or get_secret_from_env("OPENAI_API_KEY", runtime_paths)
+        api_key = resolve_configured_api_key(
+            runtime_paths=runtime_paths,
+            configured_api_key=config.voice.stt.api_key,
+            api_key_env_var=config.voice.stt.api_key_env_var,
+            default_env_var="OPENAI_API_KEY",
+        )
         if not api_key:
             logger.error("No OpenAI-compatible STT API key configured for voice transcription")
             return None

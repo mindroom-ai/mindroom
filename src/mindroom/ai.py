@@ -50,8 +50,7 @@ from mindroom.constants import (
     RuntimePaths,
     runtime_env_path,
 )
-from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host, resolve_configured_api_key
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     build_prompt_with_thread_history,
@@ -710,13 +709,15 @@ def get_model_instance(
     # Get extra kwargs if specified
     extra_kwargs = dict(model_config.extra_kwargs or {})
 
-    # Check for model-specific API key first, then fall back to provider-level
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    model_creds = creds_manager.load_credentials(f"model:{model_name}")
-    model_api_key = model_creds.get("api_key") if model_creds else None
-
-    if model_api_key:
-        extra_kwargs["api_key"] = model_api_key
+    resolved_api_key = resolve_configured_api_key(
+        runtime_paths=runtime_paths,
+        provider=provider,
+        configured_api_key=model_config.api_key,
+        api_key_env_var=model_config.api_key_env_var,
+        credentials_service=f"model:{model_name}",
+    )
+    if resolved_api_key:
+        extra_kwargs["api_key"] = resolved_api_key
 
     return _create_model_for_provider(
         provider,

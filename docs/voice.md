@@ -90,7 +90,24 @@ voice:
     api_key: your-custom-api-key
 ```
 
-If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment variable.
+### Custom API Key Environment Variable
+
+When STT should use a different secret than the rest of your OpenAI-compatible stack, point it at a dedicated env var:
+
+```yaml
+voice:
+  enabled: true
+  stt:
+    provider: openai
+    model: whisper-1
+    api_key_env_var: OPENAI_STT_API_KEY
+```
+
+MindRoom resolves the STT key in this order:
+
+1. `voice.stt.api_key`
+2. `voice.stt.api_key_env_var`
+3. `OPENAI_API_KEY`
 
 ## Command Recognition
 
@@ -202,7 +219,8 @@ Reply-permission checks still use the original human sender, not a later router 
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | For OpenAI Whisper API (used as fallback if no `api_key` configured) |
+| `OPENAI_API_KEY` | Default OpenAI Whisper API key |
+| `OPENAI_STT_API_KEY` | Optional dedicated STT key when referenced via `voice.stt.api_key_env_var` |
 
 ## Text-to-Speech Tools
 

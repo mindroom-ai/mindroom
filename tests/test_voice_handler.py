@@ -15,7 +15,7 @@ from mindroom import voice_handler
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
-from mindroom.constants import ATTACHMENT_IDS_KEY
+from mindroom.constants import ATTACHMENT_IDS_KEY, resolve_runtime_paths
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
@@ -51,6 +51,11 @@ async def _process_transcription(transcription: str, config: Config, **kwargs: o
         runtime_paths_for(config),
         **kwargs,
     )
+
+
+async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
+    """Run audio transcription with the explicit runtime bound to the test config."""
+    return await voice_handler._transcribe_audio(audio_data, config, runtime_paths_for(config))
 
 
 async def _prepare_voice_message(
@@ -229,6 +234,48 @@ class TestVoiceHandler:
         assert result.content == b"decrypted_audio_data"
         assert result.mime_type == "audio/mpeg"
         mock_download.assert_awaited_once_with(client, event)
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_uses_explicit_api_key_env_var(self) -> None:
+        """Voice STT should honor an explicit env-var selector before OPENAI_API_KEY."""
+        runtime_root = Path(tempfile.mkdtemp())
+        runtime_paths = resolve_runtime_paths(
+            config_path=runtime_root / "config.yaml",
+            storage_path=runtime_root / "mindroom_data",
+            process_env={
+                "OPENAI_STT_API_KEY": "stt-key",
+                "OPENAI_API_KEY": "default-openai-key",
+            },
+        )
+        config = bind_runtime_paths(
+            Config(
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=_VoiceSTTConfig(
+                        provider="openai",
+                        model="whisper-1",
+                        api_key_env_var="OPENAI_STT_API_KEY",
+                    ),
+                ),
+            ),
+            runtime_paths,
+        )
+
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"text": "hello world"}
+
+        http_client = AsyncMock()
+        http_client.post.return_value = response
+
+        http_client_cm = AsyncMock()
+        http_client_cm.__aenter__.return_value = http_client
+        http_client_cm.__aexit__.return_value = None
+
+        with patch("mindroom.voice_handler.httpx.AsyncClient", return_value=http_client_cm):
+            result = await _transcribe_audio(b"audio-bytes", config)
+
+        assert result == "hello world"
+        assert http_client.post.await_args.kwargs["headers"] == {"Authorization": "Bearer stt-key"}
 
     @pytest.mark.asyncio
     async def test_prepare_voice_message_clears_inflight_task_after_failed_download(self, tmp_path: Path) -> None:

@@ -422,6 +422,32 @@ def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.Monk
     }
 
 
+def test_create_embedder_uses_explicit_api_key_env_var(tmp_path: Path) -> None:
+    """Knowledge embedder should honor an explicit env-var selector."""
+    config = Config(
+        agents={},
+        models={},
+        memory={
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                    "api_key_env_var": "OPENAI_EMBEDDER_KEY",
+                },
+            },
+        },
+    )
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"OPENAI_EMBEDDER_KEY": "embedder-key"},
+    )
+    embedder = _create_embedder(config, runtime_paths)
+
+    assert getattr(embedder, "api_key", None) == "embedder-key"
+
+
 def test_resolve_file_path_rejects_traversal(dummy_manager: KnowledgeManager) -> None:
     """resolve_file_path should reject escapes outside the knowledge root."""
     with pytest.raises(ValueError, match="outside knowledge folder"):

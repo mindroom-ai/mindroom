@@ -12,6 +12,7 @@ from mindroom.credentials_sync import (
     get_api_key_for_provider,
     get_ollama_host,
     get_secret_from_env,
+    resolve_configured_api_key,
     sync_env_to_credentials,
 )
 
@@ -264,6 +265,69 @@ class TestCredentialsSync:
 
         # Test non-existent provider
         assert get_api_key_for_provider("anthropic", runtime_paths=runtime_paths) is None
+
+    def test_resolve_configured_api_key_prefers_inline_value(
+        self,
+        credentials_manager: CredentialsManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Inline config should win over env vars and stored credentials."""
+        credentials_manager.set_api_key("openai", "provider-key")
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+        monkeypatch.setenv("LITELLM_MASTER_KEY", "env-key")
+
+        resolved = resolve_configured_api_key(
+            runtime_paths=runtime_paths,
+            provider="openai",
+            configured_api_key="inline-key",
+            api_key_env_var="LITELLM_MASTER_KEY",
+        )
+
+        assert resolved == "inline-key"
+
+    def test_resolve_configured_api_key_prefers_explicit_env_var_over_provider_credentials(
+        self,
+        credentials_manager: CredentialsManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An explicit env-var selector should beat provider-level shared credentials."""
+        credentials_manager.set_api_key("openai", "provider-key")
+        monkeypatch.setenv("LITELLM_MASTER_KEY", "env-key")
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        resolved = resolve_configured_api_key(
+            runtime_paths=runtime_paths,
+            provider="openai",
+            api_key_env_var="LITELLM_MASTER_KEY",
+        )
+
+        assert resolved == "env-key"
+
+    def test_resolve_configured_api_key_prefers_credentials_service_over_provider_credentials(
+        self,
+        credentials_manager: CredentialsManager,
+    ) -> None:
+        """Model-scoped credentials should beat provider-level shared credentials."""
+        credentials_manager.set_api_key("openai", "provider-key")
+        credentials_manager.save_credentials("model:test_model", {"api_key": "model-key"})
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        resolved = resolve_configured_api_key(
+            runtime_paths=runtime_paths,
+            provider="openai",
+            credentials_service="model:test_model",
+        )
+
+        assert resolved == "model-key"
 
     def test_get_ollama_host(self, credentials_manager: CredentialsManager) -> None:
         """Test getting Ollama host configuration."""

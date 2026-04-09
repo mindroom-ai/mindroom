@@ -9,6 +9,7 @@ from mem0 import AsyncMemory
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials_sync import resolve_configured_api_key
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
@@ -33,7 +34,7 @@ def _memory_collection_name(config: Config) -> str:
     return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
-def _get_memory_config(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> dict:  # noqa: C901, PLR0912
+def _get_memory_config(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> dict:  # noqa: C901, PLR0912, PLR0915
     """Get Mem0 configuration with ChromaDB backend.
 
     Args:
@@ -65,7 +66,12 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
 
     # Add provider-specific configuration
     if embedder_provider == "openai":
-        api_key = creds_manager.get_api_key("openai")
+        api_key = resolve_configured_api_key(
+            runtime_paths=runtime_paths,
+            provider="openai",
+            configured_api_key=app_config.memory.embedder.config.api_key,
+            api_key_env_var=app_config.memory.embedder.config.api_key_env_var,
+        )
         if api_key:
             embedder_config["config"]["api_key"] = api_key
         # Support custom OpenAI-compatible base URL (e.g., llama.cpp)
@@ -100,15 +106,27 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
                     llm_config["config"]["ollama_base_url"] = ollama_creds["host"]
                 else:
                     llm_config["config"]["ollama_base_url"] = value or "http://localhost:11434"
+            elif key == "api_key_env_var":
+                continue
             elif key != "host":  # Skip host for other fields
                 llm_config["config"][key] = value
 
         if app_config.memory.llm.provider == "openai":
-            api_key = creds_manager.get_api_key("openai")
+            api_key = resolve_configured_api_key(
+                runtime_paths=runtime_paths,
+                provider="openai",
+                configured_api_key=app_config.memory.llm.config.get("api_key"),
+                api_key_env_var=app_config.memory.llm.config.get("api_key_env_var"),
+            )
             if api_key:
                 llm_config["config"]["api_key"] = api_key
         elif app_config.memory.llm.provider == "anthropic":
-            api_key = creds_manager.get_api_key("anthropic")
+            api_key = resolve_configured_api_key(
+                runtime_paths=runtime_paths,
+                provider="anthropic",
+                configured_api_key=app_config.memory.llm.config.get("api_key"),
+                api_key_env_var=app_config.memory.llm.config.get("api_key_env_var"),
+            )
             if api_key:
                 llm_config["config"]["api_key"] = api_key
 

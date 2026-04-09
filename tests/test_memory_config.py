@@ -241,6 +241,43 @@ class TestMemoryConfig:
 
         assert result["embedder"]["config"]["api_key"] == "shared-openai-key"
 
+    def test_get_memory_config_uses_embedder_and_llm_api_key_env_vars(self, tmp_path: Path) -> None:
+        """Memory config should honor explicit env-var selectors for embedder and memory LLM."""
+        runtime_paths = resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env={
+                "OPENAI_EMBEDDER_KEY": "embedder-key",
+                "OPENAI_MEMORY_LLM_KEY": "memory-llm-key",
+            },
+        )
+
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "openai",
+                    "config": {
+                        "model": "text-embedding-3-small",
+                        "api_key_env_var": "OPENAI_EMBEDDER_KEY",
+                    },
+                },
+                "llm": {
+                    "provider": "openai",
+                    "config": {
+                        "model": "gpt-5.4-mini",
+                        "api_key_env_var": "OPENAI_MEMORY_LLM_KEY",
+                    },
+                },
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
+
+        assert result["embedder"]["config"]["api_key"] == "embedder-key"
+        assert result["llm"]["config"]["api_key"] == "memory-llm-key"
+        assert "api_key_env_var" not in result["llm"]["config"]
+
     @pytest.mark.parametrize(
         ("model", "effective_dimensions"),
         [

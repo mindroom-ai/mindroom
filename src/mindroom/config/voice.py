@@ -11,6 +11,10 @@ class _VoiceSTTConfig(BaseModel):
     provider: str = Field(default="openai", description="STT provider (openai or compatible)")
     model: str = Field(default="whisper-1", description="STT model name")
     api_key: str | None = Field(default=None, description="API key for STT service")
+    api_key_env_var: str | None = Field(
+        default=None,
+        description="Optional environment variable name to read the STT API key from at runtime",
+    )
     host: str | None = Field(default=None, description="Host URL for self-hosted STT")
 
 
