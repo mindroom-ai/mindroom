@@ -282,6 +282,48 @@ mcp_servers:
 If Chrome startup is slow on your machine, increase `startup_timeout_seconds`.
 If individual browser operations can take a while, increase `call_timeout_seconds`.
 
+## Example: MemPalace AI Memory
+
+[MemPalace](https://github.com/milla-jovovich/mempalace) is a local AI memory system that stores conversations in ChromaDB, organized as a navigable "palace" with wings, rooms, and halls.
+It exposes 19 MCP tools for search, knowledge graph operations, agent diaries, and more — all without API keys.
+
+Using `uvx` keeps MemPalace in an isolated virtual environment, avoiding dependency conflicts with MindRoom's own ChromaDB version:
+
+```yaml
+mcp_servers:
+  mempalace:
+    transport: stdio
+    command: uvx
+    args:
+      - --from
+      - mempalace
+      - python
+      - -m
+      - mempalace.mcp_server
+      - --palace
+      - /path/to/.mempalace/palace
+    startup_timeout_seconds: 30
+    call_timeout_seconds: 60
+
+agents:
+  assistant:
+    display_name: Assistant
+    role: General assistant with persistent memory
+    model: sonnet
+    tools:
+      - mcp_mempalace
+```
+
+Before the MCP server can return results, initialize and seed the palace:
+
+```bash
+uvx mempalace init /path/to/content
+uvx mempalace mine /path/to/content
+```
+
+Agents can also add memories on the fly via the `mempalace_add_drawer` tool.
+The palace enforces deduplication at a 0.9 similarity threshold.
+
 ## Error Handling
 
 MindRoom connects to MCP servers during startup and whenever `config.yaml` changes.
