@@ -115,6 +115,14 @@ def _notice_count(messages: list[Message]) -> int:
     return sum(1 for message in messages if message.content == QUEUED_MESSAGE_NOTICE_TEXT)
 
 
+def _queued_notice_message() -> Message:
+    return Message(
+        role="user",
+        content=QUEUED_MESSAGE_NOTICE_TEXT,
+        provider_data={"mindroom_queued_message_notice": True},
+    )
+
+
 class _FakeStorage:
     def __init__(self) -> None:
         self.session: AgentSession | None = None
@@ -487,7 +495,7 @@ async def test_ai_response_scrubs_stale_notice_before_prepare(tmp_path: Path) ->
             RunOutput(
                 run_id="run-0",
                 session_id="session-1",
-                messages=[Message(role="user", content=QUEUED_MESSAGE_NOTICE_TEXT)],
+                messages=[_queued_notice_message()],
             ),
         ],
     )

@@ -721,6 +721,11 @@ class AgentBot:
             ),
         )
 
+    def has_active_response_for_target(self, target: MessageTarget) -> bool:
+        """Return whether one canonical conversation target currently holds the response lock."""
+        lock = self._response_lifecycle_locks.get((target.room_id, target.resolved_thread_id))
+        return lock.locked() if lock is not None else False
+
     def _build_message_target(
         self,
         *,
@@ -1925,12 +1930,29 @@ class AgentBot:
             return
         if should_handle_interactive_text_response(envelope):
             await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
+        if self._should_bypass_coalescing_for_active_thread_follow_up(envelope):
+            await self._dispatch_text_message(
+                room,
+                prepared_event,
+                prechecked_event.requester_user_id,
+            )
+            return
         await self._enqueue_for_dispatch(
             prechecked_event.event,
             room,
             source_kind="message",
             requester_user_id=prechecked_event.requester_user_id,
         )
+
+    def _should_bypass_coalescing_for_active_thread_follow_up(self, envelope: MessageEnvelope) -> bool:
+        """Return whether one human thread follow-up should skip IN_FLIGHT coalescing."""
+        if envelope.target.resolved_thread_id is None:
+            return False
+        if is_automation_source_kind(envelope.source_kind):
+            return False
+        if is_agent_id(envelope.sender_id, self.config, self.runtime_paths):
+            return False
+        return self.has_active_response_for_target(envelope.target)
 
     async def _dispatch_text_message(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -2885,6 +2907,8 @@ class AgentBot:
             dispatch.requester_user_id,
             message_for_decision,
             dm_room,
+            target=dispatch.target,
+            source_envelope=dispatch.envelope,
         )
         if action.kind == "skip":
             return None
@@ -3258,6 +3282,9 @@ class AgentBot:
         requester_user_id: str,
         message: str,
         is_dm: bool,
+        *,
+        target: MessageTarget | None = None,
+        source_envelope: MessageEnvelope | None = None,
     ) -> _ResponseAction:
         """Decide whether to respond as a team, individually, or skip.
 
@@ -3302,9 +3329,33 @@ class AgentBot:
             has_non_agent_mentions=context.has_non_agent_mentions,
             sender_id=requester_user_id,
         ):
+            if self._should_queue_follow_up_in_active_response_thread(
+                context=context,
+                target=target,
+                source_envelope=source_envelope,
+            ):
+                return _ResponseAction(kind="individual")
             return _ResponseAction(kind="skip")
 
         return _ResponseAction(kind="individual")
+
+    def _should_queue_follow_up_in_active_response_thread(
+        self,
+        *,
+        context: _MessageContext,
+        target: MessageTarget | None,
+        source_envelope: MessageEnvelope | None,
+    ) -> bool:
+        """Return whether one human follow-up should enter the queued-response path."""
+        if target is None or source_envelope is None or not context.is_thread:
+            return False
+        if context.mentioned_agents or context.has_non_agent_mentions:
+            return False
+        if is_automation_source_kind(source_envelope.source_kind):
+            return False
+        if is_agent_id(source_envelope.sender_id, self.config, self.runtime_paths):
+            return False
+        return self.has_active_response_for_target(target)
 
     async def _decide_team_for_sender(
         self,

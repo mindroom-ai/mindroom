@@ -137,9 +137,13 @@ _queued_message_notice_context: ContextVar[_QueuedMessageNoticeContext | None] =
 
 
 @contextmanager
-def queued_message_signal_context(signal: _SupportsQueuedMessageState | None) -> Generator[None, None, None]:
+def queued_message_signal_context(
+    signal: _SupportsQueuedMessageState | None,
+) -> Generator[None, None, None]:
     """Bind one queued-message signal to the current async task."""
-    token = _queued_message_notice_context.set(_QueuedMessageNoticeContext(state=signal))
+    token = _queued_message_notice_context.set(
+        _QueuedMessageNoticeContext(state=signal),
+    )
     try:
         yield
     finally:
@@ -151,33 +155,16 @@ def _has_queued_notice_marker(message: Message) -> bool:
     return isinstance(provider_data, dict) and provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY) is True
 
 
-def _is_legacy_queued_notice_message(message: Message) -> bool:
-    return isinstance(message.content, str) and message.content == QUEUED_MESSAGE_NOTICE_TEXT
-
-
-def _is_queued_notice_message(message: Message, *, allow_legacy_text_match: bool = False) -> bool:
+def _is_queued_notice_message(message: Message) -> bool:
     """Return whether one Agno message is the hidden queued-message notice."""
-    if _has_queued_notice_marker(message):
-        return True
-    return allow_legacy_text_match and _is_legacy_queued_notice_message(message)
+    return _has_queued_notice_marker(message)
 
 
-def _strip_queued_notice_messages(
-    messages: list[Message] | None,
-    *,
-    allow_legacy_text_match: bool = False,
-) -> bool:
+def _strip_queued_notice_messages(messages: list[Message] | None) -> bool:
     """Remove queued-message notices from one mutable message list."""
     if not messages:
         return False
-    filtered_messages = [
-        message
-        for message in messages
-        if not _is_queued_notice_message(
-            message,
-            allow_legacy_text_match=allow_legacy_text_match,
-        )
-    ]
+    filtered_messages = [message for message in messages if not _is_queued_notice_message(message)]
     if len(filtered_messages) == len(messages):
         return False
     messages[:] = filtered_messages
@@ -209,19 +196,11 @@ def _load_session_for_cleanup(
 
 def _strip_queued_notice_from_session(
     session: AgentSession | TeamSession,
-    *,
-    allow_legacy_text_match: bool = False,
 ) -> bool:
     changed = False
     for run in session.runs or []:
         if isinstance(run, (RunOutput, TeamRunOutput)):
-            changed = (
-                _strip_queued_notice_messages(
-                    run.messages,
-                    allow_legacy_text_match=allow_legacy_text_match,
-                )
-                or changed
-            )
+            changed = _strip_queued_notice_messages(run.messages) or changed
     return changed
 
 
@@ -230,7 +209,6 @@ def strip_queued_notice_from_session_storage(
     session_id: str,
     *,
     session_type: SessionType = SessionType.AGENT,
-    allow_legacy_text_match: bool = False,
 ) -> bool:
     """Remove queued-message notices from one persisted Agno session."""
     raw_session = storage.get_session(session_id, session_type)
@@ -242,11 +220,7 @@ def strip_queued_notice_from_session_storage(
     )
     if session is None:
         return False
-
-    changed = _strip_queued_notice_from_session(
-        session,
-        allow_legacy_text_match=allow_legacy_text_match,
-    )
+    changed = _strip_queued_notice_from_session(session)
     if changed:
         storage.upsert_session(session)
     return changed
@@ -288,10 +262,7 @@ def scrub_queued_notice_session_context(
     if scope_context is None or scope_context.session is None:
         return
     try:
-        if _strip_queued_notice_from_session(
-            scope_context.session,
-            allow_legacy_text_match=True,
-        ):
+        if _strip_queued_notice_from_session(scope_context.session):
             scope_context.storage.upsert_session(scope_context.session)
     except Exception:
         logger.exception(
