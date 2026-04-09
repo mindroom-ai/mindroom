@@ -141,7 +141,7 @@ class TestThreadingBehavior:
         ):
             await bot.start()
             assert bot._event_cache is not None
-            assert get_event_cache(start_client) is bot._event_cache
+            assert get_event_cache(start_client) is None
 
             await bot.stop(reason="test")
 
@@ -274,7 +274,7 @@ class TestThreadingBehavior:
                 "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event, redaction_event])),
             }
 
-            await bot._cache_sync_timeline_events(sync_response)
+            await bot._conversation_state_writer.cache_sync_timeline_events(sync_response)
             cached_event = await bot._event_cache.get_event("$thread_msg:localhost")
         finally:
             await bot._close_event_cache()
@@ -305,7 +305,7 @@ class TestThreadingBehavior:
             },
         )
 
-        await bot._cache_thread_event(
+        await bot._conversation_state_writer.cache_thread_event(
             "!test:localhost",
             edit_event,
             event_info=EventInfo.from_event(edit_event.source),
@@ -337,7 +337,7 @@ class TestThreadingBehavior:
             "type": "m.room.redaction",
         }
 
-        await bot._cache_redaction_event("!test:localhost", redaction_event)
+        await bot._conversation_state_writer.cache_redaction_event("!test:localhost", redaction_event)
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$thread_msg:localhost")
         event_cache.redact_event.assert_awaited_once()
@@ -410,7 +410,7 @@ class TestThreadingBehavior:
             assert await bot._event_cache.get_event("$msg1:localhost") is not None
             mock_fetch.assert_not_called()
 
-            bot._reply_chain = ReplyChainCaches()
+            bot._conversation_resolver.reply_chain = ReplyChainCaches()
             bot.client.room_get_event = AsyncMock(side_effect=AssertionError("should use persisted cache"))
 
             with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch_again:
@@ -607,7 +607,12 @@ class TestThreadingBehavior:
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
-        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
+        mock_fetch.assert_awaited_once_with(
+            bot.client,
+            room.room_id,
+            "$thread_root:localhost",
+            event_cache=bot._event_cache,
+        )
 
     @pytest.mark.asyncio
     async def test_extract_context_maps_plain_reply_to_thread_root_with_existing_replies(self, bot: AgentBot) -> None:
@@ -657,7 +662,12 @@ class TestThreadingBehavior:
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
-        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
+        mock_fetch.assert_awaited_once_with(
+            bot.client,
+            room.room_id,
+            "$thread_root:localhost",
+            event_cache=bot._event_cache,
+        )
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_uses_thread_from_new_content(self, bot: AgentBot) -> None:
@@ -696,7 +706,12 @@ class TestThreadingBehavior:
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
-        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
+        mock_fetch.assert_awaited_once_with(
+            bot.client,
+            room.room_id,
+            "$thread_root:localhost",
+            event_cache=bot._event_cache,
+        )
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_resolves_thread_from_original_event(self, bot: AgentBot) -> None:
@@ -752,7 +767,12 @@ class TestThreadingBehavior:
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_msg:localhost")
-        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
+        mock_fetch.assert_awaited_once_with(
+            bot.client,
+            room.room_id,
+            "$thread_root:localhost",
+            event_cache=bot._event_cache,
+        )
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_keeps_reply_chain_context_without_threads(self, bot: AgentBot) -> None:
@@ -1304,7 +1324,12 @@ class TestThreadingBehavior:
             "$plain1:localhost",
             "$plain2:localhost",
         ]
-        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
+        mock_fetch.assert_awaited_once_with(
+            bot.client,
+            room.room_id,
+            "$thread_root:localhost",
+            event_cache=bot._event_cache,
+        )
 
     @pytest.mark.asyncio
     async def test_extract_context_hydrates_sidecar_plain_reply_chain_messages(self, bot: AgentBot) -> None:
@@ -1515,7 +1540,12 @@ class TestThreadingBehavior:
         bot.client.download.assert_awaited_once()
         assert bot.client.room_get_event.await_count == 2
         mock_snapshot.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
-        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
+        mock_fetch.assert_awaited_once_with(
+            bot.client,
+            room.room_id,
+            "$thread_root:localhost",
+            event_cache=bot._event_cache,
+        )
 
     @pytest.mark.asyncio
     async def test_extract_context_preserves_plain_replies_across_thread_reentries(self, bot: AgentBot) -> None:
@@ -1635,7 +1665,12 @@ class TestThreadingBehavior:
             "$t2:localhost",
             "$p2:localhost",
         ]
-        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$root:localhost")
+        mock_fetch.assert_awaited_once_with(
+            bot.client,
+            room.room_id,
+            "$root:localhost",
+            event_cache=bot._event_cache,
+        )
 
     def test_merge_thread_and_chain_history_preserves_chronological_order(self) -> None:
         """Merged context should preserve chronological order for interleaved plain replies."""

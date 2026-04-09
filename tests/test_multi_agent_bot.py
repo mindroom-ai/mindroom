@@ -248,6 +248,30 @@ def test_get_or_create_lock_evicts_enough_unlocked_entries_to_stay_bounded() -> 
     assert len(locks) == 100
 
 
+def test_agent_bot_init_defers_matrix_id_access_until_after_user_id_is_populated(tmp_path: Path) -> None:
+    """Bot init should not parse an empty Matrix user ID while wiring helper deps."""
+    agent_user = AgentMatrixUser(
+        agent_name="calculator",
+        password=TEST_PASSWORD,
+        display_name="CalculatorAgent",
+        user_id="",
+    )
+    config = _runtime_bound_config(
+        Config(
+            agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=True),
+        ),
+        tmp_path,
+    )
+
+    bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+    agent_user.user_id = "@mindroom_calculator:localhost"
+    assert bot._conversation_resolver.deps.matrix_id_getter().full_id == "@mindroom_calculator:localhost"
+    assert bot._inbound_turn_normalizer.deps.matrix_id_getter().domain == "localhost"
+
+
 @asynccontextmanager
 async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
     yield
@@ -3865,7 +3889,7 @@ class TestAgentBot:
         history_attachment_id = "att_prev_image"
         current_attachment_id = _attachment_id_for_event("$img_event_history")
 
-        bot._extract_message_context = AsyncMock(
+        bot._extract_dispatch_context = AsyncMock(
             return_value=_MessageContext(
                 am_i_mentioned=False,
                 is_thread=True,
@@ -4809,14 +4833,16 @@ class TestAgentBot:
         # Simulate the routing mention event in a thread rooted at the image
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_calculator:localhost")
 
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = True
-        mock_context.mentioned_agents = [mock_agent_user.matrix_id]
-        mock_context.has_non_agent_mentions = False
-        mock_context.is_thread = True
-        mock_context.thread_id = "$img_root"
-        mock_context.thread_history = []
-        bot._extract_message_context = AsyncMock(return_value=mock_context)
+        bot._extract_dispatch_context = AsyncMock(
+            return_value=_MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id="$img_root",
+                thread_history=[],
+                mentioned_agents=[mock_agent_user.matrix_id],
+                has_non_agent_mentions=False,
+            ),
+        )
 
         event = nio.RoomMessageText.from_dict(
             {

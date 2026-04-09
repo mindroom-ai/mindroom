@@ -28,6 +28,7 @@ __all__ = [
     "make_visible_message",
     "normalize_console_output",
     "orchestrator_runtime_paths",
+    "resolve_response_thread_root_for_test",
     "runtime_paths_for",
     "test_runtime_paths",
 ]
@@ -202,6 +203,20 @@ def make_visible_message(
         content=resolved_content or None,
         thread_id=thread_id,
     )
+
+
+def resolve_response_thread_root_for_test(
+    thread_id: str | None,
+    _reply_to_event_id: str | None,
+    *,
+    room_id: str,
+    response_envelope: object | None = None,
+) -> str | None:
+    """Resolve thread roots like the bot seam helpers used by response tests."""
+    del room_id
+    if response_envelope is not None:
+        return response_envelope.target.resolved_thread_id
+    return thread_id
 
 
 @pytest.fixture

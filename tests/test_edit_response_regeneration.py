@@ -629,7 +629,11 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
             new_callable=AsyncMock,
             return_value=response_event_id,
         ) as mock_generate,
-        patch.object(bot, "_create_history_scope_storage", return_value=storage),
+        patch.object(
+            bot._conversation_state_writer,
+            "create_history_scope_storage",
+            return_value=storage,
+        ),
         patch("mindroom.bot.remove_run_by_event_id", return_value=True) as mock_remove_run,
     ):
         mock_context.return_value = MagicMock(
@@ -642,12 +646,6 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
 
         await bot._on_message(room, edit_event)
     assert mock_remove_run.call_args_list == [
-        call(
-            storage,
-            create_session_id("!test:example.com", "$original:example.com"),
-            "$original:example.com",
-            session_type=SessionType.TEAM,
-        ),
         call(
             storage,
             create_session_id("!test:example.com", None),
@@ -967,7 +965,10 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
     with (
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
-        patch.object(bot, "_create_history_scope_storage") as mock_create_storage,
+        patch.object(
+            bot._conversation_state_writer,
+            "create_history_scope_storage",
+        ) as mock_create_storage,
         patch("mindroom.bot.remove_run_by_event_id", return_value=True) as mock_remove_run,
         patch.object(
             bot,
@@ -1009,8 +1010,8 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
         }
         assert bot.handled_turn_ledger.get_response_event_id("$first:example.com") == "$response:example.com"
         assert bot.handled_turn_ledger.get_response_event_id("$primary:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 4
-        assert mock_remove_run.call_count == 2
+        assert mock_create_storage.call_count == 2
+        assert mock_remove_run.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -1085,7 +1086,10 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
     with (
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=True),
-        patch.object(bot, "_create_history_scope_storage") as mock_create_storage,
+        patch.object(
+            bot._conversation_state_writer,
+            "create_history_scope_storage",
+        ) as mock_create_storage,
         patch("mindroom.bot.remove_run_by_event_id", return_value=False) as mock_remove_run,
         patch.object(
             bot,
@@ -1116,8 +1120,8 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         assert call_kwargs["existing_event_id"] == "$response:example.com"
         assert call_kwargs["existing_event_is_placeholder"] is False
         assert bot.handled_turn_ledger.get_response_event_id("$original:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 4
-        assert mock_remove_run.call_count == 2
+        assert mock_create_storage.call_count == 2
+        assert mock_remove_run.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -1191,7 +1195,10 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
     with (
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=True),
-        patch.object(bot, "_create_history_scope_storage") as mock_create_storage,
+        patch.object(
+            bot._conversation_state_writer,
+            "create_history_scope_storage",
+        ) as mock_create_storage,
         patch("mindroom.bot.remove_run_by_event_id", return_value=False) as mock_remove_run,
         patch.object(bot, "_generate_response", new_callable=AsyncMock, return_value=None) as mock_generate_response,
     ):
@@ -1214,8 +1221,8 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
         mock_generate_response.assert_awaited_once()
         assert bot.handled_turn_ledger.record_handled_turn.call_count == 0
         assert bot.handled_turn_ledger.get_response_event_id("$original:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 4
-        assert mock_remove_run.call_count == 2
+        assert mock_create_storage.call_count == 2
+        assert mock_remove_run.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -1311,7 +1318,11 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
     with (
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
-        patch.object(bot, "_create_history_scope_storage", return_value=storage) as mock_create_storage,
+        patch.object(
+            bot._conversation_state_writer,
+            "create_history_scope_storage",
+            return_value=storage,
+        ) as mock_create_storage,
         patch("mindroom.bot.remove_run_by_event_id", return_value=True) as mock_remove_run,
         patch.object(
             bot,
@@ -1353,8 +1364,8 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
         }
         assert bot.handled_turn_ledger.get_response_event_id("$first:example.com") == "$response:example.com"
         assert bot.handled_turn_ledger.get_response_event_id("$primary:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 4
-        assert mock_remove_run.call_count == 2
+        assert mock_create_storage.call_count == 2
+        assert mock_remove_run.call_count == 1
 
 
 def test_load_persisted_turn_metadata_prefers_newest_matching_run(tmp_path: Path) -> None:
@@ -1409,7 +1420,11 @@ def test_load_persisted_turn_metadata_prefers_newest_matching_run(tmp_path: Path
     )
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
 
-    with patch.object(bot, "_create_history_scope_storage", return_value=storage):
+    with patch.object(
+        bot._conversation_state_writer,
+        "create_history_scope_storage",
+        return_value=storage,
+    ):
         metadata = bot._load_persisted_turn_metadata(
             room=room,
             thread_id=None,
@@ -1489,8 +1504,8 @@ def test_load_persisted_turn_metadata_prefers_newest_match_across_thread_and_roo
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
 
     with patch.object(
-        bot,
-        "_create_history_scope_storage",
+        bot._conversation_state_writer,
+        "create_history_scope_storage",
         side_effect=[threaded_storage, room_storage],
     ):
         metadata = bot._load_persisted_turn_metadata(
@@ -1506,6 +1521,64 @@ def test_load_persisted_turn_metadata_prefers_newest_match_across_thread_and_roo
         "$first:example.com": "first room",
         "$primary:example.com": "primary room",
     }
+
+
+def test_remove_stale_runs_for_edited_message_uses_internal_state_writer_helpers_and_rebound_logger(
+    tmp_path: Path,
+) -> None:
+    """State-writer edit cleanup should use its own helpers and the bot's current logger."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path)
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+
+    original_logger = MagicMock()
+    rebound_logger = MagicMock()
+    bot.logger = original_logger
+    bot.logger = rebound_logger
+
+    storage = MagicMock()
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+
+    with (
+        patch.object(
+            bot._conversation_state_writer,
+            "history_session_type",
+            return_value=SessionType.AGENT,
+        ) as mock_history_session_type,
+        patch.object(
+            bot._conversation_state_writer,
+            "create_history_scope_storage",
+            return_value=storage,
+        ) as mock_create_history_scope_storage,
+        patch("mindroom.bot.remove_run_by_event_id", return_value=True),
+    ):
+        bot._remove_stale_runs_for_edited_message(
+            room=room,
+            thread_id=None,
+            original_event_id="$original:example.com",
+            requester_user_id="@user:example.com",
+        )
+
+    mock_history_session_type.assert_called_once_with()
+    mock_create_history_scope_storage.assert_called_once()
+    rebound_logger.info.assert_called_once_with(
+        "Removed stale run for edited message",
+        event_id="$original:example.com",
+        session_id="!test:example.com",
+    )
+    original_logger.info.assert_not_called()
+    storage.close.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -1638,7 +1711,11 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     with (
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=False),
-        patch.object(bot, "_create_history_scope_storage", return_value=storage),
+        patch.object(
+            bot._conversation_state_writer,
+            "create_history_scope_storage",
+            return_value=storage,
+        ),
         patch("mindroom.bot.remove_run_by_event_id", return_value=True),
         patch.object(bot, "_generate_response", new_callable=AsyncMock, return_value=None) as mock_generate_response,
     ):

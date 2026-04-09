@@ -15,7 +15,12 @@ from mindroom.config.main import Config
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
 from mindroom.response_coordinator import ResponseRequest
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    resolve_response_thread_root_for_test,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -46,6 +51,10 @@ def _mock_bot(tmp_path: Path) -> MagicMock:
     bot._build_tool_execution_identity = MagicMock(return_value=None)
     bot._build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
+    )
+    bot._conversation_resolver = MagicMock()
+    bot._conversation_resolver.resolve_response_thread_root = MagicMock(
+        side_effect=resolve_response_thread_root_for_test,
     )
     bot._request_with_resolved_thread_target = AgentBot._request_with_resolved_thread_target.__get__(
         bot,
