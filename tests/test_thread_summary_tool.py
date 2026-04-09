@@ -16,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.thread_summary import ThreadSummaryTools
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.thread_summary import (
+    THREAD_SUMMARY_MAX_LENGTH,
     _last_summary_counts,
     _thread_locks,
     thread_summary_cache_key,
@@ -164,6 +165,38 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         "manual",
     )
     assert _last_summary_counts[thread_summary_cache_key(context.room_id, "$ctx-thread:localhost")] == 3
+
+
+@pytest.mark.asyncio
+async def test_set_thread_summary_strips_markdown_before_send() -> None:
+    """Manual summaries should remove markdown syntax before they are written."""
+    tool = ThreadSummaryTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+    context.conversation_access.get_thread_history.return_value = _thread_history(3)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_summary.normalize_thread_root_event_id",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_summary.send_thread_summary_event",
+            new=AsyncMock(return_value="$summary-event:localhost"),
+        ) as mock_send,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.set_thread_summary("# **Fix** [ISSUE-116](http://example.com)"))
+
+    assert payload["status"] == "ok"
+    assert payload["summary"] == "Fix ISSUE-116"
+    mock_send.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$ctx-thread:localhost",
+        "Fix ISSUE-116",
+        3,
+        "manual",
+    )
 
 
 @pytest.mark.asyncio
@@ -322,11 +355,14 @@ async def test_set_thread_summary_rejects_overlong_summary() -> None:
     context = _make_context()
 
     with tool_runtime_context(context):
-        payload = json.loads(await tool.set_thread_summary("x" * 501))
+        payload = json.loads(await tool.set_thread_summary("x" * (THREAD_SUMMARY_MAX_LENGTH + 1)))
 
     assert payload["status"] == "error"
     assert payload["room_id"] == context.room_id
-    assert payload["message"] == "summary must be 500 characters or fewer after whitespace normalization."
+    assert (
+        payload["message"]
+        == f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization."
+    )
 
 
 @pytest.mark.asyncio

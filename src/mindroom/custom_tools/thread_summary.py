@@ -8,7 +8,9 @@ from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id, room_access_allowed
 from mindroom.thread_summary import (
+    THREAD_SUMMARY_MAX_LENGTH,
     _count_non_summary_messages,
+    normalize_thread_summary_text,
     send_thread_summary_event,
     thread_summary_lock,
     update_last_summary_count,
@@ -16,7 +18,7 @@ from mindroom.thread_summary import (
 from mindroom.thread_tags import normalize_thread_root_event_id
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
-_MAX_THREAD_SUMMARY_LENGTH = 500
+_MAX_THREAD_SUMMARY_LENGTH = THREAD_SUMMARY_MAX_LENGTH
 
 
 class ThreadSummaryTools(Toolkit):
@@ -42,13 +44,16 @@ class ThreadSummaryTools(Toolkit):
             message="Thread summary tool context is unavailable in this runtime path.",
         )
 
-    async def set_thread_summary(  # noqa: C901, PLR0911, PLR0912
+    async def set_thread_summary(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         summary: str,
         thread_id: str | None = None,
         room_id: str | None = None,
     ) -> str:
-        """Write a manual summary notice into the current or specified Matrix thread."""
+        """Write a plain-text summary notice into the current or specified Matrix thread.
+
+        Summary must be plain text (no markdown), maximum 300 characters.
+        """
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
@@ -83,7 +88,14 @@ class ThreadSummaryTools(Toolkit):
                 room_id=resolved_room_id,
                 message="summary must be a non-empty string.",
             )
-        normalized_summary = " ".join(summary.split())
+        normalized_summary = normalize_thread_summary_text(summary)
+        if not normalized_summary:
+            return self._payload(
+                "error",
+                action="set",
+                room_id=resolved_room_id,
+                message="summary must be a non-empty string.",
+            )
         if len(normalized_summary) > _MAX_THREAD_SUMMARY_LENGTH:
             return self._payload(
                 "error",

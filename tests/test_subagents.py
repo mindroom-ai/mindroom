@@ -8,12 +8,14 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
+import nio
 import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.constants import ORIGINAL_SENDER_KEY, resolve_runtime_paths
 from mindroom.custom_tools import subagents as subagents_module
 from mindroom.custom_tools.subagents import SubAgentsTools
+from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -432,17 +434,63 @@ async def test_sessions_spawn_rejects_blank_summary(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_sessions_spawn_rejects_overlong_summary(tmp_path: Path) -> None:
-    """sessions_spawn should reject summaries longer than the normalized 500-char limit."""
+    """sessions_spawn should reject summaries longer than the shared thread-summary limit."""
     ctx = _make_context(tmp_path)
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await SubAgentsTools().sessions_spawn(task="do thing", summary="x" * 501, tag=TEST_TAG),
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary="x" * (THREAD_SUMMARY_MAX_LENGTH + 1),
+                tag=TEST_TAG,
+            ),
         )
 
     assert payload["status"] == "error"
     assert payload["tool"] == "sessions_spawn"
-    assert "500 characters or fewer" in payload["message"]
+    assert f"{THREAD_SUMMARY_MAX_LENGTH} characters or fewer" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_strips_markdown_from_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should normalize markdown before writing the summary event."""
+    send_mock = AsyncMock(return_value="$event")
+    tag_mock = AsyncMock(return_value=SimpleNamespace())
+    update_mock = MagicMock()
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "set_thread_tag", tag_mock)
+    monkeypatch.setattr(subagents_module, "update_last_summary_count", update_mock)
+    ctx = _make_context(tmp_path)
+    ctx.client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$summary:localhost", room_id=ctx.room_id),
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary="# **Fix** [ISSUE-116](http://example.com)\n> `deploy` ~~done~~",
+                tag=TEST_TAG,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["summary"] == "Fix ISSUE-116 deploy done"
+    ctx.client.room_send.assert_awaited_once()
+    content = ctx.client.room_send.call_args.kwargs["content"]
+    assert content["body"] == "Fix ISSUE-116 deploy done"
+    assert content["io.mindroom.thread_summary"]["summary"] == "Fix ISSUE-116 deploy done"
+    tag_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_TAG,
+        set_by=ctx.requester_id,
+    )
+    update_mock.assert_called_once_with(ctx.room_id, "$event", 1)
 
 
 @pytest.mark.asyncio

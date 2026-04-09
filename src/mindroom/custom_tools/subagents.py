@@ -14,7 +14,12 @@ from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.matrix.client import get_latest_thread_event_id_if_needed, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
-from mindroom.thread_summary import send_thread_summary_event, update_last_summary_count
+from mindroom.thread_summary import (
+    THREAD_SUMMARY_MAX_LENGTH,
+    normalize_thread_summary_text,
+    send_thread_summary_event,
+    update_last_summary_count,
+)
 from mindroom.thread_tags import ThreadTagsError, normalize_tag_name, set_thread_tag
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
@@ -24,7 +29,7 @@ if TYPE_CHECKING:
 
 
 _REGISTRY_LOCK = Lock()
-_MAX_SPAWN_SUMMARY_LENGTH = 500
+_MAX_SPAWN_SUMMARY_LENGTH = THREAD_SUMMARY_MAX_LENGTH
 
 
 def _now_iso() -> str:
@@ -64,9 +69,9 @@ def _normalize_spawn_summary(summary: object) -> str:
         msg = "summary must be a non-empty string."
         raise ValueError(msg)
 
-    normalized_summary = " ".join(summary.split())
+    normalized_summary = normalize_thread_summary_text(summary)
     if len(normalized_summary) > _MAX_SPAWN_SUMMARY_LENGTH:
-        msg = f"summary must be {_MAX_SPAWN_SUMMARY_LENGTH} characters or fewer after whitespace normalization."
+        msg = f"summary must be {_MAX_SPAWN_SUMMARY_LENGTH} characters or fewer after normalization."
         raise ValueError(msg)
     return normalized_summary
 
