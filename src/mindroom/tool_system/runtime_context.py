@@ -1,16 +1,18 @@
-"""Shared runtime context for tool calls."""
+"""Shared runtime context and support helpers for tool calls."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
 from mindroom.hooks import (
     CustomEventContext,
+    HookContextSupport,
     HookRegistry,
+    MessageEnvelope,
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit,
@@ -18,18 +20,27 @@ from mindroom.hooks import (
 from mindroom.hooks.types import validate_event_name
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.plugin_identity import validate_plugin_name
+from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from pathlib import Path
 
     import nio
+    from structlog.stdlib import BoundLogger
 
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.conversation_resolver import ConversationResolver
     from mindroom.hooks.sender import HookMessageSender
     from mindroom.hooks.types import HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.matrix.identity import MatrixID
+    from mindroom.message_target import MessageTarget
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+_ToolContextReturn = TypeVar("_ToolContextReturn")
+_StreamChunk = TypeVar("_StreamChunk")
 
 
 @dataclass(frozen=True)
@@ -67,6 +78,108 @@ class ToolRuntimeHookBindings:
     room_state_querier: HookRoomStateQuerier | None
     room_state_putter: HookRoomStatePutter | None
     message_received_depth: int
+
+
+@dataclass
+class ToolRuntimeSupport:
+    """Own shared tool-runtime context building and scoped execution helpers."""
+
+    runtime: BotRuntimeView
+    logger: BoundLogger
+    runtime_paths: RuntimePaths
+    storage_path: Path
+    agent_name: str
+    matrix_id: MatrixID
+    resolver: ConversationResolver
+    hook_context: HookContextSupport
+
+    def build_context(
+        self,
+        target: MessageTarget,
+        *,
+        user_id: str | None,
+        session_id: str | None = None,
+        agent_name: str | None = None,
+        active_model_name: str | None = None,
+        attachment_ids: list[str] | tuple[str, ...] | None = None,
+        correlation_id: str | None = None,
+        source_envelope: MessageEnvelope | None = None,
+    ) -> ToolRuntimeContext | None:
+        """Build shared runtime context for all tool calls."""
+        client = self.runtime.client
+        if client is None:
+            return None
+        target_room_id = target.room_id
+        target_thread_id = target.thread_id
+        target_resolved_thread_id = target.resolved_thread_id
+        target_reply_to_event_id = target.reply_to_event_id
+        return ToolRuntimeContext(
+            agent_name=agent_name or self.agent_name,
+            room_id=target_room_id,
+            thread_id=target_thread_id,
+            resolved_thread_id=target_resolved_thread_id,
+            requester_id=user_id or self.matrix_id.full_id,
+            client=client,
+            config=self.runtime.config,
+            runtime_paths=self.runtime_paths,
+            active_model_name=active_model_name,
+            session_id=session_id,
+            room=self.resolver.cached_room(target_room_id),
+            reply_to_event_id=target_reply_to_event_id,
+            storage_path=self.storage_path,
+            attachment_ids=tuple(attachment_ids or ()),
+            hook_registry=self.hook_context.registry,
+            correlation_id=correlation_id,
+            hook_message_sender=self.hook_context.message_sender(),
+            room_state_querier=self.hook_context.room_state_querier(),
+            room_state_putter=self.hook_context.room_state_putter(),
+            message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
+        )
+
+    def build_execution_identity(
+        self,
+        *,
+        target: MessageTarget,
+        user_id: str | None,
+        session_id: str,
+        agent_name: str | None = None,
+    ) -> ToolExecutionIdentity:
+        """Build the serializable execution identity used for worker routing."""
+        return build_tool_execution_identity(
+            channel="matrix",
+            agent_name=agent_name or self.agent_name,
+            runtime_paths=self.runtime_paths,
+            requester_id=user_id or self.matrix_id.full_id,
+            room_id=target.room_id,
+            thread_id=target.thread_id,
+            resolved_thread_id=target.resolved_thread_id,
+            session_id=session_id,
+        )
+
+    async def run_in_context(
+        self,
+        *,
+        tool_context: ToolRuntimeContext | None,
+        operation: Callable[[], Awaitable[_ToolContextReturn]],
+    ) -> _ToolContextReturn:
+        """Execute one async operation inside the ambient tool runtime context."""
+        with tool_runtime_context(tool_context):
+            return await operation()
+
+    def stream_in_context(
+        self,
+        *,
+        tool_context: ToolRuntimeContext | None,
+        stream_factory: Callable[[], AsyncIterator[_StreamChunk]],
+    ) -> AsyncIterator[_StreamChunk]:
+        """Wrap one async iterator so it runs inside the ambient tool runtime context."""
+
+        async def wrapped_stream() -> AsyncIterator[_StreamChunk]:
+            with tool_runtime_context(tool_context):
+                async for chunk in stream_factory():
+                    yield chunk
+
+        return wrapped_stream()
 
 
 _TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(

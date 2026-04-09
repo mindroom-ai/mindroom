@@ -20,7 +20,15 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_send_response_mock,
+    runtime_paths_for,
+    sync_bot_runtime_state,
+    test_runtime_paths,
+    wrap_extracted_collaborators,
+)
 
 
 @pytest.fixture
@@ -78,8 +86,10 @@ class TestResponseTrackingRegression:
             enable_streaming=False,
             rooms=[test_room_id],
         )
+        wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
+        sync_bot_runtime_state(bot)
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -158,8 +168,10 @@ class TestResponseTrackingRegression:
             enable_streaming=False,
             rooms=[test_room_id],
         )
+        wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
+        sync_bot_runtime_state(bot)
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -184,7 +196,6 @@ class TestResponseTrackingRegression:
         mock_room.users = {mock_router_agent.user_id: MagicMock()}
 
         # Mock the necessary methods for _on_message flow
-        bot._extract_message_context = AsyncMock()
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
         mock_context.is_thread = False
@@ -192,21 +203,19 @@ class TestResponseTrackingRegression:
         mock_context.thread_history = []
         mock_context.mentioned_agents = []
         mock_context.has_non_agent_mentions = False
-        bot._extract_message_context.return_value = mock_context
+        mock_context.requires_full_thread_history = False
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
-        # Mock the _send_response to track the call
-        original_send_response = bot._send_response
-        bot._send_response = AsyncMock(side_effect=original_send_response)
+        bot._send_response = AsyncMock(return_value="$response_456")
+        install_send_response_mock(bot, bot._send_response)
 
         # Mock constants to make router handle commands
         with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
             # Call _on_message which should detect unknown command and respond
             await bot._on_message(mock_room, unknown_command_event)
 
-        # Verify that _send_response was called with the error message
-        bot._send_response.assert_called_once()
-        call_args = bot._send_response.call_args[0]
-        assert "❌ Unknown command" in call_args[2]
+        bot._send_response.assert_awaited_once()
+        assert "❌ Unknown command" in bot._send_response.await_args.args[2]
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix in bot.py at line 371
@@ -215,7 +224,7 @@ class TestResponseTrackingRegression:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.suggest_agent_for_message")
+    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
     async def test_router_ai_routing_response_tracking(
         self,
         mock_suggest_agent: AsyncMock,
@@ -239,8 +248,10 @@ class TestResponseTrackingRegression:
             enable_streaming=False,
             rooms=[test_room_id],
         )
+        wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
+        sync_bot_runtime_state(bot)
 
         # Mock successful room_send
         mock_send_response = MagicMock()

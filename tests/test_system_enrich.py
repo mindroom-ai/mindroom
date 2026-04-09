@@ -21,12 +21,13 @@ from agno.session.team import TeamSession
 from agno.team import Team
 
 from mindroom.ai import _prepare_agent_and_prompt
-from mindroom.bot import AgentBot, _ResponseDispatchResult
+from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.delivery_gateway import DeliveryResult
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_SYSTEM_ENRICH,
@@ -47,7 +48,13 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_coordinator import ResponseRequest
 from mindroom.team_runtime_resolution import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, _prepare_materialized_team_execution
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    patch_response_coordinator_module,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -191,7 +198,8 @@ def _make_bot(tmp_path: Path) -> AgentBot:
         rooms=["!room:localhost"],
     )
     bot.client = MagicMock()
-    bot._knowledge_for_agent = MagicMock(return_value=None)
+    bot.client.user_id = agent_user.user_id
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
     bot._handle_interactive_question = AsyncMock()
     return bot
 
@@ -505,14 +513,6 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
 async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Path) -> None:
     """Non-streaming agent delivery should forward system enrichment items into the AI layer."""
     bot = _make_bot(tmp_path)
-    bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
-    bot._deliver_generated_response = AsyncMock(
-        return_value=_ResponseDispatchResult(
-            event_id="$response",
-            response_text="handled",
-            delivery_kind="sent",
-        ),
-    )
     system_items = (
         EnrichmentItem(key="alpha", text="stable", cache_policy="stable"),
         EnrichmentItem(key="omega", text="volatile", cache_policy="volatile"),
@@ -523,8 +523,21 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
         return "handled"
 
     with (
-        patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
-        patch("mindroom.bot.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+        patch(
+            "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
+            new=AsyncMock(
+                return_value=DeliveryResult(
+                    event_id="$response",
+                    response_text="handled",
+                    delivery_kind="sent",
+                ),
+            ),
+        ),
+        patch_response_coordinator_module(
+            ensure_request_knowledge_managers=AsyncMock(return_value={}),
+            typing_indicator=_noop_typing_indicator,
+            ai_response=AsyncMock(side_effect=fake_ai_response),
+        ),
     ):
         delivery = await bot._process_and_respond(
             ResponseRequest(
@@ -561,9 +574,14 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
         return "$response", "".join(chunks)
 
     with (
-        patch("mindroom.bot.typing_indicator", _noop_typing_indicator),
-        patch("mindroom.bot.stream_agent_response", new=fake_stream_agent_response),
-        patch("mindroom.bot.send_streaming_response", new=AsyncMock(side_effect=fake_send_streaming_response)),
+        patch(
+            "mindroom.delivery_gateway.send_streaming_response",
+            new=AsyncMock(side_effect=fake_send_streaming_response),
+        ),
+        patch_response_coordinator_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=fake_stream_agent_response,
+        ),
     ):
         delivery = await bot._process_and_respond_streaming(
             ResponseRequest(

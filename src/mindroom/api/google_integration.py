@@ -74,11 +74,11 @@ def _ensure_google_packages(runtime_paths: RuntimePaths) -> tuple[type[GoogleReq
     """Lazily import Google auth packages, auto-installing if needed."""
     ensure_tool_deps(_GOOGLE_OAUTH_DEPS, "gmail", runtime_paths)
 
-    from google.auth.transport.requests import Request as _GoogleRequest  # noqa: PLC0415
-    from google.oauth2.credentials import Credentials as _Credentials  # noqa: PLC0415
-    from google_auth_oauthlib.flow import Flow as _Flow  # noqa: PLC0415
+    from google.auth.transport.requests import Request  # noqa: PLC0415
+    from google.oauth2.credentials import Credentials  # noqa: PLC0415
+    from google_auth_oauthlib.flow import Flow  # noqa: PLC0415
 
-    return _GoogleRequest, _Credentials, _Flow
+    return Request, Credentials, Flow
 
 
 class GoogleStatus(BaseModel):

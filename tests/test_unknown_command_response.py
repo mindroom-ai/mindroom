@@ -103,7 +103,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.bot.send_message", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message", mock_send_message):
         await bot._on_message(room, event)
 
     # Verify error message was sent
@@ -220,7 +220,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.bot.send_message", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message", mock_send_message):
         await bot._on_message(room, event)
 
     # The current bug: it tries to use the event as thread root and fails
@@ -328,7 +328,7 @@ async def test_unknown_command_with_reply(tmp_path: Path) -> None:
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.bot.send_message", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message", mock_send_message):
         await bot._on_message(room, event)
 
     # Should use the original message as thread root, not the reply

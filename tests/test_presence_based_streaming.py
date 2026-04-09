@@ -241,14 +241,12 @@ class TestBotIntegration:
     """Test bot integration with presence-based streaming."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.stream_agent_response")
-    @patch("mindroom.bot.fetch_thread_history")
+    @patch("mindroom.response_coordinator.ai_response")
+    @patch("mindroom.response_coordinator.stream_agent_response")
     @patch("mindroom.matrix.presence.is_user_online")
     async def test_bot_uses_streaming_when_user_online(
         self,
         mock_is_user_online: AsyncMock,
-        mock_fetch_history: AsyncMock,
         mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
         tmp_path: Path,
@@ -256,7 +254,6 @@ class TestBotIntegration:
         """Test that bot uses streaming when user is online."""
         # Setup mocks
         mock_is_user_online.return_value = True
-        mock_fetch_history.return_value = []
 
         async def mock_streaming_response() -> AsyncIterator[str]:
             yield "Test"
@@ -313,14 +310,12 @@ class TestBotIntegration:
         mock_ai_response.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.stream_agent_response")
-    @patch("mindroom.bot.fetch_thread_history")
+    @patch("mindroom.response_coordinator.ai_response")
+    @patch("mindroom.response_coordinator.stream_agent_response")
     @patch("mindroom.matrix.presence.is_user_online")
     async def test_bot_uses_non_streaming_when_user_offline(
         self,
         mock_is_user_online: AsyncMock,
-        mock_fetch_history: AsyncMock,
         mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
         tmp_path: Path,
@@ -328,7 +323,6 @@ class TestBotIntegration:
         """Test that bot uses non-streaming when user is offline."""
         # Setup mocks
         mock_is_user_online.return_value = False
-        mock_fetch_history.return_value = []
         mock_ai_response.return_value = "Test response"
 
         # Create bot with streaming enabled

@@ -107,3 +107,10 @@ class HookRegistry:
     def has_hooks(self, event_name: str) -> bool:
         """Return whether any hooks are registered for one event."""
         return bool(self.hooks_for(event_name))
+
+
+@dataclass(slots=True)
+class HookRegistryState:
+    """Mutable holder for the currently active hook registry snapshot."""
+
+    registry: HookRegistry

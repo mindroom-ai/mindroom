@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
@@ -21,10 +21,12 @@ from agno.session.team import TeamSession
 
 from mindroom import interactive
 from mindroom.agents import get_agent_session, remove_run_by_event_id
-from mindroom.bot import AgentBot, TeamBot, _ResponseDispatchResult
+from mindroom.bot import AgentBot, TeamBot
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.conversation_state_writer import ConversationStateWriter
+from mindroom.delivery_gateway import DeliveryResult
 from mindroom.handled_turns import HandledTurnLedger, HandledTurnState
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.event_info import EventInfo
@@ -33,7 +35,14 @@ from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import create_session_id
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import (
+    bind_runtime_paths,
+    install_generate_response_mock,
+    patch_response_coordinator_module,
+    replace_dispatch_planner_deps,
+    runtime_paths_for,
+    unwrap_extracted_collaborator,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
@@ -168,6 +177,12 @@ def _team_test_config(tmp_path: Path) -> Config:
                 "rooms": ["!test:example.com"],
             },
         },
+        models={
+            "default": {
+                "provider": "openai",
+                "id": "test-model",
+            },
+        },
         authorization={"default_room_access": True, "agent_reply_permissions": {}},
         mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
     )
@@ -217,6 +232,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
 
     # Create real HandledTurnLedger with the test path
     bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
 
     # Mock logger
     bot.logger = MagicMock()
@@ -303,12 +319,16 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     }
 
     # Mock the methods needed for regeneration
+    mock_streaming = AsyncMock(return_value=False)
+    mock_ai_response = AsyncMock(return_value="The answer is 6")
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch_response_coordinator_module(
+            should_use_streaming=mock_streaming,
+            ai_response=mock_ai_response,
+        ),
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond") as mock_should_respond,
-        patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock) as mock_streaming,
-        patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai_response,
-        patch("mindroom.bot.edit_message", new=AsyncMock(return_value="$edit")) as mock_edit,
+        patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value="$edit")) as mock_edit,
     ):
         # Setup mocks
         mock_context.return_value = MagicMock(
@@ -319,9 +339,6 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
             mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
         )
         mock_should_respond.return_value = True
-        mock_streaming.return_value = False  # Use non-streaming for simpler test
-        mock_ai_response.return_value = "The answer is 6"
-
         # Process the edit event
         await bot._on_message(room, edit_event)
 
@@ -431,8 +448,12 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
     edit_event.source = edit_event.__dict__["source"]
 
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(bot, "_emit_message_received_hooks", new_callable=AsyncMock) as mock_emit_hooks,
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(
+            bot._dispatch_hook_service,
+            "emit_message_received_hooks",
+            new_callable=AsyncMock,
+        ) as mock_emit_hooks,
         patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
     ):
         mock_context.return_value = MagicMock(
@@ -497,7 +518,7 @@ async def test_bot_edit_regeneration_uses_hydrated_mentions_for_response_gating(
     )
     bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
     bot.logger = MagicMock()
-    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    bot._conversation_resolver.derive_conversation_context = AsyncMock(return_value=(False, None, []))
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
     _record_handled_turn(bot.handled_turn_ledger, ["$original:example.com"], response_event_id="$response:example.com")
@@ -532,7 +553,11 @@ async def test_bot_edit_regeneration_uses_hydrated_mentions_for_response_gating(
     edit_event.source = edit_event.__dict__["source"]
 
     with (
-        patch.object(bot, "_emit_message_received_hooks", new_callable=AsyncMock) as mock_emit_hooks,
+        patch.object(
+            bot._dispatch_hook_service,
+            "emit_message_received_hooks",
+            new_callable=AsyncMock,
+        ) as mock_emit_hooks,
         patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
     ):
         mock_emit_hooks.return_value = False
@@ -625,8 +650,13 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     }
 
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(bot, "_fetch_thread_history", new_callable=AsyncMock, return_value=[]) as mock_fetch_history,
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(
+            bot._conversation_resolver,
+            "fetch_thread_history",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as mock_fetch_history,
         patch("mindroom.bot.should_agent_respond") as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
@@ -829,22 +859,25 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         scheduled_tasks.append(task)
         return task
 
+    mock_team_response = AsyncMock(return_value="team response")
+
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
-        patch("mindroom.bot.typing_indicator", new=noop_typing_indicator),
-        patch("mindroom.bot.team_response", new=AsyncMock(return_value="team response")) as mock_team_response,
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
         patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+        patch_response_coordinator_module(
+            team_response=mock_team_response,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=noop_typing_indicator,
+        ),
         patch(
             "mindroom.response_coordinator.apply_post_response_effects",
             new=AsyncMock(),
         ),
-        patch.object(
-            bot,
-            "_deliver_generated_response",
+        patch(
+            "mindroom.response_coordinator.DeliveryGateway.deliver_final",
             new=AsyncMock(
-                return_value=_ResponseDispatchResult(
+                return_value=DeliveryResult(
                     event_id=response_event_id,
                     response_text="team response",
                     delivery_kind="edited",
@@ -853,7 +886,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         ),
         patch.object(
             bot._conversation_state_writer,
-            "create_history_scope_storage",
+            "create_storage_for_history_scope",
             return_value=storage,
         ),
         patch("mindroom.bot.remove_run_by_event_id", return_value=True) as mock_remove_run,
@@ -911,6 +944,7 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
 
     # Create real HandledTurnLedger with the test path
     bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
 
     # Mock logger
     bot.logger = MagicMock()
@@ -959,7 +993,7 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
 
     # Mock the methods
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock),
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock),
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate,
         patch.object(bot, "_edit_message", new_callable=AsyncMock) as mock_edit,
     ):
@@ -1090,7 +1124,7 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
 
     # Mock the methods
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(bot, "_edit_message", new_callable=AsyncMock) as mock_edit,
     ):
         mock_context.return_value = MagicMock(
@@ -1197,7 +1231,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
     }
 
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
@@ -1347,7 +1381,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
     }
 
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
@@ -1470,7 +1504,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
     }
 
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
@@ -1607,7 +1641,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
     )
 
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
@@ -1850,9 +1884,12 @@ def test_remove_stale_runs_for_edited_message_uses_internal_state_writer_helpers
         rooms=["!test:example.com"],
     )
 
-    original_logger = MagicMock()
+    captured_logger = MagicMock()
     rebound_logger = MagicMock()
-    bot.logger = original_logger
+    state_writer = unwrap_extracted_collaborator(bot._conversation_state_writer)
+    bot._conversation_state_writer = ConversationStateWriter(
+        replace(state_writer.deps, logger=captured_logger),
+    )
     bot.logger = rebound_logger
 
     storage = MagicMock()
@@ -1880,12 +1917,12 @@ def test_remove_stale_runs_for_edited_message_uses_internal_state_writer_helpers
 
     mock_history_session_type.assert_called_once_with()
     mock_create_history_scope_storage.assert_called_once()
-    rebound_logger.info.assert_called_once_with(
+    captured_logger.info.assert_called_once_with(
         "Removed stale run for edited message",
         event_id="$original:example.com",
         session_id="!test:example.com",
     )
-    original_logger.info.assert_not_called()
+    rebound_logger.info.assert_not_called()
     storage.close.assert_called_once_with()
 
 
@@ -1970,7 +2007,7 @@ async def test_handle_message_edit_uses_fallback_cleanup_when_turn_context_was_r
         return "$response:example.com"
 
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(bot, "_remove_stale_runs_for_edited_message") as mock_fallback_cleanup,
         patch.object(
             bot._conversation_state_writer,
@@ -2035,6 +2072,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
     bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
     bot.logger = MagicMock()
 
@@ -2080,7 +2118,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     session_id = create_session_id("!test:example.com", None)
     storage = _FakeAgentStorage(session=None)
 
-    async def process_and_respond(*_args: object, **kwargs: object) -> _ResponseDispatchResult:
+    async def process_and_respond(*_args: object, **kwargs: object) -> DeliveryResult:
         storage.session = AgentSession(
             session_id=session_id,
             runs=[
@@ -2098,22 +2136,24 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
                 ),
             ],
         )
-        return _ResponseDispatchResult(
+        return DeliveryResult(
             event_id="$response:example.com",
             response_text="ok",
             delivery_kind="sent",
         )
 
     with (
-        patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
-        patch.object(bot, "_create_history_scope_storage", return_value=storage),
+        patch.object(bot._conversation_state_writer, "create_history_scope_storage", return_value=storage),
         patch(
             "mindroom.response_coordinator.ResponseCoordinator.process_and_respond",
             new=AsyncMock(side_effect=process_and_respond),
         ),
-        patch("mindroom.bot.reprioritize_auto_flush_sessions"),
-        patch("mindroom.bot.mark_auto_flush_dirty_session"),
+        patch("mindroom.response_coordinator.reprioritize_auto_flush_sessions"),
+        patch("mindroom.response_coordinator.mark_auto_flush_dirty_session"),
         patch.object(Config, "get_agent_memory_backend", return_value="none"),
+        patch_response_coordinator_module(
+            should_use_streaming=AsyncMock(return_value=False),
+        ),
     ):
         response_event_id = await bot._generate_response(
             room_id="!test:example.com",
@@ -2138,7 +2178,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     assert persisted_metadata["matrix_response_event_id"] == "$response:example.com"
 
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=False),
         patch.object(
             bot._conversation_state_writer,
@@ -2265,7 +2305,7 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
     )
 
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
@@ -2349,8 +2389,8 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         conversation_target=stored_target,
     )
 
-    async def process_and_respond(*_args: object, **kwargs: object) -> _ResponseDispatchResult:
-        storage = bot._create_history_scope_storage(None)
+    async def process_and_respond(*_args: object, **kwargs: object) -> DeliveryResult:
+        storage = bot._conversation_state_writer.create_history_scope_storage(None)
         try:
             storage.upsert_session(
                 AgentSession(
@@ -2378,20 +2418,20 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
             )
         finally:
             storage.close()
-        return _ResponseDispatchResult(
+        return DeliveryResult(
             event_id="$response-new:example.com",
             response_text="ok",
             delivery_kind="sent",
         )
 
     with (
-        patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.response_coordinator.should_use_streaming", new_callable=AsyncMock, return_value=False),
         patch(
             "mindroom.response_coordinator.ResponseCoordinator.process_and_respond",
             new=AsyncMock(side_effect=process_and_respond),
         ),
-        patch("mindroom.bot.reprioritize_auto_flush_sessions"),
-        patch("mindroom.bot.mark_auto_flush_dirty_session"),
+        patch("mindroom.response_coordinator.reprioritize_auto_flush_sessions"),
+        patch("mindroom.response_coordinator.mark_auto_flush_dirty_session"),
         patch.object(Config, "get_agent_memory_backend", return_value="none"),
     ):
         response_event_id = await bot._generate_response(
@@ -2410,7 +2450,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         )
 
     assert response_event_id == "$response-new:example.com"
-    storage = bot._create_history_scope_storage(None)
+    storage = bot._conversation_state_writer.create_history_scope_storage(None)
     try:
         persisted_session = get_agent_session(storage, session_id)
     finally:
@@ -2475,7 +2515,11 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
     }
 
     with (
-        patch.object(restarted_bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(
+            restarted_bot._conversation_resolver,
+            "extract_message_context",
+            new_callable=AsyncMock,
+        ) as mock_context,
         patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
         patch("mindroom.bot.remove_run_by_event_id", return_value=True),
         patch.object(
@@ -2573,7 +2617,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
-        patch("mindroom.bot.fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
+        patch("mindroom.conversation_state_writer.fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
     ):
         # Setup mocks
         mock_handle_reaction.return_value = ("Option 1", "thread_id")  # selected_value, thread_id
@@ -2934,17 +2978,17 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     }
 
     # Mock voice_handler._handle_voice_message to return a transcription
+    mock_generate_response = AsyncMock(return_value="$response:example.com")
+    install_generate_response_mock(bot, mock_generate_response)
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
-        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
+        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_handle_voice.return_value = "This is the transcribed message from voice"
-        mock_generate_response.return_value = "$response:example.com"
 
         # Process the voice event
         await bot._on_media_message(room, voice_event)
@@ -3041,17 +3085,17 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
     }
 
     # Mock voice_handler._handle_voice_message to return None (no transcription)
+    mock_generate_response = AsyncMock(return_value="$response:example.com")
+    install_generate_response_mock(bot, mock_generate_response)
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
-        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
+        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_handle_voice.return_value = None  # No transcription
-        mock_generate_response.return_value = "$response:example.com"
 
         # Process the voice event
         await bot._on_media_message(room, voice_event)
@@ -3238,7 +3282,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
     # Mock is_authorized_sender to return False
     with (
         patch("mindroom.bot.is_authorized_sender", return_value=False) as mock_is_authorized,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
     ):
         # Process the voice event
         await bot._on_media_message(room, voice_event)

@@ -957,7 +957,7 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    runtime_context = bot._build_tool_runtime_context(
+    runtime_context = bot._tool_runtime_support.build_context(
         MessageTarget.resolve("!room:localhost", "$thread", None),
         user_id="@user:localhost",
     )
@@ -1288,11 +1288,11 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
                 thread_id="$thread",
                 reply_to_event_id=None,
             )
-            tool_context = bot._build_tool_runtime_context(target, user_id="@user:localhost")
+            tool_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
             assert tool_context is not None
             assert tool_context.hook_registry.has_hooks(custom_event_name)
 
-            execution_identity = bot._build_tool_execution_identity(
+            execution_identity = bot._tool_runtime_support.build_execution_identity(
                 target=target,
                 user_id="@user:localhost",
                 session_id="session-1",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,7 +18,13 @@ from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    runtime_paths_for,
+    sync_bot_runtime_state,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -76,8 +83,10 @@ def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:
         runtime_paths=runtime_paths_for(config),
     )
     bot.client = AsyncMock()
+    bot.client.user_id = bot.agent_user.user_id
     bot.logger = MagicMock()
     bot._conversation_resolver.derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    sync_bot_runtime_state(bot)
     return bot
 
 
@@ -111,9 +120,9 @@ async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
 
     # Patch the function to capture what was passed
 
-    with patch("mindroom.bot.format_message_with_mentions") as mock_create:
+    with patch("mindroom.delivery_gateway.format_message_with_mentions") as mock_create:
         mock_create.return_value = mock_content.copy()
-        with patch("mindroom.bot.send_message") as mock_send:
+        with patch("mindroom.delivery_gateway.send_message") as mock_send:
             mock_send.return_value = "$response123"
 
             # Call the actual _send_response method with skip_mentions=True
@@ -160,7 +169,11 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
     )
 
     # Extract context - should not detect mentions
-    context = await AgentBot._extract_message_context_impl(bot, room, event_with_skip, full_history=True)
+    context = await bot._conversation_resolver.extract_message_context_impl(
+        room,
+        event_with_skip,
+        full_history=True,
+    )
 
     # Verify mentions were ignored
     assert context.am_i_mentioned is False
@@ -184,10 +197,14 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
     )
 
     # Mock check_agent_mentioned to return that we're mentioned
-    with patch("mindroom.bot.check_agent_mentioned") as mock_check:
+    with patch("mindroom.conversation_resolver.check_agent_mentioned") as mock_check:
         mock_check.return_value = (["email_agent"], True, False)
 
-        context = await AgentBot._extract_message_context_impl(bot, room, event_without_skip, full_history=True)
+        context = await bot._conversation_resolver.extract_message_context_impl(
+            room,
+            event_without_skip,
+            full_history=True,
+        )
 
         # Verify mentions were detected
         assert context.am_i_mentioned is True
@@ -222,7 +239,11 @@ async def test_extract_context_without_skip_metadata_detects_tool_mentions(tmp_p
         },
     )
 
-    context = await AgentBot._extract_message_context_impl(bot, room, event, full_history=True)
+    context = await bot._conversation_resolver.extract_message_context_impl(
+        room,
+        event,
+        full_history=True,
+    )
 
     assert context.am_i_mentioned is True
     assert [agent.full_id for agent in context.mentioned_agents] == [
@@ -239,24 +260,25 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
     runtime_paths = runtime_paths_for(config)
     before_hooks = AsyncMock()
     after_hooks = AsyncMock()
+    response_hooks = MagicMock()
+    response_hooks.apply_before_response = before_hooks
+    response_hooks.emit_after_response = after_hooks
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
-            client=AsyncMock(),
-            config=config,
+            runtime=SimpleNamespace(
+                client=AsyncMock(),
+                config=config,
+                enable_streaming=True,
+                orchestrator=None,
+                event_cache=None,
+            ),
             runtime_paths=runtime_paths,
-            sender_domain="localhost",
             agent_name="email_agent",
             logger=MagicMock(),
-            build_message_target=MagicMock(),
-            format_message_with_mentions=MagicMock(),
-            get_latest_thread_event_id_if_needed=AsyncMock(),
-            send_message=AsyncMock(),
-            build_threaded_edit_content=AsyncMock(),
-            edit_message=AsyncMock(),
             redact_message_event=AsyncMock(return_value=True),
-            apply_before_response_hooks=before_hooks,
-            emit_after_response_hooks=after_hooks,
-            send_streaming_response=AsyncMock(),
+            sender_domain="localhost",
+            resolver=SimpleNamespace(build_message_target=MagicMock()),
+            response_hooks=response_hooks,
         ),
     )
     return gateway, before_hooks, after_hooks

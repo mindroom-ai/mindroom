@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot, _DispatchPayload, _MessageContext, _PreparedDispatch
+from mindroom.bot import AgentBot
 from mindroom.coalescing import (
     GatePhase,
     PendingEvent,
@@ -23,12 +23,22 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
-from mindroom.dispatch_planner import DispatchPlan
+from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_planner import DispatchPlan, PreparedDispatch
 from mindroom.hooks import MessageEnvelope
+from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_generate_response_mock,
+    install_send_response_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+    wrap_extracted_collaborators,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -79,7 +89,9 @@ def _make_bot(
         display_name="TestAgent",
         user_id=f"@mindroom_{agent_name}:localhost",
     )
-    return AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    wrap_extracted_collaborators(bot)
+    return bot
 
 
 def _respond_dispatch_plan(action: object | None = None) -> DispatchPlan:
@@ -194,8 +206,8 @@ def _prepared_dispatch(
     requester_user_id: str = "@user:localhost",
     body: str = "hello",
     thread_id: str | None = None,
-) -> _PreparedDispatch:
-    context = _MessageContext(
+) -> PreparedDispatch:
+    context = MessageContext(
         am_i_mentioned=True,
         is_thread=thread_id is not None,
         thread_id=thread_id,
@@ -208,7 +220,7 @@ def _prepared_dispatch(
         thread_id=thread_id,
         reply_to_event_id=event_id,
     )
-    return _PreparedDispatch(
+    return PreparedDispatch(
         requester_user_id=requester_user_id,
         context=context,
         target=target,
@@ -1079,19 +1091,21 @@ async def test_handled_turn_ledger_marks_all_batch_event_ids(tmp_path: Path) -> 
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
     second = _text_event(event_id="$m2", body="second", server_timestamp=1001)
     dispatch = _prepared_dispatch(event_id="$m2")
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     with (
-        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_plan_dispatch", new=AsyncMock(return_value=_respond_dispatch_plan())),
+        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._dispatch_planner, "plan_dispatch", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(
-            bot,
-            "_build_dispatch_payload_with_attachments",
-            new=AsyncMock(return_value=_DispatchPayload(prompt="combined")),
+            bot._inbound_turn_normalizer,
+            "build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=DispatchPayload(prompt="combined")),
         ),
-        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
-        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
-        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot, "_log_dispatch_latency"),
+        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
         await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
         await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
@@ -1213,8 +1227,8 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
 
     action_mock = AsyncMock()
     with (
-        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_plan_dispatch", new=action_mock),
+        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
     ):
         await bot._dispatch_text_message(room, older_event, "@user:localhost")
 
@@ -1237,19 +1251,21 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
     )
     dispatch = _prepared_dispatch(event_id="$m1", body="hello")
     dispatch.context.thread_history = []
+    bot._send_response = AsyncMock(return_value="$placeholder")
+    bot._generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, bot._send_response)
+    install_generate_response_mock(bot, bot._generate_response)
 
     with (
-        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_plan_dispatch", new=AsyncMock(return_value=_respond_dispatch_plan())),
+        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._dispatch_planner, "plan_dispatch", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(
-            bot,
-            "_build_dispatch_payload_with_attachments",
-            new=AsyncMock(return_value=_DispatchPayload(prompt="hello")),
+            bot._inbound_turn_normalizer,
+            "build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=DispatchPayload(prompt="hello")),
         ),
-        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
-        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
-        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot, "_log_dispatch_latency"),
+        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
         await bot._dispatch_text_message(room, event, "@user:localhost")
 
@@ -1460,20 +1476,22 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         latest_event_id="$m2",
     )
     dispatch.context.thread_history = [newer_cmd]
+    bot._send_response = AsyncMock(return_value="$placeholder")
+    bot._generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, bot._send_response)
+    install_generate_response_mock(bot, bot._generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
-        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_plan_dispatch", new=action_mock),
+        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
         patch.object(
-            bot,
-            "_build_dispatch_payload_with_attachments",
-            new=AsyncMock(return_value=_DispatchPayload(prompt="What is the project structure?")),
+            bot._inbound_turn_normalizer,
+            "build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=DispatchPayload(prompt="What is the project structure?")),
         ),
-        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
-        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
-        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot, "_log_dispatch_latency"),
+        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
         await bot._dispatch_text_message(room, older_event, "@user:localhost")
 
@@ -1505,20 +1523,22 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         latest_event_id="$m2",
     )
     dispatch.context.thread_history = [newer_cmd]
+    bot._send_response = AsyncMock(return_value="$placeholder")
+    bot._generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, bot._send_response)
+    install_generate_response_mock(bot, bot._generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
-        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_plan_dispatch", new=action_mock),
+        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
         patch.object(
-            bot,
-            "_build_dispatch_payload_with_attachments",
-            new=AsyncMock(return_value=_DispatchPayload(prompt="hello")),
+            bot._inbound_turn_normalizer,
+            "build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=DispatchPayload(prompt="hello")),
         ),
-        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
-        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
-        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot, "_log_dispatch_latency"),
+        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
         await bot._dispatch_text_message(room, older_event, "@user:localhost")
 
@@ -1559,20 +1579,22 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$s2",
     )
     dispatch.context.thread_history = [newer_msg]
+    bot._send_response = AsyncMock(return_value="$placeholder")
+    bot._generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, bot._send_response)
+    install_generate_response_mock(bot, bot._generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
-        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_plan_dispatch", new=action_mock),
+        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
         patch.object(
-            bot,
-            "_build_dispatch_payload_with_attachments",
-            new=AsyncMock(return_value=_DispatchPayload(prompt="scheduled task output")),
+            bot._inbound_turn_normalizer,
+            "build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=DispatchPayload(prompt="scheduled task output")),
         ),
-        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
-        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
-        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot, "_log_dispatch_latency"),
+        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
         await bot._dispatch_text_message(room, scheduled_event, "@mindroom_test_agent:localhost")
 
@@ -1605,20 +1627,22 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$h2",
     )
     dispatch.context.thread_history = [newer_msg]
+    bot._send_response = AsyncMock(return_value="$placeholder")
+    bot._generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, bot._send_response)
+    install_generate_response_mock(bot, bot._generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
-        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_plan_dispatch", new=action_mock),
+        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
         patch.object(
-            bot,
-            "_build_dispatch_payload_with_attachments",
-            new=AsyncMock(return_value=_DispatchPayload(prompt="hook result")),
+            bot._inbound_turn_normalizer,
+            "build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=DispatchPayload(prompt="hook result")),
         ),
-        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
-        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
-        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot, "_log_dispatch_latency"),
+        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
         await bot._dispatch_text_message(room, hook_event, "@mindroom_test_agent:localhost")
 
@@ -1653,20 +1677,22 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$s2",
     )
     dispatch.context.thread_history = [second_fire_msg]
+    bot._send_response = AsyncMock(return_value="$placeholder")
+    bot._generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, bot._send_response)
+    install_generate_response_mock(bot, bot._generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
-        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_plan_dispatch", new=action_mock),
+        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
         patch.object(
-            bot,
-            "_build_dispatch_payload_with_attachments",
-            new=AsyncMock(return_value=_DispatchPayload(prompt="scheduled fire 1")),
+            bot._inbound_turn_normalizer,
+            "build_dispatch_payload_with_attachments",
+            new=AsyncMock(return_value=DispatchPayload(prompt="scheduled fire 1")),
         ),
-        patch.object(bot, "_send_response", new=AsyncMock(return_value="$placeholder")),
-        patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response")),
-        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot, "_log_dispatch_latency"),
+        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
         await bot._dispatch_text_message(room, first_fire, "@mindroom_test_agent:localhost")
 
@@ -1708,8 +1734,8 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
 
     action_mock = AsyncMock()
     with (
-        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_plan_dispatch", new=action_mock),
+        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
     ):
         await bot._dispatch_text_message(room, coalesced_event, "@user:localhost")
 
@@ -1749,8 +1775,8 @@ async def test_voice_synthetic_suppressed_by_thread_guard(tmp_path: Path) -> Non
 
     action_mock = AsyncMock()
     with (
-        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_plan_dispatch", new=action_mock),
+        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
     ):
         await bot._dispatch_text_message(room, voice_event, "@user:localhost")
 
@@ -1791,7 +1817,7 @@ async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> Non
 
     handle_cmd_mock = AsyncMock()
     with (
-        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
         patch.object(bot, "_handle_command", new=handle_cmd_mock),
     ):
         await bot._dispatch_text_message(room, cmd_event, "@user:localhost")

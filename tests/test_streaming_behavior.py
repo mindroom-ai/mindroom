@@ -33,7 +33,14 @@ from mindroom.streaming import (
     is_interrupted_partial_reply,
     send_streaming_response,
 )
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    patch_response_coordinator_module,
+    replace_response_coordinator_deps,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -98,9 +105,9 @@ class TestStreamingBehavior:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.stream_agent_response")
-    @patch("mindroom.bot.should_use_streaming")
+    @patch("mindroom.response_coordinator.ai_response")
+    @patch("mindroom.response_coordinator.stream_agent_response")
+    @patch("mindroom.response_coordinator.should_use_streaming")
     async def test_streaming_agent_mentions_another_agent(  # noqa: PLR0915
         self,
         mock_should_use_streaming: AsyncMock,
@@ -195,7 +202,7 @@ class TestStreamingBehavior:
         }
 
         # Mock that we're mentioned
-        with patch("mindroom.bot.check_agent_mentioned") as mock_check:
+        with patch("mindroom.conversation_resolver.check_agent_mentioned") as mock_check:
             mock_check.return_value = ([MatrixID.parse("@mindroom_helper:localhost")], True, False)
 
             # Process message with helper bot - it should stream a response
@@ -219,7 +226,7 @@ class TestStreamingBehavior:
         }
 
         # Process initial message - calculator should NOT respond while the stream is active.
-        with patch("mindroom.bot.check_agent_mentioned") as mock_check:
+        with patch("mindroom.conversation_resolver.check_agent_mentioned") as mock_check:
             mock_check.return_value = ([MatrixID.parse("@mindroom_calculator:localhost")], True, False)
 
             # Debug: let's see what happens
@@ -249,7 +256,7 @@ class TestStreamingBehavior:
         }
 
         # Process final message - calculator SHOULD respond now
-        with patch("mindroom.bot.check_agent_mentioned") as mock_check:
+        with patch("mindroom.conversation_resolver.check_agent_mentioned") as mock_check:
             mock_check.return_value = ([MatrixID.parse("@mindroom_calculator:localhost")], True, False)
             with patch("mindroom.bot.extract_agent_name") as mock_extract:
                 # Make extract_agent_name return 'helper' for the sender
@@ -260,7 +267,7 @@ class TestStreamingBehavior:
         assert mock_ai_response.call_count == 1
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
+    @patch("mindroom.response_coordinator.ai_response")
     async def test_agent_responds_only_to_final_message(
         self,
         mock_ai_response: AsyncMock,
@@ -807,8 +814,11 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(config),
         )
         bot.client = MagicMock(rooms={})
-        bot._knowledge_for_agent = MagicMock(return_value=None)
-        bot._ensure_request_knowledge_managers = empty_request_knowledge_managers
+        bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+        replace_response_coordinator_deps(
+            bot,
+            knowledge_access=bot._knowledge_access_support,
+        )
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
             room_id="!test:localhost",
@@ -841,11 +851,14 @@ class TestStreamingBehavior:
             return "$stream_1"
 
         with (
-            patch("mindroom.bot.stream_agent_response", new=MagicMock(return_value=response_stream())),
-            patch("mindroom.bot.typing_indicator", new=noop_typing),
             patch("mindroom.streaming.get_latest_thread_event_id_if_needed", new=no_latest_thread_event),
             patch("mindroom.streaming.send_message", new=record_send),
             patch("mindroom.streaming.edit_message", new=record_edit),
+            patch_response_coordinator_module(
+                ensure_request_knowledge_managers=empty_request_knowledge_managers,
+                stream_agent_response=MagicMock(return_value=response_stream()),
+                typing_indicator=noop_typing,
+            ),
         ):
             delivery = await bot._process_and_respond_streaming(
                 ResponseRequest(

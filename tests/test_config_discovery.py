@@ -50,6 +50,7 @@ _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
     "src/mindroom/api/sandbox_runner.py",
     "src/mindroom/bot.py",
     "src/mindroom/commands/handler.py",
+    "src/mindroom/response_coordinator.py",
     "src/mindroom/tool_system/worker_routing.py",
 }
 _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {

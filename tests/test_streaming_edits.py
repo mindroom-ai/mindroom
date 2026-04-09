@@ -97,8 +97,8 @@ class TestStreamingEdits:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.stream_agent_response")
+    @patch("mindroom.response_coordinator.ai_response")
+    @patch("mindroom.response_coordinator.stream_agent_response")
     async def test_agent_regenerates_on_user_edits(
         self,
         mock_stream_agent_response: AsyncMock,  # noqa: ARG002
@@ -209,7 +209,7 @@ class TestStreamingEdits:
         assert mock_generate_response.await_count == 1
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
+    @patch("mindroom.response_coordinator.ai_response")
     async def test_agent_responds_to_new_messages_after_edits(
         self,
         mock_ai_response: AsyncMock,
@@ -253,7 +253,7 @@ class TestStreamingEdits:
         assert mock_ai_response.call_count == 1
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
+    @patch("mindroom.response_coordinator.ai_response")
     async def test_agent_ignores_all_edits_from_agents(
         self,
         mock_ai_response: AsyncMock,
@@ -321,7 +321,7 @@ class TestStreamingEdits:
         assert mock_ai_response.call_count == 0
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
+    @patch("mindroom.response_coordinator.ai_response")
     async def test_agent_responds_to_user_edits_with_new_mentions(
         self,
         mock_ai_response: AsyncMock,

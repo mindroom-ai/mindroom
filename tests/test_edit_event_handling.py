@@ -11,6 +11,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
+from tests.conftest import wrap_extracted_collaborators
 
 
 @pytest.mark.asyncio
@@ -40,6 +41,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
         ),
         rooms=["!test:example.com"],
     )
+    wrap_extracted_collaborators(bot)
 
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -119,7 +121,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     # Mock the routing method that would be called for the router
     with (
         patch.object(bot, "_handle_ai_routing", new_callable=AsyncMock) as mock_routing,
-        patch.object(bot, "_can_reply_to_sender", return_value=True),
+        patch.object(bot._dispatch_planner, "can_reply_to_sender", return_value=True),
         patch.object(bot, "_load_persisted_turn_metadata", return_value=None),
     ):
         # Process the original message - this should trigger routing
@@ -160,6 +162,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
         ),
         rooms=["!test:example.com"],
     )
+    wrap_extracted_collaborators(bot)
 
     # Mock the client and dependencies
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -252,6 +255,7 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
         ),
         rooms=["!test:example.com"],
     )
+    wrap_extracted_collaborators(bot)
 
     # Mock the client and dependencies
     bot.client = AsyncMock(spec=nio.AsyncClient)

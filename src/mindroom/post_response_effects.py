@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom import constants
+from mindroom import constants, interactive
+from mindroom.background_tasks import create_background_task
+from mindroom.delivery_gateway import CompactionNoticeRequest
+from mindroom.thread_summary import maybe_generate_thread_summary
+from mindroom.timing import timed
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -14,7 +18,9 @@ if TYPE_CHECKING:
     import structlog
     from agno.db.base import SessionType
 
-    from mindroom.delivery_gateway import DeliveryResult
+    from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.constants import RuntimePaths
+    from mindroom.delivery_gateway import DeliveryGateway, DeliveryResult
     from mindroom.handled_turns import HandledTurnLedger, HandledTurnState
     from mindroom.history.types import CompactionOutcome
     from mindroom.matrix.client import ResolvedVisibleMessage
@@ -70,6 +76,160 @@ class PostResponseEffectsDeps:
     persist_response_event_id: Callable[[str, str], None] | None = None
     queue_thread_summary: Callable[[str, str, int | None], None] | None = None
     record_handled_turn: Callable[[HandledTurnState], None] | None = None
+
+
+@dataclass(frozen=True)
+class PostResponseEffectsSupport:
+    """Shared support used to build per-response post-effect deps."""
+
+    runtime: BotRuntimeView
+    logger: structlog.stdlib.BoundLogger
+    runtime_paths: RuntimePaths
+    delivery_gateway: DeliveryGateway
+
+    def _client(self) -> nio.AsyncClient:
+        """Return the current Matrix client for interactive follow-up effects."""
+        client = self.runtime.client
+        if client is None:
+            msg = "Matrix client is not ready for post-response effects"
+            raise RuntimeError(msg)
+        return client
+
+    @timed("maybe_generate_thread_summary")
+    async def _timed_thread_summary(
+        self,
+        *,
+        thread_id: str,
+        summary_coro: Awaitable[None],
+    ) -> None:
+        """Run thread-summary generation with duration logging."""
+        del thread_id
+        await summary_coro
+
+    async def _register_interactive_delivery(
+        self,
+        *,
+        event_id: str,
+        room_id: str,
+        target: MessageTarget,
+        option_map: dict[str, str],
+        options_list: list[dict[str, str]],
+        agent_name: str,
+    ) -> None:
+        """Persist one interactive response and add its reaction buttons."""
+        interactive.register_interactive_question(
+            event_id,
+            room_id,
+            target.resolved_thread_id,
+            option_map,
+            agent_name,
+        )
+        await interactive.add_reaction_buttons(
+            self._client(),
+            room_id,
+            event_id,
+            options_list,
+        )
+
+    async def _dispatch_compaction_notices(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        main_response_event_id: str | None,
+        thread_id: str | None,
+        compaction_outcomes: Sequence[CompactionOutcome],
+    ) -> None:
+        """Send compaction notices for all outcomes that request one."""
+        if main_response_event_id is None:
+            return
+        for outcome in compaction_outcomes:
+            if not outcome.notify:
+                continue
+            await self.delivery_gateway.send_compaction_notice(
+                CompactionNoticeRequest(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    main_response_event_id=main_response_event_id,
+                    thread_id=thread_id,
+                    outcome=outcome,
+                ),
+            )
+
+    def queue_thread_summary(
+        self,
+        room_id: str,
+        thread_id: str,
+        message_count_hint: int | None,
+    ) -> None:
+        """Queue background thread summarization with timing instrumentation."""
+        summary_coro = maybe_generate_thread_summary(
+            client=self._client(),
+            room_id=room_id,
+            thread_id=thread_id,
+            config=self.runtime.config,
+            runtime_paths=self.runtime_paths,
+            message_count_hint=message_count_hint,
+        )
+        create_background_task(
+            self._timed_thread_summary(
+                thread_id=thread_id,
+                summary_coro=summary_coro,
+            ),
+            name=f"thread_summary_{room_id}_{thread_id}",
+        )
+
+    def build_deps(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        interactive_agent_name: str,
+        strip_transient_enrichment: Callable[[], None] | None = None,
+        queue_memory_persistence: Callable[[], None] | None = None,
+        persist_response_event_id: Callable[[str, str], None] | None = None,
+        record_handled_turn: Callable[[HandledTurnState], None] | None = None,
+    ) -> PostResponseEffectsDeps:
+        """Build the per-response post-effect dependency surface."""
+
+        async def register_interactive(
+            event_id: str,
+            target: MessageTarget,
+            option_map: dict[str, str],
+            options_list: list[dict[str, str]],
+        ) -> None:
+            await self._register_interactive_delivery(
+                event_id=event_id,
+                room_id=room_id,
+                target=target,
+                option_map=option_map,
+                options_list=options_list,
+                agent_name=interactive_agent_name,
+            )
+
+        async def dispatch_compaction_notices(
+            main_response_event_id: str,
+            compaction_outcomes: Sequence[CompactionOutcome],
+        ) -> None:
+            await self._dispatch_compaction_notices(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                main_response_event_id=main_response_event_id,
+                thread_id=thread_id,
+                compaction_outcomes=compaction_outcomes,
+            )
+
+        return PostResponseEffectsDeps(
+            logger=self.logger,
+            register_interactive=register_interactive,
+            dispatch_compaction_notices=dispatch_compaction_notices,
+            strip_transient_enrichment=strip_transient_enrichment,
+            queue_memory_persistence=queue_memory_persistence,
+            persist_response_event_id=persist_response_event_id,
+            queue_thread_summary=self.queue_thread_summary,
+            record_handled_turn=record_handled_turn,
+        )
 
 
 def record_handled_turn(

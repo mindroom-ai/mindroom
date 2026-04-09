@@ -117,6 +117,14 @@ _PRIVATE_CULTURE_MANAGER_CACHE: WeakValueDictionary[
 ] = WeakValueDictionary()
 
 
+def show_tool_calls_for_agent(config: Config, agent_name: str) -> bool:
+    """Resolve tool-call visibility for one agent from current config."""
+    agent_config = config.agents.get(agent_name)
+    if agent_config and agent_config.show_tool_calls is not None:
+        return agent_config.show_tool_calls
+    return config.defaults.show_tool_calls
+
+
 def _uses_default_mind_workspace_scaffold(agent_name: str, agent_config: AgentConfig) -> bool:
     return (
         agent_name == _DEFAULT_MIND_AGENT_NAME
@@ -1131,9 +1139,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
 
-    show_tool_calls = (
-        agent_config.show_tool_calls if agent_config.show_tool_calls is not None else defaults.show_tool_calls
-    )
+    show_tool_calls = show_tool_calls_for_agent(config, agent_name)
     if not show_tool_calls:
         instructions.append(agent_prompts.HIDDEN_TOOL_CALLS_PROMPT)
 

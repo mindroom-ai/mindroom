@@ -2,31 +2,42 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence  # noqa: TC003
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.attachments import append_attachment_ids_prompt
+from mindroom.attachment_media import resolve_attachment_media
+from mindroom.attachments import (
+    append_attachment_ids_prompt,
+    merge_attachment_ids,
+    parse_attachment_ids_from_thread_history,
+    register_file_or_video_attachment,
+    register_image_attachment,
+    resolve_thread_attachment_ids,
+)
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.image_handler import download_image
 from mindroom.matrix.message_content import (
     is_v2_sidecar_text_preview,
+    resolve_event_source_content,
+    visible_body_from_event_source,
 )
 from mindroom.media_inputs import MediaInputs
+from mindroom.voice_handler import prepare_voice_message
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
     import structlog
     from agno.media import Image
 
-    from mindroom.config.main import Config
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
+    from mindroom.conversation_resolver import ConversationResolver
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.identity import MatrixID
-    from mindroom.message_target import MessageTarget
 
 type MediaDispatchEvent = (
     nio.RoomMessageImage
@@ -36,19 +47,6 @@ type MediaDispatchEvent = (
     | nio.RoomMessageVideo
     | nio.RoomEncryptedVideo
 )
-
-
-class _PreparedVoiceMessage(Protocol):
-    """Minimal prepared voice surface needed by the normalizer."""
-
-    text: str
-    source: dict[str, Any]
-
-
-class _AttachmentRecord(Protocol):
-    """Minimal attachment record surface needed by the normalizer."""
-
-    attachment_id: str
 
 
 @dataclass(frozen=True)
@@ -118,27 +116,12 @@ class DispatchPayloadWithAttachmentsRequest:
 class InboundTurnNormalizerDeps:
     """Explicit collaborators for inbound normalization."""
 
-    client_getter: Callable[[], nio.AsyncClient | None]
+    runtime: BotRuntimeView
+    logger: structlog.stdlib.BoundLogger
     storage_path: Path
-    config_getter: Callable[[], Config]
     runtime_paths: RuntimePaths
-    matrix_id_getter: Callable[[], MatrixID]
-    logger_getter: Callable[[], structlog.stdlib.BoundLogger]
-    prepare_voice_message: Callable[..., Awaitable[_PreparedVoiceMessage | None]]
-    resolve_event_source_content: Callable[..., Awaitable[dict[str, Any]]]
-    visible_body_from_event_source: Callable[[dict[str, Any], str], str]
-    download_image: Callable[..., Awaitable[Image | None]]
-    register_file_or_video_attachment: Callable[..., Awaitable[_AttachmentRecord | None]]
-    register_image_attachment: Callable[..., Awaitable[_AttachmentRecord | None]]
-    resolve_attachment_media: Callable[..., tuple[list[str], list[Any], list[Image], list[Any], list[Any]]]
-    build_message_target: Callable[..., MessageTarget]
-    derive_conversation_context: Callable[
-        [str, EventInfo],
-        Awaitable[tuple[bool, str | None, Sequence[ResolvedVisibleMessage]]],
-    ]
-    resolve_thread_attachment_ids: Callable[..., Awaitable[list[str]]]
-    parse_attachment_ids_from_thread_history: Callable[[Sequence[ResolvedVisibleMessage]], list[str]]
-    merge_attachment_ids: Callable[..., list[str]]
+    sender_domain: str
+    conversation_resolver: ConversationResolver
 
 
 @dataclass(frozen=True)
@@ -148,23 +131,11 @@ class InboundTurnNormalizer:
     deps: InboundTurnNormalizerDeps
 
     def _client(self) -> nio.AsyncClient:
-        client = self.deps.client_getter()
+        client = self.deps.runtime.client
         if client is None:
             msg = "Matrix client is not ready for inbound normalization"
             raise RuntimeError(msg)
         return client
-
-    def _config(self) -> Config:
-        """Return the bot's current live config."""
-        return self.deps.config_getter()
-
-    def _logger(self) -> structlog.stdlib.BoundLogger:
-        """Return the bot's current live logger."""
-        return self.deps.logger_getter()
-
-    def _matrix_id(self) -> MatrixID:
-        """Return the bot's current live Matrix ID."""
-        return self.deps.matrix_id_getter()
 
     async def resolve_text_event(self, request: TextNormalizationRequest) -> PreparedTextEvent:
         """Return one canonical text event for hooks, routing, and command handling."""
@@ -172,11 +143,11 @@ class InboundTurnNormalizer:
         if isinstance(event, PreparedTextEvent):
             return event
 
-        resolved_source = await self.deps.resolve_event_source_content(event.source, self._client())
+        resolved_source = await resolve_event_source_content(event.source, self._client())
         return PreparedTextEvent(
             sender=event.sender,
             event_id=event.event_id,
-            body=self.deps.visible_body_from_event_source(resolved_source, event.body),
+            body=visible_body_from_event_source(resolved_source, event.body),
             source=resolved_source,
             server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
         )
@@ -185,21 +156,24 @@ class InboundTurnNormalizer:
         """Normalize one audio message into a prepared text event."""
         client = self._client()
         event_info = EventInfo.from_event(request.event.source)
-        _, thread_id, _ = await self.deps.derive_conversation_context(request.room.room_id, event_info)
-        effective_thread_id = self.deps.build_message_target(
+        _, thread_id, _ = await self.deps.conversation_resolver.derive_conversation_context(
+            request.room.room_id,
+            event_info,
+        )
+        effective_thread_id = self.deps.conversation_resolver.build_message_target(
             room_id=request.room.room_id,
             thread_id=thread_id,
             reply_to_event_id=request.event.event_id,
             event_source=request.event.source,
         ).resolved_thread_id
-        prepared_voice = await self.deps.prepare_voice_message(
+        prepared_voice = await prepare_voice_message(
             client,
             self.deps.storage_path,
             request.room,
             request.event,
-            self._config(),
+            self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
-            sender_domain=self._matrix_id().domain,
+            sender_domain=self.deps.sender_domain,
             thread_id=effective_thread_id,
         )
         if prepared_voice is None:
@@ -232,11 +206,11 @@ class InboundTurnNormalizer:
         if not is_v2_sidecar_text_preview(event.source):
             return None
 
-        resolved_source = await self.deps.resolve_event_source_content(event.source, self._client())
+        resolved_source = await resolve_event_source_content(event.source, self._client())
         return PreparedTextEvent(
             sender=event.sender,
             event_id=event.event_id,
-            body=self.deps.visible_body_from_event_source(resolved_source, event.body),
+            body=visible_body_from_event_source(resolved_source, event.body),
             source=resolved_source,
             server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
         )
@@ -254,7 +228,7 @@ class InboundTurnNormalizer:
             event,
             nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
         ):
-            attachment_record = await self.deps.register_file_or_video_attachment(
+            attachment_record = await register_file_or_video_attachment(
                 client,
                 self.deps.storage_path,
                 room_id=room_id,
@@ -262,12 +236,15 @@ class InboundTurnNormalizer:
                 event=event,
             )
             if attachment_record is None:
-                self._logger().error("Failed to register routed media attachment", event_id=event.event_id)
+                self.deps.logger.error(
+                    "Failed to register routed media attachment",
+                    event_id=event.event_id,
+                )
                 return None
             return attachment_record.attachment_id
 
         if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
-            attachment_record = await self.deps.register_image_attachment(
+            attachment_record = await register_image_attachment(
                 client,
                 self.deps.storage_path,
                 room_id=room_id,
@@ -275,7 +252,10 @@ class InboundTurnNormalizer:
                 event=event,
             )
             if attachment_record is None:
-                self._logger().error("Failed to register routed image attachment", event_id=event.event_id)
+                self.deps.logger.error(
+                    "Failed to register routed image attachment",
+                    event_id=event.event_id,
+                )
                 return None
             return attachment_record.attachment_id
 
@@ -294,11 +274,11 @@ class InboundTurnNormalizer:
         fallback_images: list[Image] = []
         for media_event in request.media_events:
             if isinstance(media_event, nio.RoomMessageImage | nio.RoomEncryptedImage):
-                image = await self.deps.download_image(client, media_event)
+                image = await download_image(client, media_event)
                 if image is None:
                     msg = "Failed to download image"
                     raise RuntimeError(msg)
-                attachment_record = await self.deps.register_image_attachment(
+                attachment_record = await register_image_attachment(
                     client,
                     self.deps.storage_path,
                     room_id=request.room_id,
@@ -312,7 +292,7 @@ class InboundTurnNormalizer:
                     fallback_images.append(image)
                 continue
 
-            attachment_record = await self.deps.register_file_or_video_attachment(
+            attachment_record = await register_file_or_video_attachment(
                 client,
                 self.deps.storage_path,
                 room_id=request.room_id,
@@ -335,7 +315,7 @@ class InboundTurnNormalizer:
     ) -> DispatchPayload:
         """Build dispatch payload by merging thread/history attachment media."""
         thread_attachment_ids = (
-            await self.deps.resolve_thread_attachment_ids(
+            await resolve_thread_attachment_ids(
                 self._client(),
                 self.deps.storage_path,
                 room_id=request.room_id,
@@ -344,14 +324,14 @@ class InboundTurnNormalizer:
             if request.thread_id
             else []
         )
-        history_attachment_ids = self.deps.parse_attachment_ids_from_thread_history(request.thread_history)
-        attachment_ids = self.deps.merge_attachment_ids(
+        history_attachment_ids = parse_attachment_ids_from_thread_history(request.thread_history)
+        attachment_ids = merge_attachment_ids(
             request.current_attachment_ids,
             thread_attachment_ids,
             history_attachment_ids,
         )
         resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
-            self.deps.resolve_attachment_media(
+            resolve_attachment_media(
                 self.deps.storage_path,
                 attachment_ids,
                 room_id=request.room_id,

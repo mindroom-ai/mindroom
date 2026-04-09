@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.client import PermanentMatrixStartupError
@@ -15,6 +16,22 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import orchestrator_runtime_paths
+
+
+def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMock:
+    """Build a bot-shaped mock with the runtime state expected by config reloads."""
+    bot = MagicMock(spec=AgentBot)
+    bot.config = config
+    bot.enable_streaming = enable_streaming
+    bot.running = True
+    bot._runtime_view = BotRuntimeState(
+        client=None,
+        config=config,
+        enable_streaming=enable_streaming,
+        orchestrator=None,
+        event_cache=None,
+    )
+    return bot
 
 
 class TestDynamicConfigUpdate:
@@ -41,8 +58,7 @@ class TestDynamicConfigUpdate:
         orchestrator.config = initial_config
 
         # Create a mock bot for the general agent
-        mock_bot = MagicMock(spec=AgentBot)
-        mock_bot.config = initial_config
+        mock_bot = _mock_agent_bot(initial_config)
         mock_bot.running = True
         orchestrator.agent_bots["general"] = mock_bot
 
@@ -76,8 +92,7 @@ class TestDynamicConfigUpdate:
                 mock_identify.return_value = set()  # No entities need restarting
 
                 # Create a mock for the new bot
-                new_bot_mock = MagicMock(spec=AgentBot)
-                new_bot_mock.config = updated_config
+                new_bot_mock = _mock_agent_bot(updated_config)
                 new_bot_mock.start.return_value = None
                 new_bot_mock.sync_forever.return_value = None
                 mock_create_bot.return_value = new_bot_mock
@@ -127,13 +142,9 @@ class TestDynamicConfigUpdate:
         orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
-        general_bot = MagicMock(spec=AgentBot)
-        general_bot.config = initial_config
-        general_bot.enable_streaming = True
+        general_bot = _mock_agent_bot(initial_config)
         general_bot._set_presence_with_model_info = AsyncMock()
-        router_bot = MagicMock(spec=AgentBot)
-        router_bot.config = initial_config
-        router_bot.enable_streaming = True
+        router_bot = _mock_agent_bot(initial_config)
         router_bot._set_presence_with_model_info = AsyncMock()
         orchestrator.agent_bots = {
             "general": general_bot,
@@ -261,13 +272,9 @@ class TestDynamicConfigUpdate:
         orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
-        mock_bot = MagicMock(spec=AgentBot)
-        mock_bot.config = initial_config
-        mock_bot.enable_streaming = True
+        mock_bot = _mock_agent_bot(initial_config)
         orchestrator.agent_bots["general"] = mock_bot
-        router_bot = MagicMock(spec=AgentBot)
-        router_bot.config = initial_config
-        router_bot.enable_streaming = True
+        router_bot = _mock_agent_bot(initial_config)
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
@@ -323,13 +330,9 @@ class TestDynamicConfigUpdate:
         orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
-        mock_bot = MagicMock(spec=AgentBot)
-        mock_bot.config = initial_config
-        mock_bot.enable_streaming = True
+        mock_bot = _mock_agent_bot(initial_config)
         orchestrator.agent_bots["general"] = mock_bot
-        router_bot = MagicMock(spec=AgentBot)
-        router_bot.config = initial_config
-        router_bot.enable_streaming = True
+        router_bot = _mock_agent_bot(initial_config)
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
@@ -380,13 +383,9 @@ class TestDynamicConfigUpdate:
         orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
-        general_bot = MagicMock(spec=AgentBot)
-        general_bot.config = initial_config
-        general_bot.enable_streaming = True
+        general_bot = _mock_agent_bot(initial_config)
         orchestrator.agent_bots["general"] = general_bot
-        router_bot = MagicMock(spec=AgentBot)
-        router_bot.config = initial_config
-        router_bot.enable_streaming = True
+        router_bot = _mock_agent_bot(initial_config)
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
@@ -432,13 +431,9 @@ class TestDynamicConfigUpdate:
         orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
-        general_bot = MagicMock(spec=AgentBot)
-        general_bot.config = initial_config
-        general_bot.enable_streaming = True
+        general_bot = _mock_agent_bot(initial_config)
         orchestrator.agent_bots["general"] = general_bot
-        router_bot = MagicMock(spec=AgentBot)
-        router_bot.config = initial_config
-        router_bot.enable_streaming = True
+        router_bot = _mock_agent_bot(initial_config)
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
@@ -482,14 +477,10 @@ class TestDynamicConfigUpdate:
 
         orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
-        mock_bot = MagicMock(spec=AgentBot)
-        mock_bot.config = initial_config
-        mock_bot.enable_streaming = True
+        mock_bot = _mock_agent_bot(initial_config)
         mock_bot._set_presence_with_model_info = AsyncMock()
         orchestrator.agent_bots["general"] = mock_bot
-        router_bot = MagicMock(spec=AgentBot)
-        router_bot.config = initial_config
-        router_bot.enable_streaming = True
+        router_bot = _mock_agent_bot(initial_config)
         router_bot._set_presence_with_model_info = AsyncMock()
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
@@ -536,14 +527,10 @@ class TestDynamicConfigUpdate:
 
         orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
-        mock_bot = MagicMock(spec=AgentBot)
-        mock_bot.config = initial_config
-        mock_bot.enable_streaming = True
+        mock_bot = _mock_agent_bot(initial_config)
         mock_bot._set_presence_with_model_info = AsyncMock()
         orchestrator.agent_bots["general"] = mock_bot
-        router_bot = MagicMock(spec=AgentBot)
-        router_bot.config = initial_config
-        router_bot.enable_streaming = True
+        router_bot = _mock_agent_bot(initial_config)
         router_bot._set_presence_with_model_info = AsyncMock()
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 

@@ -3,9 +3,12 @@
 import os
 import re
 from collections.abc import AsyncGenerator, Callable, Generator
+from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from itertools import count
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -14,7 +17,10 @@ from aioresponses import aioresponses
 import mindroom.bot  # noqa: F401
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
+from mindroom.dispatch_planner import DispatchPlanner
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.response_coordinator import ResponseCoordinator, ResponseRequest
 
 __all__ = [
     "TEST_ACCESS_TOKEN",
@@ -25,12 +31,23 @@ __all__ = [
     "build_private_template_dir",
     "bypass_authorization",
     "create_mock_room",
+    "install_edit_message_mock",
+    "install_generate_response_mock",
+    "install_send_response_mock",
+    "install_send_skill_command_response_mock",
     "make_visible_message",
     "normalize_console_output",
     "orchestrator_runtime_paths",
+    "patch_response_coordinator_module",
+    "replace_delivery_gateway_deps",
+    "replace_dispatch_planner_deps",
+    "replace_response_coordinator_deps",
     "resolve_response_thread_root_for_test",
     "runtime_paths_for",
+    "sync_bot_runtime_state",
     "test_runtime_paths",
+    "unwrap_extracted_collaborator",
+    "wrap_extracted_collaborators",
 ]
 
 _TEST_RUNTIME_PATHS_BY_CONFIG_ID: dict[int, RuntimePaths] = {}
@@ -42,6 +59,30 @@ _SOFT_WRAP_RE = re.compile(r"(?<=\S)\n(?=\S)")
 def normalize_console_output(text: str) -> str:
     """Collapse wrapped console output for stable substring assertions."""
     return " ".join(_SOFT_WRAP_RE.sub("", _ANSI_RE.sub("", text)).split())
+
+
+class _ExtractedCollaboratorProxy[CollaboratorT]:
+    """Mutable proxy that keeps real collaborator attributes visible to tests."""
+
+    def __init__(self, wrapped: CollaboratorT) -> None:
+        object.__setattr__(self, "_wrapped", wrapped)
+
+    def __getattr__(self, name: str) -> object:
+        proxy_dict = object.__getattribute__(self, "__dict__")
+        if name in proxy_dict:
+            return proxy_dict[name]
+        return getattr(object.__getattribute__(self, "_wrapped"), name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        object.__getattribute__(self, "__dict__")[name] = value
+
+    def __delattr__(self, name: str) -> None:
+        proxy_dict = object.__getattribute__(self, "__dict__")
+        if name in proxy_dict:
+            del proxy_dict[name]
+            return
+        msg = f"{type(self).__name__!s} has no attribute {name!r}"
+        raise AttributeError(msg)
 
 
 class FakeCredentialsManager:
@@ -217,6 +258,199 @@ def resolve_response_thread_root_for_test(
     if response_envelope is not None:
         return response_envelope.target.resolved_thread_id
     return thread_id
+
+
+def unwrap_extracted_collaborator[T](collaborator: T) -> T:
+    """Return the real extracted collaborator behind one test wrapper."""
+    if isinstance(collaborator, MagicMock):
+        wrapped = collaborator._mock_wraps
+        if wrapped is not None:
+            return wrapped
+    wrapped = getattr(collaborator, "_wrapped", None)
+    if wrapped is not None:
+        return wrapped
+    return collaborator
+
+
+def wrap_extracted_collaborators(bot: object, *names: str) -> object:
+    """Wrap frozen extracted collaborators so tests can patch their methods."""
+    sync_bot_runtime_state(bot)
+    collaborator_names = names or (
+        "_dispatch_planner",
+        "_delivery_gateway",
+        "_response_coordinator",
+        "_inbound_turn_normalizer",
+        "_conversation_resolver",
+        "_conversation_state_writer",
+    )
+    for name in collaborator_names:
+        collaborator = getattr(bot, name)
+        if isinstance(collaborator, MagicMock | _ExtractedCollaboratorProxy):
+            continue
+        setattr(bot, name, _ExtractedCollaboratorProxy(collaborator))
+    return bot
+
+
+def sync_bot_runtime_state(bot: object) -> None:
+    """Update the extracted runtime state after tests mutate bot internals."""
+    runtime = getattr(bot, "_runtime_view", None)
+    if runtime is None:
+        return
+    runtime.client = bot.client
+    runtime.config = bot.config
+    runtime.enable_streaming = bot.enable_streaming
+    runtime.orchestrator = bot.orchestrator
+    runtime.event_cache = getattr(bot, "event_cache", None)
+
+
+def replace_dispatch_planner_deps(bot: object, **changes: object) -> DispatchPlanner:
+    """Rebuild the planner after swapping collaborators captured at construction."""
+    sync_bot_runtime_state(bot)
+    planner = unwrap_extracted_collaborator(cast("DispatchPlanner", bot._dispatch_planner))
+    rebuilt = DispatchPlanner(replace(planner.deps, **changes))
+    bot._dispatch_planner = rebuilt
+    wrap_extracted_collaborators(bot, "_dispatch_planner")
+    return rebuilt
+
+
+def replace_delivery_gateway_deps(bot: object, **changes: object) -> DeliveryGateway:
+    """Rebuild the delivery gateway after swapping captured collaborators."""
+    sync_bot_runtime_state(bot)
+    gateway = unwrap_extracted_collaborator(cast("DeliveryGateway", bot._delivery_gateway))
+    rebuilt = DeliveryGateway(replace(gateway.deps, **changes))
+    bot._delivery_gateway = rebuilt
+    wrap_extracted_collaborators(bot, "_delivery_gateway")
+    if hasattr(bot, "_response_coordinator"):
+        replace_response_coordinator_deps(bot, delivery_gateway=bot._delivery_gateway)
+    elif hasattr(bot, "_dispatch_planner"):
+        replace_dispatch_planner_deps(bot, delivery_gateway=bot._delivery_gateway)
+    return rebuilt
+
+
+def replace_response_coordinator_deps(bot: object, **changes: object) -> ResponseCoordinator:
+    """Rebuild the response coordinator after swapping captured collaborators."""
+    sync_bot_runtime_state(bot)
+    coordinator = unwrap_extracted_collaborator(cast("ResponseCoordinator", bot._response_coordinator))
+    rebuilt = ResponseCoordinator(replace(coordinator.deps, **changes))
+    bot._response_coordinator = rebuilt
+    wrap_extracted_collaborators(bot, "_response_coordinator")
+    if hasattr(bot, "_dispatch_planner"):
+        planner_changes: dict[str, object] = {"response_coordinator": bot._response_coordinator}
+        if "delivery_gateway" in changes:
+            planner_changes["delivery_gateway"] = changes["delivery_gateway"]
+        replace_dispatch_planner_deps(bot, **planner_changes)
+    return rebuilt
+
+
+@contextmanager
+def patch_response_coordinator_module(**changes: object) -> Generator[None, None, None]:
+    """Patch module-level response coordinator seams on the real current owner."""
+    with ExitStack() as stack:
+        for name, replacement in changes.items():
+            stack.enter_context(patch(f"mindroom.response_coordinator.{name}", new=replacement))
+        yield
+
+
+def install_send_response_mock(bot: object, send_response: AsyncMock) -> None:
+    """Route visible delivery through one legacy-style send-response mock."""
+    wrap_extracted_collaborators(bot, "_delivery_gateway")
+
+    async def _send_text(request: SendTextRequest) -> str | None:
+        return await send_response(
+            request.room_id,
+            request.reply_to_event_id,
+            request.response_text,
+            request.thread_id,
+            reply_to_event=request.reply_to_event,
+            skip_mentions=request.skip_mentions,
+            tool_trace=request.tool_trace,
+            extra_content=request.extra_content,
+            thread_mode_override=request.thread_mode_override,
+            target=request.target,
+        )
+
+    bot._delivery_gateway.send_text = AsyncMock(side_effect=_send_text)
+    if hasattr(bot, "_response_coordinator"):
+        replace_response_coordinator_deps(bot, delivery_gateway=bot._delivery_gateway)
+    if hasattr(bot, "_dispatch_planner"):
+        replace_dispatch_planner_deps(
+            bot,
+            delivery_gateway=bot._delivery_gateway,
+            handled_turn_ledger=bot.handled_turn_ledger,
+        )
+
+
+def install_generate_response_mock(bot: object, generate_response: AsyncMock) -> None:
+    """Route response execution through one legacy-style generate-response mock."""
+    wrap_extracted_collaborators(bot, "_response_coordinator")
+
+    async def _generate(request: ResponseRequest) -> str | None:
+        attachment_ids = list(request.attachment_ids) if request.attachment_ids is not None else None
+        return await generate_response(
+            room_id=request.room_id,
+            prompt=request.prompt,
+            reply_to_event_id=request.reply_to_event_id,
+            thread_id=request.thread_id,
+            thread_history=request.thread_history,
+            existing_event_id=request.existing_event_id,
+            existing_event_is_placeholder=request.existing_event_is_placeholder,
+            user_id=request.user_id,
+            media=request.media,
+            attachment_ids=attachment_ids,
+            model_prompt=request.model_prompt,
+            strip_transient_enrichment_after_run=request.strip_transient_enrichment_after_run,
+            system_enrichment_items=request.system_enrichment_items,
+            response_envelope=request.response_envelope,
+            correlation_id=request.correlation_id,
+            target=request.target,
+            matrix_run_metadata=request.matrix_run_metadata,
+            received_monotonic=request.received_monotonic,
+        )
+
+    bot._response_coordinator.generate_response = AsyncMock(side_effect=_generate)
+    if hasattr(bot, "_dispatch_planner"):
+        replace_dispatch_planner_deps(
+            bot,
+            response_coordinator=bot._response_coordinator,
+            handled_turn_ledger=bot.handled_turn_ledger,
+        )
+
+
+def install_edit_message_mock(bot: object, edit_message: AsyncMock) -> None:
+    """Route Matrix edits through one legacy-style edit-message mock."""
+    wrap_extracted_collaborators(bot, "_delivery_gateway")
+
+    async def _edit_text(request: EditTextRequest) -> bool:
+        return await edit_message(
+            request.room_id,
+            request.event_id,
+            request.new_text,
+            request.thread_id,
+            tool_trace=request.tool_trace,
+            extra_content=request.extra_content,
+        )
+
+    bot._delivery_gateway.edit_text = AsyncMock(side_effect=_edit_text)
+    if hasattr(bot, "_response_coordinator"):
+        replace_response_coordinator_deps(bot, delivery_gateway=bot._delivery_gateway)
+    if hasattr(bot, "_dispatch_planner"):
+        replace_dispatch_planner_deps(
+            bot,
+            delivery_gateway=bot._delivery_gateway,
+            handled_turn_ledger=bot.handled_turn_ledger,
+        )
+
+
+def install_send_skill_command_response_mock(bot: object, send_skill_command_response: AsyncMock) -> None:
+    """Route skill-command dispatch through one test mock on the real owner."""
+    wrap_extracted_collaborators(bot, "_response_coordinator")
+    bot._response_coordinator.send_skill_command_response = send_skill_command_response
+    if hasattr(bot, "_dispatch_planner"):
+        replace_dispatch_planner_deps(
+            bot,
+            response_coordinator=bot._response_coordinator,
+            handled_turn_ledger=bot.handled_turn_ledger,
+        )
 
 
 @pytest.fixture

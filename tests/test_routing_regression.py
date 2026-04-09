@@ -14,10 +14,11 @@ import nio
 import pytest
 from agno.models.ollama import Ollama
 
-from mindroom.bot import AgentBot, _MessageContext
+from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -104,9 +105,9 @@ class TestRoutingRegression:
     """Regression tests for routing behavior."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.is_user_online")
-    @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.suggest_agent_for_message")
+    @patch("mindroom.response_coordinator.is_user_online")
+    @patch("mindroom.response_coordinator.ai_response")
+    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
     async def test_router_does_not_respond_when_agent_mentioned(
         self,
         mock_suggest_agent: AsyncMock,
@@ -176,8 +177,8 @@ class TestRoutingRegression:
         assert mock_suggest_agent.call_count == 0
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.suggest_agent_for_message")
+    @patch("mindroom.response_coordinator.ai_response")
+    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
     async def test_router_activates_when_no_agent_mentioned(
         self,
         mock_suggest_agent: AsyncMock,
@@ -275,7 +276,7 @@ class TestRoutingRegression:
         assert news_bot.client.room_send.call_count == 0
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.suggest_agent_for_message")
+    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
     async def test_router_filters_by_agent_reply_permissions(
         self,
         mock_suggest_agent: AsyncMock,
@@ -357,7 +358,7 @@ class TestRoutingRegression:
         assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["news"]
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.suggest_agent_for_message")
+    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
     async def test_router_filters_by_agent_reply_permissions_with_multiple_allowed(
         self,
         mock_suggest_agent: AsyncMock,
@@ -440,7 +441,7 @@ class TestRoutingRegression:
         assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["facts", "news"]
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.suggest_agent_for_message")
+    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
     async def test_router_reply_permissions_block_router_response(
         self,
         mock_suggest_agent: AsyncMock,
@@ -517,7 +518,7 @@ class TestRoutingRegression:
         router_bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.suggest_agent_for_message")
+    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
     async def test_router_routes_when_thread_agents_are_disallowed_for_sender(
         self,
         mock_suggest_agent: AsyncMock,
@@ -594,10 +595,10 @@ class TestRoutingRegression:
         }
 
         with patch.object(
-            router_bot,
-            "_extract_message_context",
+            router_bot._conversation_resolver,
+            "extract_message_context",
             new=AsyncMock(
-                return_value=_MessageContext(
+                return_value=MessageContext(
                     am_i_mentioned=False,
                     is_thread=True,
                     thread_id="$thread_root",
@@ -620,7 +621,7 @@ class TestRoutingRegression:
     @patch("mindroom.teams.get_agent_knowledge")
     @patch("mindroom.teams.create_agent")
     @patch("mindroom.teams.Team.arun")
-    @patch("mindroom.bot.ai_response")
+    @patch("mindroom.response_coordinator.ai_response")
     @patch("mindroom.teams.get_model_instance")
     @patch("mindroom.config.main.Config.from_yaml")
     async def test_multiple_mentions_each_responds_once(
@@ -732,8 +733,8 @@ class TestRoutingRegression:
         assert mock_team_arun.call_count == 1  # Team formed once
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.is_user_online")
-    @patch("mindroom.bot.ai_response")
+    @patch("mindroom.response_coordinator.is_user_online")
+    @patch("mindroom.response_coordinator.ai_response")
     async def test_router_message_has_completion_marker(
         self,
         mock_ai_response: AsyncMock,

@@ -14,7 +14,18 @@ from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_ACCESS_TOKEN,
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_generate_response_mock,
+    replace_dispatch_planner_deps,
+    runtime_paths_for,
+    sync_bot_runtime_state,
+    test_runtime_paths,
+    unwrap_extracted_collaborator,
+    wrap_extracted_collaborators,
+)
 
 
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
@@ -45,13 +56,17 @@ def mock_home_bot() -> AgentBot:
     config = bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
     with tempfile.TemporaryDirectory() as tmpdir:
         bot = _agent_bot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+    wrap_extracted_collaborators(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
+    sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
-    bot._generate_response = AsyncMock(return_value="$response")
     bot.handled_turn_ledger = MagicMock()
     bot.handled_turn_ledger.has_responded.return_value = False
+    replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._generate_response = AsyncMock(return_value="$response")
+    install_generate_response_mock(bot, bot._generate_response)
     return bot
 
 
@@ -74,7 +89,9 @@ def _make_voice_event(
 async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot) -> None:
     """Audio in the main room should reply in a thread rooted at the audio event."""
     bot = mock_home_bot
-    bot._derive_conversation_context = AsyncMock(return_value=(True, "$voice123", []))
+    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+        return_value=(True, "$voice123", []),
+    )
 
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -87,10 +104,10 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
     voice_event = _make_voice_event(event_id="$voice123", source={"content": {}})
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", return_value="🎤 what is the weather"),
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", return_value="🎤 what is the weather"),
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
@@ -106,7 +123,9 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
 async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot) -> None:
     """Audio in an existing thread should keep using that thread root."""
     bot = mock_home_bot
-    bot._derive_conversation_context = AsyncMock(return_value=(True, "$thread_root", []))
+    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+        return_value=(True, "$thread_root", []),
+    )
 
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -126,10 +145,10 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
     )
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", return_value="🎤 show me the forecast"),
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", return_value="🎤 show me the forecast"),
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
@@ -177,14 +196,15 @@ async def test_voice_plain_reply_to_thread_message_uses_thread_root(mock_home_bo
             },
         ),
     )
-    bot._derive_conversation_context = AsyncMock(return_value=(True, "$thread_root", []))
+    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+        return_value=(True, "$thread_root", []),
+    )
 
     with (
-        patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=[])),
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", return_value="🎤 continue the same thread"),
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", return_value="🎤 continue the same thread"),
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)

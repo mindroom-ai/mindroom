@@ -13,7 +13,17 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamResolution
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_generate_response_mock,
+    install_send_response_mock,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+    sync_bot_runtime_state,
+    unwrap_extracted_collaborator,
+    wrap_extracted_collaborators,
+)
 
 
 @pytest.mark.asyncio
@@ -47,11 +57,13 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
         runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],
     )
+    wrap_extracted_collaborators(general_bot)
 
     # Mock the client
     general_bot.client = AsyncMock(spec=nio.AsyncClient)
     general_bot.client.user_id = f"@mindroom_general:{domain}"
     general_bot.client.rooms = {}
+    sync_bot_runtime_state(general_bot)
 
     # Mock response tracker
     general_bot.handled_turn_ledger = Mock()
@@ -81,17 +93,27 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
         },
     }
 
-    # Mock the thread history fetch
-    with patch("mindroom.bot.fetch_thread_history") as mock_fetch_history:
-        mock_fetch_history.return_value = []
+    general_bot._send_response = AsyncMock(return_value="$placeholder")
+    general_bot._generate_response = AsyncMock()
+    install_send_response_mock(general_bot, general_bot._send_response)
+    install_generate_response_mock(general_bot, general_bot._generate_response)
 
-        # Mock the generate_response method to track if it's called
-        with patch.object(general_bot, "_generate_response") as mock_generate:
-            # Process the message
-            await general_bot._on_message(room, event)
+    mock_context = Mock()
+    mock_context.am_i_mentioned = False
+    mock_context.is_thread = True
+    mock_context.thread_id = "$thread_root"
+    mock_context.thread_history = []
+    mock_context.mentioned_agents = [config.get_ids(runtime_paths_for(config))["research"]]
+    mock_context.has_non_agent_mentions = False
+    mock_context.requires_full_thread_history = False
+    unwrap_extracted_collaborator(general_bot._conversation_resolver).extract_dispatch_context = AsyncMock(
+        return_value=mock_context,
+    )
 
-            # GeneralAgent should NOT generate a response because ResearchAgent is mentioned
-            mock_generate.assert_not_called()
+    await general_bot._on_message(room, event)
+
+    # GeneralAgent should NOT generate a response because ResearchAgent is mentioned
+    general_bot._generate_response.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -125,11 +147,13 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
         runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],
     )
+    wrap_extracted_collaborators(general_bot)
 
     # Mock the client
     general_bot.client = AsyncMock(spec=nio.AsyncClient)
     general_bot.client.user_id = f"@mindroom_general:{domain}"
     general_bot.client.rooms = {}
+    sync_bot_runtime_state(general_bot)
 
     # Mock response tracker
     general_bot.handled_turn_ledger = Mock()
@@ -161,18 +185,28 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
         },
     }
 
-    # Mock the thread history fetch
-    with patch("mindroom.bot.fetch_thread_history") as mock_fetch_history:
-        mock_fetch_history.return_value = []
+    general_bot._send_response = AsyncMock(return_value="$placeholder")
+    general_bot._generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(general_bot, general_bot._send_response)
+    install_generate_response_mock(general_bot, general_bot._generate_response)
 
-        # Mock decide_team_formation to return False (no team formation)
-        with patch("mindroom.bot.decide_team_formation") as mock_decide_team_formation:
-            mock_decide_team_formation.return_value = TeamResolution.none()
+    mock_context = Mock()
+    mock_context.am_i_mentioned = True
+    mock_context.is_thread = True
+    mock_context.thread_id = "$thread_root"
+    mock_context.thread_history = []
+    mock_context.mentioned_agents = [
+        config.get_ids(runtime_paths_for(config))["general"],
+        config.get_ids(runtime_paths_for(config))["research"],
+    ]
+    mock_context.has_non_agent_mentions = False
+    mock_context.requires_full_thread_history = False
+    unwrap_extracted_collaborator(general_bot._conversation_resolver).extract_dispatch_context = AsyncMock(
+        return_value=mock_context,
+    )
 
-            # Mock the generate_response method to track if it's called
-            with patch.object(general_bot, "_generate_response") as mock_generate:
-                # Process the message
-                await general_bot._on_message(room, event)
+    with patch("mindroom.dispatch_planner.decide_team_formation", return_value=TeamResolution.none()):
+        await general_bot._on_message(room, event)
 
-                # GeneralAgent SHOULD generate a response because it's mentioned
-                mock_generate.assert_called_once()
+    # GeneralAgent SHOULD generate a response because it's mentioned
+    general_bot._generate_response.assert_called_once()
