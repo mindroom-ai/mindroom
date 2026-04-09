@@ -495,15 +495,9 @@ class TestThreadingBehavior:
             # Now simulate the response being sent
             await bot._send_response(room.room_id, event.event_id, "I can help you with that!", None)
 
-        # Verify the bot sent the visible placeholder, then the threaded response.
-        assert bot.client.room_send.call_count == 2
-        placeholder_content = bot.client.room_send.call_args_list[0].kwargs["content"]
-        assert placeholder_content["m.relates_to"]["rel_type"] == "m.thread"
-        assert placeholder_content["m.relates_to"]["event_id"] == "$main_msg:localhost"
-        assert placeholder_content["io.mindroom.stream_status"] == "pending"
-
         # Check the final response content.
-        content = bot.client.room_send.call_args_list[-1].kwargs["content"]
+        assert bot.client.room_send.call_count == 1
+        content = bot.client.room_send.call_args_list[0].kwargs["content"]
 
         # The response should create a thread from the original message
         assert "m.relates_to" in content
@@ -2308,15 +2302,9 @@ class TestThreadingBehavior:
                 "$thread_root:localhost",
             )
 
-        # Verify the bot sent the visible placeholder, then the threaded response.
-        assert bot.client.room_send.call_count == 2
-        placeholder_content = bot.client.room_send.call_args_list[0].kwargs["content"]
-        assert placeholder_content["m.relates_to"]["rel_type"] == "m.thread"
-        assert placeholder_content["m.relates_to"]["event_id"] == "$thread_root:localhost"
-        assert placeholder_content["io.mindroom.stream_status"] == "pending"
-
         # Check the final response content.
-        content = bot.client.room_send.call_args_list[-1].kwargs["content"]
+        assert bot.client.room_send.call_count == 1
+        content = bot.client.room_send.call_args_list[0].kwargs["content"]
 
         # The response should maintain the thread context
         assert "m.relates_to" in content

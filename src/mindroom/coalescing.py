@@ -13,7 +13,6 @@ import nio
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .commands.parsing import command_parser
 from .constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
-from .hooks.ingress import AUTOMATION_SOURCE_KINDS
 from .matrix.media import extract_media_caption
 
 if TYPE_CHECKING:
@@ -37,6 +36,7 @@ __all__ = [
 
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
+_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"hook", "hook_dispatch"})
 
 
 class GatePhase(enum.Enum):
@@ -139,7 +139,7 @@ def is_coalescing_exempt_source_kind(
     fallback_source_kind: str | None = None,
 ) -> bool:
     """Return True when coalescing should be skipped for this event."""
-    return _effective_source_kind(event, fallback_source_kind) in AUTOMATION_SOURCE_KINDS
+    return _effective_source_kind(event, fallback_source_kind) in _COALESCING_EXEMPT_SOURCE_KINDS
 
 
 def is_command_event(event: DispatchEvent) -> bool:

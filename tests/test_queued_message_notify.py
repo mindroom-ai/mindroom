@@ -381,6 +381,95 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_generate_response_waits_for_lock_before_starting_placeholder_lifecycle(tmp_path: Path) -> None:
+    """A queued scheduled turn should not start the placeholder lifecycle until it owns the lock."""
+    bot = _bot(tmp_path)
+    response_envelope = _envelope(source_kind="scheduled")
+    response_target = response_envelope.target
+    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
+    await lifecycle_lock.acquire()
+    lifecycle_started = asyncio.Event()
+
+    async def fake_run_cancellable_response(*_args: object, **kwargs: object) -> str:
+        lifecycle_started.set()
+        response_function = kwargs["response_function"]
+        await response_function(None)
+        return "$response"
+
+    try:
+        with (
+            patch.object(
+                ResponseCoordinator,
+                "process_and_respond",
+                new=AsyncMock(
+                    return_value=DeliveryResult(
+                        event_id="$response",
+                        response_text="ok",
+                        delivery_kind="sent",
+                    ),
+                ),
+            ),
+            patch.object(
+                ResponseCoordinator,
+                "run_cancellable_response",
+                new=AsyncMock(side_effect=fake_run_cancellable_response),
+            ) as mock_run_cancellable_response,
+            patch("mindroom.response_coordinator.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.response_coordinator.reprioritize_auto_flush_sessions", new=MagicMock()),
+            patch("mindroom.response_coordinator.apply_post_response_effects", new=AsyncMock()),
+        ):
+            task = asyncio.create_task(
+                bot._generate_response(
+                    room_id="!room:localhost",
+                    prompt="hello",
+                    reply_to_event_id="$event",
+                    thread_id=None,
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    response_envelope=response_envelope,
+                ),
+            )
+            await asyncio.sleep(0.05)
+            mock_run_cancellable_response.assert_not_awaited()
+
+            lifecycle_lock.release()
+            await asyncio.wait_for(lifecycle_started.wait(), timeout=0.2)
+            assert await task == "$response"
+    finally:
+        if lifecycle_lock.locked():
+            lifecycle_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(tmp_path: Path) -> None:
+    """Threaded turns with an empty cached history should still refresh after lock handoff."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
+    fresh_history = [SimpleNamespace(event_id="$reply", body="updated")]
+
+    with patch.object(
+        resolver,
+        "fetch_thread_history",
+        new=AsyncMock(return_value=fresh_history),
+    ) as mock_fetch_thread_history:
+        request = await coordinator._refresh_thread_history_after_lock(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=[],
+                prompt="hello",
+                user_id="@user:localhost",
+            ),
+        )
+
+    mock_fetch_thread_history.assert_awaited_once_with(bot.client, "!room:localhost", "$thread")
+    assert request.thread_history == fresh_history
+
+
+@pytest.mark.asyncio
 async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) -> None:
     """Team responses should raise the same queued-message signal before waiting on the lock."""
     bot = _bot(tmp_path)

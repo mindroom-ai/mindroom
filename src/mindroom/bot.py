@@ -2225,6 +2225,8 @@ class AgentBot:
         content = event.source.get("content") if isinstance(event.source, dict) else None
         if not isinstance(content, dict):
             return False
+        if content.get("com.mindroom.source_kind") == "scheduled":
+            return False
         original_sender = content.get(ORIGINAL_SENDER_KEY)
         return isinstance(original_sender, str) and bool(original_sender)
 
@@ -2368,7 +2370,6 @@ class AgentBot:
         room_id: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        placeholder_event_id: str | None,
         error: Exception,
     ) -> str | None:
         """Convert post-placeholder setup failures into a visible terminal message."""
@@ -2376,7 +2377,6 @@ class AgentBot:
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
-            placeholder_event_id=placeholder_event_id,
             error=error,
         )
 
@@ -2385,9 +2385,7 @@ class AgentBot:
         *,
         event_id: str,
         action_kind: str,
-        placeholder_event_id: str | None,
         dispatch_started_at: float,
-        placeholder_ready_monotonic: float,
         context_ready_monotonic: float,
         payload_ready_monotonic: float,
     ) -> None:
@@ -2395,9 +2393,7 @@ class AgentBot:
         self._dispatch_planner.log_dispatch_latency(
             event_id=event_id,
             action_kind=action_kind,
-            placeholder_event_id=placeholder_event_id,
             dispatch_started_at=dispatch_started_at,
-            placeholder_ready_monotonic=placeholder_ready_monotonic,
             context_ready_monotonic=context_ready_monotonic,
             payload_ready_monotonic=payload_ready_monotonic,
         )
