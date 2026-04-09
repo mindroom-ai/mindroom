@@ -24,7 +24,6 @@ from mindroom.history.compaction import (
     completed_top_level_runs,
     estimate_agent_static_tokens,
     estimate_prompt_visible_history_tokens,
-    estimate_session_summary_tokens,
     estimate_team_static_tokens,
     runs_for_scope,
 )
@@ -1023,29 +1022,16 @@ def plan_replay_that_fits(
             mode="limited",
             estimated_tokens=fitting_tokens,
             add_history_to_context=True,
-            add_session_summary_to_context=True,
             num_history_runs=num_history_runs,
             num_history_messages=num_history_messages,
             history_limit_mode=limit_mode,
             history_limit=fitting_limit,
         )
 
-    summary_tokens = estimate_session_summary_tokens(
-        session.summary.summary if session.summary is not None else None,
-    )
-    if 0 < summary_tokens <= available_history_budget:
-        return ResolvedReplayPlan(
-            mode="summary_only",
-            estimated_tokens=summary_tokens,
-            add_history_to_context=False,
-            add_session_summary_to_context=True,
-        )
-
     return ResolvedReplayPlan(
         mode="disabled",
         estimated_tokens=0,
         add_history_to_context=False,
-        add_session_summary_to_context=False,
     )
 
 
@@ -1056,7 +1042,6 @@ def apply_replay_plan(
 ) -> None:
     """Apply one resolved persisted-replay plan to a live Agent or Team."""
     target.add_history_to_context = replay_plan.add_history_to_context
-    target.add_session_summary_to_context = replay_plan.add_session_summary_to_context
     target.num_history_runs = replay_plan.num_history_runs
     target.num_history_messages = replay_plan.num_history_messages
 
@@ -1138,7 +1123,6 @@ def _log_replay_plan(
     logger.warning(
         "Replay planner disabled raw persisted replay for this run",
         scope=scope.key,
-        keep_summary_only=replay_plan.mode == "summary_only",
         estimated_tokens=current_history_tokens,
         fitted_tokens=replay_plan.estimated_tokens,
         available_history_budget=available_history_budget,
@@ -1158,7 +1142,6 @@ def _configured_replay_plan(
         mode="configured",
         estimated_tokens=estimated_tokens,
         add_history_to_context=True,
-        add_session_summary_to_context=True,
         num_history_runs=num_history_runs,
         num_history_messages=num_history_messages,
     )
@@ -1195,11 +1178,6 @@ def _has_effective_persisted_replay(
     scope: HistoryScope,
     replay_plan: ResolvedReplayPlan,
 ) -> bool:
-    summary = session.summary.summary if session.summary is not None else None
-    has_replayed_summary = (
-        replay_plan.add_session_summary_to_context and isinstance(summary, str) and bool(summary.strip())
-    )
-    has_replayed_runs = replay_plan.add_history_to_context and bool(
+    return replay_plan.add_history_to_context and bool(
         runs_for_scope(completed_top_level_runs(session), scope),
     )
-    return has_replayed_summary or has_replayed_runs

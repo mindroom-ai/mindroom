@@ -1233,7 +1233,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
         compress_tool_results=compress_tool_results,
-        add_session_summary_to_context=True,
         max_tool_calls_from_history=max_tool_calls_from_history,
     )
     if include_all_history:
