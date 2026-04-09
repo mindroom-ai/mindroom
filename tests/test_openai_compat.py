@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import contextmanager
+from contextvars import Context
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -16,7 +18,7 @@ import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.team import Team as AgnoTeam
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
 
 from mindroom import constants
@@ -1271,6 +1273,51 @@ class TestStreamingCompletion:
         assert len(observed_session_ids) == 2
         assert all(session_id is not None for session_id in observed_session_ids)
 
+    @pytest.mark.asyncio
+    async def test_streaming_close_from_other_task_keeps_execution_identity(self, test_config: Config) -> None:
+        """Closing the SSE body from another task should still clean up inside the execution identity."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+
+        runtime_paths = _runtime_paths()
+        execution_identity = build_tool_execution_identity(
+            channel="openai_compat",
+            agent_name="general",
+            session_id="session-123",
+            runtime_paths=runtime_paths,
+            requester_id=None,
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+        )
+        observed_final_identities: list[ToolExecutionIdentity | None] = []
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+            try:
+                assert get_tool_execution_identity() == execution_identity
+                yield RunContentEvent(content="Hello")
+                await asyncio.Future()
+            finally:
+                observed_final_identities.append(get_tool_execution_identity())
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = await openai_compat._stream_completion(
+                "general",
+                "Hello",
+                "session-123",
+                test_config,
+                runtime_paths,
+                None,
+                None,
+                None,
+                execution_identity=execution_identity,
+            )
+
+        assert isinstance(response, StreamingResponse)
+        body_iterator = response.body_iterator
+        await asyncio.create_task(anext(body_iterator), context=Context())
+        await asyncio.create_task(body_iterator.aclose(), context=Context())
+        assert observed_final_identities == [execution_identity]
+
     def test_streaming_cached_response(self, app_client: TestClient) -> None:
         """Cached full response (string) is streamed correctly."""
 
@@ -2455,6 +2502,65 @@ class TestTeamCompletion:
         assert response.status_code == 200
         assert len(observed_session_ids) == 2
         assert all(session_id is not None for session_id in observed_session_ids)
+
+    @pytest.mark.asyncio
+    async def test_team_streaming_close_from_other_task_keeps_execution_identity(
+        self,
+        team_config: Config,
+    ) -> None:
+        """Closing the team SSE body from another task should still clean up inside the execution identity."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        runtime_paths = _runtime_paths()
+        execution_identity = build_tool_execution_identity(
+            channel="openai_compat",
+            agent_name="team/super_team",
+            session_id="session-123",
+            runtime_paths=runtime_paths,
+            requester_id=None,
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+        )
+        mock_team = _make_test_team()
+        observed_final_identities: list[ToolExecutionIdentity | None] = []
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            try:
+                assert get_tool_execution_identity() == execution_identity
+                yield TeamContentEvent(content="Hello")
+                await asyncio.Future()
+            finally:
+                observed_final_identities.append(get_tool_execution_identity())
+
+        mock_team.arun = mock_stream_events
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=([_make_test_agent("GeneralAgent")], mock_team, TeamMode.COORDINATE),
+            ),
+            patch("mindroom.api.openai_compat._prepare_openai_team_prompt", new=AsyncMock(return_value="Build it")),
+        ):
+            response = await openai_compat._stream_team_completion(
+                "super_team",
+                "team/super_team",
+                "Build it",
+                "session-123",
+                team_config,
+                runtime_paths,
+                None,
+                None,
+                execution_identity=execution_identity,
+            )
+
+        assert isinstance(response, StreamingResponse)
+        body_iterator = response.body_iterator
+        await asyncio.create_task(anext(body_iterator), context=Context())
+        await asyncio.create_task(body_iterator.aclose(), context=Context())
+        assert observed_final_identities == [execution_identity]
 
     def test_team_streaming_builds_team_inside_execution_identity(self, team_app_client: TestClient) -> None:
         """Streamed team requests must establish execution identity before member agents are built."""

@@ -53,7 +53,10 @@ from mindroom.streaming import (
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.timing import timing_scope as timing_scope_context
-from mindroom.tool_system.worker_routing import tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    run_with_tool_execution_identity,
+    stream_with_tool_execution_identity,
+)
 
 from .delivery_gateway import (
     DeliveryGateway,
@@ -393,11 +396,13 @@ class ResponseCoordinator:
         operation: Callable[[], Awaitable[_ToolContextResult]],
     ) -> _ToolContextResult:
         """Execute one operation inside the response-owned execution and tool context."""
-        with tool_execution_identity(execution_identity):
-            return await self.deps.tool_runtime.run_in_context(
-                tool_context=tool_context,
+        return await self.deps.tool_runtime.run_in_context(
+            tool_context=tool_context,
+            operation=lambda: run_with_tool_execution_identity(
+                execution_identity,
                 operation=operation,
-            )
+            ),
+        )
 
     def _stream_in_tool_context(
         self,
@@ -407,16 +412,13 @@ class ResponseCoordinator:
         stream_factory: Callable[[], AsyncIterator[_ToolStreamChunk]],
     ) -> AsyncIterator[_ToolStreamChunk]:
         """Wrap one stream inside the response-owned execution and tool context."""
-
-        async def wrapped_stream() -> AsyncIterator[_ToolStreamChunk]:
-            with tool_execution_identity(execution_identity):
-                async for chunk in self.deps.tool_runtime.stream_in_context(
-                    tool_context=tool_context,
-                    stream_factory=stream_factory,
-                ):
-                    yield chunk
-
-        return wrapped_stream()
+        return self.deps.tool_runtime.stream_in_context(
+            tool_context=tool_context,
+            stream_factory=lambda: stream_with_tool_execution_identity(
+                execution_identity,
+                stream_factory=stream_factory,
+            ),
+        )
 
     def _resolve_request_target(self, request: ResponseRequest) -> MessageTarget:
         """Resolve the canonical response target for one request."""

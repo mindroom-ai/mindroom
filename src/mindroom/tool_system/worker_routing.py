@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import AsyncGenerator as AsyncGeneratorABC
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
 
     from mindroom.constants import RuntimePaths
 
@@ -32,6 +33,14 @@ SHARED_ONLY_INTEGRATION_NAMES = frozenset(
         "google_sheets",
     },
 )
+
+
+@runtime_checkable
+class _AsyncClosableIterator(Protocol):
+    """Minimal async-iterator surface that can be closed explicitly."""
+
+    async def aclose(self) -> None:
+        """Close the async iterator and release any underlying resources."""
 
 
 @dataclass(frozen=True)
@@ -104,6 +113,43 @@ def tool_execution_identity(identity: ToolExecutionIdentity | None) -> Iterator[
         yield
     finally:
         _TOOL_EXECUTION_IDENTITY.reset(token)
+
+
+async def run_with_tool_execution_identity[ReturnT](
+    identity: ToolExecutionIdentity | None,
+    *,
+    operation: Callable[[], Awaitable[ReturnT]],
+) -> ReturnT:
+    """Execute one async operation inside one execution-identity boundary."""
+    with tool_execution_identity(identity):
+        return await operation()
+
+
+def stream_with_tool_execution_identity[ChunkT](
+    identity: ToolExecutionIdentity | None,
+    *,
+    stream_factory: Callable[[], AsyncIterator[ChunkT]],
+) -> AsyncIterator[ChunkT]:
+    """Wrap one async iterator without spanning execution-identity tokens across yields."""
+
+    async def wrapped_stream() -> AsyncIterator[ChunkT]:
+        stream: AsyncIterator[ChunkT] | None = None
+        try:
+            with tool_execution_identity(identity):
+                stream = stream_factory()
+            while True:
+                try:
+                    with tool_execution_identity(identity):
+                        chunk = await anext(stream)
+                except StopAsyncIteration:
+                    return
+                yield chunk
+        finally:
+            if isinstance(stream, (AsyncGeneratorABC, _AsyncClosableIterator)):
+                with tool_execution_identity(identity):
+                    await stream.aclose()
+
+    return wrapped_stream()
 
 
 def _normalize_worker_key_part(value: str) -> str:

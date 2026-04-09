@@ -342,11 +342,7 @@ def normalize_event_source_for_cache(
     origin_server_ts: int | None = None,
 ) -> dict[str, Any]:
     """Normalize one raw Matrix event payload for persistent cache storage."""
-    source = {
-        key: value
-        for key, value in event_source.items()
-        if key not in _RUNTIME_ONLY_EVENT_SOURCE_KEYS
-    }
+    source = {key: value for key, value in event_source.items() if key not in _RUNTIME_ONLY_EVENT_SOURCE_KEYS}
     if "event_id" not in source and isinstance(event_id, str):
         source["event_id"] = event_id
     if "sender" not in source and isinstance(sender, str):

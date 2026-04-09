@@ -54,6 +54,7 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
     build_tool_execution_identity,
+    stream_with_tool_execution_identity,
     tool_execution_identity,
 )
 
@@ -1046,29 +1047,36 @@ async def _stream_completion(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
-    with tool_execution_identity(execution_identity):
-        stream = stream_agent_response(
-            agent_name=agent_name,
-            prompt=prompt,
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            thread_history=thread_history,
-            room_id=None,
-            knowledge=knowledge,
-            user_id=user,
-            include_interactive_questions=False,
-            active_event_ids=set(),
-            execution_identity=execution_identity,
-        )
+    stream = cast(
+        "AsyncGenerator[AIStreamChunk, None]",
+        stream_with_tool_execution_identity(
+            execution_identity,
+            stream_factory=lambda: stream_agent_response(
+                agent_name=agent_name,
+                prompt=prompt,
+                session_id=session_id,
+                runtime_paths=runtime_paths,
+                config=config,
+                thread_history=thread_history,
+                room_id=None,
+                knowledge=knowledge,
+                user_id=user,
+                include_interactive_questions=False,
+                active_event_ids=set(),
+                execution_identity=execution_identity,
+            ),
+        ),
+    )
 
-        # Peek at first event to detect errors before committing to SSE
-        first_event = await anext(aiter(stream), None)
+    # Peek at first event to detect errors before committing to SSE
+    first_event = await anext(aiter(stream), None)
     if first_event is None:
+        await stream.aclose()
         return _error_response(500, "Agent returned empty response", error_type="server_error")
 
     if isinstance(first_event, str) and _is_error_response(first_event):
         logger.warning("Stream returned error", model=agent_name, session_id=session_id, error=first_event)
+        await stream.aclose()
         return _error_response(500, "Agent execution failed", error_type="server_error")
 
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
@@ -1076,7 +1084,7 @@ async def _stream_completion(
 
     async def event_generator() -> AsyncIterator[str]:
         tool_state = _ToolStreamState()
-        with tool_execution_identity(execution_identity):
+        try:
             # 1. Initial role announcement
             yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
 
@@ -1099,6 +1107,8 @@ async def _stream_completion(
 
             # 5. Stream terminator
             yield "data: [DONE]\n\n"
+        finally:
+            await stream.aclose()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -1367,16 +1377,23 @@ async def _stream_team_completion(  # noqa: C901
             await _cleanup()
             return _error_response(500, "Team execution failed", error_type="server_error")
         try:
-            with tool_execution_identity(execution_identity):
-                raw_stream = team.arun(
-                    team_prompt,
-                    stream=True,
-                    stream_events=True,
-                    session_id=session_id,
-                    user_id=user,
-                )
-                stream = cast("AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None]", raw_stream)
-                first_event = await anext(stream, None)
+            stream = cast(
+                "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None]",
+                stream_with_tool_execution_identity(
+                    execution_identity,
+                    stream_factory=lambda: cast(
+                        "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None]",
+                        team.arun(
+                            team_prompt,
+                            stream=True,
+                            stream_events=True,
+                            session_id=session_id,
+                            user_id=user,
+                        ),
+                    ),
+                ),
+            )
+            first_event = await anext(stream, None)
         except Exception:
             logger.exception("Team execution failed", team=team_name)
             await _cleanup()
@@ -1403,7 +1420,6 @@ async def _stream_team_completion(  # noqa: C901
                     created=created,
                     model_id=model_id,
                     team_name=team_name,
-                    execution_identity=execution_identity,
                 ):
                     yield chunk
             finally:
@@ -1479,7 +1495,6 @@ async def _team_stream_event_generator(
     created: int,
     model_id: str,
     team_name: str,
-    execution_identity: ToolExecutionIdentity | None,
 ) -> AsyncIterator[str]:
     """Yield SSE chunks for team streaming responses.
 
@@ -1496,42 +1511,41 @@ async def _team_stream_event_generator(
     def _chunk(content: str) -> str:
         return f"data: {_chunk_json(completion_id, created, model_id, delta={'content': content})}\n\n"
 
-    with tool_execution_identity(execution_identity):
-        # 1. Role announcement
-        yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
+    # 1. Role announcement
+    yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
 
-        # 2. First event (guaranteed non-error by preflight)
-        text = _classify_team_event(first_event, tool_state)
-        if text:
-            yield _chunk(text)
+    # 2. First event (guaranteed non-error by preflight)
+    text = _classify_team_event(first_event, tool_state)
+    if text:
+        yield _chunk(text)
 
-        # 3. Remaining events
-        try:
-            async for event in stream:
-                if _extract_team_stream_error(event) is not None:
-                    logger.warning("Team stream emitted error event", team=team_name)
-                    pending = _finalize_pending_tools(tool_state)
-                    if pending:
-                        yield _chunk(pending)
-                    yield _chunk("Team execution failed.")
-                    break
+    # 3. Remaining events
+    try:
+        async for event in stream:
+            if _extract_team_stream_error(event) is not None:
+                logger.warning("Team stream emitted error event", team=team_name)
+                pending = _finalize_pending_tools(tool_state)
+                if pending:
+                    yield _chunk(pending)
+                yield _chunk("Team execution failed.")
+                break
 
-                text = _classify_team_event(event, tool_state)
-                if text:
-                    yield _chunk(text)
-        except Exception:
-            logger.exception("Team stream failed during iteration", team=team_name)
-            pending = _finalize_pending_tools(tool_state)
-            if pending:
-                yield _chunk(pending)
-            yield _chunk("Team execution failed.")
-
-        # 4. Finalize any tool calls that started but never completed
+            text = _classify_team_event(event, tool_state)
+            if text:
+                yield _chunk(text)
+    except Exception:
+        logger.exception("Team stream failed during iteration", team=team_name)
         pending = _finalize_pending_tools(tool_state)
         if pending:
             yield _chunk(pending)
+        yield _chunk("Team execution failed.")
 
-        # 5. Finish
-        logger.info("Team completion sent", team=team_name, stream=True)
-        yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
-        yield "data: [DONE]\n\n"
+    # 4. Finalize any tool calls that started but never completed
+    pending = _finalize_pending_tools(tool_state)
+    if pending:
+        yield _chunk(pending)
+
+    # 5. Finish
+    logger.info("Team completion sent", team=team_name, stream=True)
+    yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
+    yield "data: [DONE]\n\n"

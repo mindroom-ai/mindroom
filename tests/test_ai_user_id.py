@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import Context
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -48,7 +49,13 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.response_coordinator import ResponseCoordinator, ResponseCoordinatorDeps, ResponseRequest
-from mindroom.tool_system.runtime_context import ToolRuntimeSupport, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeSupport, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.worker_routing import (
+    build_tool_execution_identity,
+    get_tool_execution_identity,
+    stream_with_tool_execution_identity,
+    tool_execution_identity,
+)
 from tests.conftest import bind_runtime_paths, resolve_response_thread_root_for_test
 
 if TYPE_CHECKING:
@@ -312,6 +319,138 @@ class TestUserIdPassthrough:
             mock_stream.assert_called_once()
             assert mock_stream.call_args.kwargs["user_id"] == "@bob:localhost"
             assert callable(mock_stream.call_args.kwargs["run_id_callback"])
+
+    @pytest.mark.asyncio
+    async def test_streaming_tool_context_cleanup_survives_cross_task_close(self, tmp_path: Path) -> None:
+        """Wrapped response streams should clean up across task-context boundaries."""
+        runtime_paths = _runtime_paths(tmp_path)
+        config = bind_runtime_paths(_config(), runtime_paths)
+        bot = MagicMock(spec=AgentBot)
+        bot.logger = MagicMock()
+        bot.stop_manager = MagicMock()
+        bot.stop_manager.remove_stop_button = AsyncMock()
+        bot.client = AsyncMock()
+        bot.agent_name = "general"
+        bot.storage_path = tmp_path
+        bot.config = config
+        bot.runtime_paths = runtime_paths
+
+        coordinator = _build_response_coordinator(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+        target = MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True)
+        tool_context = coordinator.deps.tool_runtime.build_context(
+            target,
+            user_id="@alice:localhost",
+            session_id="session-1",
+        )
+        assert tool_context is not None
+        execution_identity = coordinator.deps.tool_runtime.build_execution_identity(
+            target=target,
+            user_id="@alice:localhost",
+            session_id="session-1",
+        )
+        observed_final_contexts: list[tuple[object | None, object | None]] = []
+
+        async def source() -> AsyncIterator[str]:
+            try:
+                assert get_tool_runtime_context() is tool_context
+                assert get_tool_execution_identity() == execution_identity
+                yield "chunk"
+                await asyncio.Future()
+            finally:
+                observed_final_contexts.append(
+                    (get_tool_runtime_context(), get_tool_execution_identity()),
+                )
+
+        stream = coordinator._stream_in_tool_context(
+            execution_identity=execution_identity,
+            tool_context=tool_context,
+            stream_factory=source,
+        )
+
+        first_chunk = await asyncio.create_task(anext(stream), context=Context())
+        assert first_chunk == "chunk"
+        await asyncio.create_task(stream.aclose(), context=Context())
+        assert observed_final_contexts == [(tool_context, execution_identity)]
+
+    @pytest.mark.asyncio
+    async def test_execution_identity_stream_factory_masks_outer_context(self, tmp_path: Path) -> None:
+        """Factory setup should not inherit an outer execution identity when None is explicit."""
+        runtime_paths = _runtime_paths(tmp_path)
+        outer_identity = build_tool_execution_identity(
+            channel="matrix",
+            agent_name="outer",
+            runtime_paths=runtime_paths,
+            requester_id="@outer:localhost",
+            room_id="!test:localhost",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="outer-session",
+        )
+        observed_identity: list[object | None] = []
+
+        def factory() -> AsyncIterator[str]:
+            observed_identity.append(get_tool_execution_identity())
+            msg = "factory boom"
+            raise RuntimeError(msg)
+
+        with tool_execution_identity(outer_identity):
+            stream = stream_with_tool_execution_identity(None, stream_factory=factory)
+            with pytest.raises(RuntimeError, match="factory boom"):
+                await anext(stream)
+
+        assert observed_identity == [None]
+
+    @pytest.mark.asyncio
+    async def test_tool_runtime_stream_factory_masks_outer_context(self, tmp_path: Path) -> None:
+        """Factory setup should not inherit an outer tool runtime context when None is explicit."""
+        runtime_paths = _runtime_paths(tmp_path)
+        config = bind_runtime_paths(_config(), runtime_paths)
+        bot = MagicMock(spec=AgentBot)
+        bot.logger = MagicMock()
+        bot.stop_manager = MagicMock()
+        bot.stop_manager.remove_stop_button = AsyncMock()
+        bot.client = AsyncMock()
+        bot.agent_name = "general"
+        bot.storage_path = tmp_path
+        bot.config = config
+        bot.runtime_paths = runtime_paths
+
+        coordinator = _build_response_coordinator(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+        target = MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True)
+        outer_context = coordinator.deps.tool_runtime.build_context(
+            target,
+            user_id="@outer:localhost",
+            session_id="outer-session",
+        )
+        assert outer_context is not None
+        observed_context: list[object | None] = []
+
+        def factory() -> AsyncIterator[str]:
+            observed_context.append(get_tool_runtime_context())
+            msg = "factory boom"
+            raise RuntimeError(msg)
+
+        with tool_runtime_context(outer_context):
+            stream = coordinator.deps.tool_runtime.stream_in_context(
+                tool_context=None,
+                stream_factory=factory,
+            )
+            with pytest.raises(RuntimeError, match="factory boom"):
+                await anext(stream)
+
+        assert observed_context == [None]
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:
