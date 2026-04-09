@@ -57,6 +57,8 @@ models:
     provider: openai
     id: gpt-5.4
     api_key_env_var: LITELLM_MASTER_KEY
+    extra_kwargs:
+      base_url: http://localhost:4000/v1
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
@@ -161,6 +163,8 @@ MindRoom resolves model credentials in this order:
 4. shared provider credentials for the model provider
 
 This is useful when one runtime needs, for example, OpenAI-compatible chat traffic to use a gateway key while other OpenAI-compatible features use the real OpenAI key.
+`api_key_env_var` only selects the secret source.
+If the model should also talk to a non-default OpenAI-compatible endpoint, set `extra_kwargs.base_url` on that model or configure `OPENAI_BASE_URL` for the runtime.
 
 For Ollama, you can also set:
 
