@@ -204,7 +204,7 @@ async def compact_scope_history(
     return new_state, outcome
 
 
-async def _rewrite_working_session_for_compaction(
+async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
     *,
     working_session: AgentSession | TeamSession,
     summary_model: Model,
@@ -241,9 +241,7 @@ async def _rewrite_working_session_for_compaction(
                 history_settings=history_settings,
                 available_history_budget=available_history_budget,
             )
-            selected_run_ids = {
-                run.run_id for run in compactable_runs if isinstance(run.run_id, str) and run.run_id
-            }
+            selected_run_ids = {run.run_id for run in compactable_runs if isinstance(run.run_id, str) and run.run_id}
             if compactable_runs and len(selected_run_ids) == len(compactable_runs):
                 pending_selected_run_ids = selected_run_ids
         if not compactable_runs:

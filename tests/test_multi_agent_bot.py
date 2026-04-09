@@ -35,9 +35,9 @@ from mindroom.bot import (
     _get_or_create_lock,
     _merge_response_extra_content,
     _MessageContext,
-    _PreparedTextEvent,
     _PrecheckedEvent,
     _PreparedDispatch,
+    _PreparedTextEvent,
     _ResponseAction,
     _ResponseDispatchResult,
     _SuppressedPlaceholderCleanupError,
@@ -5892,7 +5892,7 @@ class TestAgentBot:
             sender="@user:localhost",
             event_id="$followup",
             body="stop right now!",
-            source=cast("dict[str, Any]", event.source),
+            source=event.source,
             server_timestamp=1234567890,
         )
         target = MessageTarget.resolve(room.room_id, "$thread_root", event.event_id)

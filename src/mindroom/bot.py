@@ -296,7 +296,18 @@ def _get_or_create_lock(
 @dataclass
 class _QueuedMessageState:
     pending_human_messages: int = 0
+    _active_response_turns: int = 0
     _event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def begin_response_turn(self) -> bool:
+        existing_turn = self._active_response_turns > 0
+        self._active_response_turns += 1
+        return existing_turn
+
+    def finish_response_turn(self) -> None:
+        if self._active_response_turns == 0:
+            return
+        self._active_response_turns -= 1
 
     def add_waiting_human_message(self) -> None:
         self.pending_human_messages += 1
@@ -3949,7 +3960,10 @@ class AgentBot:
         )
         lifecycle_lock = self._response_lifecycle_lock(effective_response_target.target)
         queued_signal = self._get_or_create_queued_signal(effective_response_target.target)
-        queued_human_message = lifecycle_lock.locked() and self._should_signal_queued_message(response_envelope)
+        existing_turn = queued_signal.begin_response_turn()
+        queued_human_message = (existing_turn or lifecycle_lock.locked()) and self._should_signal_queued_message(
+            response_envelope,
+        )
         if queued_human_message:
             queued_signal.add_waiting_human_message()
         try:
@@ -3980,6 +3994,7 @@ class AgentBot:
         finally:
             if queued_human_message:
                 queued_signal.consume_waiting_human_message()
+            queued_signal.finish_response_turn()
 
     async def _generate_team_response_helper_locked(  # noqa: C901, PLR0915
         self,
@@ -5280,7 +5295,10 @@ class AgentBot:
         )
         lifecycle_lock = self._response_lifecycle_lock(response_target.target)
         queued_signal = self._get_or_create_queued_signal(response_target.target)
-        queued_human_message = lifecycle_lock.locked() and self._should_signal_queued_message(response_envelope)
+        existing_turn = queued_signal.begin_response_turn()
+        queued_human_message = (existing_turn or lifecycle_lock.locked()) and self._should_signal_queued_message(
+            response_envelope,
+        )
         if queued_human_message:
             queued_signal.add_waiting_human_message()
         try:
@@ -5311,6 +5329,7 @@ class AgentBot:
         finally:
             if queued_human_message:
                 queued_signal.consume_waiting_human_message()
+            queued_signal.finish_response_turn()
 
     async def _generate_response_locked(
         self,

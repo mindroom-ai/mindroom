@@ -5,19 +5,23 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
+from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 from mindroom.ai import (
     QUEUED_MESSAGE_NOTICE_TEXT,
     ai_response,
+    cleanup_queued_notice_state,
     install_queued_message_notice_hook,
     queued_message_signal_context,
     stream_agent_response,
@@ -125,15 +129,15 @@ def _queued_notice_message() -> Message:
 
 class _FakeStorage:
     def __init__(self) -> None:
-        self.session: AgentSession | None = None
+        self.session: AgentSession | TeamSession | None = None
         self.upserted = False
 
-    def get_session(self, session_id: str, _session_type: object) -> AgentSession | None:
+    def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
         if self.session is None or self.session.session_id != session_id:
             return None
         return self.session
 
-    def upsert_session(self, session: AgentSession) -> AgentSession:
+    def upsert_session(self, session: AgentSession | TeamSession) -> AgentSession | TeamSession:
         self.session = session
         self.upserted = True
         return session
@@ -161,6 +165,35 @@ class _StaticQueuedState:
 @contextmanager
 def _open_scope(storage: _FakeStorage) -> object:
     yield SimpleNamespace(storage=storage, session=storage.session)
+
+
+class _PrelockBarrierLock:
+    def __init__(self) -> None:
+        self._locked = False
+        self.first_waiting = asyncio.Event()
+        self._allow_first_entry = asyncio.Event()
+        self._first_entered = asyncio.Event()
+        self._released = asyncio.Event()
+        self._released.set()
+
+    def locked(self) -> bool:
+        return self._locked
+
+    async def __aenter__(self) -> Self:
+        if not self.first_waiting.is_set():
+            self.first_waiting.set()
+            await self._allow_first_entry.wait()
+        else:
+            await self._first_entered.wait()
+        await self._released.wait()
+        self._locked = True
+        self._released.clear()
+        self._first_entered.set()
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        self._locked = False
+        self._released.set()
 
 
 @pytest.mark.asyncio
@@ -229,6 +262,59 @@ async def test_generate_response_skips_signal_for_automation_ingress(tmp_path: P
             lifecycle_lock.release()
 
     assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_path: Path) -> None:
+    """A second human turn should queue even before the first acquires the lifecycle lock."""
+    bot = _bot(tmp_path)
+    lock = _PrelockBarrierLock()
+    response_envelope = _envelope()
+    response_target = response_envelope.target
+    observed_pending: dict[str, int] = {}
+
+    async def fake_generate_response_locked(*_args: object, **kwargs: object) -> str:
+        user_id = str(kwargs["user_id"])
+        queued_signal = bot._get_or_create_queued_signal(response_target)
+        observed_pending[user_id] = queued_signal.pending_human_messages
+        return user_id
+
+    with (
+        patch.object(bot, "_response_lifecycle_lock", return_value=lock),
+        patch.object(bot, "_generate_response_locked", new=AsyncMock(side_effect=fake_generate_response_locked)),
+    ):
+        first_task = asyncio.create_task(
+            bot._generate_response(
+                room_id="!room:localhost",
+                prompt="hello",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                user_id="first",
+                response_envelope=response_envelope,
+            ),
+        )
+        await lock.first_waiting.wait()
+
+        second_task = asyncio.create_task(
+            bot._generate_response(
+                room_id="!room:localhost",
+                prompt="stop",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                user_id="second",
+                response_envelope=response_envelope,
+            ),
+        )
+
+        lock._allow_first_entry.set()
+        second_result = await second_task
+        first_result = await first_task
+
+    assert second_result == "second"
+    assert first_result == "first"
+    assert observed_pending["first"] == 1
 
 
 @pytest.mark.asyncio
@@ -614,6 +700,55 @@ async def test_ai_response_strips_notice_from_run_output_and_session(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_ai_response_strips_notice_from_session_after_exception(tmp_path: Path) -> None:
+    """Non-streaming cleanup should still scrub persisted notices after an exception."""
+    config = _config(tmp_path)
+    storage = _FakeStorage()
+    model = _FakeModel()
+
+    async def fake_arun(
+        _prompt: str,
+        *,
+        session_id: str,
+        **_kwargs: object,
+    ) -> RunOutput:
+        messages = [Message(role="user", content="hello")]
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="tool result")],
+        )
+        storage.session = AgentSession(
+            session_id=session_id,
+            runs=[RunOutput(run_id="run-1", session_id=session_id, messages=messages)],
+        )
+        error_message = "boom"
+        raise RuntimeError(error_message)
+
+    agent = MagicMock()
+    agent.model = model
+    agent.arun = AsyncMock(side_effect=fake_arun)
+
+    with (
+        patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
+        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=(agent, "prompt", [], MagicMock()))),
+        patch("mindroom.ai.close_agent_runtime_sqlite_dbs"),
+        queued_message_signal_context(_StaticQueuedState(pending=True)),
+    ):
+        response = await ai_response(
+            agent_name="general",
+            prompt="hello",
+            session_id="session-1",
+            runtime_paths=runtime_paths_for(config),
+            config=config,
+        )
+
+    assert isinstance(response, str)
+    assert storage.upserted is True
+    assert storage.session is not None
+    assert _notice_count(storage.session.runs[0].messages or []) == 0
+
+
+@pytest.mark.asyncio
 async def test_stream_agent_response_strips_notice_from_session(tmp_path: Path) -> None:
     """Streaming runs should also scrub the hidden notice from persisted history."""
     config = _config(tmp_path)
@@ -691,3 +826,62 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
             function_call_results=[Message(role="tool", content="tool result")],
         )
         assert _notice_count(messages) == 1
+
+
+def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> None:
+    """Team cleanup should recurse into nested member responses."""
+    run_output = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        messages=[_queued_notice_message()],
+        member_responses=[
+            RunOutput(
+                run_id="member-run-1",
+                session_id="session-1",
+                messages=[_queued_notice_message()],
+            ),
+        ],
+        status=RunStatus.completed,
+    )
+    storage = _FakeStorage()
+    storage.session = TeamSession(
+        session_id="session-1",
+        runs=[
+            TeamRunOutput(
+                run_id="run-1",
+                session_id="session-1",
+                messages=[_queued_notice_message()],
+                member_responses=[
+                    RunOutput(
+                        run_id="member-run-1",
+                        session_id="session-1",
+                        messages=[_queued_notice_message()],
+                    ),
+                ],
+                status=RunStatus.completed,
+            ),
+        ],
+    )
+
+    cleanup_queued_notice_state(
+        run_output=run_output,
+        storage=storage,
+        session_id="session-1",
+        session_type=SessionType.TEAM,
+        entity_name="queued-notice-team",
+    )
+
+    assert _notice_count(run_output.messages or []) == 0
+    assert run_output.member_responses is not None
+    nested_member_run = run_output.member_responses[0]
+    assert isinstance(nested_member_run, RunOutput)
+    assert _notice_count(nested_member_run.messages or []) == 0
+    assert storage.upserted is True
+    assert storage.session is not None
+    stored_team_run = storage.session.runs[0]
+    assert isinstance(stored_team_run, TeamRunOutput)
+    assert _notice_count(stored_team_run.messages or []) == 0
+    assert stored_team_run.member_responses is not None
+    stored_member_run = stored_team_run.member_responses[0]
+    assert isinstance(stored_member_run, RunOutput)
+    assert _notice_count(stored_member_run.messages or []) == 0

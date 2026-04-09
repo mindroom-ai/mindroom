@@ -175,7 +175,12 @@ def _cleanup_queued_notice_from_run_output(run_output: RunOutput | TeamRunOutput
     """Remove queued-message notices from one returned run output."""
     if run_output is None:
         return False
-    return _strip_queued_notice_messages(run_output.messages)
+    changed = _strip_queued_notice_messages(run_output.messages)
+    if isinstance(run_output, TeamRunOutput) and run_output.member_responses:
+        for member_response in run_output.member_responses:
+            if isinstance(member_response, RunOutput | TeamRunOutput):
+                changed = _cleanup_queued_notice_from_run_output(member_response) or changed
+    return changed
 
 
 def _load_session_for_cleanup(
@@ -200,7 +205,7 @@ def _strip_queued_notice_from_session(
     changed = False
     for run in session.runs or []:
         if isinstance(run, (RunOutput, TeamRunOutput)):
-            changed = _strip_queued_notice_messages(run.messages) or changed
+            changed = _cleanup_queued_notice_from_run_output(run) or changed
     return changed
 
 
@@ -1075,62 +1080,67 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             attempt_media_inputs = media_inputs
             attempt_run_id = run_id
 
-            for retried_without_inline_media in (False, True):
-                response = None
-                try:
-                    response = await cached_agent_run(
-                        agent,
-                        attempt_prompt,
-                        session_id,
-                        user_id=user_id,
-                        run_id=attempt_run_id,
-                        run_id_callback=run_id_callback,
-                        media=attempt_media_inputs,
-                        metadata=metadata,
-                    )
-                except Exception as e:
-                    if not retried_without_inline_media and should_retry_without_inline_media(e, attempt_media_inputs):
-                        logger.warning(
-                            "Retrying AI response without inline media after validation error",
-                            agent=agent_name,
-                            error=str(e),
+            try:
+                for retried_without_inline_media in (False, True):
+                    response = None
+                    try:
+                        response = await cached_agent_run(
+                            agent,
+                            attempt_prompt,
+                            session_id,
+                            user_id=user_id,
+                            run_id=attempt_run_id,
+                            run_id_callback=run_id_callback,
+                            media=attempt_media_inputs,
+                            metadata=metadata,
                         )
-                        attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
-                        attempt_media_inputs = MediaInputs()
-                        attempt_run_id = _next_retry_run_id(run_id)
-                        continue
+                    except Exception as e:
+                        if not retried_without_inline_media and should_retry_without_inline_media(
+                            e,
+                            attempt_media_inputs,
+                        ):
+                            logger.warning(
+                                "Retrying AI response without inline media after validation error",
+                                agent=agent_name,
+                                error=str(e),
+                            )
+                            attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                            attempt_media_inputs = MediaInputs()
+                            attempt_run_id = _next_retry_run_id(run_id)
+                            continue
 
-                    logger.exception("Error generating AI response", agent=agent_name)
-                    return get_user_friendly_error_message(e, agent_name)
+                        logger.exception("Error generating AI response", agent=agent_name)
+                        return get_user_friendly_error_message(e, agent_name)
 
-                if response.status == RunStatus.error:
-                    error_text = str(response.content or "Unknown agent error")
-                    if not retried_without_inline_media and should_retry_without_inline_media(
-                        error_text,
-                        attempt_media_inputs,
-                    ):
-                        logger.warning(
-                            "Retrying AI response without inline media after errored run output",
-                            agent=agent_name,
-                            error=error_text,
-                        )
-                        attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
-                        attempt_media_inputs = MediaInputs()
-                        attempt_run_id = _next_retry_run_id(run_id)
-                        continue
+                    if response.status == RunStatus.error:
+                        error_text = str(response.content or "Unknown agent error")
+                        if not retried_without_inline_media and should_retry_without_inline_media(
+                            error_text,
+                            attempt_media_inputs,
+                        ):
+                            logger.warning(
+                                "Retrying AI response without inline media after errored run output",
+                                agent=agent_name,
+                                error=error_text,
+                            )
+                            attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                            attempt_media_inputs = MediaInputs()
+                            attempt_run_id = _next_retry_run_id(run_id)
+                            continue
 
-                    logger.warning("AI response returned errored run output", agent=agent_name, error=error_text)
+                        logger.warning("AI response returned errored run output", agent=agent_name, error=error_text)
 
-                break
+                    break
 
-            assert response is not None
-            cleanup_queued_notice_state(
-                run_output=response,
-                storage=scope_context.storage if scope_context is not None else None,
-                session_id=session_id,
-                session_type=SessionType.AGENT,
-                entity_name=agent_name,
-            )
+                assert response is not None
+            finally:
+                cleanup_queued_notice_state(
+                    run_output=response,
+                    storage=scope_context.storage if scope_context is not None else None,
+                    session_id=session_id,
+                    session_type=SessionType.AGENT,
+                    entity_name=agent_name,
+                )
 
             if tool_trace_collector is not None:
                 tool_trace_collector.extend(_extract_tool_trace(response))

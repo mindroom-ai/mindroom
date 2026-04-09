@@ -780,11 +780,14 @@ async def test_prepare_history_for_run_auto_compaction_finishes_selected_runs_ac
         scope=scope,
         history_settings=history_settings,
     )
-    assert estimate_prompt_visible_history_tokens(
-        session=session,
-        scope=scope,
-        history_settings=history_settings,
-    ) > replay_budget
+    assert (
+        estimate_prompt_visible_history_tokens(
+            session=session,
+            scope=scope,
+            history_settings=history_settings,
+        )
+        > replay_budget
+    )
 
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_config=True,
