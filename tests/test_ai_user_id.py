@@ -30,7 +30,7 @@ from mindroom.ai import (
     stream_agent_response,
 )
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -66,6 +66,21 @@ def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> Runtim
 def _config() -> Config:
     return Config(
         agents={"general": AgentConfig(display_name="General")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+
+
+def _config_with_team() -> Config:
+    return Config(
+        agents={"general": AgentConfig(display_name="General")},
+        teams={
+            "ultimate": TeamConfig(
+                display_name="Ultimate",
+                role="Coordinate the team",
+                agents=["general"],
+                mode="coordinate",
+            ),
+        },
         models={"default": ModelConfig(provider="openai", id="test-model")},
     )
 
@@ -565,6 +580,45 @@ class TestUserIdPassthrough:
 
         assert response == "friendly-error"
         mock_friendly_error.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ai_response_rejects_configured_team_targets(self, tmp_path: Path) -> None:
+        """Generic ai helpers should reject configured team names explicitly."""
+        with patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly-error") as mock_friendly_error:
+            response = await ai_response(
+                agent_name="ultimate",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config_with_team(),
+            )
+
+        assert response == "friendly-error"
+        error = mock_friendly_error.call_args.args[0]
+        assert isinstance(error, ValueError)
+        assert "configured team" in str(error)
+        assert "team/ultimate" in str(error)
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_rejects_configured_team_targets(self, tmp_path: Path) -> None:
+        """Streaming agent helpers should reject configured team names explicitly."""
+        with patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly-error") as mock_friendly_error:
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="ultimate",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config_with_team(),
+                )
+            ]
+
+        assert chunks == ["friendly-error"]
+        error = mock_friendly_error.call_args.args[0]
+        assert isinstance(error, ValueError)
+        assert "configured team" in str(error)
+        assert "team/ultimate" in str(error)
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:

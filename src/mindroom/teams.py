@@ -106,7 +106,6 @@ class TeamMode(str, Enum):
 class _PreparedMaterializedTeamExecution:
     """Shared prepared team execution state used by stream and non-stream paths."""
 
-    team: Team
     prepared_prompt: str
     run_metadata: dict[str, Any] | None
     unseen_event_ids: list[str]
@@ -998,48 +997,62 @@ def _raise_team_run_cancelled(reason: str | None) -> NoReturn:
     raise asyncio.CancelledError(reason or "Run cancelled")
 
 
-def _build_agent_from_orchestrator(
-    agent_name: str,
-    orchestrator: MultiAgentOrchestrator,
-    execution_identity: ToolExecutionIdentity | None,
+def materialize_exact_team_members(
+    requested_agent_names: list[str],
     *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
     session_id: str | None = None,
+    materializable_agent_names: set[str] | None = None,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
-) -> Agent:
-    """Create one exact team member from orchestrator-backed runtime state."""
-    assert orchestrator.config is not None
+    shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
+    reason_prefix: str = "Team request",
+) -> ResolvedExactTeamMembers:
+    """Materialize the exact team-member set without silent fallback."""
+    if not requested_agent_names:
+        raise ValueError(_NO_AGENTS_RESPONSE)
 
-    def _shared_manager(base_id: str) -> KnowledgeManager | None:
-        return orchestrator.knowledge_managers.get(base_id)
+    def _build_member(agent_name: str) -> Agent:
+        def _on_missing_agent_bases(missing_base_ids: list[str]) -> None:
+            logger.warning(
+                "Knowledge bases not available for team agent",
+                agent_name=agent_name,
+                knowledge_bases=missing_base_ids,
+            )
 
-    def _on_missing_agent_bases(missing_base_ids: list[str]) -> None:
-        logger.warning(
-            "Knowledge bases not available for team agent",
-            agent_name=agent_name,
-            knowledge_bases=missing_base_ids,
+        knowledge = get_agent_knowledge(
+            agent_name,
+            config,
+            runtime_paths,
+            request_knowledge_managers=request_knowledge_managers,
+            shared_manager_lookup=shared_manager_lookup,
+            on_missing_bases=_on_missing_agent_bases,
+        )
+        return create_agent(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            session_id=session_id
+            if session_id is not None
+            else execution_identity.session_id
+            if execution_identity
+            else None,
+            knowledge=knowledge,
+            include_interactive_questions=False,
         )
 
-    knowledge = get_agent_knowledge(
-        agent_name,
-        orchestrator.config,
-        orchestrator.runtime_paths,
-        request_knowledge_managers=request_knowledge_managers,
-        shared_manager_lookup=_shared_manager,
-        on_missing_bases=_on_missing_agent_bases,
+    team_members = materialize_exact_requested_team_members(
+        requested_agent_names,
+        materializable_agent_names=materializable_agent_names,
+        build_member=_build_member,
     )
-    return create_agent(
-        agent_name,
-        orchestrator.config,
-        orchestrator.runtime_paths,
-        execution_identity=execution_identity,
-        session_id=session_id
-        if session_id is not None
-        else execution_identity.session_id
-        if execution_identity
-        else None,
-        knowledge=knowledge,
-        include_interactive_questions=False,
-    )
+    if team_members.failed_agent_names:
+        raise ValueError(
+            _not_materializable_team_agents_message(team_members.failed_agent_names, prefix=reason_prefix),
+        )
+    return team_members
 
 
 def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
@@ -1058,24 +1071,22 @@ def _materialize_team_members(
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact requested team-member set without silent fallback."""
     requested_agent_names = _requested_team_agent_names(agent_names)
-    if not requested_agent_names:
-        raise ValueError(_NO_AGENTS_RESPONSE)
-    team_members = materialize_exact_requested_team_members(
+    assert orchestrator.config is not None
+
+    def _shared_manager(base_id: str) -> KnowledgeManager | None:
+        return orchestrator.knowledge_managers.get(base_id)
+
+    return materialize_exact_team_members(
         requested_agent_names,
+        config=orchestrator.config,
+        runtime_paths=orchestrator.runtime_paths,
+        execution_identity=execution_identity,
+        session_id=session_id,
         materializable_agent_names=resolve_live_shared_agent_names(orchestrator),
-        build_member=lambda name: _build_agent_from_orchestrator(
-            name,
-            orchestrator,
-            execution_identity,
-            session_id=session_id,
-            request_knowledge_managers=request_knowledge_managers,
-        ),
+        request_knowledge_managers=request_knowledge_managers,
+        shared_manager_lookup=_shared_manager,
+        reason_prefix=reason_prefix,
     )
-    if team_members.failed_agent_names:
-        raise ValueError(
-            _not_materializable_team_agents_message(team_members.failed_agent_names, prefix=reason_prefix),
-        )
-    return team_members
 
 
 async def _ensure_request_team_knowledge_managers(
@@ -1213,15 +1224,48 @@ def select_model_for_team(
     return model_name
 
 
-async def _prepare_materialized_team_execution(
+def build_materialized_team_instance(
+    *,
+    requested_agent_names: list[str],
+    agents: list[Agent],
+    mode: TeamMode,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    scope_context: ScopeSessionContext | None,
+    model_name: str | None,
+    configured_team_name: str | None,
+) -> Team:
+    """Build one agno.Team instance for already-materialized members."""
+    resolved_team_runtime_model = config.resolve_runtime_model(
+        entity_name=configured_team_name,
+        active_model_name=model_name,
+    )
+    resolved_team_model_name = resolved_team_runtime_model.model_name
+    team_label = f"Team-{'-'.join(requested_agent_names)}"
+    return _create_team_instance(
+        agents=agents,
+        mode=mode,
+        config=config,
+        runtime_paths=runtime_paths,
+        team_display_name=team_label,
+        fallback_team_id=team_label,
+        model_name=resolved_team_model_name,
+        configured_team_name=configured_team_name,
+        history_storage=scope_context.storage if scope_context is not None else None,
+    )
+
+
+async def prepare_materialized_team_execution(
     *,
     scope_context: ScopeSessionContext | None,
-    team_members: ResolvedExactTeamMembers,
-    mode: TeamMode,
+    agents: list[Agent],
+    team: Team,
     message: str,
-    orchestrator: MultiAgentOrchestrator,
+    fallback_prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    model_name: str | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    active_model_name: str | None,
     reply_to_event_id: str | None,
     active_event_ids: Collection[str],
     response_sender_id: str | None,
@@ -1231,51 +1275,26 @@ async def _prepare_materialized_team_execution(
     system_enrichment_items: Sequence[EnrichmentItem] = (),
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
-    assert orchestrator.config is not None
-
-    fallback_prompt = build_prompt_with_thread_history(
-        message,
-        thread_history,
-        header="Thread Context:",
-        prompt_intro="User: ",
-        max_messages=30,
-        max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
-        missing_sender_label="Unknown",
-    )
-    resolved_team_runtime_model = orchestrator.config.resolve_runtime_model(
-        entity_name=configured_team_name,
-        active_model_name=model_name,
-    )
-    resolved_team_model_name = resolved_team_runtime_model.model_name
-    team_label = f"Team-{'-'.join(team_members.requested_agent_names)}"
-    team = _create_team_instance(
-        agents=team_members.agents,
-        mode=mode,
-        config=orchestrator.config,
-        runtime_paths=orchestrator.runtime_paths,
-        team_display_name=team_label,
-        fallback_team_id=team_label,
-        model_name=resolved_team_model_name,
-        configured_team_name=configured_team_name,
-        history_storage=scope_context.storage if scope_context is not None else None,
-    )
     if system_enrichment_items:
         rendered_system_context = render_system_enrichment_block(system_enrichment_items)
         team.additional_context = rendered_system_context
-        for agent in team_members.agents:
+        for agent in agents:
             agent.additional_context = rendered_system_context
     prepared_execution = await prepare_bound_team_execution_context(
         scope_context=scope_context,
-        agents=team_members.agents,
+        agents=agents,
         team=team,
         prompt=message,
         fallback_prompt=fallback_prompt,
         thread_history=thread_history,
-        runtime_paths=orchestrator.runtime_paths,
-        config=orchestrator.config,
+        runtime_paths=runtime_paths,
+        config=config,
         team_name=configured_team_name,
-        active_model_name=resolved_team_runtime_model.model_name,
-        active_context_window=resolved_team_runtime_model.context_window,
+        active_model_name=active_model_name,
+        active_context_window=config.resolve_runtime_model(
+            entity_name=configured_team_name,
+            active_model_name=active_model_name,
+        ).context_window,
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,
@@ -1289,7 +1308,6 @@ async def _prepare_materialized_team_execution(
         extra_metadata=matrix_run_metadata,
     )
     return _PreparedMaterializedTeamExecution(
-        team=team,
         prepared_prompt=prepared_execution.final_prompt,
         run_metadata=run_metadata,
         unseen_event_ids=prepared_execution.unseen_event_ids,
@@ -1361,14 +1379,35 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 scope_context=scope_context,
                 entity_name=configured_team_name or team_name,
             )
-            prepared_execution = await _prepare_materialized_team_execution(
-                scope_context=scope_context,
-                team_members=team_members,
+            fallback_prompt = build_prompt_with_thread_history(
+                message,
+                thread_history,
+                header="Thread Context:",
+                prompt_intro="User: ",
+                max_messages=30,
+                max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
+                missing_sender_label="Unknown",
+            )
+            team = build_materialized_team_instance(
+                requested_agent_names=team_members.requested_agent_names,
+                agents=agents,
                 mode=mode,
-                message=message,
-                orchestrator=orchestrator,
-                thread_history=thread_history,
+                config=orchestrator.config,
+                runtime_paths=orchestrator.runtime_paths,
+                scope_context=scope_context,
                 model_name=model_name,
+                configured_team_name=configured_team_name,
+            )
+            prepared_execution = await prepare_materialized_team_execution(
+                scope_context=scope_context,
+                agents=agents,
+                team=team,
+                message=message,
+                fallback_prompt=fallback_prompt,
+                thread_history=thread_history,
+                config=orchestrator.config,
+                runtime_paths=orchestrator.runtime_paths,
+                active_model_name=model_name,
                 reply_to_event_id=reply_to_event_id,
                 active_event_ids=active_event_ids,
                 response_sender_id=response_sender_id,
@@ -1377,7 +1416,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
             )
-            team = prepared_execution.team
             prompt = prepared_execution.prepared_prompt
             run_metadata = prepared_execution.run_metadata
             logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
@@ -1627,14 +1665,35 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 scope_context=scope_context,
                 entity_name=configured_team_name or team_label,
             )
-            prepared_execution = await _prepare_materialized_team_execution(
-                scope_context=scope_context,
-                team_members=team_members,
+            fallback_prompt = build_prompt_with_thread_history(
+                message,
+                thread_history,
+                header="Thread Context:",
+                prompt_intro="User: ",
+                max_messages=30,
+                max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
+                missing_sender_label="Unknown",
+            )
+            team = build_materialized_team_instance(
+                requested_agent_names=team_members.requested_agent_names,
+                agents=team_members.agents,
                 mode=mode,
-                message=message,
-                orchestrator=orchestrator,
-                thread_history=thread_history,
+                config=orchestrator.config,
+                runtime_paths=orchestrator.runtime_paths,
+                scope_context=scope_context,
                 model_name=model_name,
+                configured_team_name=configured_team_name,
+            )
+            prepared_execution = await prepare_materialized_team_execution(
+                scope_context=scope_context,
+                agents=team_members.agents,
+                team=team,
+                message=message,
+                fallback_prompt=fallback_prompt,
+                thread_history=thread_history,
+                config=orchestrator.config,
+                runtime_paths=orchestrator.runtime_paths,
+                active_model_name=model_name,
                 reply_to_event_id=reply_to_event_id,
                 active_event_ids=active_event_ids,
                 response_sender_id=response_sender_id,
@@ -1643,7 +1702,6 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
             )
-            team = prepared_execution.team
             prepared_prompt = prepared_execution.prepared_prompt
             unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
