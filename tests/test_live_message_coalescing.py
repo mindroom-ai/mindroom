@@ -23,6 +23,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.dispatch_planner import DispatchPlan
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
@@ -79,6 +80,14 @@ def _make_bot(
         user_id=f"@mindroom_{agent_name}:localhost",
     )
     return AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+
+
+def _respond_dispatch_plan(action: object | None = None) -> DispatchPlan:
+    """Return a plan that continues into the response executor path."""
+    return DispatchPlan(
+        kind="respond",
+        response_action=action or MagicMock(kind="individual"),
+    )
 
 
 def _handled_turn_source_event_ids(handled_turn: HandledTurnState | None) -> list[str]:
@@ -1073,7 +1082,7 @@ async def test_handled_turn_ledger_marks_all_batch_event_ids(tmp_path: Path) -> 
 
     with (
         patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_resolve_dispatch_action", new=AsyncMock(return_value=MagicMock(kind="individual"))),
+        patch.object(bot, "_plan_dispatch", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(
             bot,
             "_build_dispatch_payload_with_attachments",
@@ -1205,7 +1214,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
     action_mock = AsyncMock()
     with (
         patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(bot, "_plan_dispatch", new=action_mock),
     ):
         await bot._dispatch_text_message(room, older_event, "@user:localhost")
 
@@ -1231,7 +1240,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
 
     with (
         patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_resolve_dispatch_action", new=AsyncMock(return_value=MagicMock(kind="individual"))),
+        patch.object(bot, "_plan_dispatch", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(
             bot,
             "_build_dispatch_payload_with_attachments",
@@ -1452,10 +1461,10 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
     )
     dispatch.context.thread_history = [newer_cmd]
 
-    action_mock = AsyncMock(return_value=MagicMock(kind="individual"))
+    action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
         patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(bot, "_plan_dispatch", new=action_mock),
         patch.object(
             bot,
             "_build_dispatch_payload_with_attachments",
@@ -1497,10 +1506,10 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
     )
     dispatch.context.thread_history = [newer_cmd]
 
-    action_mock = AsyncMock(return_value=MagicMock(kind="individual"))
+    action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
         patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(bot, "_plan_dispatch", new=action_mock),
         patch.object(
             bot,
             "_build_dispatch_payload_with_attachments",
@@ -1551,10 +1560,10 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
     )
     dispatch.context.thread_history = [newer_msg]
 
-    action_mock = AsyncMock(return_value=MagicMock(kind="individual"))
+    action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
         patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(bot, "_plan_dispatch", new=action_mock),
         patch.object(
             bot,
             "_build_dispatch_payload_with_attachments",
@@ -1597,10 +1606,10 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
     )
     dispatch.context.thread_history = [newer_msg]
 
-    action_mock = AsyncMock(return_value=MagicMock(kind="individual"))
+    action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
         patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(bot, "_plan_dispatch", new=action_mock),
         patch.object(
             bot,
             "_build_dispatch_payload_with_attachments",
@@ -1645,10 +1654,10 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
     )
     dispatch.context.thread_history = [second_fire_msg]
 
-    action_mock = AsyncMock(return_value=MagicMock(kind="individual"))
+    action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
         patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(bot, "_plan_dispatch", new=action_mock),
         patch.object(
             bot,
             "_build_dispatch_payload_with_attachments",
@@ -1700,7 +1709,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
     action_mock = AsyncMock()
     with (
         patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(bot, "_plan_dispatch", new=action_mock),
     ):
         await bot._dispatch_text_message(room, coalesced_event, "@user:localhost")
 
@@ -1741,7 +1750,7 @@ async def test_voice_synthetic_suppressed_by_thread_guard(tmp_path: Path) -> Non
     action_mock = AsyncMock()
     with (
         patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_resolve_dispatch_action", new=action_mock),
+        patch.object(bot, "_plan_dispatch", new=action_mock),
     ):
         await bot._dispatch_text_message(room, voice_event, "@user:localhost")
 

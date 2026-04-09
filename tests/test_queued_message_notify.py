@@ -39,6 +39,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.delivery_gateway import DeliveryResult
+from mindroom.dispatch_planner import DispatchPlan
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -569,7 +570,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
         patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
         patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot, "_has_newer_unresponded_in_thread", return_value=True),
-        patch.object(bot, "_resolve_dispatch_action", new=AsyncMock()) as mock_resolve_action,
+        patch.object(bot, "_plan_dispatch", new=AsyncMock(return_value=DispatchPlan(kind="ignore"))) as mock_plan,
     ):
         await bot._dispatch_text_message(
             room,
@@ -577,7 +578,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
         )
 
     assert bot.handled_turn_ledger.has_responded("$older")
-    mock_resolve_action.assert_not_awaited()
+    mock_plan.assert_not_awaited()
     assert bot._thread_queued_signals == {}
 
 

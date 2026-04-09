@@ -83,11 +83,7 @@ from mindroom.matrix.presence import (
 )
 from mindroom.matrix.room_cache import cached_room, cached_room_get_event
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
-from mindroom.matrix.rooms import (
-    is_dm_room,
-    leave_non_dm_rooms,
-    resolve_room_aliases,
-)
+from mindroom.matrix.rooms import is_dm_room, leave_non_dm_rooms, resolve_room_aliases
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.typing import typing_indicator
 from mindroom.matrix.users import (
@@ -101,20 +97,18 @@ from mindroom.memory.auto_flush import (
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
 )
-from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import (
     PostResponseEffectsDeps,
     clear_tracked_response_message,
     matrix_run_metadata_for_handled_turn,
     record_handled_turn,
 )
+from mindroom.routing import suggest_agent_for_message
 from mindroom.stop import StopManager
 from mindroom.streaming import (
     send_streaming_response,
 )
-from mindroom.team_runtime_resolution import resolve_live_shared_agent_names
 from mindroom.teams import (
-    TeamIntent,
     TeamMode,
     TeamOutcome,
     TeamResolution,
@@ -184,19 +178,12 @@ from .coalescing import (
     build_batch_dispatch_event as _build_batch_dispatch_event,
 )
 from .commands import config_confirmation
-from .commands.handler import (
-    CommandEvent,
-    CommandHandlerContext,
-    _generate_welcome_message,
-    _run_skill_command_tool,
-    handle_command,
-)
+from .commands.handler import CommandEvent, _generate_welcome_message, _run_skill_command_tool, handle_command
 from .commands.parsing import Command, command_parser
 from .constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
-    STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
@@ -234,7 +221,17 @@ from .delivery_gateway import (
 from .delivery_gateway import (
     SuppressedPlaceholderCleanupError as _SuppressedPlaceholderCleanupError,
 )
-from .error_handling import get_user_friendly_error_message
+from .dispatch_planner import (
+    DispatchPlan,
+    DispatchPlanner,
+    DispatchPlannerDeps,
+)
+from .dispatch_planner import (
+    PreparedDispatch as _PreparedDispatch,
+)
+from .dispatch_planner import (
+    ResponseAction as _ResponseAction,
+)
 from .handled_turns import HandledTurnLedger, HandledTurnState
 from .history.runtime import create_scope_session_storage
 from .inbound_turn_normalizer import (
@@ -242,7 +239,6 @@ from .inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
     InboundTurnNormalizer,
     InboundTurnNormalizerDeps,
-    TextNormalizationRequest,
     VoiceNormalizationRequest,
 )
 from .inbound_turn_normalizer import (
@@ -272,7 +268,6 @@ from .matrix.client import (
 from .matrix.event_cache import EventCache, normalize_event_source_for_cache
 from .media_inputs import MediaInputs
 from .response_coordinator import ResponseCoordinator, ResponseCoordinatorDeps, ResponseRequest
-from .routing import suggest_agent_for_message
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,
@@ -280,6 +275,7 @@ from .scheduling import (
     has_deferred_overdue_tasks,
     restore_scheduled_tasks,
 )
+from .team_runtime_resolution import resolve_live_shared_agent_names
 
 _ToolContextReturn = TypeVar("_ToolContextReturn")
 _StreamChunk = TypeVar("_StreamChunk")
@@ -302,6 +298,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.reply_chain import ReplyChainCaches
+    from mindroom.message_target import MessageTarget
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -432,23 +429,6 @@ def _create_task_wrapper(
     return wrapper
 
 
-@dataclass(frozen=True)
-class _ResponseAction:
-    """Result of the shared team-formation / should-respond decision."""
-
-    kind: Literal["skip", "team", "individual", "reject"]
-    form_team: TeamResolution | None = None
-    rejection_message: str | None = None
-
-
-@dataclass(frozen=True)
-class _RouterDispatchResult:
-    """Whether router dispatch consumed the event and if display-only echoes count as handled."""
-
-    handled: bool
-    mark_visible_echo_responded: bool = False
-
-
 def create_bot_for_entity(
     entity_name: str,
     agent_user: AgentMatrixUser,
@@ -534,18 +514,6 @@ type _MediaDispatchEvent = (
     | nio.RoomEncryptedVideo
 )
 type _InboundMediaEvent = _MediaDispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
-
-
-@dataclass(frozen=True)
-class _PreparedDispatch:
-    """Common dispatch context reused across media handlers."""
-
-    requester_user_id: str
-    context: _MessageContext
-    target: MessageTarget
-    correlation_id: str
-    envelope: MessageEnvelope
-
 
 type _DispatchPayloadBuilder = Callable[[_MessageContext], Awaitable[_DispatchPayload]]
 
@@ -701,6 +669,7 @@ class AgentBot:
         init=False,
     )
     _inbound_turn_normalizer: InboundTurnNormalizer = field(init=False, repr=False)
+    _dispatch_planner: DispatchPlanner = field(init=False, repr=False)
     _conversation_resolver: ConversationResolver = field(init=False, repr=False)
     _conversation_state_writer: ConversationStateWriter = field(init=False, repr=False)
     in_flight_response_count: int = field(default=0, init=False)
@@ -814,6 +783,445 @@ class AgentBot:
                 merge_attachment_ids=lambda *args, **kwargs: merge_attachment_ids(
                     *args,
                     **kwargs,
+                ),
+            ),
+        )
+        self._dispatch_planner = DispatchPlanner(
+            DispatchPlannerDeps(
+                client_getter=lambda: self.client,
+                config_getter=lambda: self.config,
+                runtime_paths=self.runtime_paths,
+                storage_path=self.storage_path,
+                agent_name=self.agent_name,
+                matrix_id_getter=lambda: self.matrix_id,
+                logger_getter=lambda: self.logger,
+                orchestrator_getter=lambda: self.orchestrator,
+                handled_turn_ledger_getter=lambda: self.handled_turn_ledger,
+                resolve_text_dispatch_event=lambda request: self._inbound_turn_normalizer.resolve_text_event(request),
+                extract_dispatch_context=lambda room, event: self._extract_dispatch_context(room, event),
+                hydrate_dispatch_context=lambda room, event, context: self._hydrate_dispatch_context(
+                    room,
+                    event,
+                    context,
+                ),
+                build_message_target=lambda room_id,
+                thread_id,
+                reply_to_event_id,
+                event_source=None,
+                thread_mode_override=None: self._build_message_target(
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    reply_to_event_id=reply_to_event_id,
+                    event_source=event_source,
+                    **({"thread_mode_override": thread_mode_override} if thread_mode_override is not None else {}),
+                ),
+                build_message_envelope=lambda room_id,
+                event,
+                requester_user_id,
+                context,
+                target=None,
+                attachment_ids=None,
+                agent_name=None,
+                body=None,
+                source_kind=None: self._build_message_envelope(
+                    room_id=room_id,
+                    event=event,
+                    requester_user_id=requester_user_id,
+                    context=context,
+                    target=target,
+                    attachment_ids=attachment_ids,
+                    agent_name=agent_name,
+                    body=body,
+                    source_kind=source_kind,
+                ),
+                emit_message_received_hooks=lambda envelope, correlation_id, policy: self._emit_message_received_hooks(
+                    envelope=envelope,
+                    correlation_id=correlation_id,
+                    policy=policy,
+                ),
+                mark_source_events_responded=lambda handled_turn: self._mark_source_events_responded(handled_turn),
+                derive_conversation_context=lambda room_id, event_info: self._derive_conversation_context(
+                    room_id,
+                    event_info,
+                ),
+                requester_user_id_for_event=lambda event: self._requester_user_id_for_event(event),
+                handle_command_fn=lambda context, room, event, command, requester_user_id: handle_command(
+                    context=context,
+                    room=room,
+                    event=event,
+                    command=command,
+                    requester_user_id=requester_user_id,
+                ),
+                run_skill_command_tool_fn=lambda config,
+                runtime_paths,
+                agent_name,
+                storage_path,
+                command_tool,
+                skill_name,
+                args_text,
+                requester_user_id,
+                room_id,
+                thread_id,
+                runtime_context: _run_skill_command_tool(
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    agent_name=agent_name,
+                    storage_path=storage_path,
+                    command_tool=command_tool,
+                    skill_name=skill_name,
+                    args_text=args_text,
+                    requester_user_id=requester_user_id,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    runtime_context=runtime_context,
+                ),
+                send_response=lambda room_id,
+                reply_to_event_id,
+                response_text,
+                thread_id,
+                reply_to_event=None,
+                skip_mentions=False,
+                tool_trace=None,
+                extra_content=None,
+                thread_mode_override=None,
+                target=None: self._send_response(
+                    room_id,
+                    reply_to_event_id,
+                    response_text,
+                    thread_id,
+                    **({"reply_to_event": reply_to_event} if reply_to_event is not None else {}),
+                    **({"skip_mentions": True} if skip_mentions else {}),
+                    **({"tool_trace": tool_trace} if tool_trace is not None else {}),
+                    **({"extra_content": extra_content} if extra_content is not None else {}),
+                    **({"thread_mode_override": thread_mode_override} if thread_mode_override is not None else {}),
+                    **({"target": target} if target is not None else {}),
+                ),
+                send_response_kw=lambda room_id,
+                reply_to_event_id,
+                response_text,
+                thread_id,
+                reply_to_event=None,
+                skip_mentions=False,
+                tool_trace=None,
+                extra_content=None,
+                thread_mode_override=None,
+                target=None: self._send_response(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    response_text=response_text,
+                    thread_id=thread_id,
+                    **({"reply_to_event": reply_to_event} if reply_to_event is not None else {}),
+                    **({"skip_mentions": True} if skip_mentions else {}),
+                    **({"tool_trace": tool_trace} if tool_trace is not None else {}),
+                    **({"extra_content": extra_content} if extra_content is not None else {}),
+                    **({"thread_mode_override": thread_mode_override} if thread_mode_override is not None else {}),
+                    **({"target": target} if target is not None else {}),
+                ),
+                send_skill_command_response=lambda room_id,
+                reply_to_event_id,
+                thread_id,
+                thread_history,
+                prompt,
+                agent_name,
+                user_id,
+                reply_to_event=None,
+                source_envelope=None: self._send_skill_command_response(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    thread_id=thread_id,
+                    thread_history=thread_history,
+                    prompt=prompt,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                    reply_to_event=reply_to_event,
+                    source_envelope=source_envelope,
+                ),
+                build_tool_runtime_context=lambda target,
+                user_id,
+                session_id=None,
+                agent_name=None,
+                active_model_name=None,
+                attachment_ids=None,
+                correlation_id=None,
+                source_envelope=None: self._build_tool_runtime_context(
+                    target,
+                    user_id=user_id,
+                    session_id=session_id,
+                    agent_name=agent_name,
+                    active_model_name=active_model_name,
+                    attachment_ids=attachment_ids,
+                    correlation_id=correlation_id,
+                    source_envelope=source_envelope,
+                ),
+                get_agents_in_thread_fn=lambda thread_history, config, runtime_paths: get_agents_in_thread(
+                    thread_history,
+                    config,
+                    runtime_paths,
+                ),
+                get_all_mentioned_agents_in_thread_fn=lambda thread_history,
+                config,
+                runtime_paths: get_all_mentioned_agents_in_thread(
+                    thread_history,
+                    config,
+                    runtime_paths,
+                ),
+                has_multiple_non_agent_users_in_thread_fn=lambda thread_history,
+                config,
+                runtime_paths: has_multiple_non_agent_users_in_thread(
+                    thread_history,
+                    config,
+                    runtime_paths,
+                ),
+                get_available_agents_for_sender_fn=lambda room,
+                requester_user_id,
+                config,
+                runtime_paths: get_available_agents_for_sender(
+                    room,
+                    requester_user_id,
+                    config,
+                    runtime_paths,
+                ),
+                filter_agents_by_sender_permissions_fn=lambda agent_ids,
+                sender_id,
+                config,
+                runtime_paths: filter_agents_by_sender_permissions(
+                    agent_ids,
+                    sender_id,
+                    config,
+                    runtime_paths,
+                ),
+                decide_team_formation_fn=lambda matrix_id,
+                mentioned_agents,
+                agents_in_thread,
+                all_mentioned_in_thread,
+                room,
+                message,
+                config,
+                runtime_paths,
+                is_dm_room,
+                is_thread,
+                available_agents_in_room,
+                materializable_agent_names: decide_team_formation(
+                    matrix_id,
+                    mentioned_agents,
+                    agents_in_thread,
+                    all_mentioned_in_thread,
+                    room=room,
+                    message=message,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    is_dm_room=is_dm_room,
+                    is_thread=is_thread,
+                    available_agents_in_room=available_agents_in_room,
+                    materializable_agent_names=materializable_agent_names,
+                ),
+                decide_team_for_sender_fn=lambda agents_in_thread,
+                context,
+                room,
+                requester_user_id,
+                message,
+                is_dm,
+                available_agents_in_room=None,
+                materializable_agent_names=None: self._decide_team_for_sender(
+                    agents_in_thread,
+                    context,
+                    room,
+                    requester_user_id,
+                    message,
+                    is_dm,
+                    available_agents_in_room=available_agents_in_room,
+                    materializable_agent_names=materializable_agent_names,
+                ),
+                should_agent_respond_fn=lambda agent_name,
+                am_i_mentioned,
+                is_thread,
+                room,
+                thread_history,
+                config,
+                runtime_paths,
+                mentioned_agents,
+                has_non_agent_mentions,
+                sender_id: should_agent_respond(
+                    agent_name=agent_name,
+                    am_i_mentioned=am_i_mentioned,
+                    is_thread=is_thread,
+                    room=room,
+                    thread_history=thread_history,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    mentioned_agents=mentioned_agents,
+                    has_non_agent_mentions=has_non_agent_mentions,
+                    sender_id=sender_id,
+                ),
+                suggest_agent_for_message_fn=lambda message,
+                available_agents,
+                config,
+                runtime_paths,
+                thread_history: suggest_agent_for_message(
+                    message,
+                    available_agents,
+                    config,
+                    runtime_paths,
+                    thread_history,
+                ),
+                register_routed_attachment=lambda room_id, thread_id, event: self._register_routed_attachment(
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    event=event,
+                ),
+                edit_message=lambda room_id,
+                event_id,
+                new_text,
+                thread_id,
+                tool_trace=None,
+                extra_content=None: self._edit_message(
+                    room_id,
+                    event_id,
+                    new_text,
+                    thread_id,
+                    **({"tool_trace": tool_trace} if tool_trace is not None else {}),
+                    extra_content=extra_content,
+                ),
+                generate_response=lambda room_id,
+                prompt,
+                reply_to_event_id,
+                thread_id,
+                thread_history,
+                existing_event_id=None,
+                existing_event_is_placeholder=False,
+                user_id=None,
+                media=None,
+                attachment_ids=None,
+                model_prompt=None,
+                strip_transient_enrichment_after_run=False,
+                system_enrichment_items=(),
+                response_envelope=None,
+                correlation_id=None,
+                target=None,
+                matrix_run_metadata=None,
+                received_monotonic=None: self._generate_response(
+                    room_id=room_id,
+                    prompt=prompt,
+                    reply_to_event_id=reply_to_event_id,
+                    thread_id=thread_id,
+                    thread_history=thread_history,
+                    existing_event_id=existing_event_id,
+                    existing_event_is_placeholder=existing_event_is_placeholder,
+                    user_id=user_id,
+                    media=media,
+                    attachment_ids=attachment_ids,
+                    model_prompt=model_prompt,
+                    strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
+                    system_enrichment_items=system_enrichment_items,
+                    response_envelope=response_envelope,
+                    correlation_id=correlation_id,
+                    target=target,
+                    matrix_run_metadata=matrix_run_metadata,
+                    received_monotonic=received_monotonic,
+                ),
+                has_active_response_for_target_fn=lambda target: self.has_active_response_for_target(target),
+                generate_team_response_helper=lambda room_id,
+                reply_to_event_id,
+                thread_id,
+                team_agents,
+                team_mode,
+                thread_history,
+                requester_user_id,
+                existing_event_id=None,
+                existing_event_is_placeholder=False,
+                target=None,
+                payload=None,
+                response_envelope=None,
+                strip_transient_enrichment_after_run=False,
+                system_enrichment_items=(),
+                correlation_id=None,
+                reason_prefix="Team request",
+                matrix_run_metadata=None: self._generate_team_response_helper(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    thread_id=thread_id,
+                    team_agents=team_agents,
+                    team_mode=team_mode,
+                    thread_history=thread_history,
+                    requester_user_id=requester_user_id,
+                    existing_event_id=existing_event_id,
+                    existing_event_is_placeholder=existing_event_is_placeholder,
+                    target=target,
+                    payload=cast("_DispatchPayload", payload),
+                    response_envelope=response_envelope,
+                    strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
+                    system_enrichment_items=system_enrichment_items,
+                    correlation_id=correlation_id,
+                    reason_prefix=reason_prefix,
+                    matrix_run_metadata=matrix_run_metadata,
+                ),
+                apply_message_enrichment=lambda dispatch,
+                payload,
+                target_entity_name,
+                target_member_names: self._apply_message_enrichment(
+                    dispatch,
+                    payload,
+                    target_entity_name=target_entity_name,
+                    target_member_names=target_member_names,
+                ),
+                apply_system_enrichment=lambda dispatch,
+                envelope,
+                target_entity_name,
+                target_member_names: self._apply_system_enrichment(
+                    dispatch,
+                    envelope,
+                    target_entity_name=target_entity_name,
+                    target_member_names=target_member_names,
+                ),
+                build_dispatch_payload=lambda payload_builder, context: self._build_dispatch_payload(
+                    payload_builder,
+                    context,
+                ),
+                received_monotonic_from_source=_received_monotonic_from_source,
+                finalize_dispatch_failure_fn=lambda room_id,
+                reply_to_event_id,
+                thread_id,
+                placeholder_event_id,
+                error: self._finalize_dispatch_failure(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    thread_id=thread_id,
+                    placeholder_event_id=placeholder_event_id,
+                    error=error,
+                ),
+                log_dispatch_latency_fn=lambda event_id,
+                action_kind,
+                placeholder_event_id,
+                dispatch_started_at,
+                placeholder_ready_monotonic,
+                context_ready_monotonic,
+                payload_ready_monotonic: self._log_dispatch_latency(
+                    event_id=event_id,
+                    action_kind=action_kind,
+                    placeholder_event_id=placeholder_event_id,
+                    dispatch_started_at=dispatch_started_at,
+                    placeholder_ready_monotonic=placeholder_ready_monotonic,
+                    context_ready_monotonic=context_ready_monotonic,
+                    payload_ready_monotonic=payload_ready_monotonic,
+                ),
+                is_dm_room_fn=lambda client, room_id: is_dm_room(client, room_id),
+                is_sender_allowed_for_agent_reply_fn=lambda sender_id,
+                agent_name,
+                config,
+                runtime_paths: is_sender_allowed_for_agent_reply(
+                    sender_id,
+                    agent_name,
+                    config,
+                    runtime_paths,
+                ),
+                resolve_live_shared_agent_names_fn=lambda orchestrator, config: resolve_live_shared_agent_names(
+                    orchestrator,
+                    config=config,
+                ),
+                get_configured_agents_for_room_fn=lambda room_id, config, runtime_paths: get_configured_agents_for_room(
+                    room_id,
+                    config,
+                    runtime_paths,
                 ),
             ),
         )
@@ -2213,7 +2621,7 @@ class AgentBot:
             if dispatch is None:
                 return
 
-            # Commands always dispatch — never suppressed by thread-history guard.
+            # Commands always dispatch and bypass thread-history suppression.
             command = command_parser.parse(event.body) if not media_events else None
             if command:
                 if self.agent_name == ROUTER_AGENT_NAME:
@@ -2257,28 +2665,58 @@ class AgentBot:
             router_extra_content = dict(message_extra_content)
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
-            router_handled_turn = (
-                handled_turn
-                if handled_turn.is_coalesced
-                or (handled_turn.source_event_ids and handled_turn.source_event_ids[0] != event.event_id)
-                else None
-            )
-
-            action = await self._resolve_dispatch_action(
+            plan = await self._plan_dispatch(
                 room,
                 event,
                 dispatch,
-                message_for_decision=event.body,
-                router_message=event.body if media_events else None,
                 extra_content=router_extra_content or None,
                 media_events=media_events,
-                handled_turn=router_handled_turn,
+                handled_turn=handled_turn,
                 router_event=media_events[0]
                 if media_events and len(handled_turn.source_event_ids) == 1
                 else router_event,
             )
-            if action is None:
+            if plan.kind == "ignore":
+                if plan.handled_turn_outcome is not None:
+                    self._mark_source_events_responded(plan.handled_turn_outcome)
                 return
+            if plan.kind == "route":
+                route_event = plan.router_event or event
+                single_direct_media_route = (
+                    isinstance(
+                        route_event,
+                        nio.RoomMessageFile
+                        | nio.RoomEncryptedFile
+                        | nio.RoomMessageVideo
+                        | nio.RoomEncryptedVideo
+                        | nio.RoomMessageImage
+                        | nio.RoomEncryptedImage,
+                    )
+                    and media_events == [route_event]
+                    and handled_turn.source_event_ids == (event.event_id,)
+                )
+                routing_kwargs: dict[str, Any] = {
+                    "message": event.body if media_events else plan.router_message,
+                    "requester_user_id": dispatch.requester_user_id,
+                    "extra_content": plan.extra_content,
+                }
+                if plan.media_events is not None and not single_direct_media_route:
+                    routing_kwargs["media_events"] = plan.media_events
+                if (
+                    plan.handled_turn is not None
+                    and list(plan.handled_turn.source_event_ids) != [route_event.event_id]
+                    and not single_direct_media_route
+                ):
+                    routing_kwargs["handled_turn"] = plan.handled_turn
+                await self._handle_ai_routing(
+                    room,
+                    route_event,
+                    dispatch.context.thread_history,
+                    dispatch.context.thread_id,
+                    **routing_kwargs,
+                )
+                return
+            assert plan.response_action is not None
             matrix_run_metadata = self._dispatch_matrix_run_metadata(handled_turn)
 
             async def build_payload(context: _MessageContext) -> _DispatchPayload:
@@ -2309,7 +2747,7 @@ class AgentBot:
                 room,
                 event,
                 dispatch,
-                action,
+                plan.response_action,
                 build_payload,
                 processing_log="Processing",
                 dispatch_started_at=dispatch_started_at,
@@ -2786,113 +3224,41 @@ class AgentBot:
         handled_turn: HandledTurnState,
     ) -> _PreparedDispatch | None:
         """Run common precheck/context/sender-gating for dispatch handlers."""
-        event = prechecked_event.event
-        effective_requester_user_id = prechecked_event.requester_user_id
-
-        context = await self._extract_dispatch_context(room, event)
-        target = self._build_message_target(
-            room_id=room.room_id,
-            thread_id=context.thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
-        correlation_id = event.event_id
-        envelope = self._build_message_envelope(
-            room_id=room.room_id,
-            event=event,
-            requester_user_id=effective_requester_user_id,
-            context=context,
-            target=target,
-        )
-        ingress_policy = hook_ingress_policy(envelope)
-        suppressed = await self._emit_message_received_hooks(
-            envelope=envelope,
-            correlation_id=correlation_id,
-            policy=ingress_policy,
-        )
-        if suppressed:
-            self._mark_source_events_responded(handled_turn)
-            return None
-
-        sender_agent_name = extract_agent_name(effective_requester_user_id, self.config, self.runtime_paths)
-        if sender_agent_name and not context.am_i_mentioned and not ingress_policy.bypass_unmentioned_agent_gate:
-            self.logger.debug(f"Ignoring {event_label} from other agent (not mentioned)")
-            return None
-
-        return _PreparedDispatch(
-            requester_user_id=effective_requester_user_id,
-            context=context,
-            target=target,
-            correlation_id=correlation_id,
-            envelope=envelope,
+        return await self._dispatch_planner.prepare_dispatch(
+            room,
+            prechecked_event.event,
+            prechecked_event.requester_user_id,
+            event_label=event_label,
+            handled_turn=handled_turn,
         )
 
     async def _resolve_text_dispatch_event(self, event: _TextDispatchEvent) -> PreparedTextEvent:
         """Return one canonical text event for hooks, routing, and command handling."""
-        return await self._inbound_turn_normalizer.resolve_text_event(
-            TextNormalizationRequest(event=event),
-        )
+        return await self._dispatch_planner.resolve_text_dispatch_event(event)
 
-    @timed("dispatch_action_resolution")
-    async def _resolve_dispatch_action(
+    async def _plan_dispatch(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
+        event: _TextDispatchEvent,
         dispatch: _PreparedDispatch,
         *,
-        message_for_decision: str,
-        router_message: str | None = None,
         extra_content: dict[str, Any] | None = None,
         media_events: list[_MediaDispatchEvent] | None = None,
         handled_turn: HandledTurnState | None = None,
         router_event: _DispatchEvent | None = None,
-    ) -> _ResponseAction | None:
-        """Resolve routing + team/individual/skip action for a prepared dispatch."""
-        tracked_handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
-        router_result = await self._handle_router_dispatch(
+    ) -> DispatchPlan:
+        """Return the explicit plan for one prepared dispatch."""
+        return await self._dispatch_planner.plan_dispatch(
             room,
-            router_event or event,
-            dispatch.context,
-            dispatch.requester_user_id,
-            message=router_message,
+            event,
+            dispatch,
             extra_content=extra_content,
             media_events=media_events,
             handled_turn=handled_turn,
+            router_event=router_event,
         )
-        if router_result.handled:
-            visible_router_echo_event_id = (
-                tracked_handled_turn.visible_echo_event_id
-                or self.handled_turn_ledger.visible_echo_event_id_for_sources(tracked_handled_turn.source_event_ids)
-            )
-            if (
-                router_result.mark_visible_echo_responded
-                and visible_router_echo_event_id is not None
-                and any(
-                    not self.handled_turn_ledger.has_responded(source_event_id)
-                    for source_event_id in tracked_handled_turn.source_event_ids
-                )
-            ):
-                self._mark_source_events_responded(
-                    tracked_handled_turn.with_response_event_id(visible_router_echo_event_id),
-                )
-            return None
 
-        assert self.client is not None
-        dm_room = await is_dm_room(self.client, room.room_id)
-        action = await self._resolve_response_action(
-            dispatch.context,
-            room,
-            dispatch.requester_user_id,
-            message_for_decision,
-            dm_room,
-            target=dispatch.target,
-            source_envelope=dispatch.envelope,
-        )
-        if action.kind == "skip":
-            return None
-        return action
-
-    async def _execute_dispatch_action(  # noqa: C901
+    async def _execute_dispatch_action(
         self,
         room: nio.MatrixRoom,
         event: _DispatchEvent,
@@ -2906,146 +3272,17 @@ class AgentBot:
         matrix_run_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Execute resolved dispatch action and mark the source event responded."""
-        if action.kind == "reject":
-            assert action.rejection_message is not None
-            response_event_id = await self._send_response(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                response_text=action.rejection_message,
-                thread_id=dispatch.context.thread_id,
-            )
-            self._mark_source_events_responded(
-                handled_turn.with_response_event_id(response_event_id),
-            )
-            return
-
-        if not dispatch.context.am_i_mentioned:
-            self.logger.info("Will respond: only agent in thread")
-
-        placeholder_text = "Thinking..."
-        target_member_names: tuple[str, ...] | None = None
-        if action.kind == "team":
-            placeholder_text = "🤝 Team Response: Thinking..."
-            assert action.form_team is not None
-            assert action.form_team.mode is not None
-            target_member_names = tuple(
-                member.agent_name(self.config, self.runtime_paths) or member.username
-                for member in action.form_team.eligible_members
-            )
-
-        placeholder_event_id = await self._send_response(
-            room_id=room.room_id,
-            reply_to_event_id=event.event_id,
-            response_text=placeholder_text,
-            thread_id=dispatch.context.thread_id,
-            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
-        )
-        placeholder_ready_monotonic = time.monotonic()
-
-        try:
-            if dispatch.context.requires_full_thread_history:
-                await self._hydrate_dispatch_context(room, event, dispatch.context)
-            context_ready_monotonic = time.monotonic()
-            payload = await self._build_dispatch_payload(payload_builder, dispatch.context)
-            prepared_payload = await self._apply_message_enrichment(
-                dispatch,
-                payload,
-                target_entity_name=self.agent_name,
-                target_member_names=target_member_names,
-            )
-            system_enrichment_items = await self._apply_system_enrichment(
-                dispatch,
-                prepared_payload.envelope,
-                target_entity_name=self.agent_name,
-                target_member_names=target_member_names,
-            )
-            if system_enrichment_items:
-                prepared_payload = replace(
-                    prepared_payload,
-                    system_enrichment_items=tuple(system_enrichment_items),
-                )
-            payload_ready_monotonic = time.monotonic()
-        except Exception as error:
-            response_event_id = await self._finalize_dispatch_failure(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                thread_id=dispatch.context.thread_id,
-                placeholder_event_id=placeholder_event_id,
-                error=error,
-            )
-            if response_event_id is not None:
-                self._mark_source_events_responded(
-                    handled_turn.with_response_event_id(response_event_id),
-                )
-            return
-
-        self._log_dispatch_latency(
-            event_id=event.event_id,
-            action_kind=action.kind,
-            placeholder_event_id=placeholder_event_id,
+        await self._dispatch_planner.execute_response_action(
+            room,
+            event,
+            dispatch,
+            action,
+            payload_builder,
+            processing_log=processing_log,
             dispatch_started_at=dispatch_started_at,
-            placeholder_ready_monotonic=placeholder_ready_monotonic,
-            context_ready_monotonic=context_ready_monotonic,
-            payload_ready_monotonic=payload_ready_monotonic,
+            handled_turn=handled_turn,
+            matrix_run_metadata=matrix_run_metadata,
         )
-
-        self.logger.info(processing_log, event_id=event.event_id)
-        received_monotonic = _received_monotonic_from_source(event.source)
-        try:
-            if action.kind == "team":
-                assert action.form_team is not None
-                assert action.form_team.mode is not None
-                response_event_id = await self._generate_team_response_helper(
-                    room_id=room.room_id,
-                    reply_to_event_id=event.event_id,
-                    thread_id=dispatch.context.thread_id,
-                    target=dispatch.target,
-                    payload=prepared_payload.payload,
-                    team_agents=action.form_team.eligible_members,
-                    team_mode=action.form_team.mode,
-                    thread_history=dispatch.context.thread_history,
-                    requester_user_id=dispatch.requester_user_id,
-                    existing_event_id=placeholder_event_id,
-                    existing_event_is_placeholder=placeholder_event_id is not None,
-                    response_envelope=prepared_payload.envelope,
-                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
-                    system_enrichment_items=prepared_payload.system_enrichment_items,
-                    correlation_id=dispatch.correlation_id,
-                    matrix_run_metadata=matrix_run_metadata,
-                )
-            else:
-                response_event_id = await self._generate_response(
-                    room_id=room.room_id,
-                    prompt=prepared_payload.payload.prompt,
-                    reply_to_event_id=event.event_id,
-                    thread_id=dispatch.context.thread_id,
-                    target=dispatch.target,
-                    thread_history=dispatch.context.thread_history,
-                    user_id=dispatch.requester_user_id,
-                    media=prepared_payload.payload.media,
-                    attachment_ids=prepared_payload.payload.attachment_ids,
-                    existing_event_id=placeholder_event_id,
-                    existing_event_is_placeholder=placeholder_event_id is not None,
-                    model_prompt=prepared_payload.payload.model_prompt,
-                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
-                    system_enrichment_items=prepared_payload.system_enrichment_items,
-                    response_envelope=prepared_payload.envelope,
-                    correlation_id=dispatch.correlation_id,
-                    matrix_run_metadata=matrix_run_metadata,
-                    received_monotonic=received_monotonic,
-                )
-        except _SuppressedPlaceholderCleanupError:
-            self.logger.warning(
-                "Suppressed placeholder cleanup failed",
-                source_event_id=event.event_id,
-                placeholder_event_id=placeholder_event_id,
-                correlation_id=dispatch.correlation_id,
-            )
-            return
-        if response_event_id is not None:
-            self._mark_source_events_responded(
-                handled_turn.with_response_event_id(response_event_id),
-            )
 
     async def _finalize_dispatch_failure(
         self,
@@ -3057,33 +3294,12 @@ class AgentBot:
         error: Exception,
     ) -> str | None:
         """Convert post-placeholder setup failures into a visible terminal message."""
-        error_text = get_user_friendly_error_message(error, self.agent_name)
-        terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
-        if placeholder_event_id is None:
-            return await self._send_response(
-                room_id,
-                reply_to_event_id,
-                error_text,
-                thread_id,
-                extra_content=terminal_extra_content,
-            )
-
-        placeholder_updated = await self._edit_message(
-            room_id,
-            placeholder_event_id,
-            error_text,
-            thread_id,
-            extra_content=terminal_extra_content,
-        )
-        if placeholder_updated:
-            return placeholder_event_id
-
-        return await self._send_response(
-            room_id,
-            reply_to_event_id,
-            error_text,
-            thread_id,
-            extra_content=terminal_extra_content,
+        return await self._dispatch_planner.finalize_dispatch_failure(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            placeholder_event_id=placeholder_event_id,
+            error=error,
         )
 
     def _log_dispatch_latency(
@@ -3098,161 +3314,23 @@ class AgentBot:
         payload_ready_monotonic: float,
     ) -> None:
         """Emit startup latency metrics for dispatch decisions that will respond."""
-        self.logger.info(
-            "Response startup latency",
+        self._dispatch_planner.log_dispatch_latency(
             event_id=event_id,
             action_kind=action_kind,
             placeholder_event_id=placeholder_event_id,
-            placeholder_visible_ms=round((placeholder_ready_monotonic - dispatch_started_at) * 1000, 1),
-            context_hydration_ms=round((context_ready_monotonic - placeholder_ready_monotonic) * 1000, 1),
-            payload_hydration_ms=round((payload_ready_monotonic - context_ready_monotonic) * 1000, 1),
-            startup_total_ms=round((payload_ready_monotonic - dispatch_started_at) * 1000, 1),
+            dispatch_started_at=dispatch_started_at,
+            placeholder_ready_monotonic=placeholder_ready_monotonic,
+            context_ready_monotonic=context_ready_monotonic,
+            payload_ready_monotonic=payload_ready_monotonic,
         )
 
     def _can_reply_to_sender(self, sender_id: str) -> bool:
         """Return whether this entity may reply to *sender_id*."""
-        return is_sender_allowed_for_agent_reply(sender_id, self.agent_name, self.config, self.runtime_paths)
+        return self._dispatch_planner.can_reply_to_sender(sender_id)
 
     def _materializable_agent_names(self) -> set[str] | None:
         """Return live shared agent names that can currently answer."""
-        if self.orchestrator is None:
-            return None
-        return resolve_live_shared_agent_names(self.orchestrator, config=self.config)
-
-    def _filter_materializable_agents(
-        self,
-        agent_ids: list[MatrixID],
-        materializable_agent_names: set[str] | None,
-    ) -> list[MatrixID]:
-        """Keep only agents that can currently be materialized."""
-        if materializable_agent_names is None:
-            return agent_ids
-        return [
-            agent_id
-            for agent_id in agent_ids
-            if (agent_id.agent_name(self.config, self.runtime_paths) or agent_id.username) in materializable_agent_names
-        ]
-
-    def _response_owner_for_team_resolution(
-        self,
-        form_team: TeamResolution,
-        responder_pool: list[MatrixID],
-    ) -> MatrixID | None:
-        """Return the single live bot that should surface this resolution."""
-        if form_team.outcome is TeamOutcome.NONE:
-            return None
-
-        if form_team.outcome in {TeamOutcome.TEAM, TeamOutcome.INDIVIDUAL}:
-            response_owners = form_team.eligible_members
-        else:
-            response_owners = form_team.eligible_members
-            if not response_owners and form_team.intent is TeamIntent.EXPLICIT_MEMBERS:
-                response_owners = responder_pool
-
-        if not response_owners:
-            return None
-        return min(response_owners, key=lambda x: x.full_id)
-
-    def _team_response_action(
-        self,
-        form_team: TeamResolution,
-        responder_pool: list[MatrixID],
-    ) -> _ResponseAction | None:
-        """Return the action implied by one team-formation decision, if any."""
-        if form_team.outcome is TeamOutcome.NONE:
-            return None
-        response_owner = self._response_owner_for_team_resolution(form_team, responder_pool)
-        if response_owner is None:
-            return _ResponseAction(kind="skip")
-        if self.matrix_id != response_owner:
-            return _ResponseAction(kind="skip")
-        if form_team.outcome is TeamOutcome.TEAM:
-            return _ResponseAction(kind="team", form_team=form_team)
-        if form_team.outcome is TeamOutcome.INDIVIDUAL:
-            return _ResponseAction(kind="individual")
-        assert form_team.reason is not None
-        return _ResponseAction(
-            kind="reject",
-            form_team=form_team,
-            rejection_message=form_team.reason,
-        )
-
-    async def _handle_router_dispatch(
-        self,
-        room: nio.MatrixRoom,
-        event: _DispatchEvent,
-        context: _MessageContext,
-        requester_user_id: str,
-        *,
-        message: str | None = None,
-        extra_content: dict[str, Any] | None = None,
-        media_events: list[_MediaDispatchEvent] | None = None,
-        handled_turn: HandledTurnState | None = None,
-    ) -> _RouterDispatchResult:
-        """Run the router dispatch logic shared by text and media handlers.
-
-        Returns whether router handling should short-circuit normal dispatch, and
-        whether a display-only router voice echo should count as handled.
-        """
-        if self.agent_name != ROUTER_AGENT_NAME:
-            return _RouterDispatchResult(handled=False)
-
-        agents_in_thread = get_agents_in_thread(context.thread_history, self.config, self.runtime_paths)
-        sender_visible = filter_agents_by_sender_permissions(
-            agents_in_thread,
-            requester_user_id,
-            self.config,
-            self.runtime_paths,
-        )
-
-        if not context.mentioned_agents and not context.has_non_agent_mentions and not sender_visible:
-            if context.is_thread and has_multiple_non_agent_users_in_thread(
-                context.thread_history,
-                self.config,
-                self.runtime_paths,
-            ):
-                self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
-                return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
-            available_agents = get_available_agents_for_sender(
-                room,
-                requester_user_id,
-                self.config,
-                self.runtime_paths,
-            )
-            if len(available_agents) == 1:
-                self.logger.info("Skipping routing: only one agent present")
-                return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
-            single_direct_media_route = (
-                isinstance(
-                    event,
-                    nio.RoomMessageFile
-                    | nio.RoomEncryptedFile
-                    | nio.RoomMessageVideo
-                    | nio.RoomEncryptedVideo
-                    | nio.RoomMessageImage
-                    | nio.RoomEncryptedImage,
-                )
-                and media_events == [event]
-                and (handled_turn is None or handled_turn.source_event_ids == (event.event_id,))
-            )
-            routing_kwargs: dict[str, Any] = {
-                "message": message,
-                "requester_user_id": requester_user_id,
-                "extra_content": extra_content,
-            }
-            if media_events is not None and not single_direct_media_route:
-                routing_kwargs["media_events"] = media_events
-            if handled_turn is not None and not single_direct_media_route:
-                routing_kwargs["handled_turn"] = handled_turn
-            await self._handle_ai_routing(
-                room,
-                event,
-                context.thread_history,
-                context.thread_id,
-                **routing_kwargs,
-            )
-            return _RouterDispatchResult(handled=True)
-        return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
+        return self._dispatch_planner.materializable_agent_names()
 
     async def _resolve_response_action(
         self,
@@ -3270,53 +3348,15 @@ class AgentBot:
         Shared by text and image handlers to avoid duplicating the team
         formation + should-respond decision.
         """
-        agents_in_thread = get_agents_in_thread(context.thread_history, self.config, self.runtime_paths)
-        available_agents_in_room = get_available_agents_for_sender(
-            room,
-            requester_user_id,
-            self.config,
-            self.runtime_paths,
-        )
-        materializable_agent_names = self._materializable_agent_names()
-        responder_pool = self._filter_materializable_agents(
-            available_agents_in_room,
-            materializable_agent_names,
-        )
-        form_team = await self._decide_team_for_sender(
-            agents_in_thread,
+        return await self._dispatch_planner.resolve_response_action(
             context,
             room,
             requester_user_id,
             message,
             is_dm,
-            available_agents_in_room=available_agents_in_room,
-            materializable_agent_names=materializable_agent_names,
+            target=target,
+            source_envelope=source_envelope,
         )
-        team_action = self._team_response_action(form_team, responder_pool)
-        if team_action is not None:
-            return team_action
-
-        if not should_agent_respond(
-            agent_name=self.agent_name,
-            am_i_mentioned=context.am_i_mentioned,
-            is_thread=context.is_thread,
-            room=room,
-            thread_history=context.thread_history,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            mentioned_agents=context.mentioned_agents,
-            has_non_agent_mentions=context.has_non_agent_mentions,
-            sender_id=requester_user_id,
-        ):
-            if self._should_queue_follow_up_in_active_response_thread(
-                context=context,
-                target=target,
-                source_envelope=source_envelope,
-            ):
-                return _ResponseAction(kind="individual")
-            return _ResponseAction(kind="skip")
-
-        return _ResponseAction(kind="individual")
 
     def _should_queue_follow_up_in_active_response_thread(
         self,
@@ -3349,31 +3389,13 @@ class AgentBot:
         materializable_agent_names: set[str] | None = None,
     ) -> TeamResolution:
         """Decide team formation using sender-visible candidates without losing explicit intent."""
-        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(
-            context.thread_history,
-            self.config,
-            self.runtime_paths,
-        )
-        if available_agents_in_room is None:
-            available_agents_in_room = get_available_agents_for_sender(
-                room,
-                requester_user_id,
-                self.config,
-                self.runtime_paths,
-            )
-        if materializable_agent_names is None:
-            materializable_agent_names = self._materializable_agent_names()
-        return await decide_team_formation(
-            self.matrix_id,
-            context.mentioned_agents,
+        return await self._dispatch_planner.decide_team_for_sender(
             agents_in_thread,
-            all_mentioned_in_thread,
-            room=room,
-            message=message,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            is_dm_room=is_dm,
-            is_thread=context.is_thread,
+            context,
+            room,
+            requester_user_id,
+            message,
+            is_dm,
             available_agents_in_room=available_agents_in_room,
             materializable_agent_names=materializable_agent_names,
         )
@@ -4308,106 +4330,17 @@ class AgentBot:
         media_events: list[_MediaDispatchEvent] | None = None,
         handled_turn: HandledTurnState | None = None,
     ) -> None:
-        # Only router agent should handle routing
-        assert self.agent_name == ROUTER_AGENT_NAME
-
-        # Use configured agents only - router should not suggest random agents
-        permission_sender_id = requester_user_id
-        available_agents = get_configured_agents_for_room(room.room_id, self.config, self.runtime_paths)
-        available_agents = filter_agents_by_sender_permissions(
-            available_agents,
-            permission_sender_id,
-            self.config,
-            self.runtime_paths,
-        )
-        if not available_agents:
-            self.logger.debug("No configured agents to route to in this room for sender", sender=permission_sender_id)
-            return
-
-        self.logger.info("Handling AI routing", event_id=event.event_id)
-
-        routing_text = message or event.body
-        suggested_agent = await suggest_agent_for_message(
-            routing_text,
-            available_agents,
-            self.config,
-            self.runtime_paths,
-            thread_history,
-        )
-
-        if not suggested_agent:
-            # Send error message when routing fails
-            response_text = "⚠️ I couldn't determine which agent should help with this. Please try mentioning an agent directly with @ or rephrase your request."
-            self.logger.warning("Router failed to determine agent")
-        else:
-            # Router mentions the suggested agent and asks them to help
-            response_text = f"@{suggested_agent} could you help with this?"
-
-        target_thread_mode = (
-            self.config.get_entity_thread_mode(suggested_agent, self.runtime_paths, room_id=room.room_id)
-            if suggested_agent
-            else None
-        )
-        resolved_target = self._build_message_target(
-            room_id=room.room_id,
-            thread_id=thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-            thread_mode_override=target_thread_mode,
-        )
-        thread_event_id = resolved_target.resolved_thread_id
-        routed_extra_content = dict(extra_content) if extra_content is not None else {}
-        routed_media_events = list(media_events or [])
-        if not routed_media_events and isinstance(
+        await self._dispatch_planner.execute_router_relay(
+            room,
             event,
-            nio.RoomMessageFile
-            | nio.RoomEncryptedFile
-            | nio.RoomMessageVideo
-            | nio.RoomEncryptedVideo
-            | nio.RoomMessageImage
-            | nio.RoomEncryptedImage,
-        ):
-            routed_media_events.append(event)
-        if routed_media_events:
-            routed_attachment_ids = merge_attachment_ids(
-                parse_attachment_ids_from_event_source({"content": routed_extra_content}),
-                [
-                    attachment_id
-                    for attachment_id in await asyncio.gather(
-                        *(
-                            self._register_routed_attachment(
-                                room_id=room.room_id,
-                                thread_id=thread_event_id,
-                                event=media_event,
-                            )
-                            for media_event in routed_media_events
-                        ),
-                    )
-                    if attachment_id is not None
-                ],
-            )
-            if routed_attachment_ids:
-                routed_extra_content[ATTACHMENT_IDS_KEY] = routed_attachment_ids
-            else:
-                routed_extra_content.pop(ATTACHMENT_IDS_KEY, None)
-
-        event_id = await self._send_response(
-            room_id=room.room_id,
-            reply_to_event_id=event.event_id,
-            response_text=response_text,
-            thread_id=resolved_target.thread_id,
-            target=resolved_target,
-            extra_content=routed_extra_content or None,
+            thread_history,
+            thread_id,
+            message=message,
+            requester_user_id=requester_user_id,
+            extra_content=extra_content,
+            media_events=media_events,
+            handled_turn=handled_turn,
         )
-        if event_id:
-            self.logger.info("Routed to agent", suggested_agent=suggested_agent)
-            self._mark_source_events_responded(
-                (handled_turn or HandledTurnState.from_source_event_id(event.event_id)).with_response_event_id(
-                    event_id,
-                ),
-            )
-        else:
-            self.logger.error("Failed to route to agent", agent=suggested_agent)
 
     async def _handle_message_edit(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
@@ -4635,84 +4568,12 @@ class AgentBot:
         *,
         source_envelope: MessageEnvelope | None = None,
     ) -> None:
-        assert self.client is not None
-        event = await self._resolve_text_dispatch_event(prechecked_event.event)
-
-        async def send_skill_command_response(
-            *,
-            room_id: str,
-            reply_to_event_id: str,
-            thread_id: str | None,
-            thread_history: Sequence[ResolvedVisibleMessage],
-            prompt: str,
-            agent_name: str,
-            user_id: str | None,
-            reply_to_event: nio.RoomMessageText | None = None,
-        ) -> str | None:
-            return await self._send_skill_command_response(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
-                thread_history=thread_history,
-                prompt=prompt,
-                agent_name=agent_name,
-                user_id=user_id,
-                reply_to_event=reply_to_event,
-                source_envelope=source_envelope,
-            )
-
-        async def run_skill_command_tool(
-            *,
-            agent_name: str,
-            command_tool: str,
-            skill_name: str,
-            args_text: str,
-            requester_user_id: str | None = None,
-            room_id: str | None = None,
-            thread_id: str | None = None,
-        ) -> str:
-            runtime_context = None
-            if room_id is not None:
-                runtime_context = self._build_tool_runtime_context(
-                    MessageTarget.resolve(room_id, thread_id, event.event_id),
-                    user_id=requester_user_id,
-                    agent_name=agent_name,
-                    source_envelope=source_envelope,
-                )
-            return await _run_skill_command_tool(
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                agent_name=agent_name,
-                storage_path=self.storage_path,
-                command_tool=command_tool,
-                skill_name=skill_name,
-                args_text=args_text,
-                requester_user_id=requester_user_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                runtime_context=runtime_context,
-            )
-
-        context = CommandHandlerContext(
-            client=self.client,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            storage_path=self.storage_path,
-            logger=self.logger,
-            handled_turn_ledger=self.handled_turn_ledger,
-            derive_conversation_context=self._derive_conversation_context,
-            requester_user_id_for_event=self._requester_user_id_for_event,
-            build_message_target=self._build_message_target,
-            send_response=self._send_response,
-            send_skill_command_response=send_skill_command_response,
-            run_skill_command_tool=run_skill_command_tool,
-        )
-        await handle_command(
-            context=context,
+        await self._dispatch_planner.execute_command(
             room=room,
-            event=event,
-            command=command,
+            event=prechecked_event.event,
             requester_user_id=prechecked_event.requester_user_id,
+            command=command,
+            source_envelope=source_envelope,
         )
 
 
