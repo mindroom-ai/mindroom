@@ -21,6 +21,7 @@ from agno.session.summary import SessionSummary
 from agno.tools.function import Function
 
 from mindroom.agents import create_session_storage, get_agent_session
+from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
@@ -29,9 +30,10 @@ from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.history import prepare_history_for_run
 from mindroom.history.runtime import ScopeSessionContext, open_scope_session_context
 from mindroom.history.storage import read_scope_state, write_scope_state
-from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -419,6 +421,74 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
     assert len(prepared.compaction_outcomes) == 1
+    outcome = prepared.compaction_outcomes[0]
+    assert outcome.window_tokens == 0
+    assert outcome.history_budget_tokens is None
+    assert outcome.to_notice_metadata()["version"] == 1
+    assert outcome.to_notice_metadata()["window_tokens"] == 0
+    assert "history budget" not in outcome.format_notice()
+    assert "/ 0 " not in outcome.format_notice()
+
+
+@pytest.mark.asyncio
+async def test_send_compaction_notice_omits_zero_breakdown_fields_in_html_body(tmp_path: Path) -> None:
+    """Bot notices should reuse the zero-filtered notice text for both plain and HTML bodies."""
+    config, runtime_paths = _make_config(tmp_path)
+    bot = AgentBot(
+        agent_user=AgentMatrixUser(
+            agent_name="test_agent",
+            password=TEST_PASSWORD,
+            display_name="Test Agent",
+            user_id="@mindroom_test_agent:localhost",
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=["!room:localhost"],
+    )
+    bot.client = AsyncMock()
+    outcome = CompactionOutcome(
+        mode="auto",
+        session_id="session-1",
+        scope="agent:test_agent",
+        summary="Merged summary",
+        summary_model="summary-model",
+        before_tokens=30_000,
+        after_tokens=12_000,
+        window_tokens=100_000,
+        threshold_tokens=80_000,
+        reserve_tokens=4_096,
+        runs_before=20,
+        runs_after=8,
+        compacted_run_count=12,
+        compacted_at="2026-01-01T00:00:00Z",
+        notify=True,
+        history_budget_tokens=100_000,
+        role_instructions_tokens=0,
+        tool_definition_tokens=0,
+        current_prompt_tokens=62,
+    )
+
+    with patch("mindroom.bot.send_message", new=AsyncMock(return_value="$notice")) as mock_send:
+        event_id = await bot._send_compaction_notice(
+            room_id="!room:localhost",
+            reply_to_event_id="$incoming",
+            main_response_event_id="$reply",
+            thread_id=None,
+            outcome=outcome,
+        )
+
+    assert event_id == "$notice"
+    assert mock_send.await_args is not None
+    sent_content = mock_send.await_args.args[2]
+    assert sent_content["body"] == outcome.format_notice()
+    assert sent_content["body"] == (
+        "\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget\n   Overhead: 62 prompt"
+    )
+    assert sent_content["formatted_body"] == (
+        "<em>\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget<br/>"
+        "   Overhead: 62 prompt</em>"
+    )
 
 
 @pytest.mark.asyncio

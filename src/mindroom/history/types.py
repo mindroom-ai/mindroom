@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TypeGuard
 
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
@@ -86,6 +86,27 @@ class ResolvedReplayPlan:
     history_limit: int | None = None
 
 
+def _to_k(tokens: int) -> str:
+    """Abbreviate token counts: ``145826`` → ``~145K``, values <1000 as-is.
+
+    Uses floor rounding so nearby values do not jump across adjacent ``K``
+    buckets when this helper is used for compact auxiliary counts.
+    """
+    if tokens >= 1000:
+        return f"~{tokens // 1000}K"
+    return str(tokens)
+
+
+def _format_exact_tokens(tokens: int) -> str:
+    """Format token counts exactly with thousands separators."""
+    return f"{tokens:,}"
+
+
+def _should_render_overhead_tokens(tokens: int | None) -> TypeGuard[int]:
+    """Return whether one overhead segment should appear in the notice."""
+    return tokens is not None and tokens != 0
+
+
 @dataclass(frozen=True)
 class CompactionOutcome:
     """Completed pre-run compaction result used for notices and tests."""
@@ -105,6 +126,7 @@ class CompactionOutcome:
     compacted_run_count: int
     compacted_at: str
     notify: bool
+    history_budget_tokens: int | None = None
     role_instructions_tokens: int | None = None
     tool_definition_tokens: int | None = None
     current_prompt_tokens: int | None = None
@@ -134,18 +156,23 @@ class CompactionOutcome:
         return meta
 
     def format_notice(self) -> str:
-        """Format a human-readable compaction notice line."""
-        parts = [
-            f"~{self.before_tokens:,} \u2192 ~{self.after_tokens:,} / {self.window_tokens:,} tokens",
-        ]
-        if self.role_instructions_tokens is not None:
-            parts.append(f"role/instructions ~{self.role_instructions_tokens:,}")
-        if self.tool_definition_tokens is not None:
-            parts.append(f"tools ~{self.tool_definition_tokens:,}")
-        if self.current_prompt_tokens is not None:
-            parts.append(f"current prompt ~{self.current_prompt_tokens:,}")
-        parts.append(f"{self.compacted_run_count} runs summarized")
-        return f"Conversation compacted ({'; '.join(parts)})."
+        """Format a human-readable compaction notice."""
+        line1 = (
+            f"\U0001f4e6 Compacted {self.compacted_run_count} runs: "
+            f"{_format_exact_tokens(self.before_tokens)} \u2192 {_format_exact_tokens(self.after_tokens)}"
+        )
+        if self.history_budget_tokens is not None:
+            line1 += f" / {_format_exact_tokens(self.history_budget_tokens)} history budget"
+        overhead_parts: list[str] = []
+        if _should_render_overhead_tokens(self.role_instructions_tokens):
+            overhead_parts.append(f"{_to_k(self.role_instructions_tokens)} instructions")
+        if _should_render_overhead_tokens(self.tool_definition_tokens):
+            overhead_parts.append(f"{_to_k(self.tool_definition_tokens)} tools")
+        if _should_render_overhead_tokens(self.current_prompt_tokens):
+            overhead_parts.append(f"{_to_k(self.current_prompt_tokens)} prompt")
+        if overhead_parts:
+            return f"{line1}\n   Overhead: {' + '.join(overhead_parts)}"
+        return line1
 
 
 @dataclass(frozen=True)

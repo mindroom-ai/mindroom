@@ -200,6 +200,7 @@ async def compact_scope_history(
         compacted_run_count=rewrite_result.compacted_run_count,
         compacted_at=compacted_at,
         notify=notify,
+        history_budget_tokens=available_history_budget,
     )
     return new_state, outcome
 

@@ -2507,6 +2507,51 @@ async def test_prepare_agent_and_prompt_enriches_compaction_outcomes_without_col
 
 
 @pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    live_agent = _agent()
+    live_agent.role = ""
+    live_agent.instructions = []
+    live_agent.tools = None
+
+    original_outcome = _make_test_compaction_outcome()
+    prepared_execution = PreparedExecutionContext(
+        final_prompt="x" * 248,
+        replay_plan=None,
+        unseen_event_ids=[],
+        replays_persisted_history=False,
+        compaction_outcomes=[original_outcome],
+    )
+
+    with (
+        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="x" * 248)),
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch(
+            "mindroom.ai.prepare_agent_execution_context",
+            new=AsyncMock(return_value=prepared_execution),
+        ),
+    ):
+        _prepared_agent, _full_prompt, _unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+            "test_agent",
+            "Current prompt",
+            runtime_paths,
+            config,
+            compaction_outcomes_collector=None,
+        )
+
+    outcome = prepared.compaction_outcomes[0]
+    assert outcome.role_instructions_tokens == 0
+    assert outcome.tool_definition_tokens == 0
+    assert outcome.current_prompt_tokens == 62
+    notice = outcome.format_notice()
+    assert "0 instructions" not in notice
+    assert "0 tools" not in notice
+    assert "62 prompt" in notice
+
+
+@pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_keeps_empty_collector_when_no_compaction_outcomes(
     tmp_path: Path,
 ) -> None:
