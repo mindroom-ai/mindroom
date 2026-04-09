@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 
 from mindroom.ai import cached_agent_run, get_model_instance
 from mindroom.logging_config import get_logger
-from mindroom.matrix.room_cache import cached_room
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -134,12 +133,6 @@ async def ensure_room_has_topic(
         True if topic was set or already exists, False on error
 
     """
-    room = cached_room(client, room_id)
-    topic = room.topic if room is not None else None
-    if topic:
-        logger.debug(f"Room {room_key} already has topic: {topic}")
-        return True
-
     response = await client.room_get_state_event(room_id, "m.room.topic")
     if isinstance(response, nio.RoomGetStateEventResponse) and response.content.get("topic"):
         logger.debug(f"Room {room_key} already has topic: {response.content['topic']}")

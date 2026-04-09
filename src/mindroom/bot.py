@@ -332,16 +332,20 @@ class _QueuedMessageState:
     def is_set(self) -> bool:
         return self._event.is_set()
 
+
 def _thread_summary_message_count_hint(
     thread_history: Sequence[ResolvedVisibleMessage],
 ) -> int:
-    """Return a lower-bound thread size without refetching history.
+    """Return a lower-bound post-response thread size without refetching history.
 
-    Uses the pre-response snapshot length so concurrent agents each see a
-    conservative estimate. This avoids all of them skipping the fetch when the
-    cumulative count would cross the threshold.
+    The summary task runs only after this bot has already appended one visible
+    reply to the thread, so the hint must account for that new non-summary
+    message. Existing summary notices do not count toward the thresholds.
     """
-    return len(thread_history)
+    existing_non_summary_messages = sum(
+        1 for message in thread_history if not isinstance(message.content.get("io.mindroom.thread_summary"), dict)
+    )
+    return existing_non_summary_messages + 1
 
 
 def _create_task_wrapper(

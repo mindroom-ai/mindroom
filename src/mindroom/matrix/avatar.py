@@ -7,7 +7,6 @@ from pathlib import Path
 import nio
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.room_cache import cached_room
 
 logger = get_logger(__name__)
 
@@ -178,12 +177,6 @@ async def set_room_avatar_from_file(
 
 async def room_has_avatar(client: nio.AsyncClient, room_id: str) -> bool:
     """Return whether the Matrix room already has an avatar URL configured."""
-    room = cached_room(client, room_id)
-    avatar_url = room.room_avatar_url if room is not None else None
-    if avatar_url:
-        logger.debug(f"Avatar already set for room {room_id}")
-        return True
-
     response = await client.room_get_state_event(room_id, "m.room.avatar")
     if isinstance(response, nio.RoomGetStateEventResponse) and response.content and response.content.get("url"):
         logger.debug(f"Avatar already set for room {room_id}")

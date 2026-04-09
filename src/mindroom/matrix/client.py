@@ -723,14 +723,8 @@ async def ensure_room_name(
     name: str,
 ) -> bool:
     """Ensure a room or Space has the desired display name."""
-    room = cached_room(client, room_id)
-    current_name = room.name if room is not None else None
-    if current_name is None or current_name != name:
-        current_response = await client.room_get_state_event(room_id, "m.room.name")
-        if isinstance(current_response, nio.RoomGetStateEventResponse) and current_response.content.get("name") == name:
-            logger.debug("Room name already configured", room_id=room_id, name=name)
-            return True
-    else:
+    current_response = await client.room_get_state_event(room_id, "m.room.name")
+    if isinstance(current_response, nio.RoomGetStateEventResponse) and current_response.content.get("name") == name:
         logger.debug("Room name already configured", room_id=room_id, name=name)
         return True
 
@@ -889,11 +883,6 @@ async def get_room_name(client: nio.AsyncClient, room_id: str) -> str:
         Room name if found, fallback name for DM/unnamed rooms
 
     """
-    room = cached_room(client, room_id)
-    current_name = room.name if room is not None else None
-    if current_name:
-        return current_name
-
     response = await client.room_get_state_event(room_id, "m.room.name")
     if isinstance(response, nio.RoomGetStateEventResponse) and response.content.get("name"):
         return str(response.content["name"])

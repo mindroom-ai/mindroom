@@ -85,17 +85,23 @@ def test_get_console_returns_shared_console_instance() -> None:
 
 
 @pytest.mark.asyncio
-async def test_room_has_avatar_prefers_cached_room_avatar_url() -> None:
-    """Room avatar checks should prefer nio's cached avatar URL."""
+async def test_room_has_avatar_rechecks_state_even_when_cached_avatar_exists() -> None:
+    """Room avatar checks should not trust a cached avatar URL without state confirmation."""
     client = AsyncMock()
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_avatar_url = "mxc://example.com/avatar"
     client.rooms = {"!room:example.com": room}
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={},
+        event_type="m.room.avatar",
+        state_key="",
+        room_id="!room:example.com",
+    )
 
     result = await avatar_module.room_has_avatar(client, "!room:example.com")
 
-    assert result is True
-    client.room_get_state_event.assert_not_awaited()
+    assert result is False
+    client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.avatar")
 
 
 @pytest.mark.asyncio
