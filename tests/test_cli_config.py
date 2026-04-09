@@ -18,8 +18,6 @@ from anthropic import PermissionDeniedError
 from google.auth.exceptions import DefaultCredentialsError
 from typer.testing import CliRunner
 
-from tests.conftest import normalize_console_output
-
 import mindroom.constants as constants_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli.config import _activate_cli_runtime
@@ -29,6 +27,7 @@ from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.matrix.state import MatrixState
 from mindroom.response_tracker import ResponseTracker
+from tests.conftest import normalize_console_output
 
 runner = CliRunner()
 
