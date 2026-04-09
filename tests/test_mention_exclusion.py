@@ -54,8 +54,8 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
     general_bot.client.rooms = {}
 
     # Mock response tracker
-    general_bot.response_tracker = Mock()
-    general_bot.response_tracker.has_responded = Mock(return_value=False)
+    general_bot.handled_turn_ledger = Mock()
+    general_bot.handled_turn_ledger.has_responded = Mock(return_value=False)
 
     # Create a test room
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_general:localhost")
@@ -132,8 +132,8 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
     general_bot.client.rooms = {}
 
     # Mock response tracker
-    general_bot.response_tracker = Mock()
-    general_bot.response_tracker.has_responded = Mock(return_value=False)
+    general_bot.handled_turn_ledger = Mock()
+    general_bot.handled_turn_ledger.has_responded = Mock(return_value=False)
 
     # Create a test room
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_general:localhost")

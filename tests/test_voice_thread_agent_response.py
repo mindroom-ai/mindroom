@@ -90,8 +90,8 @@ def mock_home_bot(tmp_path: Path) -> AgentBot:
     bot.client = AsyncMock()
     bot.logger = MagicMock()
     bot._generate_response = AsyncMock()
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     return bot
 
 

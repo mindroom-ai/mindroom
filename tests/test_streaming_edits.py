@@ -12,6 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -222,7 +223,7 @@ class TestStreamingEdits:
         mock_room.room_id = "!test:localhost"
 
         # Mark that we already responded to some original message
-        bot.response_tracker.mark_responded("$original123")
+        bot.handled_turn_ledger.record_handled_turn(HandledTurnState.from_source_event_id("$original123"))
 
         # New message (NOT an edit) mentioning the agent
         new_event = MagicMock()

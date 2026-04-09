@@ -18,6 +18,7 @@ from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -116,7 +117,7 @@ class TestResponseTrackingRegression:
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix
-        assert bot.response_tracker.has_responded(command_event.event_id), (
+        assert bot.handled_turn_ledger.has_responded(command_event.event_id), (
             "Command event should be marked as responded to prevent re-processing"
         )
 
@@ -209,7 +210,7 @@ class TestResponseTrackingRegression:
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix in bot.py at line 371
-        assert bot.response_tracker.has_responded(unknown_command_event.event_id), (
+        assert bot.handled_turn_ledger.has_responded(unknown_command_event.event_id), (
             "Unknown command event should be marked as responded"
         )
 
@@ -222,7 +223,7 @@ class TestResponseTrackingRegression:
         mock_config: Config,
         tmp_path: Path,
     ) -> None:
-        """Test that router AI routing is tracked in response tracker.
+        """Test that router AI routing is tracked in the handled-turn ledger.
 
         Regression test for issue where router would re-route messages
         after restart.
@@ -269,24 +270,37 @@ class TestResponseTrackingRegression:
             "@mindroom_research:localhost": MagicMock(),
         }
 
+        source_event_ids = ["$user_msg_788", message_event.event_id]
+        source_event_prompts = {
+            "$user_msg_788": "Earlier context",
+            message_event.event_id: "What is quantum computing?",
+        }
+
         # Process routing
         await bot._handle_ai_routing(
             mock_room,
             message_event,
             [],
             requester_user_id="@user:localhost",
+            handled_turn=HandledTurnState.create(
+                source_event_ids,
+                source_event_prompts=source_event_prompts,
+            ),
         )
 
         # Verify routing message was sent
         assert bot.client.room_send.call_count == 1
-        # NOTE: The fix should add mark_responded() in bot.py at line 787
-        # We're NOT adding it here in the test - we're testing that bot.py does it
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix
-        assert bot.response_tracker.has_responded(message_event.event_id), (
+        assert bot.handled_turn_ledger.has_responded(message_event.event_id), (
             "Router event should be marked as responded to prevent re-routing"
         )
+        turn_record = bot.handled_turn_ledger.get_turn_record(message_event.event_id)
+        assert turn_record is not None
+        assert turn_record.response_event_id == "$router_response_123"
+        assert turn_record.source_event_ids == tuple(source_event_ids)
+        assert turn_record.source_event_prompts == source_event_prompts
 
         # Reset mock
         bot.client.room_send.reset_mock()
@@ -298,6 +312,10 @@ class TestResponseTrackingRegression:
             message_event,
             [],
             requester_user_id="@user:localhost",
+            handled_turn=HandledTurnState.create(
+                source_event_ids,
+                source_event_prompts=source_event_prompts,
+            ),
         )
 
         # With proper tracking, this shouldn't happen again

@@ -12,6 +12,7 @@ from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.message_target import MessageTarget
@@ -41,9 +42,9 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.main import Config
+    from mindroom.handled_turns import HandledTurnLedger
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
-    from mindroom.response_tracker import ResponseTracker
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
@@ -67,7 +68,7 @@ class CommandHandlerContext:
     runtime_paths: RuntimePaths
     storage_path: Path
     logger: structlog.stdlib.BoundLogger
-    response_tracker: ResponseTracker
+    handled_turn_ledger: HandledTurnLedger
     derive_conversation_context: Callable[
         [str, EventInfo],
         Awaitable[tuple[bool, str | None, list[ResolvedVisibleMessage]]],
@@ -168,6 +169,11 @@ def _build_skill_command_prompt(skill_name: str, args_text: str) -> str:
         f"User input:\n{args_section}\n\n"
         "Load the skill instructions with get_skill_instructions and follow them."
     )
+
+
+def _normalized_response_event_id(raw_response_event_id: str | None) -> str | None:
+    """Normalize Matrix send helpers that may return empty strings or None."""
+    return raw_response_event_id if isinstance(raw_response_event_id, str) and raw_response_event_id else None
 
 
 def _resolve_skill_command_agent(  # noqa: C901
@@ -570,7 +576,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         # If we have change_info, this is a config set that needs confirmation
         if change_info:
             # Send the preview message
-            event_id = await context.send_response(
+            raw_response_event_id = await context.send_response(
                 room.room_id,
                 event.event_id,
                 response_text,
@@ -578,11 +584,17 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 reply_to_event=event,
                 skip_mentions=True,
             )
+            response_event_id = _normalized_response_event_id(raw_response_event_id)
+            handled_turn = HandledTurnState.from_source_event_id(
+                event.event_id,
+                response_event_id=response_event_id,
+            )
 
-            if event_id:
+            if response_event_id:
+                context.handled_turn_ledger.record_handled_turn(handled_turn)
                 # Register the pending change
                 config_confirmation.register_pending_change(
-                    event_id=event_id,
+                    event_id=response_event_id,
                     room_id=room.room_id,
                     thread_id=effective_thread_id,
                     config_path=change_info["config_path"],
@@ -592,20 +604,25 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 )
 
                 # Get the pending change we just registered
-                pending_change = config_confirmation.get_pending_change(event_id)
+                pending_change = config_confirmation.get_pending_change(response_event_id)
 
                 # Store in Matrix state for persistence
                 if pending_change:
                     await config_confirmation.store_pending_change_in_matrix(
                         context.client,
-                        event_id,
+                        response_event_id,
                         pending_change,
                     )
 
                 # Add reaction buttons
-                await config_confirmation.add_confirmation_reactions(context.client, room.room_id, event_id)
+                await config_confirmation.add_confirmation_reactions(
+                    context.client,
+                    room.room_id,
+                    response_event_id,
+                )
 
-            context.response_tracker.mark_responded(event.event_id)
+            if response_event_id is None:
+                context.handled_turn_ledger.record_handled_turn(handled_turn)
             return  # Exit early since we've handled the response
 
     elif command.type == CommandType.SKILL:
@@ -653,7 +670,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     )
                 else:
                     prompt = _build_skill_command_prompt(spec.name, args_text)
-                    event_id = await context.send_skill_command_response(
+                    raw_event_id = await context.send_skill_command_response(
                         room_id=room.room_id,
                         reply_to_event_id=event.event_id,
                         thread_id=effective_thread_id,
@@ -663,8 +680,12 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                         user_id=requester_user_id,
                         reply_to_event=event,
                     )
-                    if event_id:
-                        context.response_tracker.mark_responded(event.event_id, event_id)
+                    handled_turn = HandledTurnState.from_source_event_id(
+                        event.event_id,
+                        response_event_id=_normalized_response_event_id(raw_event_id),
+                    )
+                    if handled_turn.response_event_id is not None:
+                        context.handled_turn_ledger.record_handled_turn(handled_turn)
                     return
 
     elif command.type == CommandType.UNKNOWN:
@@ -672,7 +693,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = "❌ Unknown command. Try !help for available commands."
 
     if response_text:
-        await context.send_response(
+        raw_response_event_id = await context.send_response(
             room.room_id,
             event.event_id,
             response_text,
@@ -680,4 +701,9 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             reply_to_event=event,
             skip_mentions=True,
         )
-        context.response_tracker.mark_responded(event.event_id)
+        context.handled_turn_ledger.record_handled_turn(
+            HandledTurnState.from_source_event_id(
+                event.event_id,
+                response_event_id=_normalized_response_event_id(raw_response_event_id),
+            ),
+        )

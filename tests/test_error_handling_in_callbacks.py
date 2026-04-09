@@ -43,8 +43,8 @@ async def test_callback_error_is_logged_not_raised(tmp_path: Path) -> None:
     bot.client.user_id = "@test_agent:example.com"
 
     # Mock dependencies
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
 
     # Create a room and event

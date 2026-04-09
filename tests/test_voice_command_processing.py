@@ -22,6 +22,7 @@ from mindroom.constants import (
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
+from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.identity import MatrixID
 from mindroom.voice_handler import prepare_voice_message
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
@@ -155,8 +156,8 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
         config=_attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path),
         rooms=["!test:example.com"],
     )
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
 
     room = _make_room("@mindroom_router:example.com", "@alice:example.com")
@@ -194,8 +195,8 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
         config=_attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path),
         rooms=["!test:example.com"],
     )
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
 
     room = _make_room("@mindroom_router:example.com", "@bob:example.com")
@@ -237,8 +238,8 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
         ),
         rooms=["!test:example.com"],
     )
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.download = AsyncMock(
@@ -312,8 +313,8 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
         ),
         rooms=["!test:example.com"],
     )
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.download = AsyncMock(
@@ -393,8 +394,8 @@ async def test_router_parses_sidecar_skill_command_mentions_from_canonical_body(
         ),
         rooms=["!test:example.com"],
     )
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.download = AsyncMock(
@@ -473,8 +474,8 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
         config=_attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path),
         rooms=["!test:example.com"],
     )
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.download = AsyncMock()
@@ -510,7 +511,9 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     bot.client.download.assert_not_awaited()
     mock_interactive.assert_not_awaited()
     mock_schedule.assert_not_awaited()
-    bot.response_tracker.mark_responded.assert_called_once_with(event.event_id)
+    bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        HandledTurnState.from_source_event_id(event.event_id),
+    )
 
 
 @pytest.mark.asyncio
@@ -617,8 +620,8 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
         config=config,
         rooms=["!test:example.com"],
     )
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.client = MagicMock()
     bot._send_response = AsyncMock()
@@ -645,7 +648,9 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     mock_voice.assert_not_called()
     mock_download_audio.assert_not_called()
     bot._send_response.assert_not_called()
-    bot.response_tracker.mark_responded.assert_called_once_with("$agent_audio_event")
+    bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        HandledTurnState.from_source_event_id("$agent_audio_event"),
+    )
 
 
 @pytest.mark.asyncio
@@ -668,8 +673,8 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         ),
         rooms=["!test:example.com"],
     )
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.client = AsyncMock()
     bot.client.rooms = {}
@@ -697,7 +702,13 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}[Attached voice message]")
     assert call_kwargs["attachment_ids"] == [expected_attachment_id]
     assert list(call_kwargs["media"].audio)
-    bot.response_tracker.mark_responded.assert_called_once_with("$voice_event", "$response")
+    bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        HandledTurnState.from_source_event_id(
+            "$voice_event",
+            response_event_id="$response",
+            source_event_prompts={"$voice_event": f"{VOICE_PREFIX}[Attached voice message]"},
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -720,8 +731,8 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
         ),
         rooms=["!test:example.com"],
     )
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.client = AsyncMock()
     bot.client.rooms = {}
@@ -770,8 +781,8 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
             config=config,
             rooms=["!test:example.com"],
         )
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
         bot.logger = MagicMock()
         bot.client = AsyncMock()
         bot.client.rooms = {}
@@ -841,8 +852,8 @@ async def test_router_visible_voice_echo_is_deduplicated_on_redelivery(tmp_path)
     bot._send_response.assert_called_once()
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
-    assert bot.response_tracker.has_responded(event.event_id)
-    assert bot.response_tracker.get_response_event_id(event.event_id) == "$voice_echo"
+    assert bot.handled_turn_ledger.has_responded(event.event_id)
+    assert bot.handled_turn_ledger.get_response_event_id(event.event_id) == "$voice_echo"
 
 
 @pytest.mark.asyncio
@@ -866,8 +877,8 @@ async def test_router_visible_voice_echo_respects_reply_permissions(tmp_path) ->
     bot._send_response.assert_not_called()
     mock_download_audio.assert_not_awaited()
     mock_voice.assert_not_awaited()
-    assert bot.response_tracker.has_responded(event.event_id)
-    assert bot.response_tracker.get_response_event_id(event.event_id) is None
+    assert bot.handled_turn_ledger.has_responded(event.event_id)
+    assert bot.handled_turn_ledger.get_response_event_id(event.event_id) is None
 
 
 @pytest.mark.asyncio
@@ -929,8 +940,8 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
 
-        assert not bot.response_tracker.has_responded(event.event_id)
-        assert bot.response_tracker.get_visible_echo_event_id(event.event_id) == "$voice_echo"
+        assert not bot.handled_turn_ledger.has_responded(event.event_id)
+        assert bot.handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
 
         await bot._on_media_message(room, event)
 
@@ -940,8 +951,58 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         "@home could you help with this?",
         "@home could you help with this?",
     ]
-    assert bot.response_tracker.has_responded(event.event_id)
-    assert bot.response_tracker.get_visible_echo_event_id(event.event_id) == "$voice_echo"
+    assert bot.handled_turn_ledger.has_responded(event.event_id)
+    assert bot.handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
+
+
+@pytest.mark.asyncio
+async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_after_restart(
+    tmp_path: Path,
+) -> None:
+    """A fresh bot should reuse the persisted visible echo after a failed handoff retry."""
+    agents = {
+        "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
+        "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
+    }
+    bot, room, event = _make_visible_router_echo_scenario(
+        tmp_path,
+        agents=agents,
+        send_response_side_effect=["$voice_echo", None],
+    )
+
+    with (
+        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
+        await bot._on_media_message(room, event)
+
+    assert not bot.handled_turn_ledger.has_responded(event.event_id)
+    assert bot.handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
+
+    restarted_bot, restarted_room, restarted_event = _make_visible_router_echo_scenario(
+        tmp_path,
+        agents=agents,
+        send_response_return="$route",
+    )
+
+    with (
+        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
+        await restarted_bot._on_media_message(restarted_room, restarted_event)
+
+    response_texts = [call.kwargs["response_text"] for call in restarted_bot._send_response.call_args_list]
+    assert response_texts == ["@home could you help with this?"]
+    assert restarted_bot.handled_turn_ledger.has_responded(event.event_id)
+    assert restarted_bot.handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
 
 
 @pytest.mark.asyncio
@@ -970,8 +1031,8 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         config=config,
         rooms=["!test:example.com"],
     )
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.client = AsyncMock()
     bot._send_response = AsyncMock(return_value="$response")
@@ -1003,7 +1064,12 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
     }
-    bot.response_tracker.mark_responded.assert_called_once_with("$voice_event")
+    bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        HandledTurnState.from_source_event_id(
+            "$voice_event",
+            response_event_id="$response",
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -1036,8 +1102,8 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
             config=config,
             rooms=["!test:example.com"],
         )
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
         bot.logger = MagicMock()
         bot.client = AsyncMock()
         bot.client.rooms = {}
@@ -1107,8 +1173,8 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
             config=config,
             rooms=["!test:example.com"],
         )
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
         bot.logger = MagicMock()
         bot.client = AsyncMock()
         bot.client.rooms = {}

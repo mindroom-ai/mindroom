@@ -47,8 +47,8 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
     # Set up the bot with necessary mocks
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.stop_manager = StopManager()
     bot._send_response = AsyncMock(return_value="$stopping:example.com")
@@ -135,8 +135,8 @@ async def test_stop_emoji_prefers_graceful_agno_cancel_when_run_id_present(tmp_p
 
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.stop_manager = StopManager()
     bot._send_response = AsyncMock(return_value="$stopping:example.com")
@@ -427,7 +427,7 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
     # Set up the bot
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
-    bot.response_tracker = MagicMock()
+    bot.handled_turn_ledger = MagicMock()
     bot.logger = MagicMock()
     bot.stop_manager = StopManager()
 
@@ -513,7 +513,7 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
     )
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@mindroom_test_agent:example.com"
-    bot.response_tracker = MagicMock()
+    bot.handled_turn_ledger = MagicMock()
     bot.logger = MagicMock()
     bot.stop_manager = StopManager()
 

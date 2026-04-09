@@ -216,6 +216,7 @@ from .constants import (
     resolve_avatar_path,
 )
 from .error_handling import get_user_friendly_error_message
+from .handled_turns import HandledTurnLedger, HandledTurnState
 from .history.runtime import create_scope_session_storage
 from .history.types import HistoryScope
 from .knowledge.utils import (
@@ -242,7 +243,6 @@ from .matrix.client import (
 )
 from .matrix.event_cache import EventCache, normalize_event_source_for_cache
 from .media_inputs import MediaInputs
-from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
@@ -273,6 +273,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
+
+_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 
 
 # Constants
@@ -412,6 +414,20 @@ class _RouterDispatchResult:
 
     handled: bool
     mark_visible_echo_responded: bool = False
+
+
+@dataclass(frozen=True)
+class _PersistedTurnMetadata:
+    """Run metadata needed to rebuild a coalesced turn after a partial ledger write."""
+
+    anchor_event_id: str
+    source_event_ids: tuple[str, ...]
+    response_event_id: str | None = None
+    source_event_prompts: dict[str, str] | None = None
+
+    @property
+    def is_coalesced(self) -> bool:
+        return len(self.source_event_ids) > 1
 
 
 def _should_skip_mentions(event_source: dict) -> bool:
@@ -585,17 +601,6 @@ class _PreparedHookedPayload:
     envelope: MessageEnvelope
     strip_transient_enrichment_after_run: bool = False
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-
-
-@dataclass(frozen=True)
-class _PersistedTurnMetadata:
-    anchor_event_id: str
-    source_event_ids: tuple[str, ...]
-    source_event_prompts: dict[str, str] | None = None
-
-    @property
-    def is_coalesced(self) -> bool:
-        return len(self.source_event_ids) > 1
 
 
 type _TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
@@ -871,72 +876,61 @@ class AgentBot:
 
     def _mark_source_events_responded(
         self,
-        event_ids: list[str] | tuple[str, ...],
-        response_event_id: str | None = None,
+        handled_turn: HandledTurnState,
     ) -> None:
         """Mark one or more source events as handled by the same response."""
-        seen_event_ids: set[str] = set()
-        for event_id in event_ids:
-            if event_id in seen_event_ids:
-                continue
-            seen_event_ids.add(event_id)
-            if response_event_id is None:
-                self.response_tracker.mark_responded(event_id)
-            else:
-                self.response_tracker.mark_responded(event_id, response_event_id)
-
-    def _visible_echo_event_id_for_sources(
-        self,
-        event_ids: list[str] | tuple[str, ...],
-    ) -> str | None:
-        """Return the first tracked visible router echo for one or more source events."""
-        for event_id in event_ids:
-            visible_echo_event_id = self.response_tracker.get_visible_echo_event_id(event_id)
-            if visible_echo_event_id is not None:
-                return visible_echo_event_id
-        return None
+        visible_echo_event_id = (
+            handled_turn.visible_echo_event_id
+            or self.handled_turn_ledger.visible_echo_event_id_for_sources(
+                handled_turn.source_event_ids,
+            )
+        )
+        self.handled_turn_ledger.record_handled_turn(
+            handled_turn.with_visible_echo_event_id(visible_echo_event_id),
+        )
 
     def _dispatch_matrix_run_metadata(
         self,
-        source_event_ids: list[str],
-        source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState,
     ) -> dict[str, Any] | None:
         """Build run metadata extras for one dispatch turn."""
-        if len(source_event_ids) <= 1:
+        if not handled_turn.is_coalesced:
             return None
         metadata: dict[str, Any] = {
-            constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(source_event_ids),
+            constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(handled_turn.source_event_ids),
         }
-        if source_event_prompts:
-            metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(source_event_prompts)
+        if handled_turn.source_event_prompts:
+            metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(handled_turn.source_event_prompts)
         return metadata
 
     def _persisted_turn_metadata_for_run(self, metadata: dict[str, Any]) -> _PersistedTurnMetadata | None:
-        """Parse persisted run metadata needed for edit regeneration."""
+        """Parse persisted run metadata needed for coalesced edit regeneration."""
         anchor_event_id = metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY)
         if not isinstance(anchor_event_id, str) or not anchor_event_id:
             return None
         raw_source_event_ids = metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-        source_event_ids = (
-            tuple(event_id for event_id in raw_source_event_ids if isinstance(event_id, str) and event_id)
-            if isinstance(raw_source_event_ids, list)
-            else ()
-        )
-        normalized_source_event_ids = source_event_ids or (anchor_event_id,)
         raw_prompt_map = metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)
-        source_event_prompts = (
-            {
-                event_id: prompt
-                for event_id, prompt in raw_prompt_map.items()
-                if isinstance(event_id, str) and isinstance(prompt, str) and event_id in normalized_source_event_ids
-            }
-            if isinstance(raw_prompt_map, dict)
+        response_event_id = (
+            metadata.get(_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
+            if isinstance(metadata.get(_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY), str)
             else None
         )
+        handled_turn = HandledTurnState.create(
+            raw_source_event_ids if isinstance(raw_source_event_ids, list) else [anchor_event_id],
+            response_event_id=response_event_id,
+            source_event_prompts=raw_prompt_map if isinstance(raw_prompt_map, dict) else None,
+        )
+        if not handled_turn.source_event_ids:
+            handled_turn = HandledTurnState.from_source_event_id(
+                anchor_event_id,
+                response_event_id=response_event_id,
+                source_event_prompts=raw_prompt_map if isinstance(raw_prompt_map, dict) else None,
+            )
         return _PersistedTurnMetadata(
             anchor_event_id=anchor_event_id,
-            source_event_ids=normalized_source_event_ids,
-            source_event_prompts=source_event_prompts,
+            source_event_ids=handled_turn.source_event_ids,
+            response_event_id=handled_turn.response_event_id,
+            source_event_prompts=handled_turn.source_event_prompts,
         )
 
     def _load_persisted_turn_metadata(
@@ -959,6 +953,8 @@ class AgentBot:
             (None, create_session_id(room.room_id, None)),
         ]
         checked_session_ids: set[str] = set()
+        newest_match: _PersistedTurnMetadata | None = None
+        newest_sort_key: tuple[int | float, int] | None = None
         for candidate_thread_id, session_id in session_contexts:
             if session_id in checked_session_ids:
                 continue
@@ -987,22 +983,76 @@ class AgentBot:
                 )
                 if session is None:
                     continue
-                for run in session.runs or []:
-                    if not isinstance(run, (RunOutput, TeamRunOutput)):
-                        continue
-                    if not isinstance(run.metadata, dict):
-                        continue
-                    turn_metadata = self._persisted_turn_metadata_for_run(run.metadata)
-                    if turn_metadata is None:
-                        continue
-                    if (
-                        original_event_id == turn_metadata.anchor_event_id
-                        or original_event_id in turn_metadata.source_event_ids
-                    ):
-                        return turn_metadata
+                session_match = self._latest_matching_persisted_turn_metadata(
+                    session.runs,
+                    original_event_id=original_event_id,
+                )
+                if session_match is not None:
+                    session_sort_key, turn_metadata = session_match
+                    if newest_sort_key is None or session_sort_key > newest_sort_key:
+                        newest_sort_key = session_sort_key
+                        newest_match = turn_metadata
             finally:
                 storage.close()
-        return None
+        return newest_match
+
+    def _latest_matching_persisted_turn_metadata(
+        self,
+        runs: list[RunOutput | TeamRunOutput] | None,
+        *,
+        original_event_id: str,
+    ) -> tuple[tuple[int | float, int], _PersistedTurnMetadata] | None:
+        """Return the newest persisted turn metadata in one session that matches the edit target."""
+        newest_match: tuple[tuple[int | float, int], _PersistedTurnMetadata] | None = None
+        for run_index, run in enumerate(runs or []):
+            if not isinstance(run, (RunOutput, TeamRunOutput)):
+                continue
+            if not isinstance(run.metadata, dict):
+                continue
+            turn_metadata = self._persisted_turn_metadata_for_run(run.metadata)
+            if turn_metadata is None:
+                continue
+            if (
+                original_event_id != turn_metadata.anchor_event_id
+                and original_event_id not in turn_metadata.source_event_ids
+            ):
+                continue
+            run_created_at = run.created_at if isinstance(run.created_at, int | float) else 0
+            sort_key = (run_created_at, run_index)
+            if newest_match is None or sort_key > newest_match[0]:
+                newest_match = (sort_key, turn_metadata)
+        return newest_match
+
+    def _persist_response_event_id_in_session_run(
+        self,
+        *,
+        storage: SqliteDb,
+        session_id: str,
+        session_type: SessionType,
+        run_id: str,
+        response_event_id: str,
+    ) -> None:
+        """Persist Matrix response linkage onto the run that produced it."""
+        session = (
+            get_team_session(storage, session_id)
+            if session_type is SessionType.TEAM
+            else get_agent_session(
+                storage,
+                session_id,
+            )
+        )
+        if session is None or not session.runs:
+            return
+        for run in session.runs:
+            if not isinstance(run, (RunOutput, TeamRunOutput)) or run.run_id != run_id:
+                continue
+            metadata = dict(run.metadata or {})
+            if metadata.get(_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id:
+                return
+            metadata[_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
+            run.metadata = metadata
+            storage.upsert_session(session)
+            return
 
     def _hook_base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
         """Return shared base fields for hook context construction."""
@@ -1161,7 +1211,7 @@ class AgentBot:
                 continue
             if msg.event_id == event.event_id:
                 continue
-            if self.response_tracker.has_responded(msg.event_id):
+            if self.handled_turn_ledger.has_responded(msg.event_id):
                 continue
             # Commands are handled independently — skip them as suppression candidates.
             if msg.body and isinstance(msg.body, str) and command_parser.parse(msg.body.strip()) is not None:
@@ -1464,11 +1514,11 @@ class AgentBot:
         )
 
     @cached_property
-    def response_tracker(self) -> ResponseTracker:
-        """Get or create the response tracker for this agent."""
+    def handled_turn_ledger(self) -> HandledTurnLedger:
+        """Get or create the handled-turn ledger for this agent."""
         # Use the tracking subdirectory, not the root storage path
         tracking_dir = self.storage_path / "tracking"
-        return ResponseTracker(self.agent_name, base_path=tracking_dir)
+        return HandledTurnLedger(self.agent_name, base_path=tracking_dir)
 
     @cached_property
     def stop_manager(self) -> StopManager:
@@ -2119,7 +2169,10 @@ class AgentBot:
                 dispatch_event,
                 batch.requester_user_id,
                 media_events=batch.media_events or None,
-                source_event_ids=batch.source_event_ids,
+                handled_turn=HandledTurnState.create(
+                    batch.source_event_ids,
+                    source_event_prompts=batch.source_event_prompts,
+                ),
             )
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
@@ -2201,8 +2254,7 @@ class AgentBot:
         requester_user_id: str | None = None,
         *,
         media_events: list[_MediaDispatchEvent] | None = None,
-        source_event_ids: list[str] | None = None,
-        source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
         """Run the normal text/command dispatch pipeline for a prepared text event."""
         raw_event: _TextDispatchEvent
@@ -2219,7 +2271,7 @@ class AgentBot:
         timing_scope_token = timing_scope_context.set(event.event_id[:20] if event.event_id else "unknown")
         try:
             dispatch_started_at = time.monotonic()
-            tracked_source_event_ids = source_event_ids or [event.event_id]
+            handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
 
             dispatch = await self._prepare_dispatch(
                 room,
@@ -2228,7 +2280,7 @@ class AgentBot:
                     requester_user_id=requester_user_id,
                 ),
                 event_label="message",
-                source_event_ids=tracked_source_event_ids,
+                handled_turn=handled_turn,
             )
             if dispatch is None:
                 return
@@ -2253,7 +2305,7 @@ class AgentBot:
                 requester_user_id,
                 dispatch.context.thread_history,
             ):
-                self._mark_source_events_responded(tracked_source_event_ids)
+                self._mark_source_events_responded(handled_turn)
                 return
             if self._should_skip_deep_synthetic_full_dispatch(
                 event_id=event.event_id,
@@ -2277,9 +2329,10 @@ class AgentBot:
             router_extra_content = dict(message_extra_content)
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
-            router_source_event_ids = (
-                tracked_source_event_ids
-                if len(tracked_source_event_ids) > 1 or tracked_source_event_ids[0] != event.event_id
+            router_handled_turn = (
+                handled_turn
+                if handled_turn.is_coalesced
+                or (handled_turn.source_event_ids and handled_turn.source_event_ids[0] != event.event_id)
                 else None
             )
 
@@ -2291,12 +2344,14 @@ class AgentBot:
                 router_message=event.body if media_events else None,
                 extra_content=router_extra_content or None,
                 media_events=media_events,
-                source_event_ids=router_source_event_ids,
-                router_event=media_events[0] if media_events and len(tracked_source_event_ids) == 1 else router_event,
+                handled_turn=router_handled_turn,
+                router_event=media_events[0]
+                if media_events and len(handled_turn.source_event_ids) == 1
+                else router_event,
             )
             if action is None:
                 return
-            matrix_run_metadata = self._dispatch_matrix_run_metadata(tracked_source_event_ids, source_event_prompts)
+            matrix_run_metadata = self._dispatch_matrix_run_metadata(handled_turn)
 
             async def build_payload(context: _MessageContext) -> _DispatchPayload:
                 effective_thread_id = self._build_message_target(
@@ -2330,7 +2385,7 @@ class AgentBot:
                 build_payload,
                 processing_log="Processing",
                 dispatch_started_at=dispatch_started_at,
-                source_event_ids=tracked_source_event_ids,
+                handled_turn=handled_turn,
                 matrix_run_metadata=matrix_run_metadata,
             )
         finally:
@@ -2441,7 +2496,12 @@ class AgentBot:
             )
             return
         if response_event_id is not None:
-            self.response_tracker.mark_responded(event.reacts_to, response_event_id)
+            self._mark_source_events_responded(
+                HandledTurnState.from_source_event_id(
+                    event.reacts_to,
+                    response_event_id=response_event_id,
+                ),
+            )
 
     async def _build_dispatch_payload_with_attachments(
         self,
@@ -2507,7 +2567,7 @@ class AgentBot:
                 event_id=event.event_id,
                 sender=event.sender,
             )
-            self.response_tracker.mark_responded(event.event_id)
+            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
         event_info = EventInfo.from_event(event.source)
@@ -2529,7 +2589,7 @@ class AgentBot:
             thread_id=effective_thread_id,
         )
         if prepared_voice is None:
-            self.response_tracker.mark_responded(event.event_id)
+            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
         await self._maybe_send_visible_voice_echo(
@@ -2572,7 +2632,7 @@ class AgentBot:
         if self.agent_name != ROUTER_AGENT_NAME or not self.config.voice.visible_router_echo:
             return None
 
-        existing_visible_echo_event_id = self.response_tracker.get_visible_echo_event_id(event.event_id)
+        existing_visible_echo_event_id = self.handled_turn_ledger.get_visible_echo_event_id(event.event_id)
         if existing_visible_echo_event_id is not None:
             return existing_visible_echo_event_id
 
@@ -2584,7 +2644,7 @@ class AgentBot:
             skip_mentions=True,
         )
         if visible_echo_event_id is not None:
-            self.response_tracker.mark_visible_echo_sent(event.event_id, visible_echo_event_id)
+            self.handled_turn_ledger.record_visible_echo(event.event_id, visible_echo_event_id)
         return visible_echo_event_id
 
     async def _on_media_message(
@@ -2907,7 +2967,7 @@ class AgentBot:
 
         # Edits bypass the dedup check: if an edit is redelivered after a
         # restart the bot should still regenerate the response.
-        if not is_edit and self.response_tracker.has_responded(event.event_id):
+        if not is_edit and self.handled_turn_ledger.has_responded(event.event_id):
             return None
 
         if not is_authorized_sender(
@@ -2917,11 +2977,11 @@ class AgentBot:
             self.runtime_paths,
             room_alias=room.canonical_alias,
         ):
-            self.response_tracker.mark_responded(event.event_id)
+            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return None
 
         if not self._can_reply_to_sender(requester_user_id):
-            self.response_tracker.mark_responded(event.event_id)
+            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return None
 
         return requester_user_id
@@ -2950,7 +3010,7 @@ class AgentBot:
         prechecked_event: _PrecheckedDispatchEvent,
         *,
         event_label: str,
-        source_event_ids: list[str] | None = None,
+        handled_turn: HandledTurnState,
     ) -> _PreparedDispatch | None:
         """Run common precheck/context/sender-gating for dispatch handlers."""
         event = prechecked_event.event
@@ -2985,7 +3045,7 @@ class AgentBot:
             policy=ingress_policy,
         )
         if suppressed:
-            self._mark_source_events_responded(source_event_ids or [event.event_id])
+            self._mark_source_events_responded(handled_turn)
             return None
 
         sender_agent_name = extract_agent_name(effective_requester_user_id, self.config, self.runtime_paths)
@@ -3027,11 +3087,11 @@ class AgentBot:
         router_message: str | None = None,
         extra_content: dict[str, Any] | None = None,
         media_events: list[_MediaDispatchEvent] | None = None,
-        source_event_ids: list[str] | None = None,
+        handled_turn: HandledTurnState | None = None,
         router_event: _DispatchEvent | None = None,
     ) -> _ResponseAction | None:
         """Resolve routing + team/individual/skip action for a prepared dispatch."""
-        tracked_source_event_ids = source_event_ids or [event.event_id]
+        tracked_handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
         router_result = await self._handle_router_dispatch(
             room,
             router_event or event,
@@ -3040,19 +3100,24 @@ class AgentBot:
             message=router_message,
             extra_content=extra_content,
             media_events=media_events,
-            source_event_ids=source_event_ids,
+            handled_turn=handled_turn,
         )
         if router_result.handled:
-            visible_router_echo_event_id = self._visible_echo_event_id_for_sources(tracked_source_event_ids)
+            visible_router_echo_event_id = (
+                tracked_handled_turn.visible_echo_event_id
+                or self.handled_turn_ledger.visible_echo_event_id_for_sources(tracked_handled_turn.source_event_ids)
+            )
             if (
                 router_result.mark_visible_echo_responded
                 and visible_router_echo_event_id is not None
                 and any(
-                    not self.response_tracker.has_responded(source_event_id)
-                    for source_event_id in tracked_source_event_ids
+                    not self.handled_turn_ledger.has_responded(source_event_id)
+                    for source_event_id in tracked_handled_turn.source_event_ids
                 )
             ):
-                self._mark_source_events_responded(tracked_source_event_ids, visible_router_echo_event_id)
+                self._mark_source_events_responded(
+                    tracked_handled_turn.with_response_event_id(visible_router_echo_event_id),
+                )
             return None
 
         assert self.client is not None
@@ -3080,11 +3145,10 @@ class AgentBot:
         *,
         processing_log: str,
         dispatch_started_at: float,
-        source_event_ids: list[str] | None = None,
+        handled_turn: HandledTurnState,
         matrix_run_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Execute resolved dispatch action and mark the source event responded."""
-        tracked_source_event_ids = source_event_ids or [event.event_id]
         if action.kind == "reject":
             assert action.rejection_message is not None
             response_event_id = await self._send_response(
@@ -3093,7 +3157,9 @@ class AgentBot:
                 response_text=action.rejection_message,
                 thread_id=dispatch.context.thread_id,
             )
-            self._mark_source_events_responded(tracked_source_event_ids, response_event_id)
+            self._mark_source_events_responded(
+                handled_turn.with_response_event_id(response_event_id),
+            )
             return
 
         if not dispatch.context.am_i_mentioned:
@@ -3151,7 +3217,9 @@ class AgentBot:
                 error=error,
             )
             if response_event_id is not None:
-                self._mark_source_events_responded(tracked_source_event_ids, response_event_id)
+                self._mark_source_events_responded(
+                    handled_turn.with_response_event_id(response_event_id),
+                )
             return
 
         self._log_dispatch_latency(
@@ -3218,7 +3286,9 @@ class AgentBot:
             )
             return
         if response_event_id is not None:
-            self._mark_source_events_responded(tracked_source_event_ids, response_event_id)
+            self._mark_source_events_responded(
+                handled_turn.with_response_event_id(response_event_id),
+            )
 
     async def _finalize_dispatch_failure(
         self,
@@ -3360,7 +3430,7 @@ class AgentBot:
         message: str | None = None,
         extra_content: dict[str, Any] | None = None,
         media_events: list[_MediaDispatchEvent] | None = None,
-        source_event_ids: list[str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> _RouterDispatchResult:
         """Run the router dispatch logic shared by text and media handlers.
 
@@ -3406,7 +3476,7 @@ class AgentBot:
                     | nio.RoomEncryptedImage,
                 )
                 and media_events == [event]
-                and (source_event_ids is None or source_event_ids == [event.event_id])
+                and (handled_turn is None or handled_turn.source_event_ids == (event.event_id,))
             )
             routing_kwargs: dict[str, Any] = {
                 "message": message,
@@ -3415,8 +3485,8 @@ class AgentBot:
             }
             if media_events is not None and not single_direct_media_route:
                 routing_kwargs["media_events"] = media_events
-            if source_event_ids is not None and not single_direct_media_route:
-                routing_kwargs["source_event_ids"] = source_event_ids
+            if handled_turn is not None and not single_direct_media_route:
+                routing_kwargs["handled_turn"] = handled_turn
             await self._handle_ai_routing(
                 room,
                 event,
@@ -4486,11 +4556,36 @@ class AgentBot:
                 compaction_outcomes=compaction_outcomes,
             )
 
-        return self._resolve_response_event_id(
+        resolved_event_id = self._resolve_response_event_id(
             delivery_result=delivery_result,
             tracked_event_id=tracked_event_id,
             existing_event_id=existing_event_id,
         )
+        if resolved_event_id is not None:
+            storage = self._create_team_history_storage(
+                team_agents=team_agents,
+                execution_identity=execution_identity,
+            )
+            try:
+                self._persist_response_event_id_in_session_run(
+                    storage=storage,
+                    session_id=session_id,
+                    session_type=SessionType.TEAM,
+                    run_id=response_run_id,
+                    response_event_id=resolved_event_id,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Failed to persist team response event linkage in run metadata",
+                    agent_name=self.agent_name,
+                    room_id=room_id,
+                    session_id=session_id,
+                    run_id=response_run_id,
+                    response_event_id=resolved_event_id,
+                )
+            finally:
+                storage.close()
+        return resolved_event_id
 
     async def _run_cancellable_response(
         self,
@@ -5815,7 +5910,7 @@ class AgentBot:
                 queued_signal.consume_waiting_human_message()
             queued_signal.finish_response_turn()
 
-    async def _generate_response_locked(
+    async def _generate_response_locked(  # noqa: C901
         self,
         room_id: str,
         prompt: str,
@@ -6015,6 +6110,28 @@ class AgentBot:
             tracked_event_id=tracked_event_id,
             existing_event_id=existing_event_id,
         )
+
+        if resolved_event_id is not None:
+            storage = self._create_history_scope_storage(execution_identity)
+            try:
+                self._persist_response_event_id_in_session_run(
+                    storage=storage,
+                    session_id=session_id,
+                    session_type=self._history_session_type(),
+                    run_id=response_run_id,
+                    response_event_id=resolved_event_id,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Failed to persist response event linkage in run metadata",
+                    agent_name=self.agent_name,
+                    room_id=room_id,
+                    session_id=session_id,
+                    run_id=response_run_id,
+                    response_event_id=resolved_event_id,
+                )
+            finally:
+                storage.close()
 
         if (
             thread_id is not None
@@ -6277,7 +6394,7 @@ class AgentBot:
         requester_user_id: str,
         extra_content: dict[str, Any] | None = None,
         media_events: list[_MediaDispatchEvent] | None = None,
-        source_event_ids: list[str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
@@ -6372,11 +6489,15 @@ class AgentBot:
         )
         if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)
-            self._mark_source_events_responded(source_event_ids or [event.event_id])
+            self._mark_source_events_responded(
+                (handled_turn or HandledTurnState.from_source_event_id(event.event_id)).with_response_event_id(
+                    event_id,
+                ),
+            )
         else:
             self.logger.error("Failed to route to agent", agent=suggested_agent)
 
-    async def _handle_message_edit(  # noqa: C901, PLR0911, PLR0912
+    async def _handle_message_edit(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
@@ -6403,10 +6524,44 @@ class AgentBot:
             self.logger.debug(f"Ignoring edit from other agent: {sender_agent_name}")
             return
 
-        response_event_id = self.response_tracker.get_response_event_id(event_info.original_event_id)
-        if not response_event_id:
+        turn_record = self.handled_turn_ledger.get_turn_record(event_info.original_event_id)
+        ledger_response_event_id = turn_record.response_event_id if turn_record is not None else None
+        context = await self._extract_message_context(room, event)
+        persisted_turn_metadata = self._load_persisted_turn_metadata(
+            room=room,
+            thread_id=context.thread_id,
+            original_event_id=event_info.original_event_id,
+            requester_user_id=requester_user_id,
+        )
+        persisted_response_event_id = (
+            persisted_turn_metadata.response_event_id if persisted_turn_metadata is not None else None
+        )
+        response_event_id = persisted_response_event_id or ledger_response_event_id
+        if response_event_id is None:
             self.logger.debug(f"No previous response found for edited message {event_info.original_event_id}")
             return
+
+        needs_turn_record_backfill = (
+            turn_record is None
+            or (persisted_response_event_id is not None and ledger_response_event_id != persisted_response_event_id)
+            or (
+                turn_record is not None
+                and turn_record.is_coalesced
+                and turn_record.source_event_prompts is None
+                and persisted_turn_metadata is not None
+                and persisted_turn_metadata.source_event_prompts is not None
+            )
+        )
+        coalesced_turn_metadata: _PersistedTurnMetadata | None = None
+        if turn_record is not None and turn_record.is_coalesced and turn_record.source_event_prompts is not None:
+            coalesced_turn_metadata = _PersistedTurnMetadata(
+                anchor_event_id=turn_record.anchor_event_id,
+                source_event_ids=turn_record.source_event_ids,
+                response_event_id=response_event_id,
+                source_event_prompts=turn_record.source_event_prompts,
+            )
+        elif persisted_turn_metadata is not None and persisted_turn_metadata.is_coalesced:
+            coalesced_turn_metadata = persisted_turn_metadata
 
         self.logger.info(
             "Regenerating response for edited message",
@@ -6414,50 +6569,47 @@ class AgentBot:
             response_event_id=response_event_id,
         )
 
-        context = await self._extract_message_context(room, event)
         edited_content, _ = await extract_edit_body(event.source, self.client)
         if edited_content is None:
             self.logger.debug("Edited message missing resolved body", event_id=event.event_id)
             return
-        turn_metadata = self._load_persisted_turn_metadata(
-            room=room,
-            thread_id=context.thread_id,
-            original_event_id=event_info.original_event_id,
-            requester_user_id=requester_user_id,
+        regeneration_handled_turn = HandledTurnState.from_source_event_id(
+            event_info.original_event_id,
+            response_event_id=response_event_id,
         )
-        if turn_metadata is not None and turn_metadata.is_coalesced:
-            if turn_metadata.source_event_prompts is None:
+        if coalesced_turn_metadata is not None:
+            if coalesced_turn_metadata.source_event_prompts is None:
                 self.logger.warning(
                     "Skipping edited coalesced turn regeneration without persisted source prompts",
                     original_event_id=event_info.original_event_id,
-                    anchor_event_id=turn_metadata.anchor_event_id,
+                    anchor_event_id=coalesced_turn_metadata.anchor_event_id,
                 )
                 return
-            updated_prompt_map = dict(turn_metadata.source_event_prompts)
+            updated_prompt_map = dict(coalesced_turn_metadata.source_event_prompts)
             updated_prompt_map[event_info.original_event_id] = edited_content
             rebuilt_prompt_parts: list[str] = []
-            for source_event_id in turn_metadata.source_event_ids:
+            for source_event_id in coalesced_turn_metadata.source_event_ids:
                 prompt_part = updated_prompt_map.get(source_event_id)
                 if prompt_part is None:
                     self.logger.warning(
                         "Skipping edited coalesced turn regeneration with incomplete prompt map",
                         original_event_id=event_info.original_event_id,
                         missing_source_event_id=source_event_id,
-                        anchor_event_id=turn_metadata.anchor_event_id,
+                        anchor_event_id=coalesced_turn_metadata.anchor_event_id,
                     )
                     return
                 rebuilt_prompt_parts.append(prompt_part)
             regeneration_prompt = coalesced_prompt(rebuilt_prompt_parts)
-            regeneration_reply_to_event_id = turn_metadata.anchor_event_id
-            regeneration_source_event_ids = list(turn_metadata.source_event_ids)
-            regeneration_matrix_run_metadata = {
-                constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(turn_metadata.source_event_ids),
-                constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: updated_prompt_map,
-            }
+            regeneration_reply_to_event_id = coalesced_turn_metadata.anchor_event_id
+            regeneration_handled_turn = HandledTurnState.create(
+                coalesced_turn_metadata.source_event_ids,
+                response_event_id=response_event_id,
+                source_event_prompts=updated_prompt_map,
+            )
+            regeneration_matrix_run_metadata = self._dispatch_matrix_run_metadata(regeneration_handled_turn)
         else:
             regeneration_prompt = edited_content
             regeneration_reply_to_event_id = event_info.original_event_id
-            regeneration_source_event_ids = [event_info.original_event_id]
             regeneration_matrix_run_metadata = None
         envelope = self._build_message_envelope(
             room_id=room.room_id,
@@ -6473,7 +6625,7 @@ class AgentBot:
             correlation_id=event.event_id,
             policy=ingress_policy,
         ):
-            self._mark_source_events_responded(regeneration_source_event_ids, response_event_id)
+            self._mark_source_events_responded(regeneration_handled_turn)
             return
 
         # Check if we should respond to the edited message
@@ -6494,8 +6646,10 @@ class AgentBot:
             sender_id=requester_user_id,
         )
 
-        if not should_respond and (turn_metadata is None or not turn_metadata.is_coalesced):
+        if not should_respond and coalesced_turn_metadata is None:
             self.logger.debug("Agent should not respond to edited message")
+            if needs_turn_record_backfill:
+                self._mark_source_events_responded(regeneration_handled_turn)
             return
 
         self._remove_stale_runs_for_edited_message(
@@ -6525,11 +6679,15 @@ class AgentBot:
             matrix_run_metadata=regeneration_matrix_run_metadata,
         )
 
-        # Update the response tracker
+        # Update the handled-turn ledger linkage for the edited source turn.
         if regenerated_event_id is not None:
-            self._mark_source_events_responded(regeneration_source_event_ids, regenerated_event_id)
+            self._mark_source_events_responded(
+                regeneration_handled_turn.with_response_event_id(regenerated_event_id),
+            )
             self.logger.info("Successfully regenerated response for edited message")
         else:
+            if needs_turn_record_backfill:
+                self._mark_source_events_responded(regeneration_handled_turn)
             self.logger.info(
                 "Suppressed regeneration left existing response unchanged",
                 original_event_id=event_info.original_event_id,
@@ -6661,7 +6819,7 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             storage_path=self.storage_path,
             logger=self.logger,
-            response_tracker=self.response_tracker,
+            handled_turn_ledger=self.handled_turn_ledger,
             derive_conversation_context=self._derive_conversation_context,
             requester_user_id_for_event=self._requester_user_id_for_event,
             build_message_target=self._build_message_target,

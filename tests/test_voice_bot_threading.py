@@ -50,8 +50,8 @@ def mock_home_bot() -> AgentBot:
     bot.client.user_id = "@mindroom_home:localhost"
     bot.logger = MagicMock()
     bot._generate_response = AsyncMock(return_value="$response")
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     return bot
 
 

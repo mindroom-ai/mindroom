@@ -33,6 +33,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.handled_turns import HandledTurnState
+
 
 def _make_config(
     tmp_path: Path,
@@ -77,6 +79,11 @@ def _make_bot(
         user_id=f"@mindroom_{agent_name}:localhost",
     )
     return AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+
+
+def _handled_turn_source_event_ids(handled_turn: HandledTurnState | None) -> list[str]:
+    """Return source event IDs from one handled-turn carrier for test assertions."""
+    return list(handled_turn.source_event_ids) if handled_turn is not None else []
 
 
 def _make_room(room_id: str = "!room:localhost") -> MagicMock:
@@ -226,10 +233,10 @@ async def test_single_message_dispatches_after_debounce_window(tmp_path: Path) -
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        calls.append((dispatched_event.body, source_event_ids or [], media_events or []))
+        _ = handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), media_events or []))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
@@ -254,11 +261,10 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append((dispatched_event.body, source_event_ids or []))
+        _ = media_events, handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
@@ -272,6 +278,28 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
             ["$m1", "$m2"],
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_two_rapid_text_messages_forward_prompt_map_to_dispatch(tmp_path: Path) -> None:
+    """Coalesced dispatch should forward the per-source prompt map."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
+    second = _text_event(event_id="$m2", body="second", server_timestamp=1001)
+
+    with patch.object(bot, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch:
+        await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
+        await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
+        await asyncio.sleep(0.03)
+
+    assert mock_dispatch.await_count == 1
+    handled_turn = mock_dispatch.await_args.kwargs["handled_turn"]
+    assert list(handled_turn.source_event_ids) == ["$m1", "$m2"]
+    assert handled_turn.source_event_prompts == {
+        "$m1": "first",
+        "$m2": "second",
+    }
 
 
 @pytest.mark.asyncio
@@ -289,10 +317,10 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        calls.append((dispatched_event.body, source_event_ids or [], len(media_events or [])))
+        _ = handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(image_event, room, source_kind="image", requester_user_id="@user:localhost")
@@ -324,10 +352,10 @@ async def test_text_first_image_during_grace_dispatches_once(tmp_path: Path) -> 
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        calls.append((dispatched_event.body, source_event_ids or [], len(media_events or [])))
+        _ = handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
@@ -364,10 +392,10 @@ async def test_text_first_multiple_images_during_grace_dispatch_once(tmp_path: P
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        calls.append((source_event_ids or [], len(media_events or [])))
+        _ = handled_turn
+        calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
@@ -398,11 +426,10 @@ async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_tur
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append((dispatched_event.body, source_event_ids or []))
+        _ = media_events, handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
@@ -437,10 +464,10 @@ async def test_image_after_grace_expires_dispatches_as_second_batch(tmp_path: Pa
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        calls.append((source_event_ids or [], len(media_events or [])))
+        _ = handled_turn
+        calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
@@ -470,11 +497,10 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append(source_event_ids or [])
+        _ = media_events, handled_turn
+        calls.append(_handled_turn_source_event_ids(handled_turn))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(alice, room, source_kind="message", requester_user_id="@alice:localhost")
@@ -586,11 +612,10 @@ async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path)
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append(source_event_ids or [])
+        _ = media_events, handled_turn
+        calls.append(_handled_turn_source_event_ids(handled_turn))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(thread_a, room, source_kind="message", requester_user_id="@user:localhost")
@@ -615,11 +640,10 @@ async def test_command_mid_batch_flushes_pending_then_processes_command(tmp_path
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append((dispatched_event.body, source_event_ids or []))
+        _ = media_events, handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
@@ -647,11 +671,10 @@ async def test_command_flush_does_not_leave_stale_timer_for_next_message(tmp_pat
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append((dispatched_event.body, source_event_ids or []))
+        _ = media_events, handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
@@ -690,11 +713,10 @@ async def test_command_during_upload_grace_flushes_immediately(tmp_path: Path) -
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append((dispatched_event.body, source_event_ids or []))
+        _ = media_events, handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
@@ -728,12 +750,11 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append(source_event_ids or [])
-        if source_event_ids == ["$m1"]:
+        _ = media_events, handled_turn
+        calls.append(_handled_turn_source_event_ids(handled_turn))
+        if _handled_turn_source_event_ids(handled_turn) == ["$m1"]:
             entered_first_dispatch.set()
             await release_first_dispatch.wait()
 
@@ -769,10 +790,9 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events, source_event_ids, _source_event_prompts
+        _ = media_events, handled_turn
         calls.append(dispatched_event.body)
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
@@ -797,11 +817,10 @@ async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: P
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append(source_event_ids or [])
+        _ = media_events, handled_turn
+        calls.append(_handled_turn_source_event_ids(handled_turn))
         entered_dispatch.set()
         await release_dispatch.wait()
 
@@ -835,11 +854,10 @@ async def test_prepare_for_sync_shutdown_drains_pending_debounced_messages(tmp_p
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append((dispatched_event.body, source_event_ids or []))
+        _ = media_events, handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
@@ -863,11 +881,10 @@ async def test_prepare_for_sync_shutdown_drains_pending_upload_grace(tmp_path: P
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append((dispatched_event.body, source_event_ids or []))
+        _ = media_events, handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
@@ -898,12 +915,11 @@ async def test_shutdown_during_in_flight_dispatch_does_not_start_grace(tmp_path:
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append((dispatched_event.body, source_event_ids or []))
-        if source_event_ids == ["$m1"]:
+        _ = media_events, handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
+        if _handled_turn_source_event_ids(handled_turn) == ["$m1"]:
             entered_dispatch.set()
             await release_dispatch.wait()
 
@@ -947,10 +963,10 @@ async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: P
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append(source_event_ids or [])
+        _ = media_events, handled_turn
+        calls.append(_handled_turn_source_event_ids(handled_turn))
         if len(calls) == 1:
             entered_dispatch.set()
             await release_first_dispatch.wait()
@@ -1024,11 +1040,10 @@ async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Pat
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append(source_event_ids or [])
+        _ = media_events, handled_turn
+        calls.append(_handled_turn_source_event_ids(handled_turn))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         started_at = time.monotonic()
@@ -1048,7 +1063,7 @@ async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_response_tracker_marks_all_batch_event_ids(tmp_path: Path) -> None:
+async def test_handled_turn_ledger_marks_all_batch_event_ids(tmp_path: Path) -> None:
     """Mark every source event ID from a coalesced batch as responded."""
     bot = _make_bot(tmp_path)
     room = _make_room()
@@ -1073,10 +1088,14 @@ async def test_response_tracker_marks_all_batch_event_ids(tmp_path: Path) -> Non
         await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
         await asyncio.sleep(0.05)
 
-    assert bot.response_tracker.has_responded("$m1")
-    assert bot.response_tracker.has_responded("$m2")
-    assert bot.response_tracker.get_response_event_id("$m1") == "$response"
-    assert bot.response_tracker.get_response_event_id("$m2") == "$response"
+    assert bot.handled_turn_ledger.has_responded("$m1")
+    assert bot.handled_turn_ledger.has_responded("$m2")
+    assert bot.handled_turn_ledger.get_response_event_id("$m1") == "$response"
+    assert bot.handled_turn_ledger.get_response_event_id("$m2") == "$response"
+    turn_record = bot.handled_turn_ledger.get_turn_record("$m1")
+    assert turn_record is not None
+    assert turn_record.source_event_ids == ("$m1", "$m2")
+    assert turn_record.anchor_event_id == "$m2"
 
 
 @pytest.mark.asyncio
@@ -1093,11 +1112,10 @@ async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append((dispatched_event.body, source_event_ids or []))
+        _ = media_events, handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
@@ -1123,11 +1141,10 @@ async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> 
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        source_event_ids: list[str] | None = None,
-        _source_event_prompts: dict[str, str] | None = None,
+        handled_turn: HandledTurnState | None = None,
     ) -> None:
-        _ = media_events
-        calls.append((dispatched_event.body, source_event_ids or []))
+        _ = media_events, handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._enqueue_for_dispatch(first_cmd, room, source_kind="message", requester_user_id="@user:localhost")
@@ -1194,7 +1211,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
 
     # Older message should be skipped — resolve_dispatch_action never called
     action_mock.assert_not_awaited()
-    assert bot.response_tracker.has_responded("$m1")
+    assert bot.handled_turn_ledger.has_responded("$m1")
 
 
 @pytest.mark.asyncio
@@ -1228,7 +1245,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
         await bot._dispatch_text_message(room, event, "@user:localhost")
 
     # Dispatch proceeded to completion
-    assert bot.response_tracker.has_responded("$m1")
+    assert bot.handled_turn_ledger.has_responded("$m1")
 
 
 # ---------------------------------------------------------------------------
@@ -1689,7 +1706,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
 
     # Coalesced user batch MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
-    assert bot.response_tracker.has_responded("$m1")
+    assert bot.handled_turn_ledger.has_responded("$m1")
 
 
 @pytest.mark.asyncio
@@ -1730,7 +1747,7 @@ async def test_voice_synthetic_suppressed_by_thread_guard(tmp_path: Path) -> Non
 
     # Voice synthetic MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
-    assert bot.response_tracker.has_responded("$v1")
+    assert bot.handled_turn_ledger.has_responded("$v1")
 
 
 # ---------------------------------------------------------------------------

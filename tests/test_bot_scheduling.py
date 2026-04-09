@@ -101,8 +101,8 @@ class TestBotScheduleCommands:
             mock_schedule.return_value = ("task123", "✅ Scheduled: 5 minutes from now")
 
             # Mock response tracker for the test
-            mock_agent_bot.response_tracker = MagicMock()
-            mock_agent_bot.response_tracker.has_responded.return_value = False
+            mock_agent_bot.handled_turn_ledger = MagicMock()
+            mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
 
             await mock_agent_bot._handle_command(
                 room,
@@ -130,8 +130,8 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_handle_schedule_command_no_message(self, mock_agent_bot: AgentBot) -> None:
         """Test schedule command with no message uses default."""
-        mock_agent_bot.response_tracker = MagicMock()
-        mock_agent_bot.response_tracker.has_responded.return_value = False
+        mock_agent_bot.handled_turn_ledger = MagicMock()
+        mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -159,8 +159,8 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_handle_list_schedules_command(self, mock_agent_bot: AgentBot) -> None:
         """Test bot handles list schedules command."""
-        mock_agent_bot.response_tracker = MagicMock()
-        mock_agent_bot.response_tracker.has_responded.return_value = False
+        mock_agent_bot.handled_turn_ledger = MagicMock()
+        mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -192,8 +192,8 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_handle_cancel_schedule_command(self, mock_agent_bot: AgentBot) -> None:
         """Test bot handles cancel schedule command."""
-        mock_agent_bot.response_tracker = MagicMock()
-        mock_agent_bot.response_tracker.has_responded.return_value = False
+        mock_agent_bot.handled_turn_ledger = MagicMock()
+        mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -218,8 +218,8 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_handle_cancel_all_scheduled_tasks(self, mock_agent_bot: AgentBot) -> None:
         """Test bot handles cancel all scheduled tasks command."""
-        mock_agent_bot.response_tracker = MagicMock()
-        mock_agent_bot.response_tracker.has_responded.return_value = False
+        mock_agent_bot.handled_turn_ledger = MagicMock()
+        mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -252,8 +252,8 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_handle_edit_schedule_command(self, mock_agent_bot: AgentBot) -> None:
         """Test bot handles edit schedule command."""
-        mock_agent_bot.response_tracker = MagicMock()
-        mock_agent_bot.response_tracker.has_responded.return_value = False
+        mock_agent_bot.handled_turn_ledger = MagicMock()
+        mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -293,8 +293,8 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_schedule_command_auto_creates_thread(self, mock_agent_bot: AgentBot) -> None:
         """Test that schedule commands auto-create threads when used in main room."""
-        mock_agent_bot.response_tracker = MagicMock()
-        mock_agent_bot.response_tracker.has_responded.return_value = False
+        mock_agent_bot.handled_turn_ledger = MagicMock()
+        mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -622,8 +622,8 @@ class TestCommandHandling:
             )
             bot.client = AsyncMock()
             bot.logger = MagicMock()
-            bot.response_tracker = MagicMock()
-            bot.response_tracker.has_responded.return_value = False
+            bot.handled_turn_ledger = MagicMock()
+            bot.handled_turn_ledger.has_responded.return_value = False
             bot._send_skill_command_response = AsyncMock()
             bot._send_response = AsyncMock(return_value="$router_reply")
             bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
@@ -690,8 +690,8 @@ class TestCommandHandling:
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
 
         # Mock context extraction to say agent is mentioned
         mock_context = MagicMock()
@@ -752,8 +752,8 @@ class TestCommandHandling:
             bot.client.user_id = "@mindroom_general:localhost"  # Set the bot's user ID
             bot.logger = MagicMock()
             bot._generate_response = AsyncMock()
-            bot.response_tracker = MagicMock()
-            bot.response_tracker.has_responded.return_value = False
+            bot.handled_turn_ledger = MagicMock()
+            bot.handled_turn_ledger.has_responded.return_value = False
 
             # Mock context extraction
             mock_context = MagicMock()
@@ -882,8 +882,8 @@ class TestCommandHandling:
             bot.client.user_id = "@mindroom_finance:localhost"
             bot.logger = MagicMock()
             bot._generate_response = AsyncMock()
-            bot.response_tracker = MagicMock()
-            bot.response_tracker.has_responded.return_value = False
+            bot.handled_turn_ledger = MagicMock()
+            bot.handled_turn_ledger.has_responded.return_value = False
 
             # Mock context extraction for router's error message
             mock_context = MagicMock()
@@ -951,8 +951,8 @@ class TestCommandHandling:
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
         bot._send_response = AsyncMock()
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
         bot.orchestrator = MagicMock()
 
         # Create thread history with multiple agents mentioned
@@ -1060,8 +1060,8 @@ class TestCommandHandling:
         bot.client.user_id = "@mindroom_finance:localhost"
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
 
         # Create thread history that mimics the real scenario
         thread_history = [
@@ -1178,8 +1178,8 @@ class TestCommandHandling:
         bot.client.user_id = "@mindroom_general:localhost"
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
 
         # Mock context extraction - no agents mentioned
         mock_context = MagicMock()
@@ -1252,8 +1252,8 @@ class TestRouterSkipsSingleAgent:
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
 
         # Create context with no mentions and no agents in thread
         mock_context = MagicMock()
@@ -1334,8 +1334,8 @@ class TestRouterSkipsSingleAgent:
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
 
         # Create context with no mentions and no agents in thread
         mock_context = MagicMock()
@@ -1431,8 +1431,8 @@ class TestRouterSkipsSingleAgent:
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
 
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
@@ -1636,8 +1636,8 @@ class TestRouterSkipsSingleAgent:
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
-        bot.response_tracker = MagicMock()
-        bot.response_tracker.has_responded.return_value = False
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
 
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
