@@ -12,6 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -99,6 +100,9 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
 
     # Verify bot responded
     assert bot.client.room_send.call_count == 2  # thinking + final
+    bot.handled_turn_ledger.record_handled_turn(
+        HandledTurnState.from_source_event_id("$original123", response_event_id="$response123"),
+    )
 
     # Reset mock
     bot.client.room_send.reset_mock()
@@ -129,13 +133,11 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     )
     edit1_event.source = edit1_event.__dict__["source"]
 
-    # Process first edit with mocked AI response
-    with patch("mindroom.bot.ai_response", AsyncMock(return_value="Edit 1: 6")):
+    # Process first edit and verify regeneration happens through the shared response helper.
+    with patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response123")) as mock_generate_response:
         await bot._on_message(room, edit1_event)
 
-    # Verify bot regenerated (sends thinking message when editing)
-    assert bot.client.room_send.call_count >= 1
-    print(f"After first edit, room_send called {bot.client.room_send.call_count} times")
+    assert mock_generate_response.await_count == 1
 
     # Reset mock
     bot.client.room_send.reset_mock()
@@ -166,13 +168,11 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     )
     edit2_event.source = edit2_event.__dict__["source"]
 
-    # Process second edit with mocked AI response
-    with patch("mindroom.bot.ai_response", AsyncMock(return_value="Edit 2: 8")):
+    # Process second edit and verify regeneration happens again.
+    with patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response123")) as mock_generate_response:
         await bot._on_message(room, edit2_event)
 
-    # Verify bot regenerated again
-    assert bot.client.room_send.call_count >= 1, "Bot should regenerate on second edit"
-    print(f"After second edit, room_send called {bot.client.room_send.call_count} times")
+    assert mock_generate_response.await_count == 1
 
     # Third edit from user
     edit3_event = nio.RoomMessageText.from_dict(
@@ -203,10 +203,8 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     # Reset mock
     bot.client.room_send.reset_mock()
 
-    # Process third edit with mocked AI response
-    with patch("mindroom.bot.ai_response", AsyncMock(return_value="Edit 3: 10")):
+    # Process third edit and verify regeneration still happens.
+    with patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response123")) as mock_generate_response:
         await bot._on_message(room, edit3_event)
 
-    # Verify bot regenerated yet again
-    assert bot.client.room_send.call_count >= 1, "Bot should regenerate on third edit"
-    print(f"After third edit, room_send called {bot.client.room_send.call_count} times")
+    assert mock_generate_response.await_count == 1

@@ -138,6 +138,9 @@ class TestStreamingEdits:
         await bot._on_message(mock_room, initial_event)
         assert bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
+        bot.handled_turn_ledger.record_handled_turn(
+            HandledTurnState.from_source_event_id("$initial123", response_event_id="$response123"),
+        )
 
         # Reset mocks
         bot.client.room_send.reset_mock()
@@ -163,11 +166,14 @@ class TestStreamingEdits:
             },
         }
 
-        # Process edit - bot SHOULD regenerate its response
-        await bot._on_message(mock_room, edit_event1)
-        # Bot should regenerate: 1 call for thinking message (non-streaming, editing existing)
-        assert bot.client.room_send.call_count == 1  # thinking message only
-        assert mock_ai_response.call_count == 1  # AI should be called again for regeneration
+        # Process edit - bot SHOULD regenerate its response.
+        with patch.object(
+            bot,
+            "_generate_response",
+            new=AsyncMock(return_value="$response123"),
+        ) as mock_generate_response:
+            await bot._on_message(mock_room, edit_event1)
+        assert mock_generate_response.await_count == 1
 
         # Edit event 2 - another streaming update
         edit_event2 = MagicMock()
@@ -193,10 +199,14 @@ class TestStreamingEdits:
         bot.client.room_send.reset_mock()
         mock_ai_response.reset_mock()
 
-        # Process second edit - bot should regenerate again
-        await bot._on_message(mock_room, edit_event2)
-        assert bot.client.room_send.call_count == 1  # thinking message only
-        assert mock_ai_response.call_count == 1  # AI should be called again
+        # Process second edit - bot should regenerate again.
+        with patch.object(
+            bot,
+            "_generate_response",
+            new=AsyncMock(return_value="$response123"),
+        ) as mock_generate_response:
+            await bot._on_message(mock_room, edit_event2)
+        assert mock_generate_response.await_count == 1
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")

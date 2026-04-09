@@ -11,7 +11,10 @@ import pytest
 from mindroom.bot import AgentBot, _should_skip_mentions
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalDeliveryRequest
+from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.matrix.identity import MatrixID
+from mindroom.message_target import MessageTarget
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -56,14 +59,20 @@ def test_should_skip_mentions_explicit_false() -> None:
 async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
     """Test that _send_response adds metadata when skip_mentions is True."""
     # Create a mock bot
+    config = bind_runtime_paths(
+        Config(agents={"email_agent": AgentConfig(display_name="Email Agent")}),
+        test_runtime_paths(tmp_path),
+    )
     bot = AsyncMock(spec=AgentBot)
-    bot.config = AsyncMock()
-    bot.matrix_id = AsyncMock()
-    bot.matrix_id.domain = "localhost"
+    bot.config = config
+    bot.agent_name = "email_agent"
+    bot.matrix_id = MatrixID.from_agent("email_agent", "localhost", runtime_paths_for(config))
     bot.client = AsyncMock()
     bot.logger = MagicMock()
     bot.handled_turn_ledger = AsyncMock()
-    bot.runtime_paths = test_runtime_paths(tmp_path)
+    bot.runtime_paths = runtime_paths_for(config)
+    bot._build_message_target = AgentBot._build_message_target.__get__(bot, AgentBot)
+    bot._delivery_gateway = AgentBot._delivery_gateway.__get__(bot, AgentBot)
 
     # Mock the format_message_with_mentions to return a dict we can check
     mock_content = {"body": "test", "msgtype": "m.text"}
@@ -216,3 +225,137 @@ async def test_extract_context_without_skip_metadata_detects_tool_mentions(tmp_p
 
     assert context.am_i_mentioned is True
     assert [agent.full_id for agent in context.mentioned_agents] == [bot.matrix_id.full_id]
+
+
+def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, AsyncMock]:
+    """Build a direct DeliveryGateway test harness."""
+    config = bind_runtime_paths(
+        Config(agents={"email_agent": AgentConfig(display_name="Email Agent")}),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    before_hooks = AsyncMock()
+    after_hooks = AsyncMock()
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            sender_domain="localhost",
+            agent_name="email_agent",
+            logger=MagicMock(),
+            build_message_target=MagicMock(),
+            format_message_with_mentions=MagicMock(),
+            get_latest_thread_event_id_if_needed=AsyncMock(),
+            send_message=AsyncMock(),
+            build_threaded_edit_content=AsyncMock(),
+            edit_message=AsyncMock(),
+            redact_message_event=AsyncMock(return_value=True),
+            apply_before_response_hooks=before_hooks,
+            emit_after_response_hooks=after_hooks,
+            send_streaming_response=AsyncMock(),
+        ),
+    )
+    return gateway, before_hooks, after_hooks
+
+
+def _delivery_envelope() -> MessageEnvelope:
+    """Build a minimal response envelope for delivery gateway tests."""
+    return MessageEnvelope(
+        source_event_id="$event123",
+        room_id="!test:server",
+        target=MessageTarget.resolve("!test:server", "$thread", "$event123"),
+        requester_id="@user:server",
+        sender_id="@user:server",
+        body="hello",
+        attachment_ids=(),
+        mentioned_agents=(),
+        agent_name="email_agent",
+        source_kind="message",
+    )
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tmp_path: Path) -> None:
+    """Final delivery should route fresh sends through the gateway's native send helper."""
+    gateway, before_hooks, after_hooks = _gateway_with_mocks(tmp_path)
+    before_hooks.return_value = ResponseDraft(
+        response_text="raw response",
+        response_kind="ai",
+        tool_trace=None,
+        extra_content=None,
+        envelope=_delivery_envelope(),
+    )
+
+    parsed = MagicMock()
+    parsed.formatted_text = "formatted response"
+    parsed.option_map = None
+    parsed.options_list = None
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$response")) as mock_send_text,
+        patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
+    ):
+        result = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                room_id="!test:server",
+                reply_to_event_id="$event123",
+                thread_id="$thread",
+                target=_delivery_envelope().target,
+                existing_event_id=None,
+                response_text="raw response",
+                response_kind="ai",
+                response_envelope=_delivery_envelope(),
+                correlation_id="corr-1",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+    mock_send_text.assert_awaited_once()
+    after_hooks.assert_awaited_once()
+    assert result.event_id == "$response"
+    assert result.delivery_kind == "sent"
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messages(tmp_path: Path) -> None:
+    """Final delivery should route edits through the gateway's native edit helper."""
+    gateway, before_hooks, after_hooks = _gateway_with_mocks(tmp_path)
+    before_hooks.return_value = ResponseDraft(
+        response_text="raw response",
+        response_kind="ai",
+        tool_trace=None,
+        extra_content=None,
+        envelope=_delivery_envelope(),
+    )
+
+    parsed = MagicMock()
+    parsed.formatted_text = "formatted response"
+    parsed.option_map = None
+    parsed.options_list = None
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)) as mock_edit_text,
+        patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
+    ):
+        result = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                room_id="!test:server",
+                reply_to_event_id="$event123",
+                thread_id="$thread",
+                target=_delivery_envelope().target,
+                existing_event_id="$existing",
+                response_text="raw response",
+                response_kind="ai",
+                response_envelope=_delivery_envelope(),
+                correlation_id="corr-2",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+    mock_edit_text.assert_awaited_once()
+    after_hooks.assert_awaited_once()
+    assert result.event_id == "$existing"
+    assert result.delivery_kind == "edited"

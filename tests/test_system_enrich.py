@@ -44,6 +44,7 @@ from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_f
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_coordinator import ResponseRequest
 from mindroom.team_runtime_resolution import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, _prepare_materialized_team_execution
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -526,13 +527,15 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
         patch("mindroom.bot.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
     ):
         delivery = await bot._process_and_respond(
-            room_id="!room:localhost",
-            prompt="Please reply",
-            reply_to_event_id="$event",
-            thread_id=None,
-            thread_history=[],
-            user_id="@user:localhost",
-            system_enrichment_items=system_items,
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                prompt="Please reply",
+                user_id="@user:localhost",
+                system_enrichment_items=system_items,
+            ),
         )
 
     assert delivery.event_id == "$response"
@@ -563,13 +566,15 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
         patch("mindroom.bot.send_streaming_response", new=AsyncMock(side_effect=fake_send_streaming_response)),
     ):
         delivery = await bot._process_and_respond_streaming(
-            room_id="!room:localhost",
-            prompt="Please reply",
-            reply_to_event_id="$event",
-            thread_id=None,
-            thread_history=[],
-            user_id="@user:localhost",
-            system_enrichment_items=system_items,
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                prompt="Please reply",
+                user_id="@user:localhost",
+                system_enrichment_items=system_items,
+            ),
         )
 
     assert delivery.event_id == "$response"

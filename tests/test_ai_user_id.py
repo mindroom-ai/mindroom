@@ -41,6 +41,8 @@ from mindroom.constants import (
 )
 from mindroom.history import PreparedHistoryState
 from mindroom.media_inputs import MediaInputs
+from mindroom.message_target import MessageTarget
+from mindroom.response_coordinator import ResponseRequest
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from tests.conftest import bind_runtime_paths
 
@@ -71,6 +73,78 @@ def _prepared_prompt_result(
     return agent, prompt, [], PreparedHistoryState()
 
 
+def _bind_response_coordinator_runtime(
+    bot: MagicMock,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    storage_path: Path,
+    requester_id: str,
+) -> None:
+    """Bind the real coordinator path onto a bot double."""
+    bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
+    bot.enable_streaming = True
+    bot.show_tool_calls = False
+    bot.orchestrator = None
+    bot._agent_has_matrix_messaging_tool = MagicMock(return_value=False)
+    bot._append_matrix_prompt_context = MagicMock(side_effect=lambda prompt, **_kwargs: prompt)
+    bot._build_message_target = MagicMock(
+        return_value=MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True),
+    )
+    bot._request_with_resolved_thread_target = AgentBot._request_with_resolved_thread_target.__get__(
+        bot,
+        AgentBot,
+    )
+    bot._resolve_response_thread_root = AgentBot._resolve_response_thread_root.__get__(bot, AgentBot)
+    bot._run_in_tool_context = AgentBot._run_in_tool_context.__get__(bot, AgentBot)
+    bot._stream_in_tool_context = AgentBot._stream_in_tool_context.__get__(bot, AgentBot)
+    bot._response_coordinator = AgentBot._response_coordinator.__get__(bot, AgentBot)
+    bot._build_tool_execution_identity = MagicMock(return_value=None)
+    bot._active_response_event_ids = MagicMock(return_value=set())
+    bot._deliver_generated_response = AsyncMock(
+        return_value=MagicMock(
+            event_id="$response_id",
+            response_text="Hello!",
+            delivery_kind="sent",
+        ),
+    )
+    delivery_gateway = MagicMock()
+    delivery_gateway.deliver_stream = AsyncMock(return_value=("$msg_id", "Hello!"))
+    bot._delivery_gateway = MagicMock(return_value=delivery_gateway)
+    bot._build_tool_runtime_context = MagicMock(
+        return_value=ToolRuntimeContext(
+            agent_name="general",
+            room_id="!test:localhost",
+            thread_id=None,
+            resolved_thread_id=None,
+            requester_id=requester_id,
+            client=bot.client,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=storage_path,
+        ),
+    )
+
+
+def _response_request(
+    *,
+    room_id: str = "!test:localhost",
+    reply_to_event_id: str = "$user_msg",
+    thread_id: str | None = None,
+    prompt: str = "Hello",
+    user_id: str | None = None,
+) -> ResponseRequest:
+    """Build one response request for direct bot seam tests."""
+    return ResponseRequest(
+        room_id=room_id,
+        reply_to_event_id=reply_to_event_id,
+        thread_id=thread_id,
+        thread_history=(),
+        prompt=prompt,
+        user_id=user_id,
+    )
+
+
 class TestUserIdPassthrough:
     """Test that user_id reaches agent.arun() in both streaming and non-streaming paths."""
 
@@ -91,18 +165,12 @@ class TestUserIdPassthrough:
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response_id")
         bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
-        bot._build_tool_runtime_context = MagicMock(
-            return_value=ToolRuntimeContext(
-                agent_name="general",
-                room_id="!test:localhost",
-                thread_id=None,
-                resolved_thread_id=None,
-                requester_id="@alice:localhost",
-                client=bot.client,
-                config=config,
-                runtime_paths=runtime_paths,
-                storage_path=tmp_path,
-            ),
+        _bind_response_coordinator_runtime(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
         )
 
         process_method = AgentBot._process_and_respond
@@ -121,12 +189,7 @@ class TestUserIdPassthrough:
 
             await process_method(
                 bot,
-                room_id="!test:localhost",
-                prompt="Hello",
-                reply_to_event_id="$user_msg",
-                thread_id=None,
-                thread_history=[],
-                user_id="@alice:localhost",
+                _response_request(prompt="Hello", user_id="@alice:localhost"),
             )
 
             mock_ai.assert_called_once()
@@ -152,54 +215,46 @@ class TestUserIdPassthrough:
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
         bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
-        bot._build_tool_runtime_context = MagicMock(
-            return_value=ToolRuntimeContext(
-                agent_name="general",
-                room_id="!test:localhost",
-                thread_id=None,
-                resolved_thread_id=None,
-                requester_id="@bob:localhost",
-                client=bot.client,
-                config=config,
-                runtime_paths=runtime_paths,
-                storage_path=tmp_path,
-            ),
+        _bind_response_coordinator_runtime(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@bob:localhost",
         )
 
         streaming_method = AgentBot._process_and_respond_streaming
 
         with patch("mindroom.bot.stream_agent_response") as mock_stream:
 
-            def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
-                context = get_tool_runtime_context()
-                assert context is not None
-                assert context.room_id == "!test:localhost"
-                assert context.thread_id is None
-                assert context.requester_id == "@bob:localhost"
+            async def consume_delivery(request: object) -> tuple[str, str]:
+                response_stream = request.response_stream
+                chunks = [chunk async for chunk in response_stream]
+                return "$msg_id", "".join(chunks)
 
+            bot._delivery_gateway.return_value.deliver_stream.side_effect = consume_delivery
+
+            def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
                 async def fake_stream() -> AsyncIterator[str]:
+                    context = get_tool_runtime_context()
+                    assert context is not None
+                    assert context.room_id == "!test:localhost"
+                    assert context.thread_id is None
+                    assert context.requester_id == "@bob:localhost"
                     yield "Hello!"
 
                 return fake_stream()
 
             mock_stream.side_effect = fake_stream_agent_response
 
-            with patch("mindroom.bot.send_streaming_response") as mock_send_streaming:
-                mock_send_streaming.return_value = ("$msg_id", "Hello!")
+            await streaming_method(
+                bot,
+                _response_request(prompt="Hello", user_id="@bob:localhost"),
+            )
 
-                await streaming_method(
-                    bot,
-                    room_id="!test:localhost",
-                    prompt="Hello",
-                    reply_to_event_id="$user_msg",
-                    thread_id=None,
-                    thread_history=[],
-                    user_id="@bob:localhost",
-                )
-
-                mock_stream.assert_called_once()
-                assert mock_stream.call_args.kwargs["user_id"] == "@bob:localhost"
-                assert callable(mock_stream.call_args.kwargs["run_id_callback"])
+            mock_stream.assert_called_once()
+            assert mock_stream.call_args.kwargs["user_id"] == "@bob:localhost"
+            assert callable(mock_stream.call_args.kwargs["run_id_callback"])
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:

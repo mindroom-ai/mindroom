@@ -8,6 +8,7 @@ These tests ensure that mentioning a predefined team:
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,6 +37,11 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
 async def _empty_event_iterator() -> AsyncGenerator[object, None]:
     if False:
         yield None
+
+
+@asynccontextmanager
+async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+    yield
 
 
 def _make_matrix_client_mock() -> AsyncMock:
@@ -230,7 +236,6 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
     )
     bot.client = _make_matrix_client_mock()
     bot.orchestrator = MagicMock()
-    bot._generate_team_response_helper = AsyncMock()
 
     store_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     seen_requesters: list[str | None] = []
@@ -253,9 +258,16 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         return task
 
     with (
+        patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.bot.typing_indicator", new=_noop_typing_indicator),
+        patch("mindroom.bot.team_response", new=AsyncMock(return_value="team response")),
         patch("mindroom.bot.store_conversation_memory", new=fake_store_conversation_memory),
         patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
     ):
+        bot.client.room_send.side_effect = [
+            nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, "!room:localhost"),
+            nio.RoomSendResponse.from_dict({"event_id": "$edit"}, "!room:localhost"),
+        ]
         await bot._generate_response(
             room_id="!room:localhost",
             prompt="@team remember this",
@@ -268,7 +280,6 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
     if scheduled_tasks:
         await asyncio.gather(*scheduled_tasks)
 
-    bot._generate_team_response_helper.assert_awaited_once()
     assert len(store_calls) == 1
     assert store_calls[0][0][0] == "@team remember this"
     assert store_calls[0][0][1] == ["a1", "a2"]
