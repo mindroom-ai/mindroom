@@ -523,40 +523,50 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
     mock_sleep.assert_awaited_once_with(2.0)
 
 
-@pytest.mark.asyncio
-async def test_auto_resume_honors_max_resumes_cap(tmp_path: Path) -> None:
-    """Auto-resume should stop after the configured resume cap."""
-    config = _make_config(tmp_path)
-    client = AsyncMock(spec=nio.AsyncClient)
+def test_select_threads_to_resume_returns_all_unique_threads_when_unlimited() -> None:
+    """Selector should return every unique threaded interruption when uncapped."""
     interrupted = [
         InterruptedThread(
             room_id=ROOM_ID,
-            thread_id=f"$thread-{index}",
-            target_event_id=f"$target-{index}",
-            partial_text=f"Part {index}",
+            thread_id="$thread-one",
+            target_event_id="$older-one",
+            partial_text="Older one",
             agent_name="test_agent",
-        )
-        for index in range(12)
+            timestamp_ms=100,
+        ),
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-two",
+            target_event_id="$target-two",
+            partial_text="Two",
+            agent_name="test_agent",
+            timestamp_ms=200,
+        ),
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-one",
+            target_event_id="$newer-one",
+            partial_text="Newer one",
+            agent_name="test_agent",
+            timestamp_ms=300,
+        ),
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-three",
+            target_event_id="$target-three",
+            partial_text="Three",
+            agent_name="test_agent",
+            timestamp_ms=400,
+        ),
     ]
 
-    with (
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.send_message",
-            new=AsyncMock(return_value="$resume"),
-        ) as mock_send,
-        patch("mindroom.matrix.stale_stream_cleanup.asyncio.sleep", new=AsyncMock()) as mock_sleep,
-    ):
-        resumed_count = await auto_resume_interrupted_threads(
-            client,
-            interrupted,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            max_resumes=10,
-        )
+    selected = stale_stream_cleanup_module._select_threads_to_resume(
+        interrupted,
+        max_resumes=None,
+    )
 
-    assert resumed_count == 10
-    assert mock_send.await_count == 10
-    assert mock_sleep.await_count == 9
+    assert [thread.thread_id for thread in selected] == ["$thread-two", "$thread-one", "$thread-three"]
+    assert [thread.target_event_id for thread in selected] == ["$target-two", "$newer-one", "$target-three"]
 
 
 @pytest.mark.asyncio
