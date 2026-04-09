@@ -21,7 +21,13 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamMode
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+from tests.conftest import (
+    TEST_ACCESS_TOKEN,
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    patch_response_coordinator_module,
+    runtime_paths_for,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -84,8 +90,8 @@ def mock_general_agent() -> AgentMatrixUser:
 
 
 @pytest.mark.asyncio
-@patch("mindroom.bot.fetch_thread_snapshot")
-@patch("mindroom.bot.fetch_thread_history")
+@patch("mindroom.conversation_resolver.fetch_thread_snapshot")
+@patch("mindroom.conversation_resolver.ConversationResolver.fetch_thread_history")
 async def test_agent_processes_direct_mention(
     mock_fetch_snapshot: AsyncMock,
     mock_fetch_history: AsyncMock,
@@ -144,43 +150,39 @@ async def test_agent_processes_direct_mention(
                 payload={"event_id": "$response_event:localhost"},
             )
 
-            # Mock the AI response and presence check
-            with (
-                patch("mindroom.bot.stream_agent_response") as mock_ai,
-                patch("mindroom.bot.should_use_streaming", return_value=True),
+            async def mock_streaming_response() -> AsyncGenerator[str, None]:
+                yield "15% of 200 is 30"
+
+            mock_ai = AsyncMock(return_value=mock_streaming_response())
+            with patch_response_coordinator_module(
+                stream_agent_response=mock_ai,
+                should_use_streaming=AsyncMock(return_value=True),
             ):
-
-                async def mock_streaming_response() -> AsyncGenerator[str, None]:
-                    yield "15% of 200 is 30"
-
-                mock_ai.return_value = mock_streaming_response()
-
-                # Process the message
                 await bot._on_message(room, message_event)
 
-                # Verify AI was called with correct parameters (full message body as prompt)
-                mock_ai.assert_called_once()
-                ai_kwargs = mock_ai.call_args.kwargs
-                assert ai_kwargs["agent_name"] == "calculator"
-                assert ai_kwargs["prompt"].startswith("[")
-                assert ai_kwargs["prompt"].endswith(
-                    f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?",
-                )
-                assert ai_kwargs["session_id"] == f"{test_room_id}:$thread_root:localhost"
-                assert ai_kwargs["thread_history"] == []
-                assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
-                assert ai_kwargs["config"] == config
-                assert ai_kwargs["room_id"] == test_room_id
-                assert ai_kwargs["knowledge"] is None
-                assert ai_kwargs["user_id"] == test_user_id
-                assert ai_kwargs["media"] == MediaInputs()
-                assert ai_kwargs["reply_to_event_id"] == "$test_event:localhost"
-                assert ai_kwargs["show_tool_calls"] is True
-                assert ai_kwargs["run_metadata_collector"] == {}
+            # Verify AI was called with correct parameters (full message body as prompt)
+            mock_ai.assert_called_once()
+            ai_kwargs = mock_ai.call_args.kwargs
+            assert ai_kwargs["agent_name"] == "calculator"
+            assert ai_kwargs["prompt"].startswith("[")
+            assert ai_kwargs["prompt"].endswith(
+                f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?",
+            )
+            assert ai_kwargs["session_id"] == f"{test_room_id}:$thread_root:localhost"
+            assert ai_kwargs["thread_history"] == []
+            assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
+            assert ai_kwargs["config"] == config
+            assert ai_kwargs["room_id"] == test_room_id
+            assert ai_kwargs["knowledge"] is None
+            assert ai_kwargs["user_id"] == test_user_id
+            assert ai_kwargs["media"] == MediaInputs()
+            assert ai_kwargs["reply_to_event_id"] == "$test_event:localhost"
+            assert ai_kwargs["show_tool_calls"] is True
+            assert ai_kwargs["run_metadata_collector"] == {}
 
-                # Verify message was sent (thinking + streaming updates)
-                # With streaming: 1 thinking message + streaming updates
-                assert bot.client.room_send.call_count >= 1
+            # Verify message was sent (thinking + streaming updates)
+            # With streaming: 1 thinking message + streaming updates
+            assert bot.client.room_send.call_count >= 1
 
 
 @pytest.mark.asyncio
@@ -220,7 +222,8 @@ async def test_agent_ignores_other_agents(
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
-        with patch("mindroom.bot.stream_agent_response") as mock_ai:
+        mock_ai = AsyncMock()
+        with patch("mindroom.response_coordinator.stream_agent_response", new=mock_ai):
             await bot._on_message(room, message_event)
 
             # Should not process the message
@@ -322,12 +325,10 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         }
 
         with (
-            patch("mindroom.bot.ai_response") as mock_ai,
-            patch("mindroom.bot.fetch_thread_snapshot") as mock_fetch_snapshot,
-            patch("mindroom.bot.fetch_thread_history") as mock_fetch,
-            patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.conversation_resolver.fetch_thread_snapshot") as mock_fetch_snapshot,
+            patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_fetch,
+            patch("mindroom.dispatch_planner.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
-            patch("mindroom.bot.should_use_streaming", return_value=False),  # No streaming
         ):
             # Only this agent in the thread
             thread_history = [
@@ -342,10 +343,12 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             mock_fetch.return_value = thread_history
             mock_fetch_snapshot.return_value = thread_history
 
-            # Mock non-streaming response
-            mock_ai.return_value = "20% of 300 is 60"
-
-            await bot._on_message(room, message_event)
+            mock_ai = AsyncMock(return_value="20% of 300 is 60")
+            with patch_response_coordinator_module(
+                ai_response=mock_ai,
+                should_use_streaming=AsyncMock(return_value=False),
+            ):
+                await bot._on_message(room, message_event)
 
             # Should process the message as only agent in thread
             mock_ai.assert_called_once()
@@ -379,13 +382,10 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         message_event_2.sender = test_user_id
 
         with (
-            patch("mindroom.bot.ai_response") as mock_ai,
-            patch("mindroom.bot.fetch_thread_snapshot") as mock_fetch_snapshot,
-            patch("mindroom.bot.fetch_thread_history") as mock_fetch,
-            patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.conversation_resolver.fetch_thread_snapshot") as mock_fetch_snapshot,
+            patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_fetch,
+            patch("mindroom.dispatch_planner.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
-            patch("mindroom.bot.should_use_streaming", return_value=False),  # No streaming
-            patch("mindroom.bot.team_response", new=AsyncMock(return_value="Team response")) as mock_team_response,
         ):
             # Multiple agents in the thread
             thread_history = [
@@ -410,7 +410,14 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 nio.RoomSendResponse.from_dict({"event_id": "$edit"}, test_room_id),
             ]
 
-            await bot._on_message(room, message_event_2)
+            mock_ai = AsyncMock()
+            mock_team_response = AsyncMock(return_value="Team response")
+            with patch_response_coordinator_module(
+                ai_response=mock_ai,
+                team_response=mock_team_response,
+                should_use_streaming=AsyncMock(return_value=False),
+            ):
+                await bot._on_message(room, message_event_2)
 
             # Should form team and send team response when multiple agents in thread
             mock_ai.assert_not_called()
@@ -453,12 +460,10 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         message_event_with_mention.sender = test_user_id
 
         with (
-            patch("mindroom.bot.ai_response") as mock_ai,
-            patch("mindroom.bot.fetch_thread_snapshot") as mock_fetch_snapshot,
-            patch("mindroom.bot.fetch_thread_history") as mock_fetch,
-            patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.conversation_resolver.fetch_thread_snapshot") as mock_fetch_snapshot,
+            patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_fetch,
+            patch("mindroom.dispatch_planner.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
-            patch("mindroom.bot.should_use_streaming", return_value=False),  # No streaming
         ):
             thread_history = [
                 _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
@@ -478,10 +483,12 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             mock_fetch.return_value = thread_history
             mock_fetch_snapshot.return_value = thread_history
 
-            # Mock non-streaming response for mention case
-            mock_ai.return_value = "20% of 300 is 60"
-
-            await bot._on_message(room, message_event_with_mention)
+            mock_ai = AsyncMock(return_value="20% of 300 is 60")
+            with patch_response_coordinator_module(
+                ai_response=mock_ai,
+                should_use_streaming=AsyncMock(return_value=False),
+            ):
+                await bot._on_message(room, message_event_with_mention)
 
             # Should process the message with explicit mention
             mock_ai.assert_called_once()

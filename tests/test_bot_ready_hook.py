@@ -442,7 +442,7 @@ async def test_non_router_hook_sender_prefers_current_bot_client(tmp_path: Path)
         sent_clients.append(client)
         return "$hook-event"
 
-    sender = bot._hook_message_sender()
+    sender = bot._hook_context_support.message_sender()
     assert sender is not None
 
     with (

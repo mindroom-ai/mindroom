@@ -18,7 +18,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from agno.knowledge.document import Document
+    from structlog.stdlib import BoundLogger
 
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.manager import KnowledgeManager
@@ -105,6 +107,42 @@ def get_agent_knowledge(
         ),
         on_missing_bases=on_missing_bases,
     )
+
+
+@dataclass
+class KnowledgeAccessSupport:
+    """Resolve live knowledge access for one runtime without routing through AgentBot."""
+
+    runtime: BotRuntimeView
+    logger: BoundLogger
+    runtime_paths: RuntimePaths
+
+    def for_agent(
+        self,
+        agent_name: str,
+        *,
+        request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
+    ) -> Knowledge | None:
+        """Return the current knowledge assigned to one or more agent bases."""
+
+        def _shared_manager(base_id: str) -> KnowledgeManager | None:
+            orchestrator = self.runtime.orchestrator
+            if orchestrator is None:
+                return None
+            return orchestrator.knowledge_managers.get(base_id)
+
+        return get_agent_knowledge(
+            agent_name,
+            self.runtime.config,
+            self.runtime_paths,
+            request_knowledge_managers=request_knowledge_managers,
+            shared_manager_lookup=_shared_manager,
+            on_missing_bases=lambda missing_base_ids: self.logger.warning(
+                "Knowledge bases not available for agent",
+                agent_name=agent_name,
+                knowledge_bases=missing_base_ids,
+            ),
+        )
 
 
 @dataclass

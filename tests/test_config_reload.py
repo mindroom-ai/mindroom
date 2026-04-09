@@ -21,6 +21,7 @@ from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainStat
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_send_response_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -118,7 +119,8 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         runtime_paths=runtime_paths_for(config),
     )
     setup_test_bot(bot, AsyncMock())
-    monkeypatch.setattr(bot, "_send_response", AsyncMock(return_value=None))
+    bot._send_response = AsyncMock(return_value=None)
+    install_send_response_mock(bot, bot._send_response)
 
     response_started = asyncio.Event()
     release_response = asyncio.Event()
@@ -1119,7 +1121,6 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
 
 @pytest.mark.asyncio
 async def test_in_flight_response_count_nonzero_during_send_response(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     mock_agent_users: dict[str, AgentMatrixUser],
 ) -> None:
@@ -1147,7 +1148,8 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         await release_send.wait()
         return "$msg"
 
-    monkeypatch.setattr(bot, "_send_response", slow_send)
+    bot._send_response = AsyncMock(side_effect=slow_send)
+    install_send_response_mock(bot, bot._send_response)
 
     async def response_function(message_id: str | None) -> None:
         pass
@@ -1215,7 +1217,6 @@ async def test_run_cancellable_response_does_not_depend_on_current_task_lookup(
 
 @pytest.mark.asyncio
 async def test_run_cancellable_response_marks_thinking_placeholder_pending(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     mock_agent_users: dict[str, AgentMatrixUser],
 ) -> None:
@@ -1261,7 +1262,8 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
         captured_send["target"] = target
         return "$thinking"
 
-    monkeypatch.setattr(bot, "_send_response", AsyncMock(side_effect=fake_send_response))
+    bot._send_response = AsyncMock(side_effect=fake_send_response)
+    install_send_response_mock(bot, bot._send_response)
 
     async def response_function(message_id: str | None) -> None:
         assert message_id == "$thinking"

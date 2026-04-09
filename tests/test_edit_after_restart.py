@@ -12,6 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import HandledTurnLedger, HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
+from tests.conftest import wrap_extracted_collaborators
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -73,6 +74,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
         ),
         rooms=["!test:example.com"],
     )
+    wrap_extracted_collaborators(bot)
 
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -183,6 +185,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
         ),
         rooms=["!test:example.com"],
     )
+    wrap_extracted_collaborators(bot)
 
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -226,13 +229,11 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
 
     # Mock methods
     with (
-        patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate,
+        patch.object(bot, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
     ):
         # Process the redelivered message
         await bot._on_message(room, message_event)
 
         # The bot should NOT process this message again
-        mock_context.assert_not_called()
-        mock_generate.assert_not_called()
+        mock_dispatch.assert_not_called()

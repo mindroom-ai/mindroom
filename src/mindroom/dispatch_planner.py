@@ -5,16 +5,27 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import nio
 
 from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
-from mindroom.coalescing import PreparedTextEvent
-from mindroom.commands.handler import CommandEvent, CommandHandlerContext
+from mindroom.authorization import (
+    filter_agents_by_sender_permissions,
+    get_available_agents_for_sender,
+    get_effective_sender_id_for_reply_permissions,
+    is_sender_allowed_for_agent_reply,
+)
+from mindroom.commands.handler import (
+    CommandEvent,
+    CommandHandlerContext,
+    _run_skill_command_tool,
+    handle_command,
+)
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -22,23 +33,58 @@ from mindroom.constants import (
     RuntimePaths,
 )
 from mindroom.conversation_resolver import (
+    ConversationResolver,
     DispatchEvent,
     MediaDispatchEvent,
     MessageContext,
     TextDispatchEvent,
 )
 from mindroom.delivery_gateway import (
-    SuppressedPlaceholderCleanupError as _SuppressedPlaceholderCleanupError,
+    DeliveryGateway,
+    EditTextRequest,
+    SendTextRequest,
+    SuppressedPlaceholderCleanupError,
 )
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnLedger, HandledTurnState
-from mindroom.hooks import EnrichmentItem, MessageEnvelope
-from mindroom.hooks.ingress import hook_ingress_policy, is_automation_source_kind
-from mindroom.inbound_turn_normalizer import DispatchPayload, TextNormalizationRequest
-from mindroom.matrix.event_info import EventInfo
+from mindroom.hooks import (
+    EVENT_MESSAGE_ENRICH,
+    EVENT_MESSAGE_RECEIVED,
+    EVENT_SYSTEM_ENRICH,
+    EnrichmentItem,
+    HookContextSupport,
+    MessageEnrichContext,
+    MessageEnvelope,
+    MessageReceivedContext,
+    SystemEnrichContext,
+    emit,
+    emit_collect,
+    render_enrichment_block,
+)
+from mindroom.hooks.ingress import HookIngressPolicy, hook_ingress_policy, is_automation_source_kind
+from mindroom.inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, TextNormalizationRequest
 from mindroom.matrix.identity import MatrixID, extract_agent_name, is_agent_id
+from mindroom.matrix.rooms import is_dm_room
 from mindroom.message_target import MessageTarget
-from mindroom.teams import TeamIntent, TeamOutcome, TeamResolution
+from mindroom.post_response_effects import record_handled_turn
+from mindroom.response_coordinator import ResponseCoordinator, ResponseRequest
+from mindroom.routing import suggest_agent_for_message
+from mindroom.team_runtime_resolution import resolve_live_shared_agent_names
+from mindroom.teams import (
+    TeamIntent,
+    TeamMode,
+    TeamOutcome,
+    TeamResolution,
+    decide_team_formation,
+    resolve_configured_team,
+)
+from mindroom.thread_utils import (
+    get_agents_in_thread,
+    get_all_mentioned_agents_in_thread,
+    get_configured_agents_for_room,
+    has_multiple_non_agent_users_in_thread,
+    should_agent_respond,
+)
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -46,51 +92,13 @@ if TYPE_CHECKING:
 
     import structlog
 
+    from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.coalescing import PreparedTextEvent
     from mindroom.commands.parsing import Command
-    from mindroom.config.main import Config
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.orchestrator import MultiAgentOrchestrator
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 
 type DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
-type ClientGetter = Callable[[], nio.AsyncClient | None]
-type ConfigGetter = Callable[[], Config]
-type MatrixIDGetter = Callable[[], MatrixID]
-type LoggerGetter = Callable[[], structlog.stdlib.BoundLogger]
-type OrchestratorGetter = Callable[[], MultiAgentOrchestrator | None]
-type HandledTurnLedgerGetter = Callable[[], HandledTurnLedger]
-type ResolveTextDispatchEventFn = Callable[[TextNormalizationRequest], Awaitable[PreparedTextEvent]]
-type ExtractDispatchContextFn = Callable[[nio.MatrixRoom, DispatchEvent], Awaitable[MessageContext]]
-type HydrateDispatchContextFn = Callable[[nio.MatrixRoom, DispatchEvent, MessageContext], Awaitable[None]]
-type BuildMessageTargetFn = Callable[..., MessageTarget]
-type BuildMessageEnvelopeFn = Callable[..., MessageEnvelope]
-type EmitMessageReceivedHooksFn = Callable[..., Awaitable[bool]]
-type MarkSourceEventsRespondedFn = Callable[[HandledTurnState], None]
-type DeriveConversationContextFn = Callable[
-    [str, EventInfo],
-    Awaitable[tuple[bool, str | None, Sequence[ResolvedVisibleMessage]]],
-]
-type RequesterUserIdForEventFn = Callable[[CommandEvent], str]
-type HandleCommandFn = Callable[..., Awaitable[None]]
-type RunSkillCommandToolFn = Callable[..., Awaitable[str]]
-type SendResponseFn = Callable[..., Awaitable[str | None]]
-type SendSkillCommandResponseFn = Callable[..., Awaitable[str | None]]
-type BuildToolRuntimeContextFn = Callable[..., ToolRuntimeContext | None]
-type ThreadAgentsLookupFn = Callable[[Sequence[ResolvedVisibleMessage], Config, RuntimePaths], list[MatrixID]]
-type ThreadUserCountLookupFn = Callable[[Sequence[ResolvedVisibleMessage], Config, RuntimePaths], bool]
-type RoomAgentsLookupFn = Callable[[nio.MatrixRoom, str, Config, RuntimePaths], list[MatrixID]]
-type FilterAgentsBySenderPermissionsFn = Callable[[list[MatrixID], str, Config, RuntimePaths], list[MatrixID]]
-type DecideTeamFormationFn = Callable[..., Awaitable[TeamResolution]]
-type DecideTeamForSenderFn = Callable[..., Awaitable[TeamResolution]]
-type ShouldAgentRespondFn = Callable[..., bool]
-type SuggestAgentForMessageFn = Callable[
-    [str, list[MatrixID], Config, RuntimePaths, Sequence[ResolvedVisibleMessage]],
-    Awaitable[str | None],
-]
-type RegisterRoutedAttachmentFn = Callable[..., Awaitable[str | None]]
-type EditMessageFn = Callable[..., Awaitable[bool]]
-type GenerateResponseFn = Callable[..., Awaitable[str | None]]
-type ActiveResponseForTargetFn = Callable[[MessageTarget], bool]
 
 
 class PreparedHookedPayload(Protocol):
@@ -102,17 +110,125 @@ class PreparedHookedPayload(Protocol):
     system_enrichment_items: tuple[EnrichmentItem, ...]
 
 
-type GenerateTeamResponseHelperFn = Callable[..., Awaitable[str | None]]
-type ApplyMessageEnrichmentFn = Callable[..., Awaitable[PreparedHookedPayload]]
-type ApplySystemEnrichmentFn = Callable[..., Awaitable[list[EnrichmentItem]]]
-type BuildDispatchPayloadFn = Callable[..., Awaitable[DispatchPayload]]
-type ReceivedMonotonicFromSourceFn = Callable[[dict[str, Any] | None], float | None]
-type FinalizeDispatchFailureFn = Callable[..., Awaitable[str | None]]
-type LogDispatchLatencyFn = Callable[..., None]
-type IsDmRoomFn = Callable[[nio.AsyncClient, str], Awaitable[bool]]
-type SenderAllowedForReplyFn = Callable[[str, str, Config, RuntimePaths], bool]
-type ResolveLiveSharedAgentNamesFn = Callable[[MultiAgentOrchestrator, Config], set[str]]
-type GetConfiguredAgentsForRoomFn = Callable[[str, Config, RuntimePaths], list[MatrixID]]
+@dataclass(frozen=True)
+class _ResolvedPreparedHookedPayload:
+    """Concrete prepared payload used after planner-side enrichment updates."""
+
+    payload: DispatchPayload
+    envelope: MessageEnvelope
+    strip_transient_enrichment_after_run: bool
+    system_enrichment_items: tuple[EnrichmentItem, ...]
+
+
+@dataclass
+class DispatchHookService:
+    """Own planner-facing hook ingress and enrichment behavior."""
+
+    hook_context: HookContextSupport
+
+    async def emit_message_received_hooks(
+        self,
+        *,
+        envelope: MessageEnvelope,
+        correlation_id: str,
+        policy: HookIngressPolicy,
+    ) -> bool:
+        """Emit message:received and return whether hooks suppressed processing."""
+        if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_RECEIVED):
+            return False
+        if not policy.rerun_message_received:
+            return False
+
+        context = MessageReceivedContext(
+            **self.hook_context.base_kwargs(EVENT_MESSAGE_RECEIVED, correlation_id),
+            envelope=envelope,
+            skip_plugin_names=policy.skip_message_received_plugin_names,
+        )
+        await emit(self.hook_context.registry, EVENT_MESSAGE_RECEIVED, context)
+        return context.suppress
+
+    async def apply_message_enrichment(
+        self,
+        dispatch: PreparedDispatch,
+        payload: DispatchPayload,
+        *,
+        target_entity_name: str,
+        target_member_names: tuple[str, ...] | None,
+    ) -> PreparedHookedPayload:
+        """Run message:enrich and return the model-facing payload."""
+        envelope = MessageEnvelope(
+            source_event_id=dispatch.envelope.source_event_id,
+            room_id=dispatch.envelope.room_id,
+            target=dispatch.envelope.target,
+            requester_id=dispatch.envelope.requester_id,
+            sender_id=dispatch.envelope.sender_id,
+            body=dispatch.envelope.body,
+            attachment_ids=(
+                tuple(payload.attachment_ids)
+                if payload.attachment_ids is not None
+                else dispatch.envelope.attachment_ids
+            ),
+            mentioned_agents=dispatch.envelope.mentioned_agents,
+            agent_name=target_entity_name,
+            source_kind=dispatch.envelope.source_kind,
+            hook_source=dispatch.envelope.hook_source,
+            message_received_depth=dispatch.envelope.message_received_depth,
+        )
+        model_prompt: str | None = None
+        strip_transient_enrichment_after_run = False
+        if self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH):
+            context = MessageEnrichContext(
+                **self.hook_context.base_kwargs(EVENT_MESSAGE_ENRICH, dispatch.correlation_id),
+                envelope=envelope,
+                target_entity_name=target_entity_name,
+                target_member_names=target_member_names,
+            )
+            items = await emit_collect(self.hook_context.registry, EVENT_MESSAGE_ENRICH, context)
+            if items:
+                enrichment_block = render_enrichment_block(items)
+                model_prompt = f"{payload.prompt.rstrip()}\n\n{enrichment_block}"
+                strip_transient_enrichment_after_run = True
+
+        return _ResolvedPreparedHookedPayload(
+            payload=DispatchPayload(
+                prompt=payload.prompt,
+                model_prompt=model_prompt,
+                media=payload.media,
+                attachment_ids=payload.attachment_ids,
+            ),
+            envelope=envelope,
+            strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
+            system_enrichment_items=(),
+        )
+
+    async def apply_system_enrichment(
+        self,
+        dispatch: PreparedDispatch,
+        envelope: MessageEnvelope,
+        *,
+        target_entity_name: str,
+        target_member_names: tuple[str, ...] | None,
+    ) -> list[EnrichmentItem]:
+        """Run system:enrich and return system-prompt enrichment items."""
+        if not self.hook_context.registry.has_hooks(EVENT_SYSTEM_ENRICH):
+            return []
+        context = SystemEnrichContext(
+            **self.hook_context.base_kwargs(EVENT_SYSTEM_ENRICH, dispatch.correlation_id),
+            envelope=envelope,
+            target_entity_name=target_entity_name,
+            target_member_names=target_member_names,
+        )
+        return await emit_collect(self.hook_context.registry, EVENT_SYSTEM_ENRICH, context)
+
+
+def _received_monotonic_from_source(source: dict[str, Any] | None) -> float | None:
+    """Return the inbound receipt timestamp persisted on one event source."""
+    if not isinstance(source, dict):
+        return None
+    raw_received_monotonic = source.get("com.mindroom.received_monotonic")
+    if isinstance(raw_received_monotonic, float | int):
+        return float(raw_received_monotonic)
+    return None
 
 
 @dataclass(frozen=True)
@@ -153,54 +269,19 @@ class DispatchPlan:
 class DispatchPlannerDeps:
     """Explicit collaborators needed by dispatch planning and execution."""
 
-    client_getter: ClientGetter
-    config_getter: ConfigGetter
+    runtime: BotRuntimeView
+    logger: structlog.stdlib.BoundLogger
+    handled_turn_ledger: HandledTurnLedger
     runtime_paths: RuntimePaths
     storage_path: Path
     agent_name: str
-    matrix_id_getter: MatrixIDGetter
-    logger_getter: LoggerGetter
-    orchestrator_getter: OrchestratorGetter
-    handled_turn_ledger_getter: HandledTurnLedgerGetter
-    resolve_text_dispatch_event: ResolveTextDispatchEventFn
-    extract_dispatch_context: ExtractDispatchContextFn
-    hydrate_dispatch_context: HydrateDispatchContextFn
-    build_message_target: BuildMessageTargetFn
-    build_message_envelope: BuildMessageEnvelopeFn
-    emit_message_received_hooks: EmitMessageReceivedHooksFn
-    mark_source_events_responded: MarkSourceEventsRespondedFn
-    derive_conversation_context: DeriveConversationContextFn
-    requester_user_id_for_event: RequesterUserIdForEventFn
-    handle_command_fn: HandleCommandFn
-    run_skill_command_tool_fn: RunSkillCommandToolFn
-    send_response: SendResponseFn
-    send_response_kw: SendResponseFn
-    send_skill_command_response: SendSkillCommandResponseFn
-    build_tool_runtime_context: BuildToolRuntimeContextFn
-    get_agents_in_thread_fn: ThreadAgentsLookupFn
-    get_all_mentioned_agents_in_thread_fn: ThreadAgentsLookupFn
-    has_multiple_non_agent_users_in_thread_fn: ThreadUserCountLookupFn
-    get_available_agents_for_sender_fn: RoomAgentsLookupFn
-    filter_agents_by_sender_permissions_fn: FilterAgentsBySenderPermissionsFn
-    decide_team_formation_fn: DecideTeamFormationFn
-    decide_team_for_sender_fn: DecideTeamForSenderFn
-    should_agent_respond_fn: ShouldAgentRespondFn
-    suggest_agent_for_message_fn: SuggestAgentForMessageFn
-    register_routed_attachment: RegisterRoutedAttachmentFn
-    edit_message: EditMessageFn
-    generate_response: GenerateResponseFn
-    has_active_response_for_target_fn: ActiveResponseForTargetFn
-    generate_team_response_helper: GenerateTeamResponseHelperFn
-    apply_message_enrichment: ApplyMessageEnrichmentFn
-    apply_system_enrichment: ApplySystemEnrichmentFn
-    build_dispatch_payload: BuildDispatchPayloadFn
-    received_monotonic_from_source: ReceivedMonotonicFromSourceFn
-    finalize_dispatch_failure_fn: FinalizeDispatchFailureFn
-    log_dispatch_latency_fn: LogDispatchLatencyFn
-    is_dm_room_fn: IsDmRoomFn
-    is_sender_allowed_for_agent_reply_fn: SenderAllowedForReplyFn
-    resolve_live_shared_agent_names_fn: ResolveLiveSharedAgentNamesFn
-    get_configured_agents_for_room_fn: GetConfiguredAgentsForRoomFn
+    matrix_id: MatrixID
+    normalizer: InboundTurnNormalizer
+    resolver: ConversationResolver
+    delivery_gateway: DeliveryGateway
+    response_coordinator: ResponseCoordinator
+    hook_service: DispatchHookService
+    tool_runtime: ToolRuntimeSupport
 
 
 @dataclass(frozen=True)
@@ -210,42 +291,51 @@ class DispatchPlanner:
     deps: DispatchPlannerDeps
 
     def _client(self) -> nio.AsyncClient:
-        client = self.deps.client_getter()
+        client = self.deps.runtime.client
         if client is None:
             msg = "Matrix client is not ready for dispatch planning"
             raise RuntimeError(msg)
         return client
 
-    def _config(self) -> Config:
-        return self.deps.config_getter()
-
-    def _logger(self) -> structlog.stdlib.BoundLogger:
-        return self.deps.logger_getter()
-
     def _matrix_id(self) -> MatrixID:
-        return self.deps.matrix_id_getter()
+        return self.deps.matrix_id
 
-    def _orchestrator(self) -> MultiAgentOrchestrator | None:
-        return self.deps.orchestrator_getter()
+    def _mark_source_events_responded(self, handled_turn: HandledTurnState) -> None:
+        """Mark one or more source events as handled by the same response."""
+        record_handled_turn(self.deps.handled_turn_ledger, handled_turn)
 
-    def _handled_turn_ledger(self) -> HandledTurnLedger:
-        return self.deps.handled_turn_ledger_getter()
+    def _requester_user_id_for_event(self, event: CommandEvent) -> str:
+        """Return the effective requester for per-user reply checks."""
+        source = event.source if isinstance(event.source, dict) else None
+        content = source.get("content") if source is not None else None
+        if (
+            event.sender == self.deps.matrix_id.full_id
+            and isinstance(content, dict)
+            and isinstance(content.get(ORIGINAL_SENDER_KEY), str)
+        ):
+            return content[ORIGINAL_SENDER_KEY]
+        return get_effective_sender_id_for_reply_permissions(
+            event.sender,
+            source,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
 
     def can_reply_to_sender(self, sender_id: str) -> bool:
         """Return whether this entity may reply to ``sender_id``."""
-        return self.deps.is_sender_allowed_for_agent_reply_fn(
+        return is_sender_allowed_for_agent_reply(
             sender_id,
             self.deps.agent_name,
-            self._config(),
+            self.deps.runtime.config,
             self.deps.runtime_paths,
         )
 
     def materializable_agent_names(self) -> set[str] | None:
         """Return live shared agent names that can currently answer."""
-        orchestrator = self._orchestrator()
+        orchestrator = self.deps.runtime.orchestrator
         if orchestrator is None:
             return None
-        return self.deps.resolve_live_shared_agent_names_fn(orchestrator, self._config())
+        return resolve_live_shared_agent_names(orchestrator, config=self.deps.runtime.config)
 
     def filter_materializable_agents(
         self,
@@ -255,11 +345,11 @@ class DispatchPlanner:
         """Keep only agents that can currently be materialized."""
         if materializable_agent_names is None:
             return agent_ids
-        config = self._config()
         return [
             agent_id
             for agent_id in agent_ids
-            if (agent_id.agent_name(config, self.deps.runtime_paths) or agent_id.username) in materializable_agent_names
+            if (agent_id.agent_name(self.deps.runtime.config, self.deps.runtime_paths) or agent_id.username)
+            in materializable_agent_names
         ]
 
     def response_owner_for_team_resolution(
@@ -307,6 +397,34 @@ class DispatchPlanner:
             rejection_message=form_team.reason,
         )
 
+    def configured_team_response_action(self) -> ResponseAction | None:
+        """Return the configured-team response action for this bot when it represents a team."""
+        team_config = self.deps.runtime.config.teams.get(self.deps.agent_name)
+        if team_config is None:
+            return None
+        configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
+        team_agents = [
+            MatrixID.from_agent(agent_name, self.deps.matrix_id.domain, self.deps.runtime_paths)
+            for agent_name in team_config.agents
+        ]
+        team_resolution = resolve_configured_team(
+            self.deps.agent_name,
+            team_agents,
+            configured_mode,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            materializable_agent_names=self.materializable_agent_names(),
+        )
+        if team_resolution.outcome is TeamOutcome.TEAM:
+            return ResponseAction(kind="team", form_team=team_resolution)
+        if team_resolution.outcome is TeamOutcome.REJECT and team_resolution.reason is not None:
+            return ResponseAction(
+                kind="reject",
+                form_team=team_resolution,
+                rejection_message=team_resolution.reason,
+            )
+        return None
+
     async def decide_team_for_sender(
         self,
         agents_in_thread: list[MatrixID],
@@ -320,28 +438,28 @@ class DispatchPlanner:
         materializable_agent_names: set[str] | None = None,
     ) -> TeamResolution:
         """Decide team formation using sender-visible candidates without losing explicit intent."""
-        all_mentioned_in_thread = self.deps.get_all_mentioned_agents_in_thread_fn(
+        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(
             context.thread_history,
-            self._config(),
+            self.deps.runtime.config,
             self.deps.runtime_paths,
         )
         if available_agents_in_room is None:
-            available_agents_in_room = self.deps.get_available_agents_for_sender_fn(
+            available_agents_in_room = get_available_agents_for_sender(
                 room,
                 requester_user_id,
-                self._config(),
+                self.deps.runtime.config,
                 self.deps.runtime_paths,
             )
         if materializable_agent_names is None:
             materializable_agent_names = self.materializable_agent_names()
-        return await self.deps.decide_team_formation_fn(
+        return await decide_team_formation(
             self._matrix_id(),
             context.mentioned_agents,
             agents_in_thread,
             all_mentioned_in_thread,
             room=room,
             message=message,
-            config=self._config(),
+            config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             is_dm_room=is_dm,
             is_thread=context.is_thread,
@@ -359,15 +477,15 @@ class DispatchPlanner:
         handled_turn: HandledTurnState,
     ) -> PreparedDispatch | None:
         """Run shared sender-gating, context extraction, and hook ingress preparation."""
-        context = await self.deps.extract_dispatch_context(room, event)
-        target = self.deps.build_message_target(
+        context = await self.deps.resolver.extract_dispatch_context(room, event)
+        target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=context.thread_id,
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
         correlation_id = event.event_id
-        envelope = self.deps.build_message_envelope(
+        envelope = self.deps.resolver.build_message_envelope(
             room_id=room.room_id,
             event=event,
             requester_user_id=requester_user_id,
@@ -375,18 +493,18 @@ class DispatchPlanner:
             target=target,
         )
         ingress_policy = hook_ingress_policy(envelope)
-        suppressed = await self.deps.emit_message_received_hooks(
+        suppressed = await self.deps.hook_service.emit_message_received_hooks(
             envelope=envelope,
             correlation_id=correlation_id,
             policy=ingress_policy,
         )
         if suppressed:
-            self.deps.mark_source_events_responded(handled_turn)
+            self._mark_source_events_responded(handled_turn)
             return None
 
-        sender_agent_name = extract_agent_name(requester_user_id, self._config(), self.deps.runtime_paths)
+        sender_agent_name = extract_agent_name(requester_user_id, self.deps.runtime.config, self.deps.runtime_paths)
         if sender_agent_name and not context.am_i_mentioned and not ingress_policy.bypass_unmentioned_agent_gate:
-            self._logger().debug(f"Ignoring {event_label} from other agent (not mentioned)")
+            self.deps.logger.debug(f"Ignoring {event_label} from other agent (not mentioned)")
             return None
 
         return PreparedDispatch(
@@ -399,7 +517,7 @@ class DispatchPlanner:
 
     async def resolve_text_dispatch_event(self, event: TextDispatchEvent) -> PreparedTextEvent:
         """Return one canonical text event for hooks, routing, and command handling."""
-        return await self.deps.resolve_text_dispatch_event(
+        return await self.deps.normalizer.resolve_text_event(
             TextNormalizationRequest(event=event),
         )
 
@@ -421,34 +539,34 @@ class DispatchPlanner:
 
         context = dispatch.context
         requester_user_id = dispatch.requester_user_id
-        agents_in_thread = self.deps.get_agents_in_thread_fn(
+        agents_in_thread = get_agents_in_thread(
             context.thread_history,
-            self._config(),
+            self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        sender_visible = self.deps.filter_agents_by_sender_permissions_fn(
+        sender_visible = filter_agents_by_sender_permissions(
             agents_in_thread,
             requester_user_id,
-            self._config(),
+            self.deps.runtime.config,
             self.deps.runtime_paths,
         )
 
         if not context.mentioned_agents and not context.has_non_agent_mentions and not sender_visible:
-            if context.is_thread and self.deps.has_multiple_non_agent_users_in_thread_fn(
+            if context.is_thread and has_multiple_non_agent_users_in_thread(
                 context.thread_history,
-                self._config(),
+                self.deps.runtime.config,
                 self.deps.runtime_paths,
             ):
-                self._logger().info("Skipping routing: multiple non-agent users in thread (mention required)")
+                self.deps.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
                 return self._router_ignore_plan(handled_turn, event.event_id)
-            available_agents = self.deps.get_available_agents_for_sender_fn(
+            available_agents = get_available_agents_for_sender(
                 room,
                 requester_user_id,
-                self._config(),
+                self.deps.runtime.config,
                 self.deps.runtime_paths,
             )
             if len(available_agents) == 1:
-                self._logger().info("Skipping routing: only one agent present")
+                self.deps.logger.info("Skipping routing: only one agent present")
                 return self._router_ignore_plan(handled_turn, event.event_id)
             return DispatchPlan(
                 kind="route",
@@ -471,10 +589,12 @@ class DispatchPlanner:
         if tracked_handled_turn is not None:
             visible_router_echo_event_id = (
                 tracked_handled_turn.visible_echo_event_id
-                or self._handled_turn_ledger().visible_echo_event_id_for_sources(tracked_handled_turn.source_event_ids)
+                or self.deps.handled_turn_ledger.visible_echo_event_id_for_sources(
+                    tracked_handled_turn.source_event_ids,
+                )
             )
             if visible_router_echo_event_id is not None and any(
-                not self._handled_turn_ledger().has_responded(source_event_id)
+                not self.deps.handled_turn_ledger.has_responded(source_event_id)
                 for source_event_id in tracked_handled_turn.source_event_ids
             ):
                 handled_turn_outcome = tracked_handled_turn.with_response_event_id(visible_router_echo_event_id)
@@ -520,7 +640,9 @@ class DispatchPlanner:
             room,
             dispatch.requester_user_id,
             event.body,
-            await self.deps.is_dm_room_fn(self._client(), room.room_id),
+            await is_dm_room(self._client(), room.room_id),
+            target=dispatch.target,
+            source_envelope=dispatch.envelope,
         )
         if action.kind == "skip":
             return DispatchPlan(kind="ignore")
@@ -538,15 +660,15 @@ class DispatchPlanner:
         source_envelope: MessageEnvelope | None = None,
     ) -> ResponseAction:
         """Decide whether to respond as a team, individually, or not at all."""
-        agents_in_thread = self.deps.get_agents_in_thread_fn(
+        agents_in_thread = get_agents_in_thread(
             context.thread_history,
-            self._config(),
+            self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        available_agents_in_room = self.deps.get_available_agents_for_sender_fn(
+        available_agents_in_room = get_available_agents_for_sender(
             room,
             requester_user_id,
-            self._config(),
+            self.deps.runtime.config,
             self.deps.runtime_paths,
         )
         materializable_agent_names = self.materializable_agent_names()
@@ -554,27 +676,27 @@ class DispatchPlanner:
             available_agents_in_room,
             materializable_agent_names,
         )
-        form_team = await self.deps.decide_team_for_sender_fn(
+        form_team = await self.decide_team_for_sender(
             agents_in_thread,
             context,
             room,
             requester_user_id,
             message,
             is_dm,
-            available_agents_in_room,
-            materializable_agent_names,
+            available_agents_in_room=available_agents_in_room,
+            materializable_agent_names=materializable_agent_names,
         )
         team_action = self.team_response_action(form_team, responder_pool)
         if team_action is not None:
             return team_action
 
-        if not self.deps.should_agent_respond_fn(
+        if not should_agent_respond(
             agent_name=self.deps.agent_name,
             am_i_mentioned=context.am_i_mentioned,
             is_thread=context.is_thread,
             room=room,
             thread_history=context.thread_history,
-            config=self._config(),
+            config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             mentioned_agents=context.mentioned_agents,
             has_non_agent_mentions=context.has_non_agent_mentions,
@@ -604,9 +726,9 @@ class DispatchPlanner:
             return False
         if is_automation_source_kind(source_envelope.source_kind):
             return False
-        if is_agent_id(source_envelope.sender_id, self._config(), self.deps.runtime_paths):
+        if is_agent_id(source_envelope.sender_id, self.deps.runtime.config, self.deps.runtime_paths):
             return False
-        return self.deps.has_active_response_for_target_fn(target)
+        return self.deps.response_coordinator.has_active_response_for_target(target)
 
     async def execute_command(
         self,
@@ -631,7 +753,7 @@ class DispatchPlanner:
             user_id: str | None,
             reply_to_event: nio.RoomMessageText | None = None,
         ) -> str | None:
-            return await self.deps.send_skill_command_response(
+            return await self.deps.response_coordinator.send_skill_command_response(
                 room_id=room_id,
                 reply_to_event_id=reply_to_event_id,
                 thread_id=thread_id,
@@ -641,6 +763,25 @@ class DispatchPlanner:
                 user_id=user_id,
                 reply_to_event=reply_to_event,
                 source_envelope=source_envelope,
+            )
+
+        async def send_response(
+            room_id: str,
+            reply_to_event_id: str | None,
+            response_text: str,
+            thread_id: str | None,
+            reply_to_event: nio.RoomMessageText | None = None,
+            skip_mentions: bool = False,
+        ) -> str | None:
+            return await self.deps.delivery_gateway.send_text(
+                SendTextRequest(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    response_text=response_text,
+                    thread_id=thread_id,
+                    reply_to_event=reply_to_event,
+                    skip_mentions=skip_mentions,
+                ),
             )
 
         async def run_skill_command_tool(
@@ -655,14 +796,14 @@ class DispatchPlanner:
         ) -> str:
             runtime_context = None
             if room_id is not None:
-                runtime_context = self.deps.build_tool_runtime_context(
+                runtime_context = self.deps.tool_runtime.build_context(
                     MessageTarget.resolve(room_id, thread_id, event.event_id),
                     user_id=requester_user_id,
                     agent_name=agent_name,
                     source_envelope=source_envelope,
                 )
-            return await self.deps.run_skill_command_tool_fn(
-                config=self._config(),
+            return await _run_skill_command_tool(
+                config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
                 agent_name=agent_name,
                 storage_path=self.deps.storage_path,
@@ -677,19 +818,19 @@ class DispatchPlanner:
 
         context = CommandHandlerContext(
             client=self._client(),
-            config=self._config(),
+            config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             storage_path=self.deps.storage_path,
-            logger=self._logger(),
-            handled_turn_ledger=self._handled_turn_ledger(),
-            derive_conversation_context=self.deps.derive_conversation_context,
-            requester_user_id_for_event=self.deps.requester_user_id_for_event,
-            build_message_target=self.deps.build_message_target,
-            send_response=self.deps.send_response,
+            logger=self.deps.logger,
+            handled_turn_ledger=self.deps.handled_turn_ledger,
+            derive_conversation_context=self.deps.resolver.derive_conversation_context,
+            requester_user_id_for_event=self._requester_user_id_for_event,
+            build_message_target=self.deps.resolver.build_message_target,
+            send_response=send_response,
             send_skill_command_response=send_skill_command_response,
             run_skill_command_tool=run_skill_command_tool,
         )
-        await self.deps.handle_command_fn(
+        await handle_command(
             context=context,
             room=room,
             event=event,
@@ -714,31 +855,31 @@ class DispatchPlanner:
         assert self.deps.agent_name == ROUTER_AGENT_NAME
 
         permission_sender_id = requester_user_id
-        available_agents = self.deps.get_configured_agents_for_room_fn(
+        available_agents = get_configured_agents_for_room(
             room.room_id,
-            self._config(),
+            self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        available_agents = self.deps.filter_agents_by_sender_permissions_fn(
+        available_agents = filter_agents_by_sender_permissions(
             available_agents,
             permission_sender_id,
-            self._config(),
+            self.deps.runtime.config,
             self.deps.runtime_paths,
         )
         if not available_agents:
-            self._logger().debug(
+            self.deps.logger.debug(
                 "No configured agents to route to in this room for sender",
                 sender=permission_sender_id,
             )
             return
 
-        self._logger().info("Handling AI routing", event_id=event.event_id)
+        self.deps.logger.info("Handling AI routing", event_id=event.event_id)
 
         routing_text = message or event.body
-        suggested_agent = await self.deps.suggest_agent_for_message_fn(
+        suggested_agent = await suggest_agent_for_message(
             routing_text,
             available_agents,
-            self._config(),
+            self.deps.runtime.config,
             self.deps.runtime_paths,
             thread_history,
         )
@@ -748,16 +889,20 @@ class DispatchPlanner:
                 "⚠️ I couldn't determine which agent should help with this. "
                 "Please try mentioning an agent directly with @ or rephrase your request."
             )
-            self._logger().warning("Router failed to determine agent")
+            self.deps.logger.warning("Router failed to determine agent")
         else:
             response_text = f"@{suggested_agent} could you help with this?"
 
         target_thread_mode = (
-            self._config().get_entity_thread_mode(suggested_agent, self.deps.runtime_paths, room_id=room.room_id)
+            self.deps.runtime.config.get_entity_thread_mode(
+                suggested_agent,
+                self.deps.runtime_paths,
+                room_id=room.room_id,
+            )
             if suggested_agent
             else None
         )
-        resolved_target = self.deps.build_message_target(
+        resolved_target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=thread_id,
             reply_to_event_id=event.event_id,
@@ -784,7 +929,7 @@ class DispatchPlanner:
                     attachment_id
                     for attachment_id in await asyncio.gather(
                         *(
-                            self.deps.register_routed_attachment(
+                            self.deps.normalizer.register_routed_attachment(
                                 room_id=room.room_id,
                                 thread_id=thread_event_id,
                                 event=media_event,
@@ -800,13 +945,15 @@ class DispatchPlanner:
             else:
                 routed_extra_content.pop(ATTACHMENT_IDS_KEY, None)
 
-        event_id = await self.deps.send_response_kw(
-            room_id=room.room_id,
-            reply_to_event_id=event.event_id,
-            response_text=response_text,
-            thread_id=resolved_target.thread_id,
-            target=resolved_target,
-            extra_content=routed_extra_content or None,
+        event_id = await self.deps.delivery_gateway.send_text(
+            SendTextRequest(
+                room_id=room.room_id,
+                reply_to_event_id=event.event_id,
+                response_text=response_text,
+                thread_id=resolved_target.thread_id,
+                target=resolved_target,
+                extra_content=routed_extra_content or None,
+            ),
         )
         tracked_handled_turn = (
             handled_turn or HandledTurnState.from_source_event_id(event.event_id)
@@ -816,14 +963,21 @@ class DispatchPlanner:
             conversation_target=resolved_target,
         )
         if event_id:
-            self._logger().info("Routed to agent", suggested_agent=suggested_agent)
-            self.deps.mark_source_events_responded(
+            self.deps.logger.info("Routed to agent", suggested_agent=suggested_agent)
+            self._mark_source_events_responded(
                 tracked_handled_turn.with_response_event_id(
                     event_id,
                 ),
             )
         else:
-            self._logger().error("Failed to route to agent", agent=suggested_agent)
+            self.deps.logger.error("Failed to route to agent", agent=suggested_agent)
+
+    def _effective_response_action(self, action: ResponseAction) -> ResponseAction:
+        """Apply configured-team execution behavior before running one response action."""
+        if action.kind == "team":
+            return action
+        configured_team_action = self.configured_team_response_action()
+        return configured_team_action or action
 
     async def execute_response_action(  # noqa: C901
         self,
@@ -839,21 +993,25 @@ class DispatchPlanner:
         matrix_run_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Execute the final response path for a prepared dispatch action."""
+        action = self._effective_response_action(action)
+
         if action.kind == "reject":
             assert action.rejection_message is not None
-            response_event_id = await self.deps.send_response_kw(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                response_text=action.rejection_message,
-                thread_id=dispatch.context.thread_id,
+            response_event_id = await self.deps.delivery_gateway.send_text(
+                SendTextRequest(
+                    room_id=room.room_id,
+                    reply_to_event_id=event.event_id,
+                    response_text=action.rejection_message,
+                    thread_id=dispatch.context.thread_id,
+                ),
             )
-            self.deps.mark_source_events_responded(
+            self._mark_source_events_responded(
                 handled_turn.with_response_event_id(response_event_id),
             )
             return
 
         if not dispatch.context.am_i_mentioned:
-            self._logger().info("Will respond: only agent in thread")
+            self.deps.logger.info("Will respond: only agent in thread")
 
         placeholder_text = "Thinking..."
         target_member_names: tuple[str, ...] | None = None
@@ -862,47 +1020,48 @@ class DispatchPlanner:
             assert action.form_team is not None
             assert action.form_team.mode is not None
             target_member_names = tuple(
-                member.agent_name(self._config(), self.deps.runtime_paths) or member.username
+                member.agent_name(self.deps.runtime.config, self.deps.runtime_paths) or member.username
                 for member in action.form_team.eligible_members
             )
 
-        placeholder_event_id = await self.deps.send_response_kw(
-            room_id=room.room_id,
-            reply_to_event_id=event.event_id,
-            response_text=placeholder_text,
-            thread_id=dispatch.context.thread_id,
-            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+        placeholder_event_id = await self.deps.delivery_gateway.send_text(
+            SendTextRequest(
+                room_id=room.room_id,
+                reply_to_event_id=event.event_id,
+                response_text=placeholder_text,
+                thread_id=dispatch.context.thread_id,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+            ),
         )
         placeholder_ready_monotonic = time.monotonic()
 
         try:
             if dispatch.context.requires_full_thread_history:
-                await self.deps.hydrate_dispatch_context(room, event, dispatch.context)
+                await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
             context_ready_monotonic = time.monotonic()
-            payload = await self.deps.build_dispatch_payload(payload_builder, dispatch.context)
-            prepared_payload = await self.deps.apply_message_enrichment(
+            payload = await payload_builder(dispatch.context)
+            prepared_payload = await self.deps.hook_service.apply_message_enrichment(
                 dispatch,
                 payload,
                 target_entity_name=self.deps.agent_name,
                 target_member_names=target_member_names,
             )
-            system_enrichment_items = await self.deps.apply_system_enrichment(
+            system_enrichment_items = await self.deps.hook_service.apply_system_enrichment(
                 dispatch,
                 prepared_payload.envelope,
                 target_entity_name=self.deps.agent_name,
                 target_member_names=target_member_names,
             )
             if system_enrichment_items:
-                prepared_payload = cast(
-                    "PreparedHookedPayload",
-                    replace(
-                        cast("Any", prepared_payload),
-                        system_enrichment_items=tuple(system_enrichment_items),
-                    ),
+                prepared_payload = _ResolvedPreparedHookedPayload(
+                    payload=prepared_payload.payload,
+                    envelope=prepared_payload.envelope,
+                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                    system_enrichment_items=tuple(system_enrichment_items),
                 )
             payload_ready_monotonic = time.monotonic()
         except Exception as error:
-            response_event_id = await self.deps.finalize_dispatch_failure_fn(
+            response_event_id = await self.finalize_dispatch_failure(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=dispatch.context.thread_id,
@@ -910,12 +1069,12 @@ class DispatchPlanner:
                 error=error,
             )
             if response_event_id is not None:
-                self.deps.mark_source_events_responded(
+                self._mark_source_events_responded(
                     handled_turn.with_response_event_id(response_event_id),
                 )
             return
 
-        self.deps.log_dispatch_latency_fn(
+        self.log_dispatch_latency(
             event_id=event.event_id,
             action_kind=action.kind,
             placeholder_event_id=placeholder_event_id,
@@ -925,61 +1084,69 @@ class DispatchPlanner:
             payload_ready_monotonic=payload_ready_monotonic,
         )
 
-        self._logger().info(processing_log, event_id=event.event_id)
-        received_monotonic = self.deps.received_monotonic_from_source(event.source)
+        self.deps.logger.info(processing_log, event_id=event.event_id)
+        received_monotonic = _received_monotonic_from_source(event.source)
         try:
             if action.kind == "team":
                 assert action.form_team is not None
                 assert action.form_team.mode is not None
-                response_event_id = await self.deps.generate_team_response_helper(
-                    room_id=room.room_id,
-                    reply_to_event_id=event.event_id,
-                    thread_id=dispatch.context.thread_id,
-                    target=dispatch.target,
-                    payload=prepared_payload.payload,
+                response_event_id = await self.deps.response_coordinator.generate_team_response_helper(
+                    ResponseRequest(
+                        room_id=room.room_id,
+                        reply_to_event_id=event.event_id,
+                        thread_id=dispatch.context.thread_id,
+                        thread_history=dispatch.context.thread_history,
+                        prompt=prepared_payload.payload.prompt,
+                        model_prompt=prepared_payload.payload.model_prompt,
+                        existing_event_id=placeholder_event_id,
+                        existing_event_is_placeholder=placeholder_event_id is not None,
+                        user_id=dispatch.requester_user_id,
+                        media=prepared_payload.payload.media,
+                        attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
+                        response_envelope=prepared_payload.envelope,
+                        correlation_id=dispatch.correlation_id,
+                        target=dispatch.target,
+                        matrix_run_metadata=matrix_run_metadata,
+                        system_enrichment_items=prepared_payload.system_enrichment_items,
+                        strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                        received_monotonic=received_monotonic,
+                    ),
                     team_agents=action.form_team.eligible_members,
-                    team_mode=action.form_team.mode,
-                    thread_history=dispatch.context.thread_history,
-                    requester_user_id=dispatch.requester_user_id,
-                    existing_event_id=placeholder_event_id,
-                    existing_event_is_placeholder=placeholder_event_id is not None,
-                    response_envelope=prepared_payload.envelope,
-                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
-                    system_enrichment_items=prepared_payload.system_enrichment_items,
-                    correlation_id=dispatch.correlation_id,
-                    matrix_run_metadata=matrix_run_metadata,
+                    team_mode=action.form_team.mode.value,
                 )
             else:
-                response_event_id = await self.deps.generate_response(
-                    room_id=room.room_id,
-                    prompt=prepared_payload.payload.prompt,
-                    reply_to_event_id=event.event_id,
-                    thread_id=dispatch.context.thread_id,
-                    target=dispatch.target,
-                    thread_history=dispatch.context.thread_history,
-                    user_id=dispatch.requester_user_id,
-                    media=prepared_payload.payload.media,
-                    attachment_ids=prepared_payload.payload.attachment_ids,
-                    existing_event_id=placeholder_event_id,
-                    existing_event_is_placeholder=placeholder_event_id is not None,
-                    model_prompt=prepared_payload.payload.model_prompt,
-                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
-                    system_enrichment_items=prepared_payload.system_enrichment_items,
-                    response_envelope=prepared_payload.envelope,
-                    correlation_id=dispatch.correlation_id,
-                    matrix_run_metadata=matrix_run_metadata,
-                    received_monotonic=received_monotonic,
+                response_event_id = await self.deps.response_coordinator.generate_response(
+                    ResponseRequest(
+                        room_id=room.room_id,
+                        reply_to_event_id=event.event_id,
+                        thread_id=dispatch.context.thread_id,
+                        thread_history=dispatch.context.thread_history,
+                        prompt=prepared_payload.payload.prompt,
+                        model_prompt=prepared_payload.payload.model_prompt,
+                        existing_event_id=placeholder_event_id,
+                        existing_event_is_placeholder=placeholder_event_id is not None,
+                        user_id=dispatch.requester_user_id,
+                        media=prepared_payload.payload.media,
+                        attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
+                        response_envelope=prepared_payload.envelope,
+                        correlation_id=dispatch.correlation_id,
+                        target=dispatch.target,
+                        matrix_run_metadata=matrix_run_metadata,
+                        system_enrichment_items=prepared_payload.system_enrichment_items,
+                        strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                        received_monotonic=received_monotonic,
+                    ),
                 )
-        except _SuppressedPlaceholderCleanupError:
-            self._logger().warning(
+        except SuppressedPlaceholderCleanupError:
+            self.deps.logger.warning(
                 "Suppressed placeholder cleanup failed",
                 source_event_id=event.event_id,
                 placeholder_event_id=placeholder_event_id,
                 correlation_id=dispatch.correlation_id,
             )
-            return
+            raise
         if response_event_id is not None:
-            self.deps.mark_source_events_responded(
+            self._mark_source_events_responded(
                 handled_turn.with_response_event_id(response_event_id),
             )
 
@@ -996,30 +1163,36 @@ class DispatchPlanner:
         error_text = get_user_friendly_error_message(error, self.deps.agent_name)
         terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
         if placeholder_event_id is None:
-            return await self.deps.send_response(
-                room_id,
-                reply_to_event_id,
-                error_text,
-                thread_id,
-                extra_content=terminal_extra_content,
+            return await self.deps.delivery_gateway.send_text(
+                SendTextRequest(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    response_text=error_text,
+                    thread_id=thread_id,
+                    extra_content=terminal_extra_content,
+                ),
             )
 
-        placeholder_updated = await self.deps.edit_message(
-            room_id,
-            placeholder_event_id,
-            error_text,
-            thread_id,
-            extra_content=terminal_extra_content,
+        placeholder_updated = await self.deps.delivery_gateway.edit_text(
+            EditTextRequest(
+                room_id=room_id,
+                event_id=placeholder_event_id,
+                new_text=error_text,
+                thread_id=thread_id,
+                extra_content=terminal_extra_content,
+            ),
         )
         if placeholder_updated:
             return placeholder_event_id
 
-        return await self.deps.send_response(
-            room_id,
-            reply_to_event_id,
-            error_text,
-            thread_id,
-            extra_content=terminal_extra_content,
+        return await self.deps.delivery_gateway.send_text(
+            SendTextRequest(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                response_text=error_text,
+                thread_id=thread_id,
+                extra_content=terminal_extra_content,
+            ),
         )
 
     def log_dispatch_latency(
@@ -1034,7 +1207,7 @@ class DispatchPlanner:
         payload_ready_monotonic: float,
     ) -> None:
         """Emit startup latency metrics for dispatch decisions that will respond."""
-        self._logger().info(
+        self.deps.logger.info(
             "Response startup latency",
             event_id=event_id,
             action_kind=action_kind,

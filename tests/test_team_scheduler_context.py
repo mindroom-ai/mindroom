@@ -9,17 +9,26 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.bot import AgentBot, _DispatchPayload
+from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.hooks import MessageEnvelope
+from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_coordinator import ResponseCoordinator
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_ACCESS_TOKEN,
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_edit_message_mock,
+    patch_response_coordinator_module,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -120,15 +129,17 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
             "run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
-        patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.bot.typing_indicator", new=_noop_typing_indicator),
-        patch("mindroom.bot.team_response", new=fake_team_response),
+        patch("mindroom.response_coordinator.typing_indicator", new=_noop_typing_indicator),
+        patch_response_coordinator_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            team_response=fake_team_response,
+        ),
     ):
         await bot._generate_team_response_helper(
             room_id="!team:localhost",
             reply_to_event_id="$user_event",
             thread_id="$thread_root",
-            payload=_DispatchPayload(prompt="Please coordinate and schedule a reminder"),
+            payload=DispatchPayload(prompt="Please coordinate and schedule a reminder"),
             team_agents=team_agents,
             team_mode="coordinate",
             thread_history=[],
@@ -165,6 +176,7 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
         raise asyncio.CancelledError
 
     bot._edit_message = AsyncMock()
+    install_edit_message_mock(bot, bot._edit_message)
 
     with (
         patch.object(
@@ -172,15 +184,17 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
             "run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
-        patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.bot.typing_indicator", new=_noop_typing_indicator),
-        patch("mindroom.bot.team_response", new=fake_team_response),
+        patch("mindroom.response_coordinator.typing_indicator", new=_noop_typing_indicator),
+        patch_response_coordinator_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            team_response=fake_team_response,
+        ),
     ):
         await bot._generate_team_response_helper(
             room_id="!team:localhost",
             reply_to_event_id="$user_event",
             thread_id="$thread_root",
-            payload=_DispatchPayload(prompt="Please coordinate and schedule a reminder"),
+            payload=DispatchPayload(prompt="Please coordinate and schedule a reminder"),
             team_agents=team_agents,
             team_mode="coordinate",
             thread_history=[],
@@ -194,6 +208,8 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
         "$thinking",
         "**[Response cancelled by user]**",
         "$thread_root",
+        tool_trace=None,
+        extra_content=None,
     )
 
 
@@ -241,16 +257,21 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
             "run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
-        patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.bot.typing_indicator", new=_noop_typing_indicator),
-        patch("mindroom.bot.team_response_stream", new=fake_team_response_stream),
-        patch("mindroom.bot.send_streaming_response", new=AsyncMock(side_effect=fake_send_streaming_response)),
+        patch("mindroom.response_coordinator.typing_indicator", new=_noop_typing_indicator),
+        patch(
+            "mindroom.delivery_gateway.send_streaming_response",
+            new=AsyncMock(side_effect=fake_send_streaming_response),
+        ),
+        patch_response_coordinator_module(
+            should_use_streaming=AsyncMock(return_value=True),
+            team_response_stream=fake_team_response_stream,
+        ),
     ):
         await bot._generate_team_response_helper(
             room_id="!team:localhost",
             reply_to_event_id="$user_event",
             thread_id="$thread_root",
-            payload=_DispatchPayload(prompt="Please collaborate and schedule a reminder"),
+            payload=DispatchPayload(prompt="Please collaborate and schedule a reminder"),
             team_agents=team_agents,
             team_mode="collaborate",
             thread_history=[],

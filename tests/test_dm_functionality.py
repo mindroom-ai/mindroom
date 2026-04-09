@@ -20,6 +20,7 @@ from mindroom.thread_utils import should_agent_respond
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_generate_response_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -265,9 +266,10 @@ class TestDMMessageContext:
 
         # Mock the client
         bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
 
         # Mock fetch_thread_history - DMs now use threads like regular rooms
-        with patch("mindroom.bot.fetch_thread_history", return_value=[]) as mock_fetch:
+        with patch("mindroom.conversation_state_writer.fetch_thread_history", return_value=[]) as mock_fetch:
             # Create a test event
             room = MagicMock()
             room.room_id = "!dm:localhost"
@@ -283,7 +285,7 @@ class TestDMMessageContext:
             event.event_id = "test_event"
 
             # Extract context
-            context = await bot._extract_message_context(room, event)
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
             # DMs now use threads like regular rooms - no special fetch
             # fetch_thread_history should NOT be called for non-thread messages
@@ -322,6 +324,7 @@ class TestDMIntegration:
         )
 
         bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
 
         # Mock join_room to return success
@@ -377,19 +380,20 @@ class TestDMIntegration:
         bot.handled_turn_ledger.has_responded.return_value = False
         bot.handled_turn_ledger.has_responded = MagicMock(return_value=False)
         bot.orchestrator = orchestrator
+        bot._generate_response = AsyncMock()
+        install_generate_response_mock(bot, bot._generate_response)
 
         # Mock helper functions
         async def mock_handle(*args: object, **kwargs: object) -> None:
             pass
 
         with (
-            patch("mindroom.bot.fetch_thread_history", return_value=[]),
-            patch("mindroom.bot.check_agent_mentioned", return_value=([], False, False)),
+            patch.object(bot._conversation_resolver, "fetch_thread_history", return_value=[]),
+            patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver.should_skip_mentions", return_value=False),
-            patch("mindroom.bot.extract_agent_name", return_value=None),  # User is not an agent
-            patch("mindroom.bot.is_dm_room", return_value=True),  # This is a DM room
-            patch.object(bot, "_generate_response") as mock_generate,
+            patch("mindroom.dispatch_planner.extract_agent_name", return_value=None),  # User is not an agent
+            patch("mindroom.dispatch_planner.is_dm_room", return_value=True),  # This is a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
@@ -438,8 +442,8 @@ class TestDMIntegration:
             await bot._on_message(room, event)
 
             # Verify the bot decided to respond even though not configured for the room
-            mock_generate.assert_called_once()
-            call_args = mock_generate.call_args
+            bot._generate_response.assert_called_once()
+            call_args = bot._generate_response.call_args
             assert call_args.kwargs["room_id"] == "!dm:localhost"
             assert call_args.kwargs["prompt"] == "Hello researcher, can you help?"
 
@@ -474,18 +478,19 @@ class TestDMIntegration:
         bot.handled_turn_ledger.has_responded.return_value = False
         bot.handled_turn_ledger.has_responded = MagicMock(return_value=False)
         bot.logger = MagicMock()
+        bot._generate_response = AsyncMock()
+        install_generate_response_mock(bot, bot._generate_response)
 
         async def mock_handle(*args: object, **kwargs: object) -> None:
             pass
 
         with (
-            patch("mindroom.bot.fetch_thread_history", return_value=[]),
-            patch("mindroom.bot.check_agent_mentioned", return_value=([], False, False)),
+            patch.object(bot._conversation_resolver, "fetch_thread_history", return_value=[]),
+            patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver.should_skip_mentions", return_value=False),
-            patch("mindroom.bot.extract_agent_name", return_value=None),
-            patch("mindroom.bot.is_dm_room", return_value=True),  # This is a DM room
-            patch.object(bot, "_generate_response") as mock_generate,
+            patch("mindroom.dispatch_planner.extract_agent_name", return_value=None),
+            patch("mindroom.dispatch_planner.is_dm_room", return_value=True),  # This is a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
@@ -530,7 +535,7 @@ class TestDMIntegration:
             await bot._on_message(room, event)
 
             # Verify the bot decided to respond in the DM room
-            mock_generate.assert_called_once()
-            call_args = mock_generate.call_args
+            bot._generate_response.assert_called_once()
+            call_args = bot._generate_response.call_args
             assert call_args[1]["room_id"] == "!dm:localhost"
             assert call_args[1]["prompt"] == "Hello agent!"

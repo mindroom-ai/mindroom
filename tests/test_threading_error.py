@@ -33,7 +33,15 @@ from mindroom.matrix.reply_chain import (
     derive_conversation_context,
 )
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_generate_response_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+    unwrap_extracted_collaborator,
+    wrap_extracted_collaborators,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -52,6 +60,11 @@ def _message(*, event_id: str, body: str, sender: str = "@user:localhost") -> Re
         body=body,
         event_id=event_id,
     )
+
+
+def _state_writer(bot: AgentBot) -> object:
+    """Return the writer instance actually captured by the resolver."""
+    return unwrap_extracted_collaborator(bot._conversation_state_writer)
 
 
 class TestThreadingBehavior:
@@ -86,6 +99,7 @@ class TestThreadingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        wrap_extracted_collaborators(bot)
 
         # Mock the orchestrator
         mock_orchestrator = MagicMock()
@@ -140,12 +154,12 @@ class TestThreadingBehavior:
             patch("mindroom.bot.wait_for_background_tasks", AsyncMock()),
         ):
             await bot.start()
-            assert bot._event_cache is not None
+            assert bot.event_cache is not None
             assert get_event_cache(start_client) is None
 
             await bot.stop(reason="test")
 
-        assert bot._event_cache is None
+        assert bot.event_cache is None
         assert get_event_cache(start_client) is None
         start_client.close.assert_awaited_once()
 
@@ -153,7 +167,7 @@ class TestThreadingBehavior:
     async def test_sync_response_caches_timeline_events_for_point_lookups(self, bot: AgentBot) -> None:
         """Sync-response handling should persist timeline events into SQLite-backed lookups."""
         await bot._initialize_event_cache()
-        assert bot._event_cache is not None
+        assert bot.event_cache is not None
 
         try:
             message_event = nio.RoomMessageText.from_dict(
@@ -179,7 +193,7 @@ class TestThreadingBehavior:
             bot._first_sync_done = True
 
             await bot._on_sync_response(sync_response)
-            cached_event = await bot._event_cache.get_event("$thread_msg:localhost")
+            cached_event = await bot.event_cache.get_event("$thread_msg:localhost")
         finally:
             await bot._close_event_cache()
 
@@ -191,10 +205,10 @@ class TestThreadingBehavior:
     async def test_live_redaction_callback_removes_persisted_lookup_event(self, bot: AgentBot) -> None:
         """Live redaction callbacks should remove point-lookup cache entries."""
         await bot._initialize_event_cache()
-        assert bot._event_cache is not None
+        assert bot.event_cache is not None
 
         try:
-            await bot._event_cache.store_event(
+            await bot.event_cache.store_event(
                 "$thread_msg:localhost",
                 "!test:localhost",
                 {
@@ -226,7 +240,7 @@ class TestThreadingBehavior:
             }
 
             await bot._on_redaction(room, redaction_event)
-            cached_event = await bot._event_cache.get_event("$thread_msg:localhost")
+            cached_event = await bot.event_cache.get_event("$thread_msg:localhost")
         finally:
             await bot._close_event_cache()
 
@@ -236,7 +250,7 @@ class TestThreadingBehavior:
     async def test_sync_timeline_redaction_does_not_resurrect_point_lookup_cache(self, bot: AgentBot) -> None:
         """A sync batch that contains both a message and its redaction must leave no cached lookup entry."""
         await bot._initialize_event_cache()
-        assert bot._event_cache is not None
+        assert bot.event_cache is not None
 
         try:
             message_event = nio.RoomMessageText.from_dict(
@@ -275,7 +289,7 @@ class TestThreadingBehavior:
             }
 
             await bot._conversation_state_writer.cache_sync_timeline_events(sync_response)
-            cached_event = await bot._event_cache.get_event("$thread_msg:localhost")
+            cached_event = await bot.event_cache.get_event("$thread_msg:localhost")
         finally:
             await bot._close_event_cache()
 
@@ -287,7 +301,7 @@ class TestThreadingBehavior:
         event_cache = MagicMock(spec=EventCache)
         event_cache.get_thread_id_for_event = AsyncMock(side_effect=RuntimeError("database is locked"))
         event_cache.append_event = AsyncMock()
-        bot._event_cache = event_cache
+        bot.event_cache = event_cache
 
         edit_event = nio.RoomMessageText.from_dict(
             {
@@ -320,7 +334,7 @@ class TestThreadingBehavior:
         event_cache = MagicMock(spec=EventCache)
         event_cache.get_thread_id_for_event = AsyncMock(side_effect=RuntimeError("database is locked"))
         event_cache.redact_event = AsyncMock(return_value=False)
-        bot._event_cache = event_cache
+        bot.event_cache = event_cache
 
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         redaction_event.event_id = "$redaction:localhost"
@@ -347,7 +361,7 @@ class TestThreadingBehavior:
     async def test_reply_chain_event_cache_write_through_supports_later_sqlite_lookup(self, bot: AgentBot) -> None:
         """Reply-chain resolution should populate the event cache and later reuse it without network I/O."""
         await bot._initialize_event_cache()
-        assert bot._event_cache is not None
+        assert bot.event_cache is not None
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -397,7 +411,7 @@ class TestThreadingBehavior:
         )
 
         try:
-            with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
+            with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
                 first_context = await bot._extract_message_context(room, event)
 
             assert first_context.is_thread is True
@@ -406,14 +420,14 @@ class TestThreadingBehavior:
                 "$msg1:localhost",
                 "$msg2:localhost",
             ]
-            assert await bot._event_cache.get_event("$msg2:localhost") is not None
-            assert await bot._event_cache.get_event("$msg1:localhost") is not None
+            assert await bot.event_cache.get_event("$msg2:localhost") is not None
+            assert await bot.event_cache.get_event("$msg1:localhost") is not None
             mock_fetch.assert_not_called()
 
             bot._conversation_resolver.reply_chain = ReplyChainCaches()
             bot.client.room_get_event = AsyncMock(side_effect=AssertionError("should use persisted cache"))
 
-            with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch_again:
+            with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch_again:
                 second_context = await bot._extract_message_context(room, event)
 
             assert second_context.is_thread is True
@@ -467,15 +481,16 @@ class TestThreadingBehavior:
 
         # Mock interactive.handle_text_response to return None (not an interactive response)
         # Mock _generate_response to capture the call and send a test response
+        bot._generate_response = AsyncMock()
+        install_generate_response_mock(bot, bot._generate_response)
         with (
             patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)),
-            patch.object(bot, "_generate_response") as mock_generate,
         ):
             # Process the message
             await bot._on_message(room, event)
 
             # Check that _generate_response was called
-            mock_generate.assert_called_once()
+            bot._generate_response.assert_called_once()
 
             # Now simulate the response being sent
             await bot._send_response(room.room_id, event.event_id, "I can help you with that!", None)
@@ -538,8 +553,11 @@ class TestThreadingBehavior:
         # Mock interactive.handle_text_response and make AI fast
         with (
             patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)),
-            patch("mindroom.bot.ai_response", AsyncMock(return_value="OK")),
-            patch("mindroom.bot.get_latest_thread_event_id_if_needed", AsyncMock(return_value="latest_thread_event")),
+            patch("mindroom.response_coordinator.ai_response", AsyncMock(return_value="OK")),
+            patch(
+                "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
+                AsyncMock(return_value="latest_thread_event"),
+            ),
         ):
             # Process the message
             await bot._on_message(room, event)
@@ -601,8 +619,12 @@ class TestThreadingBehavior:
             _message(event_id="$thread_root:localhost", body="Root"),
             _message(event_id="$thread_msg:localhost", body="Agent answer in thread"),
         ]
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=expected_history)) as mock_fetch:
-            context = await bot._extract_message_context(room, event)
+        with patch.object(
+            _state_writer(bot),
+            "fetch_thread_history",
+            AsyncMock(return_value=expected_history),
+        ) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
@@ -611,7 +633,6 @@ class TestThreadingBehavior:
             bot.client,
             room.room_id,
             "$thread_root:localhost",
-            event_cache=bot._event_cache,
         )
 
     @pytest.mark.asyncio
@@ -656,8 +677,12 @@ class TestThreadingBehavior:
             _message(event_id="$thread_root:localhost", body="Original root message"),
             _message(event_id="$thread_msg:localhost", body="Agent answer in thread"),
         ]
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=expected_history)) as mock_fetch:
-            context = await bot._extract_message_context(room, event)
+        with patch.object(
+            _state_writer(bot),
+            "fetch_thread_history",
+            AsyncMock(return_value=expected_history),
+        ) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
@@ -666,7 +691,6 @@ class TestThreadingBehavior:
             bot.client,
             room.room_id,
             "$thread_root:localhost",
-            event_cache=bot._event_cache,
         )
 
     @pytest.mark.asyncio
@@ -700,8 +724,12 @@ class TestThreadingBehavior:
             _message(event_id="$thread_root:localhost", body="Root"),
             _message(event_id="$thread_msg:localhost", body="Original"),
         ]
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=expected_history)) as mock_fetch:
-            context = await bot._extract_message_context(room, event)
+        with patch.object(
+            _state_writer(bot),
+            "fetch_thread_history",
+            AsyncMock(return_value=expected_history),
+        ) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
@@ -710,7 +738,6 @@ class TestThreadingBehavior:
             bot.client,
             room.room_id,
             "$thread_root:localhost",
-            event_cache=bot._event_cache,
         )
 
     @pytest.mark.asyncio
@@ -760,8 +787,12 @@ class TestThreadingBehavior:
             _message(event_id="$thread_root:localhost", body="Root"),
             _message(event_id="$thread_msg:localhost", body="Thread message"),
         ]
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=expected_history)) as mock_fetch:
-            context = await bot._extract_message_context(room, event)
+        with patch.object(
+            _state_writer(bot),
+            "fetch_thread_history",
+            AsyncMock(return_value=expected_history),
+        ) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
@@ -771,7 +802,6 @@ class TestThreadingBehavior:
             bot.client,
             room.room_id,
             "$thread_root:localhost",
-            event_cache=bot._event_cache,
         )
 
     @pytest.mark.asyncio
@@ -846,8 +876,8 @@ class TestThreadingBehavior:
             ],
         )
 
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
-            context = await bot._extract_message_context(room, event)
+        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$msg1:localhost"
@@ -913,8 +943,8 @@ class TestThreadingBehavior:
             ],
         )
 
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
-            context = await bot._extract_message_context(room, event)
+        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$msg1:localhost"
@@ -966,10 +996,10 @@ class TestThreadingBehavior:
 
         bot.client.room_get_event = AsyncMock(side_effect=responses)
 
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
-            context = await bot._extract_message_context(room, event)
+        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
             # Re-resolving should use cached reply-chain nodes and roots.
-            context_cached = await bot._extract_message_context(room, event)
+            context_cached = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context_cached.is_thread is True
@@ -1036,8 +1066,8 @@ class TestThreadingBehavior:
             ],
         )
 
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
-            context = await bot._extract_message_context(room, event)
+        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$msg2:localhost"
@@ -1087,12 +1117,12 @@ class TestThreadingBehavior:
 
         bot.client.room_get_event = AsyncMock(side_effect=responses)
 
-        bot._reply_chain.traversal_limit = 3
+        bot._conversation_resolver.reply_chain.traversal_limit = 3
         with (
             patch.object(bot.logger, "warning") as mock_warning,
-            patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch,
+            patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch,
         ):
-            context = await bot._extract_message_context(room, event)
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$msg4:localhost"
@@ -1152,15 +1182,15 @@ class TestThreadingBehavior:
         )
 
         bot.client.room_get_event = AsyncMock(side_effect=_make_chain_responses(6))
-        bot._reply_chain.traversal_limit = 3
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
-            ctx1 = await bot._extract_message_context(room, event1)
+        bot._conversation_resolver.reply_chain.traversal_limit = 3
+        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+            ctx1 = await bot._conversation_resolver.extract_message_context(room, event1)
 
         assert ctx1.thread_id == "$msg4:localhost"  # stale root from limit hit
         mock_fetch.assert_not_called()
 
         # --- Second resolve: default limit, new event replies to $msg6 (overlapping cached events) ---
-        bot._reply_chain.traversal_limit = 500
+        bot._conversation_resolver.reply_chain.traversal_limit = 500
         event2 = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -1178,8 +1208,8 @@ class TestThreadingBehavior:
 
         # Node cache already has $msg6..$msg4; supply $msg3..$msg1 for the deeper walk
         bot.client.room_get_event = AsyncMock(side_effect=_make_chain_responses(3))
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
-            ctx2 = await bot._extract_message_context(room, event2)
+        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+            ctx2 = await bot._conversation_resolver.extract_message_context(room, event2)
 
         assert ctx2.is_thread is True
         assert ctx2.thread_id == "$msg1:localhost"  # true root, not stale $msg4
@@ -1229,15 +1259,15 @@ class TestThreadingBehavior:
 
         bot.client.room_get_event = AsyncMock(side_effect=responses)
 
-        bot._reply_chain.nodes.maxsize = 5
-        bot._reply_chain.roots.maxsize = 5
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
-            context = await bot._extract_message_context(room, event)
+        bot._conversation_resolver.reply_chain.nodes.maxsize = 5
+        bot._conversation_resolver.reply_chain.roots.maxsize = 5
+        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$msg1:localhost"
-        assert len(bot._reply_chain.nodes) <= 5
-        assert len(bot._reply_chain.roots) <= 5
+        assert len(bot._conversation_resolver.reply_chain.nodes) <= 5
+        assert len(bot._conversation_resolver.reply_chain.roots) <= 5
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1313,8 +1343,12 @@ class TestThreadingBehavior:
             _message(event_id="$thread_root:localhost", body="Thread root"),
             _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
         ]
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=thread_history)) as mock_fetch:
-            context = await bot._extract_message_context(room, event)
+        with patch.object(
+            _state_writer(bot),
+            "fetch_thread_history",
+            AsyncMock(return_value=thread_history),
+        ) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
@@ -1328,7 +1362,6 @@ class TestThreadingBehavior:
             bot.client,
             room.room_id,
             "$thread_root:localhost",
-            event_cache=bot._event_cache,
         )
 
     @pytest.mark.asyncio
@@ -1408,8 +1441,12 @@ class TestThreadingBehavior:
             _message(event_id="$thread_root:localhost", body="Thread root"),
             _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
         ]
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=thread_history)):
-            context = await bot._extract_message_context(room, event)
+        with patch.object(
+            _state_writer(bot),
+            "fetch_thread_history",
+            AsyncMock(return_value=thread_history),
+        ):
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
@@ -1510,11 +1547,17 @@ class TestThreadingBehavior:
             _message(event_id="$thread_root:localhost", body="Thread root"),
             _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
         ]
+        mock_snapshot = AsyncMock(return_value=preview_snapshot)
+
         with (
-            patch("mindroom.bot.fetch_thread_snapshot", AsyncMock(return_value=preview_snapshot)) as mock_snapshot,
-            patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=full_thread_history)) as mock_fetch,
+            patch("mindroom.conversation_resolver.fetch_thread_snapshot", new=mock_snapshot),
+            patch.object(
+                _state_writer(bot),
+                "fetch_thread_history",
+                AsyncMock(return_value=full_thread_history),
+            ) as mock_fetch,
         ):
-            context = await bot._extract_dispatch_context(room, event)
+            context = await bot._conversation_resolver.extract_dispatch_context(room, event)
 
             assert context.thread_id == "$thread_root:localhost"
             assert [msg.event_id for msg in context.thread_history] == [
@@ -1527,7 +1570,7 @@ class TestThreadingBehavior:
             bot.client.download.assert_not_awaited()
             assert bot.client.room_get_event.await_count == 2
 
-            await bot._hydrate_dispatch_context(room, event, context)
+            await bot._conversation_resolver.hydrate_dispatch_context(room, event, context)
 
         assert context.thread_id == "$thread_root:localhost"
         assert [msg.event_id for msg in context.thread_history] == [
@@ -1544,7 +1587,6 @@ class TestThreadingBehavior:
             bot.client,
             room.room_id,
             "$thread_root:localhost",
-            event_cache=bot._event_cache,
         )
 
     @pytest.mark.asyncio
@@ -1653,8 +1695,12 @@ class TestThreadingBehavior:
             _message(event_id="$t1:localhost", body="First threaded reply"),
             _message(event_id="$t2:localhost", body="Thread reply after plain interleave"),
         ]
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=thread_history)) as mock_fetch:
-            context = await bot._extract_message_context(room, event)
+        with patch.object(
+            _state_writer(bot),
+            "fetch_thread_history",
+            AsyncMock(return_value=thread_history),
+        ) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$root:localhost"
@@ -1669,7 +1715,6 @@ class TestThreadingBehavior:
             bot.client,
             room.room_id,
             "$root:localhost",
-            event_cache=bot._event_cache,
         )
 
     def test_merge_thread_and_chain_history_preserves_chronological_order(self) -> None:
@@ -1819,6 +1864,7 @@ class TestThreadingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        wrap_extracted_collaborators(bot)
 
         # Mock the orchestrator
         mock_orchestrator = MagicMock()
@@ -1923,6 +1969,7 @@ class TestThreadingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        wrap_extracted_collaborators(bot)
         # Mock the orchestrator
         mock_orchestrator = MagicMock()
         mock_orchestrator.current_config = config
@@ -2030,6 +2077,7 @@ class TestThreadingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        wrap_extracted_collaborators(bot)
         mock_orchestrator = MagicMock()
         mock_orchestrator.current_config = config
         bot.orchestrator = mock_orchestrator
@@ -2084,7 +2132,7 @@ class TestThreadingBehavior:
             ),
         )
 
-        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=[])):
+        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock(return_value=[])):
             await bot._on_message(room, event)
 
         bot.client.room_send.assert_called_once()
@@ -2124,6 +2172,7 @@ class TestThreadingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        wrap_extracted_collaborators(bot)
         mock_orchestrator = MagicMock()
         mock_orchestrator.current_config = config
         bot.orchestrator = mock_orchestrator
@@ -2173,9 +2222,15 @@ class TestThreadingBehavior:
         )
 
         with (
-            patch("mindroom.bot.suggest_agent_for_message", AsyncMock(return_value="general")),
-            patch("mindroom.bot.get_latest_thread_event_id_if_needed", AsyncMock(return_value="$latest:localhost")),
-            patch("mindroom.bot.send_message", AsyncMock(return_value="$router_response:localhost")) as mock_send,
+            patch("mindroom.dispatch_planner.suggest_agent_for_message", AsyncMock(return_value="general")),
+            patch(
+                "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
+                AsyncMock(return_value="$latest:localhost"),
+            ),
+            patch(
+                "mindroom.delivery_gateway.send_message",
+                AsyncMock(return_value="$router_response:localhost"),
+            ) as mock_send,
         ):
             await bot._handle_ai_routing(
                 room,
@@ -2236,15 +2291,14 @@ class TestThreadingBehavior:
         bot.handled_turn_ledger.has_responded.return_value = False
 
         # Mock interactive.handle_text_response and generate_response
-        with (
-            patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)),
-            patch.object(bot, "_generate_response") as mock_generate,
-        ):
+        bot._generate_response = AsyncMock()
+        install_generate_response_mock(bot, bot._generate_response)
+        with patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)):
             # Process the message
             await bot._on_message(room, event)
 
             # Check that _generate_response was called
-            mock_generate.assert_called_once()
+            bot._generate_response.assert_called_once()
 
             # Now simulate the response being sent
             await bot._send_response(

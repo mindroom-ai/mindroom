@@ -26,27 +26,30 @@ from mindroom.ai import (
     queued_message_signal_context,
     stream_agent_response,
 )
-from mindroom.bot import (
-    AgentBot,
-    _DispatchPayload,
-    _MessageContext,
-    _PrecheckedEvent,
-    _PreparedDispatch,
-)
-from mindroom.coalescing import PreparedTextEvent as _PreparedTextEvent
+from mindroom.bot import AgentBot, _PrecheckedEvent
+from mindroom.coalescing import PreparedTextEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import DeliveryResult
-from mindroom.dispatch_planner import DispatchPlan
+from mindroom.dispatch_planner import DispatchPlan, PreparedDispatch
 from mindroom.hooks import MessageEnvelope
+from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_coordinator import ResponseCoordinator, ResponseRequest
 from mindroom.teams import TeamMode, _create_team_instance
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    runtime_paths_for,
+    test_runtime_paths,
+    unwrap_extracted_collaborator,
+    wrap_extracted_collaborators,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -75,6 +78,7 @@ def _bot(tmp_path: Path) -> AgentBot:
     )
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    wrap_extracted_collaborators(bot)
     return bot
 
 
@@ -98,8 +102,8 @@ def _envelope(*, source_kind: str = "message") -> MessageEnvelope:
     )
 
 
-def _prepared_text_event(*, event_id: str = "$event") -> _PreparedTextEvent:
-    return _PreparedTextEvent(
+def _prepared_text_event(*, event_id: str = "$event") -> PreparedTextEvent:
+    return PreparedTextEvent(
         sender="@user:localhost",
         event_id=event_id,
         body="hello",
@@ -108,8 +112,8 @@ def _prepared_text_event(*, event_id: str = "$event") -> _PreparedTextEvent:
     )
 
 
-def _message_context() -> _MessageContext:
-    return _MessageContext(
+def _message_context() -> MessageContext:
+    return MessageContext(
         am_i_mentioned=False,
         is_thread=False,
         thread_id=None,
@@ -244,8 +248,9 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
     bot = _bot(tmp_path)
     response_envelope = _envelope()
     response_target = response_envelope.target
-    lifecycle_lock = bot._response_lifecycle_lock(response_target)
-    queued_signal = bot._get_or_create_queued_signal(response_target)
+    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
+    queued_signal = coordinator._get_or_create_queued_signal(response_target)
     await lifecycle_lock.acquire()
 
     try:
@@ -282,8 +287,9 @@ async def test_generate_response_skips_signal_for_automation_ingress(tmp_path: P
     bot = _bot(tmp_path)
     response_envelope = _envelope(source_kind="scheduled")
     response_target = response_envelope.target
-    lifecycle_lock = bot._response_lifecycle_lock(response_target)
-    queued_signal = bot._get_or_create_queued_signal(response_target)
+    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
+    queued_signal = coordinator._get_or_create_queued_signal(response_target)
     await lifecycle_lock.acquire()
 
     try:
@@ -318,6 +324,7 @@ async def test_generate_response_skips_signal_for_automation_ingress(tmp_path: P
 async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_path: Path) -> None:
     """A second human turn should queue even before the first acquires the lifecycle lock."""
     bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
     lock = _PrelockBarrierLock()
     response_envelope = _envelope()
     response_target = response_envelope.target
@@ -331,12 +338,12 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
     ) -> str:
         del resolved_target
         user_id = str(request.user_id)
-        queued_signal = bot._get_or_create_queued_signal(response_target)
+        queued_signal = coordinator._get_or_create_queued_signal(response_target)
         observed_pending[user_id] = queued_signal.pending_human_messages
         return user_id
 
     with (
-        patch.object(bot, "_response_lifecycle_lock", return_value=lock),
+        patch.object(coordinator, "_response_lifecycle_lock", return_value=lock),
         patch.object(ResponseCoordinator, "generate_response_locked", new=fake_generate_response_locked),
     ):
         first_task = asyncio.create_task(
@@ -379,8 +386,9 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
     bot = _bot(tmp_path)
     response_envelope = _envelope()
     response_target = response_envelope.target
-    lifecycle_lock = bot._response_lifecycle_lock(response_target)
-    queued_signal = bot._get_or_create_queued_signal(response_target)
+    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
+    queued_signal = coordinator._get_or_create_queued_signal(response_target)
     await lifecycle_lock.acquire()
 
     try:
@@ -398,7 +406,7 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
                     team_mode="coordinate",
                     thread_history=[],
                     requester_user_id="@user:localhost",
-                    payload=_DispatchPayload(prompt="hello"),
+                    payload=DispatchPayload(prompt="hello"),
                     response_envelope=response_envelope,
                 ),
             )
@@ -419,8 +427,9 @@ async def test_generate_response_preserves_later_queued_human_message(tmp_path: 
     bot = _bot(tmp_path)
     response_envelope = _envelope()
     response_target = response_envelope.target
-    lifecycle_lock = bot._response_lifecycle_lock(response_target)
-    queued_signal = bot._get_or_create_queued_signal(response_target)
+    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
+    queued_signal = coordinator._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
@@ -485,8 +494,9 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
     bot = _bot(tmp_path)
     response_envelope = _envelope()
     response_target = response_envelope.target
-    lifecycle_lock = bot._response_lifecycle_lock(response_target)
-    queued_signal = bot._get_or_create_queued_signal(response_target)
+    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
+    queued_signal = coordinator._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
@@ -510,7 +520,7 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
                     team_mode="coordinate",
                     thread_history=[],
                     requester_user_id="@user:localhost",
-                    payload=_DispatchPayload(prompt="hello"),
+                    payload=DispatchPayload(prompt="hello"),
                     response_envelope=response_envelope,
                 ),
             )
@@ -524,7 +534,7 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
                     team_mode="coordinate",
                     thread_history=[],
                     requester_user_id="@user:localhost",
-                    payload=_DispatchPayload(prompt="hello again"),
+                    payload=DispatchPayload(prompt="hello again"),
                     response_envelope=response_envelope,
                 ),
             )
@@ -557,7 +567,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
     room.room_id = "!room:localhost"
     event = _prepared_text_event(event_id="$older")
     envelope = _envelope()
-    dispatch = _PreparedDispatch(
+    dispatch = PreparedDispatch(
         requester_user_id="@user:localhost",
         context=_message_context(),
         target=envelope.target,
@@ -566,11 +576,15 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
     )
 
     with (
-        patch.object(bot, "_resolve_text_dispatch_event", new=AsyncMock(return_value=event)),
-        patch.object(bot, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
+        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot, "_has_newer_unresponded_in_thread", return_value=True),
-        patch.object(bot, "_plan_dispatch", new=AsyncMock(return_value=DispatchPlan(kind="ignore"))) as mock_plan,
+        patch.object(
+            bot._dispatch_planner,
+            "plan_dispatch",
+            new=AsyncMock(return_value=DispatchPlan(kind="ignore")),
+        ) as mock_plan,
     ):
         await bot._dispatch_text_message(
             room,
@@ -579,7 +593,8 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
 
     assert bot.handled_turn_ledger.has_responded("$older")
     mock_plan.assert_not_awaited()
-    assert bot._thread_queued_signals == {}
+    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    assert coordinator._thread_queued_signals == {}
 
 
 def test_notice_hook_injects_once_per_turn_and_skips_stop_after_tool_call() -> None:

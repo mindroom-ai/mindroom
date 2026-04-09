@@ -27,6 +27,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.compact_context import CompactContextTools
+from mindroom.delivery_gateway import CompactionNoticeRequest
 from mindroom.history import prepare_history_for_run
 from mindroom.history.runtime import ScopeSessionContext, open_scope_session_context
 from mindroom.history.storage import read_scope_state, write_scope_state
@@ -469,13 +470,15 @@ async def test_send_compaction_notice_omits_zero_breakdown_fields_in_html_body(t
         current_prompt_tokens=62,
     )
 
-    with patch("mindroom.bot.send_message", new=AsyncMock(return_value="$notice")) as mock_send:
-        event_id = await bot._send_compaction_notice(
-            room_id="!room:localhost",
-            reply_to_event_id="$incoming",
-            main_response_event_id="$reply",
-            thread_id=None,
-            outcome=outcome,
+    with patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$notice")) as mock_send:
+        event_id = await bot._delivery_gateway.send_compaction_notice(
+            CompactionNoticeRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$incoming",
+                main_response_event_id="$reply",
+                thread_id=None,
+                outcome=outcome,
+            ),
         )
 
     assert event_id == "$notice"

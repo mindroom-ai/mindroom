@@ -23,7 +23,13 @@ from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
-from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_visible_message,
+    patch_response_coordinator_module,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -122,12 +128,8 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
     # Event mentions the team
     event = _mock_event_with_team_mention(team_user_id)
 
-    # Ensure no thread history fetch is attempted
-    with (
-        patch("mindroom.bot.fetch_thread_history", new=AsyncMock(return_value=[])),
-        # Also patch suggest_agent_for_message to detect accidental routing
-        patch("mindroom.bot.suggest_agent_for_message", new=AsyncMock(return_value="a1")),
-    ):
+    # Also patch suggest_agent_for_message to detect accidental routing
+    with patch("mindroom.dispatch_planner.suggest_agent_for_message", new=AsyncMock(return_value="a1")):
         await router._on_message(room, event)
 
     # Router must not send any message (i.e., must not route)
@@ -164,6 +166,9 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     )
     bot.client = _make_matrix_client_mock()
 
+    async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
+        return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
+
     # Minimal orchestrator stub is fine because we patch team_response
     bot.orchestrator = MagicMock()
 
@@ -171,30 +176,22 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     room = _mock_room("!room:localhost", [team_user_id, "@user:localhost"])
     event = _mock_event_with_team_mention(team_user_id)
 
-    # No thread context in this test
-    with patch("mindroom.bot.fetch_thread_history", new=AsyncMock(return_value=[])):
-        # Patch team_response to avoid invoking Agno, return deterministic text
-        async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
-            return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
-
-        with (
-            patch("mindroom.bot.team_response", new=fake_team_response),
-            patch(
-                "mindroom.bot.should_agent_respond",
-                return_value=True,
-            ),
-        ):
-            bot.client.room_send.side_effect = [
-                nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, room.room_id),
-                nio.RoomSendResponse.from_dict({"event_id": "$edit"}, room.room_id),
-            ]
-            await bot._on_message(room, event)
+    bot.client.room_send.side_effect = [
+        nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, room.room_id),
+        nio.RoomSendResponse.from_dict({"event_id": "$edit"}, room.room_id),
+    ]
+    with patch_response_coordinator_module(
+        team_response=fake_team_response,
+        should_use_streaming=AsyncMock(return_value=False),
+        typing_indicator=_noop_typing_indicator,
+    ):
+        await bot._on_message(room, event)
 
     # Team bot should send a visible pending placeholder and the final team message.
     sent_contents = [call.kwargs["content"] for call in bot.client.room_send.call_args_list]
     assert len(sent_contents) == 2
     assert sent_contents[0][STREAM_STATUS_KEY] == "pending"
-    assert sent_contents[0]["body"].startswith("Thinking...")
+    assert sent_contents[0]["body"].startswith("🤝 Team Response: Thinking...")
     assert sent_contents[1]["m.relates_to"]["rel_type"] == "m.replace"
     assert sent_contents[1]["m.new_content"]["body"] == "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
     bot.client.room_send.side_effect = None
@@ -258,9 +255,11 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         return task
 
     with (
-        patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.bot.typing_indicator", new=_noop_typing_indicator),
-        patch("mindroom.bot.team_response", new=AsyncMock(return_value="team response")),
+        patch_response_coordinator_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing_indicator,
+            team_response=AsyncMock(return_value="team response"),
+        ),
         patch("mindroom.bot.store_conversation_memory", new=fake_store_conversation_memory),
         patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
     ):
@@ -401,16 +400,18 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
         ),
     )
 
-    with patch("mindroom.bot.fetch_thread_history", new=AsyncMock(return_value=[])):
+    async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
+        return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
 
-        async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
-            return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
-
-        with (
-            patch("mindroom.bot.team_response", new=fake_team_response),
-            patch("mindroom.bot.should_agent_respond", return_value=True),
-        ):
-            await bot._on_message(room, event)
+    with (
+        patch_response_coordinator_module(
+            team_response=fake_team_response,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing_indicator,
+        ),
+        patch.object(bot._conversation_state_writer, "fetch_thread_history", new=AsyncMock(return_value=[])),
+    ):
+        await bot._on_message(room, event)
 
     assert bot.client.room_send.call_count >= 1
     first_content = bot.client.room_send.call_args_list[0].kwargs["content"]
@@ -453,6 +454,9 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     bot.client = _make_matrix_client_mock()
     bot.orchestrator = MagicMock()
 
+    async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
+        return "🤝 Team Response (a1, a2): ok"
+
     # Craft a mention using a DIFFERENT domain than the bot's MatrixID
     # This simulates someone trying to impersonate the team
     other_domain = "evil.org"
@@ -463,13 +467,12 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     room = _mock_room("!room:localhost", [team_user.user_id, "@user:localhost"])
     event = _mock_event_with_team_mention(mentioned_id, body=f"{mentioned_id} ping")
 
-    with patch("mindroom.bot.fetch_thread_history", new=AsyncMock(return_value=[])):
-
-        async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
-            return "🤝 Team Response (a1, a2): ok"
-
-        with patch("mindroom.bot.team_response", new=fake_team_response):
-            await bot._on_message(room, event)
+    with patch_response_coordinator_module(
+        team_response=fake_team_response,
+        should_use_streaming=AsyncMock(return_value=False),
+        typing_indicator=_noop_typing_indicator,
+    ):
+        await bot._on_message(room, event)
 
     # Team bot should NOT have responded - different domain!
     assert bot.client.room_send.call_count == 0

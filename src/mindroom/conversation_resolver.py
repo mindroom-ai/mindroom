@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Sequence  # noqa: TC003
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -12,25 +13,27 @@ import nio
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
+from mindroom.matrix.client import fetch_thread_snapshot
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.identity import MatrixID, extract_agent_name
+from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.reply_chain import (
     ReplyChainCaches,
     derive_conversation_context,
     derive_conversation_target,
 )
+from mindroom.matrix.room_cache import cached_room
 from mindroom.message_target import MessageTarget
+from mindroom.thread_utils import check_agent_mentioned
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
-
     import structlog
 
-    from mindroom.config.main import Config
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
+    from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.event_cache import EventCache
-    from mindroom.matrix.identity import MatrixID
 
 type TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 type MediaDispatchEvent = (
@@ -73,25 +76,12 @@ class MessageContext:
 class ConversationResolverDeps:
     """Explicit collaborators for conversation resolution."""
 
-    client_getter: Callable[[], nio.AsyncClient | None]
-    config_getter: Callable[[], Config]
+    runtime: BotRuntimeView
+    logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str
-    matrix_id_getter: Callable[[], MatrixID]
-    logger_getter: Callable[[], structlog.stdlib.BoundLogger]
-    resolve_event_source_content: Callable[..., Awaitable[dict[str, Any]]]
-    check_agent_mentioned: Callable[..., tuple[list[MatrixID], bool, bool]]
-    fetch_thread_history: Callable[
-        [nio.AsyncClient, str, str],
-        Coroutine[Any, Any, Sequence[ResolvedVisibleMessage]],
-    ]
-    fetch_thread_snapshot: Callable[
-        [nio.AsyncClient, str, str],
-        Coroutine[Any, Any, Sequence[ResolvedVisibleMessage]],
-    ]
-    cached_room: Callable[[nio.AsyncClient, str], nio.MatrixRoom | None]
-    extract_agent_name: Callable[..., str | None]
-    event_cache_getter: Callable[[], EventCache | None]
+    matrix_id: MatrixID
+    state_writer: ConversationStateWriter
 
 
 @dataclass
@@ -105,23 +95,14 @@ class ConversationResolver:
     )
 
     def _client(self) -> nio.AsyncClient:
-        client = self.deps.client_getter()
+        client = self.deps.runtime.client
         if client is None:
             msg = "Matrix client is not ready for conversation resolution"
             raise RuntimeError(msg)
         return client
 
-    def _config(self) -> Config:
-        """Return the bot's current live config."""
-        return self.deps.config_getter()
-
-    def _logger(self) -> structlog.stdlib.BoundLogger:
-        """Return the bot's current live logger."""
-        return self.deps.logger_getter()
-
     def _matrix_id(self) -> MatrixID:
-        """Return the bot's current live Matrix ID."""
-        return self.deps.matrix_id_getter()
+        return self.deps.matrix_id
 
     def build_message_target(
         self,
@@ -133,7 +114,7 @@ class ConversationResolver:
         thread_mode_override: str | None = None,
     ) -> MessageTarget:
         """Build the canonical delivery target for one outbound response."""
-        config = self._config()
+        config = self.deps.runtime.config
         effective_thread_mode = thread_mode_override or config.get_entity_thread_mode(
             self.deps.agent_name,
             self.deps.runtime_paths,
@@ -189,10 +170,8 @@ class ConversationResolver:
             if isinstance(event, PreparedTextEvent)
             else None
         )
-        config = self._config()
-        source_kind_sender_is_trusted = (
-            self.deps.extract_agent_name(event.sender, config, self.deps.runtime_paths) is not None
-        )
+        config = self.deps.runtime.config
+        source_kind_sender_is_trusted = extract_agent_name(event.sender, config, self.deps.runtime_paths) is not None
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = content.get("com.mindroom.source_kind")
             if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
@@ -260,7 +239,7 @@ class ConversationResolver:
         event: DispatchEvent,
     ) -> str | None:
         """Return the coalescing thread scope for one inbound event."""
-        config = self._config()
+        config = self.deps.runtime.config
         if (
             config.get_entity_thread_mode(
                 self.deps.agent_name,
@@ -291,9 +270,9 @@ class ConversationResolver:
             room_id,
             event_info,
             self.reply_chain,
-            self._logger(),
+            self.deps.logger,
             self.fetch_thread_history,
-            event_cache=self.deps.event_cache_getter(),
+            event_cache=self.deps.runtime.event_cache,
         )
         return is_thread, thread_id, thread_history
 
@@ -308,9 +287,9 @@ class ConversationResolver:
             room_id,
             event_info,
             self.reply_chain,
-            self._logger(),
-            self.deps.fetch_thread_snapshot,
-            event_cache=self.deps.event_cache_getter(),
+            self.deps.logger,
+            fetch_thread_snapshot,
+            event_cache=self.deps.runtime.event_cache,
         )
 
     async def extract_dispatch_context(
@@ -339,15 +318,15 @@ class ConversationResolver:
         full_history: bool,
     ) -> MessageContext:
         """Resolve event metadata, mentions, and thread history for one inbound turn."""
-        resolved_event_source = await self.deps.resolve_event_source_content(event.source, self._client())
-        config = self._config()
+        resolved_event_source = await resolve_event_source_content(event.source, self._client())
+        config = self.deps.runtime.config
 
         if should_skip_mentions(resolved_event_source):
             mentioned_agents: list[MatrixID] = []
             am_i_mentioned = False
             has_non_agent_mentions = False
         else:
-            mentioned_agents, am_i_mentioned, has_non_agent_mentions = self.deps.check_agent_mentioned(
+            mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
                 resolved_event_source,
                 self._matrix_id(),
                 config,
@@ -355,7 +334,7 @@ class ConversationResolver:
             )
 
         if am_i_mentioned:
-            self._logger().info("Mentioned", event_id=event.event_id, room_id=room.room_id)
+            self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
 
         event_info = EventInfo.from_event(resolved_event_source)
         if (
@@ -412,10 +391,10 @@ class ConversationResolver:
 
     def cached_room(self, room_id: str) -> nio.MatrixRoom | None:
         """Return room from client cache when available."""
-        client = self.deps.client_getter()
+        client = self.deps.runtime.client
         if client is None:
             return None
-        return self.deps.cached_room(client, room_id)
+        return cached_room(client, room_id)
 
     @asynccontextmanager
     async def turn_thread_cache_scope(self) -> AsyncIterator[None]:
@@ -443,7 +422,7 @@ class ConversationResolver:
         if cache is not None and cache_key in cache:
             return cache[cache_key]
 
-        thread_history = list(await self.deps.fetch_thread_history(client, room_id, thread_id))
+        thread_history = list(await self.deps.state_writer.fetch_thread_history(client, room_id, thread_id))
         if cache is not None:
             cache[cache_key] = thread_history
         return thread_history

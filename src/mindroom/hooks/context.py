@@ -5,10 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.plugin_identity import validate_plugin_name
 
+from .state import (
+    build_hook_room_state_putter,
+    build_hook_room_state_querier,
+    chain_hook_room_state_putters,
+    chain_hook_room_state_queriers,
+)
 from .types import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -28,12 +34,14 @@ if TYPE_CHECKING:
 
     import structlog
 
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
 
+    from .registry import HookRegistry, HookRegistryState
     from .sender import HookMessageSender
     from .types import HookRoomStatePutter, HookRoomStateQuerier
 
@@ -112,6 +120,67 @@ async def _put_bound_room_state(
         logger.warning("No room state putter available")
         return False
     return await room_state_putter(room_id, event_type, state_key, content)
+
+
+@dataclass
+class HookContextSupport:
+    """Own live hook bindings and shared hook-context base fields."""
+
+    runtime: BotRuntimeView
+    logger: structlog.stdlib.BoundLogger
+    runtime_paths: RuntimePaths
+    agent_name: str
+    hook_registry_state: HookRegistryState
+    hook_send_message: HookMessageSender
+
+    @property
+    def registry(self) -> HookRegistry:
+        """Return the currently active hook registry snapshot."""
+        return self.hook_registry_state.registry
+
+    def message_sender(self) -> HookMessageSender | None:
+        """Return the current sender bound into hook contexts."""
+        if self.runtime.client is not None:
+            return self.hook_send_message
+        orchestrator = self.runtime.orchestrator
+        if orchestrator is not None:
+            sender = orchestrator._hook_message_sender()
+            if sender is not None:
+                return sender
+        return None
+
+    def room_state_querier(self) -> HookRoomStateQuerier | None:
+        """Return the room-state querier bound into hook contexts."""
+        primary = build_hook_room_state_querier(self.runtime.client) if self.runtime.client is not None else None
+        fallback = None
+        orchestrator = self.runtime.orchestrator
+        if self.agent_name != ROUTER_AGENT_NAME and orchestrator is not None:
+            fallback = orchestrator._hook_room_state_querier()
+        return chain_hook_room_state_queriers(primary, fallback)
+
+    def room_state_putter(self) -> HookRoomStatePutter | None:
+        """Return the room-state putter bound into hook contexts."""
+        primary = build_hook_room_state_putter(self.runtime.client) if self.runtime.client is not None else None
+        fallback = None
+        orchestrator = self.runtime.orchestrator
+        if self.agent_name != ROUTER_AGENT_NAME and orchestrator is not None:
+            fallback = orchestrator._hook_room_state_putter()
+        return chain_hook_room_state_putters(primary, fallback)
+
+    def base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
+        """Return shared base fields for hook context construction."""
+        return {
+            "event_name": event_name,
+            "plugin_name": "",
+            "settings": {},
+            "config": self.runtime.config,
+            "runtime_paths": self.runtime_paths,
+            "logger": self.logger.bind(event_name=event_name),
+            "correlation_id": correlation_id,
+            "message_sender": self.message_sender(),
+            "room_state_querier": self.room_state_querier(),
+            "room_state_putter": self.room_state_putter(),
+        }
 
 
 @dataclass(frozen=True, slots=True)

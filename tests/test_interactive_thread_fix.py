@@ -48,14 +48,18 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         return task
 
     with (
-        patch("mindroom.bot.stream_agent_response") as mock_ai_response,
-        patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=True),
-        patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
+        patch("mindroom.response_coordinator.stream_agent_response") as mock_ai_response,
+        patch("mindroom.response_coordinator.should_use_streaming", new_callable=AsyncMock, return_value=True),
+        patch(
+            "mindroom.delivery_gateway.send_streaming_response",
+            new_callable=AsyncMock,
+        ) as mock_send_streaming_response,
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
         patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
         patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock),
-        patch("mindroom.bot.maybe_generate_thread_summary", new_callable=AsyncMock),
-        patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+        patch("mindroom.post_response_effects.maybe_generate_thread_summary", new_callable=AsyncMock),
+        patch("mindroom.response_coordinator.create_background_task", side_effect=schedule_background_task),
+        patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
     ):
 
         async def mock_stream() -> AsyncIterator[str]:
@@ -143,14 +147,15 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         return task
 
     with (
-        patch("mindroom.bot.ai_response") as mock_ai_response,
-        patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=False),
-        patch("mindroom.bot.edit_message", new=AsyncMock(return_value=_room_send_response("$edit"))),
+        patch("mindroom.response_coordinator.ai_response") as mock_ai_response,
+        patch("mindroom.response_coordinator.should_use_streaming", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value=_room_send_response("$edit"))),
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
         patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
         patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock),
-        patch("mindroom.bot.maybe_generate_thread_summary", new_callable=AsyncMock),
-        patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+        patch("mindroom.post_response_effects.maybe_generate_thread_summary", new_callable=AsyncMock),
+        patch("mindroom.response_coordinator.create_background_task", side_effect=schedule_background_task),
+        patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
     ):
         mock_ai_response.return_value = "Test interactive response"
 
@@ -222,9 +227,12 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
 async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> None:
     """Streaming interactive replies without a thread should use the response event as the root."""
     with (
-        patch("mindroom.bot.stream_agent_response") as mock_ai_response,
-        patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock, return_value=True),
-        patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
+        patch("mindroom.response_coordinator.stream_agent_response") as mock_ai_response,
+        patch("mindroom.response_coordinator.should_use_streaming", new_callable=AsyncMock, return_value=True),
+        patch(
+            "mindroom.delivery_gateway.send_streaming_response",
+            new_callable=AsyncMock,
+        ) as mock_send_streaming_response,
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
         patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
         patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock),

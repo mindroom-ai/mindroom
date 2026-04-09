@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.db.base import SessionType
 from agno.media import File
 from agno.models.metrics import Metrics
 from agno.models.vertexai.claude import Claude as VertexAIClaude
@@ -40,10 +42,13 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.history import PreparedHistoryState
+from mindroom.hooks import HookContextSupport, HookRegistry
+from mindroom.hooks.registry import HookRegistryState
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
-from mindroom.response_coordinator import ResponseRequest
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.post_response_effects import PostResponseEffectsSupport
+from mindroom.response_coordinator import ResponseCoordinator, ResponseCoordinatorDeps, ResponseRequest
+from mindroom.tool_system.runtime_context import ToolRuntimeSupport, get_tool_runtime_context
 from tests.conftest import bind_runtime_paths, resolve_response_thread_root_for_test
 
 if TYPE_CHECKING:
@@ -73,59 +78,94 @@ def _prepared_prompt_result(
     return agent, prompt, [], PreparedHistoryState()
 
 
-def _bind_response_coordinator_runtime(
+def _build_response_coordinator(
     bot: MagicMock,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     storage_path: Path,
-    requester_id: str,
-) -> None:
-    """Bind the real coordinator path onto a bot double."""
+    requester_id: str,  # noqa: ARG001
+) -> ResponseCoordinator:
+    """Build a real response coordinator for one bot-shaped test double."""
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
     bot.enable_streaming = True
     bot.show_tool_calls = False
     bot.orchestrator = None
-    bot._agent_has_matrix_messaging_tool = MagicMock(return_value=False)
-    bot._append_matrix_prompt_context = MagicMock(side_effect=lambda prompt, **_kwargs: prompt)
-    bot._build_message_target = MagicMock(
+    bot._conversation_resolver = MagicMock()
+    bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True),
     )
-    bot._conversation_resolver = MagicMock()
     bot._conversation_resolver.resolve_response_thread_root = MagicMock(
         side_effect=resolve_response_thread_root_for_test,
     )
+    bot._conversation_state_writer = MagicMock()
+    bot._conversation_state_writer.create_history_scope_storage = MagicMock(return_value=MagicMock())
+    bot._conversation_state_writer.create_team_history_storage = MagicMock(return_value=MagicMock())
+    bot._conversation_state_writer.persist_response_event_id_in_session_run = MagicMock()
+    bot._conversation_state_writer.history_session_type = MagicMock(return_value=SessionType.AGENT)
     bot._request_with_resolved_thread_target = AgentBot._request_with_resolved_thread_target.__get__(
         bot,
         AgentBot,
     )
-    bot._resolve_response_thread_root = AgentBot._resolve_response_thread_root.__get__(bot, AgentBot)
-    bot._run_in_tool_context = AgentBot._run_in_tool_context.__get__(bot, AgentBot)
-    bot._stream_in_tool_context = AgentBot._stream_in_tool_context.__get__(bot, AgentBot)
-    bot._response_coordinator = AgentBot._response_coordinator.__get__(bot, AgentBot)
-    bot._build_tool_execution_identity = MagicMock(return_value=None)
-    bot._active_response_event_ids = MagicMock(return_value=set())
-    bot._deliver_generated_response = AsyncMock(
+    bot._edit_message = AsyncMock(return_value=True)
+    delivery_gateway = MagicMock()
+    delivery_gateway.deliver_final = AsyncMock(
         return_value=MagicMock(
             event_id="$response_id",
             response_text="Hello!",
             delivery_kind="sent",
         ),
     )
-    delivery_gateway = MagicMock()
     delivery_gateway.deliver_stream = AsyncMock(return_value=("$msg_id", "Hello!"))
-    bot._delivery_gateway = MagicMock(return_value=delivery_gateway)
-    bot._build_tool_runtime_context = MagicMock(
-        return_value=ToolRuntimeContext(
-            agent_name="general",
-            room_id="!test:localhost",
-            thread_id=None,
-            resolved_thread_id=None,
-            requester_id=requester_id,
-            client=bot.client,
-            config=config,
+    runtime = SimpleNamespace(
+        client=bot.client,
+        config=config,
+        enable_streaming=bot.enable_streaming,
+        orchestrator=bot.orchestrator,
+        event_cache=None,
+    )
+    hook_context = HookContextSupport(
+        runtime=runtime,
+        logger=bot.logger,
+        runtime_paths=runtime_paths,
+        agent_name=bot.agent_name,
+        hook_registry_state=HookRegistryState(HookRegistry.empty()),
+        hook_send_message=AsyncMock(),
+    )
+    tool_runtime = ToolRuntimeSupport(
+        runtime=runtime,
+        logger=bot.logger,
+        runtime_paths=runtime_paths,
+        storage_path=storage_path,
+        agent_name=bot.agent_name,
+        matrix_id=bot.matrix_id,
+        resolver=bot._conversation_resolver,
+        hook_context=hook_context,
+    )
+
+    post_response_effects = PostResponseEffectsSupport(
+        runtime=runtime,
+        logger=bot.logger,
+        runtime_paths=runtime_paths,
+        delivery_gateway=delivery_gateway,
+    )
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+
+    return ResponseCoordinator(
+        ResponseCoordinatorDeps(
+            runtime=runtime,
+            logger=bot.logger,
+            stop_manager=bot.stop_manager,
             runtime_paths=runtime_paths,
             storage_path=storage_path,
+            agent_name=bot.agent_name,
+            matrix_full_id=bot.matrix_id.full_id,
+            resolver=bot._conversation_resolver,
+            tool_runtime=tool_runtime,
+            knowledge_access=bot._knowledge_access_support,
+            delivery_gateway=delivery_gateway,
+            post_response_effects=post_response_effects,
+            state_writer=bot._conversation_state_writer,
         ),
     )
 
@@ -166,20 +206,20 @@ class TestUserIdPassthrough:
         bot.storage_path = tmp_path
         bot.config = config
         bot.runtime_paths = runtime_paths
-        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+        bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response_id")
-        bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
-        _bind_response_coordinator_runtime(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-        )
-
-        process_method = AgentBot._process_and_respond
-
-        with patch("mindroom.bot.ai_response") as mock_ai:
+        with (
+            patch("mindroom.response_coordinator.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+            patch("mindroom.response_coordinator.ai_response") as mock_ai,
+        ):
+            coordinator = _build_response_coordinator(
+                bot,
+                config=config,
+                runtime_paths=runtime_paths,
+                storage_path=tmp_path,
+                requester_id="@alice:localhost",
+            )
 
             async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
                 context = get_tool_runtime_context()
@@ -191,8 +231,7 @@ class TestUserIdPassthrough:
 
             mock_ai.side_effect = fake_ai_response
 
-            await process_method(
-                bot,
+            await coordinator.process_and_respond(
                 _response_request(prompt="Hello", user_id="@alice:localhost"),
             )
 
@@ -216,27 +255,27 @@ class TestUserIdPassthrough:
         bot.config = config
         bot.storage_path = tmp_path
         bot.runtime_paths = runtime_paths
-        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+        bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
-        bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
-        _bind_response_coordinator_runtime(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@bob:localhost",
-        )
-
-        streaming_method = AgentBot._process_and_respond_streaming
-
-        with patch("mindroom.bot.stream_agent_response") as mock_stream:
+        with (
+            patch("mindroom.response_coordinator.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+            patch("mindroom.response_coordinator.stream_agent_response") as mock_stream,
+        ):
+            coordinator = _build_response_coordinator(
+                bot,
+                config=config,
+                runtime_paths=runtime_paths,
+                storage_path=tmp_path,
+                requester_id="@bob:localhost",
+            )
 
             async def consume_delivery(request: object) -> tuple[str, str]:
                 response_stream = request.response_stream
                 chunks = [chunk async for chunk in response_stream]
                 return "$msg_id", "".join(chunks)
 
-            bot._delivery_gateway.return_value.deliver_stream.side_effect = consume_delivery
+            coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
 
             def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
                 async def fake_stream() -> AsyncIterator[str]:
@@ -251,8 +290,7 @@ class TestUserIdPassthrough:
 
             mock_stream.side_effect = fake_stream_agent_response
 
-            await streaming_method(
-                bot,
+            await coordinator.process_and_respond_streaming(
                 _response_request(prompt="Hello", user_id="@bob:localhost"),
             )
 

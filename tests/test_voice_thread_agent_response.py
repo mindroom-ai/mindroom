@@ -26,9 +26,12 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_generate_response_mock,
     make_visible_message,
+    replace_dispatch_planner_deps,
     runtime_paths_for,
     test_runtime_paths,
+    wrap_extracted_collaborators,
 )
 
 if TYPE_CHECKING:
@@ -37,13 +40,15 @@ if TYPE_CHECKING:
 
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
-    return AgentBot(
+    bot = AgentBot(
         agent_user=agent_user,
         storage_path=storage_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=rooms,
     )
+    wrap_extracted_collaborators(bot)
+    return bot
 
 
 def _extract_agent_side_effect(
@@ -90,8 +95,13 @@ def mock_home_bot(tmp_path: Path) -> AgentBot:
     bot.client = AsyncMock()
     bot.logger = MagicMock()
     bot._generate_response = AsyncMock()
+    install_generate_response_mock(bot, bot._generate_response)
     bot.handled_turn_ledger = MagicMock()
     bot.handled_turn_ledger.has_responded.return_value = False
+    replace_dispatch_planner_deps(
+        bot,
+        handled_turn_ledger=bot.handled_turn_ledger,
+    )
     return bot
 
 
@@ -139,12 +149,23 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
 
     # Mock context extraction
     with (
-        patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
+        patch.object(
+            bot._conversation_state_writer,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=thread_history),
+        ),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
-        patch("mindroom.bot.get_agents_in_thread", return_value=[MatrixID.parse("@mindroom_home:localhost")]),
-        patch("mindroom.bot.should_agent_respond", return_value=True),  # HomeAssistant should respond
+        patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
+        patch("mindroom.dispatch_planner.extract_agent_name") as mock_planner_extract_agent,
+        patch(
+            "mindroom.dispatch_planner.get_agents_in_thread",
+            return_value=[MatrixID.parse("@mindroom_home:localhost")],
+        ),
+        patch("mindroom.dispatch_planner.should_agent_respond", return_value=True),
     ):
         mock_extract_agent.side_effect = _extract_agent_side_effect
+        mock_resolver_extract_agent.side_effect = _extract_agent_side_effect
+        mock_planner_extract_agent.side_effect = _extract_agent_side_effect
 
         # Process the voice transcription
         await bot._on_message(room, voice_transcription_event)
@@ -192,13 +213,20 @@ async def test_voice_transcription_permissions_use_original_sender(mock_home_bot
     ]
 
     with (
-        patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
-        patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide_team,
+        patch.object(
+            bot._conversation_state_writer,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=thread_history),
+        ),
+        patch("mindroom.dispatch_planner.decide_team_formation", new_callable=AsyncMock) as mock_decide_team,
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
+        patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
+        patch("mindroom.dispatch_planner.extract_agent_name") as mock_planner_extract_agent,
     ):
         mock_decide_team.return_value = TeamResolution.none()
-
         mock_extract_agent.side_effect = _extract_agent_side_effect
+        mock_resolver_extract_agent.side_effect = _extract_agent_side_effect
+        mock_planner_extract_agent.side_effect = _extract_agent_side_effect
 
         await bot._on_message(room, voice_transcription_event)
 
@@ -231,10 +259,12 @@ async def test_agent_ignores_non_voice_router_messages(mock_home_bot: AgentBot) 
 
     # Mock context extraction
     with (
-        patch("mindroom.bot.fetch_thread_history", return_value=[]),
+        patch.object(bot._conversation_state_writer, "fetch_thread_history", new=AsyncMock(return_value=[])),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
+        patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
     ):
         mock_extract_agent.side_effect = _extract_agent_side_effect
+        mock_resolver_extract_agent.side_effect = _extract_agent_side_effect
 
         # Process the regular router message
         await bot._on_message(room, router_message)
@@ -247,7 +277,7 @@ async def test_agent_ignores_non_voice_router_messages(mock_home_bot: AgentBot) 
 async def test_agent_ignores_visible_router_voice_echo(mock_home_bot: AgentBot) -> None:
     """Display-only router voice echoes should not trigger a second agent reply."""
     bot = mock_home_bot
-    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    bot._conversation_resolver.derive_conversation_context = AsyncMock(return_value=(False, None, []))
     room = _mock_voice_room("@mindroom_home:localhost", f"@mindroom_{ROUTER_AGENT_NAME}:localhost")
 
     router_voice_echo = MagicMock(spec=nio.RoomMessageText)
@@ -303,11 +333,21 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
     ]
 
     with (
-        patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
+        patch.object(
+            bot._conversation_state_writer,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=thread_history),
+        ),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
-        patch("mindroom.bot.resolve_thread_attachment_ids", new_callable=AsyncMock, return_value=["att_voice_root"]),
+        patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
+        patch("mindroom.dispatch_planner.extract_agent_name") as mock_planner_extract_agent,
         patch(
-            "mindroom.bot.resolve_attachment_media",
+            "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
+            new_callable=AsyncMock,
+            return_value=["att_voice_root"],
+        ),
+        patch(
+            "mindroom.inbound_turn_normalizer.resolve_attachment_media",
             return_value=(
                 ["att_voice_root"],
                 [Audio(content=b"voice-bytes", mime_type="audio/ogg")],
@@ -316,9 +356,11 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
                 [],
             ),
         ),
-        patch("mindroom.bot.should_agent_respond", return_value=True),
+        patch("mindroom.dispatch_planner.should_agent_respond", return_value=True),
     ):
         mock_extract_agent.side_effect = _extract_agent_side_effect
+        mock_resolver_extract_agent.side_effect = _extract_agent_side_effect
+        mock_planner_extract_agent.side_effect = _extract_agent_side_effect
 
         await bot._on_message(room, fallback_event)
 
@@ -361,13 +403,28 @@ async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_h
     attachment_audio = [Audio(content=b"voice-bytes", mime_type="audio/ogg")]
 
     with (
-        patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
+        patch.object(
+            bot._conversation_state_writer,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=thread_history),
+        ),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
-        patch("mindroom.bot.resolve_attachment_media", return_value=(["att_voice"], attachment_audio, [], [], [])),
-        patch("mindroom.bot.resolve_thread_attachment_ids", new_callable=AsyncMock, return_value=[]),
-        patch("mindroom.bot.should_agent_respond", return_value=True),
+        patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
+        patch("mindroom.dispatch_planner.extract_agent_name") as mock_planner_extract_agent,
+        patch(
+            "mindroom.inbound_turn_normalizer.resolve_attachment_media",
+            return_value=(["att_voice"], attachment_audio, [], [], []),
+        ),
+        patch(
+            "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch("mindroom.dispatch_planner.should_agent_respond", return_value=True),
     ):
         mock_extract_agent.side_effect = _extract_agent_side_effect
+        mock_resolver_extract_agent.side_effect = _extract_agent_side_effect
+        mock_planner_extract_agent.side_effect = _extract_agent_side_effect
 
         await bot._on_message(room, fallback_event)
 
@@ -416,20 +473,28 @@ async def test_followup_text_in_voice_thread_recovers_audio(mock_home_bot: Agent
     attachment_audio = [Audio(content=b"voice-bytes", mime_type="audio/ogg")]
 
     with (
-        patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
+        patch.object(
+            bot._conversation_state_writer,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=thread_history),
+        ),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
+        patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
+        patch("mindroom.dispatch_planner.extract_agent_name") as mock_planner_extract_agent,
         patch(
-            "mindroom.bot.resolve_thread_attachment_ids",
+            "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
             new_callable=AsyncMock,
             return_value=["att_voiceroot"],
         ),
         patch(
-            "mindroom.bot.resolve_attachment_media",
+            "mindroom.inbound_turn_normalizer.resolve_attachment_media",
             return_value=(["att_voiceroot"], attachment_audio, [], [], []),
         ),
-        patch("mindroom.bot.should_agent_respond", return_value=True),
+        patch("mindroom.dispatch_planner.should_agent_respond", return_value=True),
     ):
         mock_extract_agent.side_effect = _extract_agent_side_effect
+        mock_resolver_extract_agent.side_effect = _extract_agent_side_effect
+        mock_planner_extract_agent.side_effect = _extract_agent_side_effect
 
         await bot._on_message(room, followup_event)
 

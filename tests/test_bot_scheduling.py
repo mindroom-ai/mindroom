@@ -23,8 +23,14 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     create_mock_room,
+    install_generate_response_mock,
+    install_send_response_mock,
+    install_send_skill_command_response_mock,
+    replace_dispatch_planner_deps,
     runtime_paths_for,
+    sync_bot_runtime_state,
     test_runtime_paths,
+    wrap_extracted_collaborators,
 )
 
 
@@ -50,6 +56,21 @@ def _message(
     )
 
 
+def _replace_dispatch_planner_deps(bot: AgentBot, **changes: object) -> None:
+    """Rebuild the planner after swapping captured collaborators on the bot."""
+    replace_dispatch_planner_deps(bot, **changes)
+
+
+def _sync_dispatch_planner_runtime(bot: AgentBot) -> None:
+    """Rebind planner deps after tests replace the bot logger or ledger."""
+    sync_bot_runtime_state(bot)
+    _replace_dispatch_planner_deps(
+        bot,
+        logger=bot.logger,
+        handled_turn_ledger=bot.handled_turn_ledger,
+    )
+
+
 @pytest.fixture
 def mock_agent_bot() -> AgentBot:
     """Create a mock agent bot for testing."""
@@ -69,9 +90,16 @@ def mock_agent_bot() -> AgentBot:
             runtime_paths=runtime_paths_for(config),
             rooms=["!test:server"],
         )
+    wrap_extracted_collaborators(bot)
     bot.client = AsyncMock()
+    bot.client.user_id = bot.agent_user.user_id
+    sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
+    bot.handled_turn_ledger = MagicMock()
+    bot.handled_turn_ledger.has_responded.return_value = False
     bot._send_response = AsyncMock()
+    _sync_dispatch_planner_runtime(bot)
+    install_send_response_mock(bot, bot._send_response)
     return bot
 
 
@@ -103,6 +131,7 @@ class TestBotScheduleCommands:
             # Mock response tracker for the test
             mock_agent_bot.handled_turn_ledger = MagicMock()
             mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+            _sync_dispatch_planner_runtime(mock_agent_bot)
 
             await mock_agent_bot._handle_command(
                 room,
@@ -132,6 +161,7 @@ class TestBotScheduleCommands:
         """Test schedule command with no message uses default."""
         mock_agent_bot.handled_turn_ledger = MagicMock()
         mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -161,6 +191,7 @@ class TestBotScheduleCommands:
         """Test bot handles list schedules command."""
         mock_agent_bot.handled_turn_ledger = MagicMock()
         mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -194,6 +225,7 @@ class TestBotScheduleCommands:
         """Test bot handles cancel schedule command."""
         mock_agent_bot.handled_turn_ledger = MagicMock()
         mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -220,6 +252,7 @@ class TestBotScheduleCommands:
         """Test bot handles cancel all scheduled tasks command."""
         mock_agent_bot.handled_turn_ledger = MagicMock()
         mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -254,6 +287,7 @@ class TestBotScheduleCommands:
         """Test bot handles edit schedule command."""
         mock_agent_bot.handled_turn_ledger = MagicMock()
         mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -295,6 +329,7 @@ class TestBotScheduleCommands:
         """Test that schedule commands auto-create threads when used in main room."""
         mock_agent_bot.handled_turn_ledger = MagicMock()
         mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -461,10 +496,17 @@ class TestCommandHandling:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
+        wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
+        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
-        bot._extract_dispatch_context = AsyncMock()
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
+        install_generate_response_mock(bot, bot._generate_response)
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock()
 
         # Create a room and event
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -507,6 +549,7 @@ class TestCommandHandling:
                 rooms=["!test:server"],
             )
             bot.client = AsyncMock()
+            bot.client.user_id = bot.agent_user.user_id
             bot.logger = MagicMock()
             bot._handle_command = AsyncMock()
 
@@ -561,6 +604,7 @@ class TestCommandHandling:
                 rooms=["!test:server"],
             )
             bot.client = AsyncMock()
+            bot.client.user_id = bot.agent_user.user_id
             bot.logger = MagicMock()
             bot._handle_command = AsyncMock()
 
@@ -620,13 +664,19 @@ class TestCommandHandling:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
+            wrap_extracted_collaborators(bot)
             bot.client = AsyncMock()
+            bot.client.user_id = bot.agent_user.user_id
+            sync_bot_runtime_state(bot)
             bot.logger = MagicMock()
             bot.handled_turn_ledger = MagicMock()
             bot.handled_turn_ledger.has_responded.return_value = False
             bot._send_skill_command_response = AsyncMock()
             bot._send_response = AsyncMock(return_value="$router_reply")
-            bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+            _sync_dispatch_planner_runtime(bot)
+            install_send_response_mock(bot, bot._send_response)
+            install_send_skill_command_response_mock(bot, bot._send_skill_command_response)
+            bot._conversation_resolver.derive_conversation_context = AsyncMock(return_value=(False, None, []))
 
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
             room.users = {
@@ -649,7 +699,7 @@ class TestCommandHandling:
 
             with (
                 patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
-                patch("mindroom.bot.is_dm_room", return_value=False),
+                patch("mindroom.dispatch_planner.is_dm_room", return_value=False),
                 patch("mindroom.commands.handler.resolve_skill_command_spec") as mock_resolve_spec,
             ):
                 await bot._on_message(room, event)
@@ -687,11 +737,19 @@ class TestCommandHandling:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
+        wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
+        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
+        bot._send_response = AsyncMock(return_value="$placeholder")
+        bot._generate_response = AsyncMock(return_value="$response")
+        _sync_dispatch_planner_runtime(bot)
+        install_send_response_mock(bot, bot._send_response)
+        install_generate_response_mock(bot, bot._generate_response)
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
 
         # Mock context extraction to say agent is mentioned
         mock_context = MagicMock()
@@ -707,10 +765,10 @@ class TestCommandHandling:
         )
         mock_context.has_non_agent_mentions = False
         mock_context.requires_full_thread_history = False
-        bot._extract_dispatch_context = AsyncMock(return_value=mock_context)
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
         # Mock should_agent_respond to return True
-        with patch("mindroom.bot.should_agent_respond", return_value=True):
+        with patch("mindroom.dispatch_planner.should_agent_respond", return_value=True):
             # Create a room and event with a regular message
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
             event = nio.RoomMessageText.from_dict(
@@ -749,12 +807,16 @@ class TestCommandHandling:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
+            wrap_extracted_collaborators(bot)
             bot.client = AsyncMock()
             bot.client.user_id = "@mindroom_general:localhost"  # Set the bot's user ID
+            sync_bot_runtime_state(bot)
             bot.logger = MagicMock()
             bot._generate_response = AsyncMock()
             bot.handled_turn_ledger = MagicMock()
             bot.handled_turn_ledger.has_responded.return_value = False
+            _sync_dispatch_planner_runtime(bot)
+            install_generate_response_mock(bot, bot._generate_response)
 
             # Mock context extraction
             mock_context = MagicMock()
@@ -765,7 +827,7 @@ class TestCommandHandling:
             mock_context.mentioned_agents = []
             mock_context.has_non_agent_mentions = False
             mock_context.requires_full_thread_history = False
-            bot._extract_dispatch_context = AsyncMock(return_value=mock_context)
+            bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
             # Create a room and event with error message from router agent
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -784,7 +846,7 @@ class TestCommandHandling:
             # Mock interactive.handle_text_response and extract_agent_name
             with (
                 patch("mindroom.bot.interactive.handle_text_response"),
-                patch("mindroom.bot.extract_agent_name") as mock_extract,
+                patch("mindroom.dispatch_planner.extract_agent_name") as mock_extract,
             ):
                 # Make extract_agent_name return "router" for the router agent sender
                 mock_extract.return_value = "router"
@@ -880,50 +942,54 @@ class TestCommandHandling:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
-            bot.client = AsyncMock()
-            bot.client.user_id = "@mindroom_finance:localhost"
-            bot.logger = MagicMock()
-            bot._generate_response = AsyncMock()
-            bot.handled_turn_ledger = MagicMock()
-            bot.handled_turn_ledger.has_responded.return_value = False
+        wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.client.user_id = "@mindroom_finance:localhost"
+        sync_bot_runtime_state(bot)
+        bot.logger = MagicMock()
+        bot._generate_response = AsyncMock()
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
+        install_generate_response_mock(bot, bot._generate_response)
 
-            # Mock context extraction for router's error message
-            mock_context = MagicMock()
-            mock_context.am_i_mentioned = False
-            mock_context.mentioned_agents = []
-            mock_context.has_non_agent_mentions = False
-            mock_context.is_thread = True
-            mock_context.thread_id = "$thread123"
-            mock_context.thread_history = []
-            mock_context.requires_full_thread_history = False
-            bot._extract_dispatch_context = AsyncMock(return_value=mock_context)
+        # Mock context extraction for router's error message
+        mock_context = MagicMock()
+        mock_context.am_i_mentioned = False
+        mock_context.mentioned_agents = []
+        mock_context.has_non_agent_mentions = False
+        mock_context.is_thread = True
+        mock_context.thread_id = "$thread123"
+        mock_context.thread_history = []
+        mock_context.requires_full_thread_history = False
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
-            # Create router's error message event
-            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
-            event = nio.RoomMessageText.from_dict(
-                {
-                    "event_id": "$router_error",
-                    "sender": "@mindroom_router:localhost",
-                    "origin_server_ts": 1234567890,
-                    "content": {
-                        "msgtype": "m.text",
-                        "body": "❌ Unable to parse the schedule request",
-                    },
+        # Create router's error message event
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$router_error",
+                "sender": "@mindroom_router:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "❌ Unable to parse the schedule request",
                 },
-            )
+            },
+        )
 
-            with (
-                patch("mindroom.bot.interactive.handle_text_response"),
-                patch("mindroom.bot.extract_agent_name", return_value="router"),
-            ):
-                await bot._on_message(room, event)
+        with (
+            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.dispatch_planner.extract_agent_name", return_value="router"),
+        ):
+            await bot._on_message(room, event)
 
-            # Verify finance agent did NOT process the message
-            bot._generate_response.assert_not_called()
+        # Verify finance agent did NOT process the message
+        bot._generate_response.assert_not_called()
 
-            # Verify it was caught early by the agent message check
-            debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
-            assert "Ignoring message from other agent (not mentioned)" in debug_calls
+        # Verify it was caught early by the agent message check
+        debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
+        assert "Ignoring message from other agent (not mentioned)" in debug_calls
 
     @pytest.mark.asyncio
     async def test_router_error_prevents_team_formation(self) -> None:
@@ -949,14 +1015,20 @@ class TestCommandHandling:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
+        wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_news:localhost"
+        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
         bot._send_response = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
+        install_send_response_mock(bot, bot._send_response)
+        install_generate_response_mock(bot, bot._generate_response)
         bot.orchestrator = MagicMock()
+        sync_bot_runtime_state(bot)
 
         # Create thread history with multiple agents mentioned
         thread_history = [
@@ -999,7 +1071,7 @@ class TestCommandHandling:
         mock_context.mentioned_agents = []
         mock_context.has_non_agent_mentions = False  # Router doesn't mention anyone
         mock_context.requires_full_thread_history = False
-        bot._extract_dispatch_context = AsyncMock(return_value=mock_context)
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
         # Create room and event for router error
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -1017,8 +1089,8 @@ class TestCommandHandling:
 
         with (
             patch("mindroom.bot.interactive") as mock_interactive,
-            patch("mindroom.bot.extract_agent_name") as mock_extract,
-            patch("mindroom.bot.team_response") as mock_team,
+            patch("mindroom.dispatch_planner.extract_agent_name") as mock_extract,
+            patch("mindroom.response_coordinator.team_response") as mock_team,
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (
@@ -1060,12 +1132,16 @@ class TestCommandHandling:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
+        wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_finance:localhost"
+        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
+        install_generate_response_mock(bot, bot._generate_response)
 
         # Create thread history that mimics the real scenario
         thread_history = [
@@ -1124,7 +1200,7 @@ class TestCommandHandling:
         mock_context.mentioned_agents = []
         mock_context.has_non_agent_mentions = False
         mock_context.requires_full_thread_history = False
-        bot._extract_dispatch_context = AsyncMock(return_value=mock_context)
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
         # Create room and event for router error
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -1142,7 +1218,7 @@ class TestCommandHandling:
 
         with (
             patch("mindroom.bot.interactive") as mock_interactive,
-            patch("mindroom.bot.extract_agent_name") as mock_extract,
+            patch("mindroom.dispatch_planner.extract_agent_name") as mock_extract,
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (
@@ -1181,10 +1257,13 @@ class TestCommandHandling:
             )
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_general:localhost"
+        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
+        install_generate_response_mock(bot, bot._generate_response)
 
         # Mock context extraction - no agents mentioned
         mock_context = MagicMock()
@@ -1195,7 +1274,7 @@ class TestCommandHandling:
         mock_context.thread_id = "$thread123"
         mock_context.thread_history = []
         mock_context.requires_full_thread_history = False
-        bot._extract_dispatch_context = AsyncMock(return_value=mock_context)
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
         # Create a room and event with message from router agent without mentions
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -1211,7 +1290,7 @@ class TestCommandHandling:
         # Mock interactive.handle_text_response and extract_agent_name
         with (
             patch("mindroom.bot.interactive.handle_text_response"),
-            patch("mindroom.bot.extract_agent_name") as mock_extract,
+            patch("mindroom.dispatch_planner.extract_agent_name") as mock_extract,
         ):
             # Make extract_agent_name return "router" for the router agent sender
             mock_extract.return_value = "router"
@@ -1256,10 +1335,13 @@ class TestRouterSkipsSingleAgent:
                 rooms=["!test:server"],
             )
         bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
+        _sync_dispatch_planner_runtime(bot)
 
         # Create context with no mentions and no agents in thread
         mock_context = MagicMock()
@@ -1270,7 +1352,7 @@ class TestRouterSkipsSingleAgent:
         mock_context.thread_id = None
         mock_context.thread_history = []
         mock_context.requires_full_thread_history = False
-        bot._extract_dispatch_context = AsyncMock(return_value=mock_context)
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
         # Create room with only general agent (router is also there but excluded from available agents)
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -1292,9 +1374,9 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.bot.interactive.handle_text_response"),
-            patch("mindroom.bot.extract_agent_name", return_value=None),  # User message
-            patch("mindroom.bot.get_agents_in_thread", return_value=[]),
-            patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
+            patch("mindroom.dispatch_planner.extract_agent_name", return_value=None),  # User message
+            patch("mindroom.dispatch_planner.get_agents_in_thread", return_value=[]),
+            patch("mindroom.dispatch_planner.get_available_agents_for_sender") as mock_get_available,
         ):
             # Return only one agent (general)
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
@@ -1339,10 +1421,12 @@ class TestRouterSkipsSingleAgent:
                 rooms=["!test:server"],
             )
         bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
 
         # Create context with no mentions and no agents in thread
         mock_context = MagicMock()
@@ -1353,7 +1437,7 @@ class TestRouterSkipsSingleAgent:
         mock_context.thread_id = None
         mock_context.thread_history = []
         mock_context.requires_full_thread_history = False
-        bot._extract_dispatch_context = AsyncMock(return_value=mock_context)
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
         # Create room with multiple agents
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -1376,9 +1460,9 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.bot.interactive.handle_text_response"),
-            patch("mindroom.bot.extract_agent_name", return_value=None),  # User message
-            patch("mindroom.bot.get_agents_in_thread", return_value=[]),
-            patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
+            patch("mindroom.dispatch_planner.extract_agent_name", return_value=None),  # User message
+            patch("mindroom.dispatch_planner.get_agents_in_thread", return_value=[]),
+            patch("mindroom.dispatch_planner.get_available_agents_for_sender") as mock_get_available,
         ):
             # Return multiple agents
             mock_get_available.return_value = [
@@ -1437,10 +1521,12 @@ class TestRouterSkipsSingleAgent:
                 rooms=["!test:server"],
             )
         bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
 
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
@@ -1453,7 +1539,7 @@ class TestRouterSkipsSingleAgent:
             _message(sender="@bob:localhost", body="I have the same question"),
         ]
         mock_context.requires_full_thread_history = False
-        bot._extract_dispatch_context = AsyncMock(return_value=mock_context)
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
@@ -1475,9 +1561,9 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.bot.interactive.handle_text_response"),
-            patch("mindroom.bot.extract_agent_name", return_value=None),
-            patch("mindroom.bot.get_agents_in_thread", return_value=[]),
-            patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
+            patch("mindroom.dispatch_planner.extract_agent_name", return_value=None),
+            patch("mindroom.dispatch_planner.get_agents_in_thread", return_value=[]),
+            patch("mindroom.dispatch_planner.get_available_agents_for_sender") as mock_get_available,
         ):
             mock_get_available.return_value = [
                 config.get_ids(runtime_paths_for(config))["general"],
@@ -1520,9 +1606,16 @@ class TestRouterSkipsSingleAgent:
                 rooms=["!test:server"],
             )
         bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         bot._handle_command = AsyncMock()
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
         bot._send_response = AsyncMock()
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
 
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -1544,7 +1637,7 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.bot.interactive.handle_text_response"),
-            patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
+            patch("mindroom.dispatch_planner.get_available_agents_for_sender") as mock_get_available,
         ):
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             await bot._on_message(room, event)
@@ -1583,9 +1676,16 @@ class TestRouterSkipsSingleAgent:
                 rooms=["!test:server"],
             )
         bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         bot._handle_command = AsyncMock()
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
         bot._send_response = AsyncMock()
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
 
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -1607,7 +1707,7 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.bot.interactive.handle_text_response"),
-            patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
+            patch("mindroom.dispatch_planner.get_available_agents_for_sender") as mock_get_available,
         ):
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             await bot._on_message(room, event)
@@ -1646,10 +1746,12 @@ class TestRouterSkipsSingleAgent:
                 rooms=["!test:server"],
             )
         bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
 
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -1682,12 +1784,12 @@ class TestRouterSkipsSingleAgent:
         mock_context.thread_id = None
         mock_context.thread_history = []
         mock_context.requires_full_thread_history = False
-        bot._extract_dispatch_context = AsyncMock(return_value=mock_context)
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
         with (
             patch("mindroom.bot.interactive.handle_text_response"),
-            patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
-            patch("mindroom.bot.get_agents_in_thread") as mock_agents_in_thread,
+            patch("mindroom.dispatch_planner.get_available_agents_for_sender") as mock_get_available,
+            patch("mindroom.dispatch_planner.get_agents_in_thread") as mock_agents_in_thread,
         ):
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             mock_agents_in_thread.return_value = []
@@ -1730,8 +1832,12 @@ class TestRouterSkipsSingleAgent:
                 rooms=["!test:server"],
             )
         bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         bot._handle_command = AsyncMock()
+        bot.handled_turn_ledger = MagicMock()
+        bot.handled_turn_ledger.has_responded.return_value = False
+        _sync_dispatch_planner_runtime(bot)
 
         # Room with router + two agents + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -1754,7 +1860,7 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.bot.interactive.handle_text_response"),
-            patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
+            patch("mindroom.dispatch_planner.get_available_agents_for_sender") as mock_get_available,
         ):
             mock_get_available.return_value = [
                 config.get_ids(runtime_paths_for(config))["general"],

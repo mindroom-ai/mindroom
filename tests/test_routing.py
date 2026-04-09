@@ -300,7 +300,7 @@ class TestAIRouting:
         mock_event = MagicMock()
         mock_event.body = "Test message"
 
-        with patch("mindroom.bot.suggest_agent_for_message") as mock_suggest:
+        with patch("mindroom.dispatch_planner.suggest_agent_for_message") as mock_suggest:
             # Should raise AssertionError since general is not the router agent
             with pytest.raises(AssertionError):
                 await bot._handle_ai_routing(

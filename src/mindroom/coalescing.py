@@ -12,8 +12,7 @@ import nio
 
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .commands.parsing import command_parser
-from .constants import ATTACHMENT_IDS_KEY as _ATTACHMENT_IDS_KEY
-from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from .constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from .hooks.ingress import AUTOMATION_SOURCE_KINDS
 from .matrix.media import extract_media_caption
 
@@ -326,7 +325,7 @@ def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
 
     # Flow attachment IDs from the batch (must be a list for parse_attachment_ids_from_event_source)
     if batch.attachment_ids:
-        primary_content[_ATTACHMENT_IDS_KEY] = batch.attachment_ids
+        primary_content[ATTACHMENT_IDS_KEY] = batch.attachment_ids
 
     merged["content"] = primary_content
     return merged

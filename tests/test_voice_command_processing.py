@@ -27,7 +27,17 @@ from mindroom.history.types import HistoryScope
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
 from mindroom.voice_handler import prepare_voice_message
-from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+from tests.conftest import (
+    bind_runtime_paths,
+    install_generate_response_mock,
+    install_send_response_mock,
+    install_send_skill_command_response_mock,
+    orchestrator_runtime_paths,
+    replace_response_coordinator_deps,
+    runtime_paths_for,
+    unwrap_extracted_collaborator,
+    wrap_extracted_collaborators,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,13 +49,15 @@ def _attach_runtime_paths(config: Config, tmp_path: Path) -> Config:
 
 def _agent_bot(*, agent_user: object, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
-    return AgentBot(
+    bot = AgentBot(
         agent_user=agent_user,
         storage_path=storage_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=rooms,
     )
+    wrap_extracted_collaborators(bot)
+    return bot
 
 
 async def _prepare_voice_message_with_runtime(
@@ -128,11 +140,15 @@ def _make_visible_router_echo_scenario(
     )
     bot.logger = MagicMock()
     bot.client = AsyncMock()
-    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    bot.client.rooms = {}
+    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+        return_value=(False, None, []),
+    )
     if send_response_side_effect is not None:
-        bot._send_response = AsyncMock(side_effect=send_response_side_effect)
+        bot._delivery_gateway.send_text = AsyncMock(side_effect=send_response_side_effect)
     else:
-        bot._send_response = AsyncMock(return_value=send_response_return)
+        bot._delivery_gateway.send_text = AsyncMock(return_value=send_response_return)
+    replace_response_coordinator_deps(bot, delivery_gateway=bot._delivery_gateway)
 
     room_user_ids = [
         "@mindroom_router:localhost",
@@ -172,10 +188,10 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
 
     with (
         patch.object(bot, "_handle_command", new_callable=AsyncMock) as mock_handle,
-        patch.object(bot, "client", MagicMock()),
         patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
-        patch("mindroom.bot.is_dm_room", return_value=False),
+        patch("mindroom.dispatch_planner.is_dm_room", return_value=False),
     ):
+        bot.client = MagicMock()
         await bot._on_message(room, event)
 
     mock_handle.assert_called_once()
@@ -211,10 +227,10 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
 
     with (
         patch.object(bot, "_handle_command", new_callable=AsyncMock) as mock_handle,
-        patch.object(bot, "client", MagicMock()),
         patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
-        patch("mindroom.bot.is_dm_room", return_value=False),
+        patch("mindroom.dispatch_planner.is_dm_room", return_value=False),
     ):
+        bot.client = MagicMock()
         await bot._on_message(room, event)
 
     mock_handle.assert_not_called()
@@ -244,6 +260,7 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
     bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     bot.client.download = AsyncMock(
         return_value=MagicMock(
             spec=nio.DownloadResponse,
@@ -257,7 +274,10 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
         ),
     )
     bot._send_response = AsyncMock(return_value="$reply")
-    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    install_send_response_mock(bot, bot._send_response)
+    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+        return_value=(False, None, []),
+    )
 
     room = _make_room("@mindroom_router:example.com", "@mindroom_home:localhost", "@alice:example.com")
     event = nio.Event.parse_event(
@@ -319,6 +339,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
     bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     bot.client.download = AsyncMock(
         return_value=MagicMock(
             spec=nio.DownloadResponse,
@@ -332,7 +353,10 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
         ),
     )
     bot._send_response = AsyncMock(return_value="$reply")
-    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    install_send_response_mock(bot, bot._send_response)
+    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+        return_value=(False, None, []),
+    )
 
     room = _make_room("@mindroom_router:example.com", "@mindroom_home:localhost", "@alice:example.com")
     event = nio.Event.parse_event(
@@ -400,6 +424,7 @@ async def test_router_parses_sidecar_skill_command_mentions_from_canonical_body(
     bot.handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     bot.client.download = AsyncMock(
         return_value=MagicMock(
             spec=nio.DownloadResponse,
@@ -414,7 +439,11 @@ async def test_router_parses_sidecar_skill_command_mentions_from_canonical_body(
     )
     bot._send_skill_command_response = AsyncMock(return_value="$skill-reply")
     bot._send_response = AsyncMock(return_value="$fallback")
-    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    install_send_response_mock(bot, bot._send_response)
+    install_send_skill_command_response_mock(bot, bot._send_skill_command_response)
+    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+        return_value=(False, None, []),
+    )
 
     room = _make_room(
         "@mindroom_router:example.com",
@@ -627,6 +656,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     bot.logger = MagicMock()
     bot.client = MagicMock()
     bot._send_response = AsyncMock()
+    install_send_response_mock(bot, bot._send_response)
 
     room = _make_room(
         "@mindroom_router:example.com",
@@ -641,8 +671,8 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     )
 
     with (
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
     ):
         await bot._on_media_message(room, event)
@@ -682,16 +712,19 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
     bot._generate_response = AsyncMock(return_value="$response")
-    bot._derive_conversation_context = AsyncMock(return_value=(True, "$voice_event", []))
+    install_generate_response_mock(bot, bot._generate_response)
+    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+        return_value=(True, "$voice_event", []),
+    )
 
     room = _make_room("@mindroom_home:localhost", "@alice:example.com")
     event = _make_voice_event(sender="@alice:example.com")
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = None
@@ -748,16 +781,19 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
     bot._generate_response = AsyncMock(return_value="$response")
-    bot._derive_conversation_context = AsyncMock(return_value=(True, "$voice_event", []))
+    install_generate_response_mock(bot, bot._generate_response)
+    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+        return_value=(True, "$voice_event", []),
+    )
 
     room = _make_room("@mindroom_router:localhost", "@mindroom_home:localhost", "@alice:example.com")
     event = _make_voice_event(sender="@alice:example.com")
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = None
@@ -799,17 +835,21 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         bot.client.user_id = agent_user.user_id
         bot._send_response = AsyncMock(return_value="$router_response")
         bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
-        bot._derive_conversation_context = AsyncMock(return_value=(True, "$voice_event", []))
+        install_send_response_mock(bot, bot._send_response)
+        install_generate_response_mock(bot, bot._generate_response)
+        unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+            return_value=(True, "$voice_event", []),
+        )
         bots.append(bot)
 
     room = _make_room("@mindroom_router:localhost", "@mindroom_home:localhost", "@alice:example.com")
     event = _make_voice_event(sender="@alice:example.com")
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}turn on the lights"
@@ -828,20 +868,20 @@ async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  
     bot, room, event = _make_visible_router_echo_scenario(tmp_path)
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
         await bot._on_media_message(room, event)
 
-    bot._send_response.assert_called_once()
-    call_kwargs = bot._send_response.call_args.kwargs
-    assert call_kwargs["reply_to_event_id"] == "$voice_event"
-    assert call_kwargs["response_text"] == f"{VOICE_PREFIX}@home turn on the lights"
-    assert call_kwargs["thread_id"] == "$voice_event"
-    assert call_kwargs["skip_mentions"] is True
+    bot._delivery_gateway.send_text.assert_called_once()
+    request = bot._delivery_gateway.send_text.call_args.args[0]
+    assert request.reply_to_event_id == "$voice_event"
+    assert request.response_text == f"{VOICE_PREFIX}@home turn on the lights"
+    assert request.thread_id == "$voice_event"
+    assert request.skip_mentions is True
 
 
 @pytest.mark.asyncio
@@ -850,8 +890,8 @@ async def test_router_visible_voice_echo_is_deduplicated_on_redelivery(tmp_path)
     bot, room, event = _make_visible_router_echo_scenario(tmp_path)
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
@@ -859,7 +899,7 @@ async def test_router_visible_voice_echo_is_deduplicated_on_redelivery(tmp_path)
         await bot._on_media_message(room, event)
         await bot._on_media_message(room, event)
 
-    bot._send_response.assert_called_once()
+    bot._delivery_gateway.send_text.assert_called_once()
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
     assert bot.handled_turn_ledger.has_responded(event.event_id)
@@ -878,13 +918,13 @@ async def test_router_visible_voice_echo_respects_reply_permissions(tmp_path) ->
     )
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
     ):
         await bot._on_media_message(room, event)
 
-    bot._send_response.assert_not_called()
+    bot._delivery_gateway.send_text.assert_not_called()
     mock_download_audio.assert_not_awaited()
     mock_voice.assert_not_awaited()
     assert bot.handled_turn_ledger.has_responded(event.event_id)
@@ -904,25 +944,25 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
     )
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.dispatch_planner.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
 
-    assert bot._send_response.await_count == 2
-    echo_call = bot._send_response.call_args_list[0].kwargs
-    handoff_call = bot._send_response.call_args_list[1].kwargs
-    assert echo_call["reply_to_event_id"] == "$voice_event"
-    assert echo_call["response_text"] == f"{VOICE_PREFIX}summarize this audio"
-    assert echo_call["skip_mentions"] is True
-    assert "extra_content" not in echo_call
-    assert handoff_call["reply_to_event_id"] == "$voice_event"
-    assert handoff_call["response_text"] == "@home could you help with this?"
-    assert handoff_call["extra_content"] == {
+    assert bot._delivery_gateway.send_text.await_count == 2
+    echo_request = bot._delivery_gateway.send_text.call_args_list[0].args[0]
+    handoff_request = bot._delivery_gateway.send_text.call_args_list[1].args[0]
+    assert echo_request.reply_to_event_id == "$voice_event"
+    assert echo_request.response_text == f"{VOICE_PREFIX}summarize this audio"
+    assert echo_request.skip_mentions is True
+    assert echo_request.extra_content is None
+    assert handoff_request.reply_to_event_id == "$voice_event"
+    assert handoff_request.response_text == "@home could you help with this?"
+    assert handoff_request.extra_content == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
     }
@@ -941,10 +981,10 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
     )
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.dispatch_planner.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -955,7 +995,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
 
         await bot._on_media_message(room, event)
 
-    response_texts = [call.kwargs["response_text"] for call in bot._send_response.call_args_list]
+    response_texts = [call.args[0].response_text for call in bot._delivery_gateway.send_text.call_args_list]
     assert response_texts == [
         f"{VOICE_PREFIX}summarize this audio",
         "@home could you help with this?",
@@ -981,10 +1021,10 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
     )
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.dispatch_planner.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1000,16 +1040,16 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
     )
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.dispatch_planner.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await restarted_bot._on_media_message(restarted_room, restarted_event)
 
-    response_texts = [call.kwargs["response_text"] for call in restarted_bot._send_response.call_args_list]
+    response_texts = [call.args[0].response_text for call in restarted_bot._delivery_gateway.send_text.call_args_list]
     assert response_texts == ["@home could you help with this?"]
     assert restarted_bot.handled_turn_ledger.has_responded(event.event_id)
     assert restarted_bot.handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
@@ -1046,7 +1086,10 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     bot.logger = MagicMock()
     bot.client = AsyncMock()
     bot._send_response = AsyncMock(return_value="$response")
-    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    install_send_response_mock(bot, bot._send_response)
+    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+        return_value=(False, None, []),
+    )
 
     room = _make_room(
         "@mindroom_router:localhost",
@@ -1057,20 +1100,20 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     event = _make_voice_event(sender="@alice:example.com")
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.dispatch_planner.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
 
-    bot._send_response.assert_called_once()
-    call_kwargs = bot._send_response.call_args.kwargs
-    assert call_kwargs["reply_to_event_id"] == "$voice_event"
-    assert call_kwargs["response_text"] == "@home could you help with this?"
-    assert call_kwargs["extra_content"] == {
+    bot._delivery_gateway.send_text.assert_called_once()
+    request = bot._delivery_gateway.send_text.call_args.args[0]
+    assert request.reply_to_event_id == "$voice_event"
+    assert request.response_text == "@home could you help with this?"
+    assert request.extra_content == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
     }
@@ -1127,14 +1170,17 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         bot.client.rooms = {}
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"
         bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
-        bot._derive_conversation_context = AsyncMock(return_value=(True, "$voice_event", []))
+        install_generate_response_mock(bot, bot._generate_response)
+        unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+            return_value=(True, "$voice_event", []),
+        )
         bots.append(bot)
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}@research summarize this audio"
@@ -1198,14 +1244,17 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         bot.client.rooms = {}
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"
         bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
-        bot._derive_conversation_context = AsyncMock(return_value=(True, "$voice_event", []))
+        install_generate_response_mock(bot, bot._generate_response)
+        unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
+            return_value=(True, "$voice_event", []),
+        )
         bots.append(bot)
 
     with (
-        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"

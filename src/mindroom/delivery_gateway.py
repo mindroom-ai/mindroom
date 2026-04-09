@@ -9,20 +9,38 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 import nio
 
 from mindroom import constants, interactive
-from mindroom.hooks import ResponseDraft
+from mindroom.hooks import (
+    AfterResponseContext,
+    BeforeResponseContext,
+    HookContextSupport,
+    ResponseDraft,
+    ResponseResult,
+    emit,
+    emit_transform,
+)
+from mindroom.hooks.types import EVENT_MESSAGE_AFTER_RESPONSE, EVENT_MESSAGE_BEFORE_RESPONSE
+from mindroom.matrix.client import (
+    build_threaded_edit_content,
+    edit_message,
+    get_latest_thread_event_id_if_needed,
+    send_message,
+)
+from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.streaming import StreamingResponse
+from mindroom.streaming import StreamingResponse, send_streaming_response
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     import structlog
 
-    from mindroom.config.main import Config
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
+    from mindroom.conversation_resolver import ConversationResolver
     from mindroom.history.types import CompactionOutcome
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
+    from mindroom.streaming import _StreamInputChunk
     from mindroom.tool_system.events import ToolTraceEntry
 
 
@@ -34,6 +52,66 @@ class _ReplyEventWithSource(Protocol):
 
 class SuppressedPlaceholderCleanupError(RuntimeError):
     """Raised when one provisional suppressed response cannot be removed safely."""
+
+
+@dataclass
+class ResponseHookService:
+    """Own response hook execution around final delivery."""
+
+    hook_context: HookContextSupport
+
+    async def apply_before_response(
+        self,
+        *,
+        correlation_id: str,
+        envelope: MessageEnvelope,
+        response_text: str,
+        response_kind: str,
+        tool_trace: list[ToolTraceEntry] | None,
+        extra_content: dict[str, Any] | None,
+    ) -> ResponseDraft:
+        """Run message:before_response hooks on one generated response."""
+        draft = ResponseDraft(
+            response_text=response_text,
+            response_kind=response_kind,
+            tool_trace=tool_trace,
+            extra_content=extra_content,
+            envelope=envelope,
+        )
+        if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_BEFORE_RESPONSE):
+            return draft
+
+        context = BeforeResponseContext(
+            **self.hook_context.base_kwargs(EVENT_MESSAGE_BEFORE_RESPONSE, correlation_id),
+            draft=draft,
+        )
+        return await emit_transform(self.hook_context.registry, EVENT_MESSAGE_BEFORE_RESPONSE, context)
+
+    async def emit_after_response(
+        self,
+        *,
+        correlation_id: str,
+        envelope: MessageEnvelope,
+        response_text: str,
+        response_event_id: str,
+        delivery_kind: Literal["sent", "edited"],
+        response_kind: str,
+    ) -> None:
+        """Emit message:after_response after the final send or edit succeeds."""
+        if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_AFTER_RESPONSE):
+            return
+
+        context = AfterResponseContext(
+            **self.hook_context.base_kwargs(EVENT_MESSAGE_AFTER_RESPONSE, correlation_id),
+            result=ResponseResult(
+                response_text=response_text,
+                response_event_id=response_event_id,
+                delivery_kind=delivery_kind,
+                response_kind=response_kind,
+                envelope=envelope,
+            ),
+        )
+        await emit(self.hook_context.registry, EVENT_MESSAGE_AFTER_RESPONSE, context)
 
 
 @dataclass(frozen=True)
@@ -113,7 +191,7 @@ class StreamingDeliveryRequest:
     room_id: str
     reply_to_event_id: str
     response_thread_id: str | None
-    response_stream: object
+    response_stream: AsyncIterator[_StreamInputChunk]
     existing_event_id: str | None = None
     adopt_existing_placeholder: bool = False
     target: MessageTarget | None = None
@@ -129,22 +207,33 @@ class StreamingDeliveryRequest:
 class DeliveryGatewayDeps:
     """Explicit dependencies needed for Matrix delivery."""
 
-    client: nio.AsyncClient
-    config: Config
+    runtime: BotRuntimeView
     runtime_paths: RuntimePaths
-    sender_domain: str
     agent_name: str
     logger: structlog.stdlib.BoundLogger
-    build_message_target: Callable[..., MessageTarget]
-    format_message_with_mentions: Callable[..., dict[str, Any]]
-    get_latest_thread_event_id_if_needed: Callable[..., Awaitable[str | None]]
-    send_message: Callable[[nio.AsyncClient, str, dict[str, Any]], Awaitable[str | None]]
-    build_threaded_edit_content: Callable[..., Awaitable[dict[str, Any]]]
-    edit_message: Callable[[nio.AsyncClient, str, str, dict[str, Any], str], Awaitable[object]]
     redact_message_event: Callable[..., Awaitable[bool]]
-    apply_before_response_hooks: Callable[..., Awaitable[ResponseDraft]]
-    emit_after_response_hooks: Callable[..., Awaitable[None]]
-    send_streaming_response: Callable[..., Awaitable[tuple[str | None, str]]]
+    sender_domain: str
+    resolver: ConversationResolver
+    response_hooks: ResponseHookService
+
+
+@dataclass(frozen=True)
+class FinalizeStreamedResponseRequest:
+    """Parameters for finalizing one streamed Matrix response."""
+
+    room_id: str
+    reply_to_event_id: str
+    thread_id: str | None
+    target: MessageTarget
+    streamed_event_id: str
+    streamed_text: str
+    delivery_kind: Literal["sent", "edited"]
+    response_kind: str
+    response_envelope: MessageEnvelope
+    correlation_id: str
+    tool_trace: list[ToolTraceEntry] | None
+    extra_content: dict[str, Any] | None
+    cleanup_suppressed_streamed_event: bool = False
 
 
 @dataclass(frozen=True)
@@ -153,9 +242,19 @@ class DeliveryGateway:
 
     deps: DeliveryGatewayDeps
 
+    def _client(self) -> nio.AsyncClient:
+        """Return the current Matrix client required for delivery."""
+        client = self.deps.runtime.client
+        if client is None:
+            msg = "Matrix client is not ready for response delivery"
+            raise RuntimeError(msg)
+        return client
+
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
-        resolved_target = request.target or self.deps.build_message_target(
+        client = self._client()
+        config = self.deps.runtime.config
+        resolved_target = request.target or self.deps.resolver.build_message_target(
             room_id=request.room_id,
             thread_id=request.thread_id,
             reply_to_event_id=request.reply_to_event_id,
@@ -165,8 +264,8 @@ class DeliveryGateway:
         effective_thread_id = resolved_target.resolved_thread_id
 
         if effective_thread_id is None:
-            content = self.deps.format_message_with_mentions(
-                self.deps.config,
+            content = format_message_with_mentions(
+                config,
                 self.deps.runtime_paths,
                 request.response_text,
                 sender_domain=self.deps.sender_domain,
@@ -177,14 +276,14 @@ class DeliveryGateway:
                 extra_content=request.extra_content,
             )
         else:
-            latest_thread_event_id = await self.deps.get_latest_thread_event_id_if_needed(
-                self.deps.client,
+            latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+                client,
                 request.room_id,
                 effective_thread_id,
                 resolved_target.reply_to_event_id,
             )
-            content = self.deps.format_message_with_mentions(
-                self.deps.config,
+            content = format_message_with_mentions(
+                config,
                 self.deps.runtime_paths,
                 request.response_text,
                 sender_domain=self.deps.sender_domain,
@@ -198,7 +297,7 @@ class DeliveryGateway:
         if request.skip_mentions:
             content["com.mindroom.skip_mentions"] = True
 
-        event_id = await self.deps.send_message(self.deps.client, request.room_id, content)
+        event_id = await send_message(client, request.room_id, content)
         if event_id:
             self.deps.logger.info("Sent response", event_id=event_id, room_id=request.room_id)
             return event_id
@@ -207,16 +306,18 @@ class DeliveryGateway:
 
     async def edit_text(self, request: EditTextRequest) -> bool:
         """Edit one existing response message."""
+        client = self._client()
+        config = self.deps.runtime.config
         if (
-            self.deps.config.get_entity_thread_mode(
+            config.get_entity_thread_mode(
                 self.deps.agent_name,
                 self.deps.runtime_paths,
                 room_id=request.room_id,
             )
             == "room"
         ):
-            content = self.deps.format_message_with_mentions(
-                self.deps.config,
+            content = format_message_with_mentions(
+                config,
                 self.deps.runtime_paths,
                 request.new_text,
                 sender_domain=self.deps.sender_domain,
@@ -224,20 +325,20 @@ class DeliveryGateway:
                 extra_content=request.extra_content,
             )
         else:
-            content = await self.deps.build_threaded_edit_content(
-                self.deps.client,
+            content = await build_threaded_edit_content(
+                client,
                 room_id=request.room_id,
                 new_text=request.new_text,
                 thread_id=request.thread_id,
-                config=self.deps.config,
+                config=config,
                 runtime_paths=self.deps.runtime_paths,
                 sender_domain=self.deps.sender_domain,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
             )
 
-        response = await self.deps.edit_message(
-            self.deps.client,
+        response = await edit_message(
+            client,
             request.room_id,
             request.event_id,
             content,
@@ -300,7 +401,7 @@ class DeliveryGateway:
     async def deliver_final(self, request: FinalDeliveryRequest) -> DeliveryResult:
         """Apply before/after hooks around one final send or edit."""
         draft = (
-            await self.deps.apply_before_response_hooks(
+            await self.deps.response_hooks.apply_before_response(
                 correlation_id=request.correlation_id,
                 envelope=request.response_envelope,
                 response_text=request.response_text,
@@ -369,7 +470,7 @@ class DeliveryGateway:
             delivery_kind = "sent" if event_id else None
 
         if event_id and delivery_kind is not None:
-            await self.deps.emit_after_response_hooks(
+            await self.deps.response_hooks.emit_after_response(
                 correlation_id=request.correlation_id,
                 envelope=request.response_envelope,
                 response_text=display_text,
@@ -389,9 +490,10 @@ class DeliveryGateway:
 
     async def send_compaction_notice(self, request: CompactionNoticeRequest) -> str | None:
         """Send one compaction notice without mention parsing side effects."""
+        client = self._client()
         summary_line = request.outcome.format_notice()
         formatted_body = f"<em>{html_escape(summary_line).replace(chr(10), '<br/>')}</em>"
-        effective_thread_id = self.deps.build_message_target(
+        effective_thread_id = self.deps.resolver.build_message_target(
             room_id=request.room_id,
             thread_id=request.thread_id,
             reply_to_event_id=request.reply_to_event_id,
@@ -407,7 +509,7 @@ class DeliveryGateway:
                 "com.mindroom.skip_mentions": True,
             },
         )
-        event_id = await self.deps.send_message(self.deps.client, request.room_id, content)
+        event_id = await send_message(client, request.room_id, content)
         if event_id:
             self.deps.logger.info(
                 "Sent compaction notice",
@@ -424,13 +526,15 @@ class DeliveryGateway:
         request: StreamingDeliveryRequest,
     ) -> tuple[str | None, str]:
         """Send one streaming Matrix response."""
-        return await self.deps.send_streaming_response(
-            self.deps.client,
+        client = self._client()
+        config = self.deps.runtime.config
+        return await send_streaming_response(
+            client,
             request.room_id,
             request.reply_to_event_id,
             request.response_thread_id,
             self.deps.sender_domain,
-            self.deps.config,
+            config,
             self.deps.runtime_paths,
             request.response_stream,
             streaming_cls=request.streaming_cls,
@@ -442,4 +546,82 @@ class DeliveryGateway:
             room_mode=request.room_mode,
             extra_content=request.extra_content,
             tool_trace_collector=request.tool_trace_collector,
+        )
+
+    async def finalize_streamed_response(
+        self,
+        request: FinalizeStreamedResponseRequest,
+    ) -> DeliveryResult:
+        """Apply hooks and any final edit needed after streamed delivery completes."""
+        draft = await self.deps.response_hooks.apply_before_response(
+            correlation_id=request.correlation_id,
+            envelope=request.response_envelope,
+            response_text=request.streamed_text,
+            response_kind=request.response_kind,
+            tool_trace=request.tool_trace,
+            extra_content=request.extra_content,
+        )
+        if draft.suppress:
+            if request.cleanup_suppressed_streamed_event:
+                return await self.cleanup_suppressed_streamed_response(
+                    room_id=request.room_id,
+                    event_id=request.streamed_event_id,
+                    response_text=request.streamed_text,
+                    response_kind=request.response_kind,
+                    response_envelope=request.response_envelope,
+                    correlation_id=request.correlation_id,
+                )
+            self.deps.logger.warning(
+                "Streaming response was already delivered before a suppressing hook ran",
+                source_event_id=request.response_envelope.source_event_id,
+                correlation_id=request.correlation_id,
+            )
+            return DeliveryResult(
+                event_id=request.streamed_event_id,
+                response_text=request.streamed_text,
+                delivery_kind=request.delivery_kind,
+                suppressed=True,
+            )
+
+        needs_final_edit = (
+            draft.response_text != request.streamed_text
+            or draft.tool_trace != request.tool_trace
+            or draft.extra_content != request.extra_content
+        )
+        if needs_final_edit:
+            return await self.deliver_final(
+                FinalDeliveryRequest(
+                    room_id=request.room_id,
+                    reply_to_event_id=request.reply_to_event_id,
+                    thread_id=request.thread_id,
+                    target=request.target,
+                    existing_event_id=request.streamed_event_id,
+                    response_text=draft.response_text,
+                    response_kind=request.response_kind,
+                    response_envelope=request.response_envelope,
+                    correlation_id=request.correlation_id,
+                    tool_trace=draft.tool_trace,
+                    extra_content=draft.extra_content,
+                    apply_before_hooks=False,
+                ),
+            )
+
+        interactive_response = interactive.parse_and_format_interactive(
+            request.streamed_text,
+            extract_mapping=True,
+        )
+        await self.deps.response_hooks.emit_after_response(
+            correlation_id=request.correlation_id,
+            envelope=request.response_envelope,
+            response_text=interactive_response.formatted_text,
+            response_event_id=request.streamed_event_id,
+            delivery_kind=request.delivery_kind,
+            response_kind=request.response_kind,
+        )
+        return DeliveryResult(
+            event_id=request.streamed_event_id,
+            response_text=interactive_response.formatted_text,
+            delivery_kind=request.delivery_kind,
+            option_map=interactive_response.option_map,
+            options_list=interactive_response.options_list,
         )

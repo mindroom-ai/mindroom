@@ -16,20 +16,13 @@ class TestTeamCoordination:
     """Test coordination between team members."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.fetch_thread_history")
-    @patch("mindroom.bot.stream_agent_response")
     async def test_sequential_team_responses(
         self,
-        mock_stream_agent_response: AsyncMock,  # noqa: ARG002
-        mock_fetch_thread_history: AsyncMock,
         tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test that team members respond in a coordinated sequence."""
         # Test coordination between research and writer agents
         # room_id = "!team:localhost", thread_id = "$thread_root"
-
-        # Mock thread history
-        mock_fetch_thread_history.return_value = []
 
         # Test message requesting both agents would trigger team formation
         # message_event setup omitted as focus is on response coordination
@@ -103,7 +96,7 @@ We have different recommendations:
         assert "Recommended approach" in expected_resolution
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
+    @patch("mindroom.response_coordinator.ai_response")
     async def test_team_handoff_mechanism(
         self,
         mock_ai_response: AsyncMock,  # noqa: ARG002

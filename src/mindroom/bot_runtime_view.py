@@ -1,0 +1,43 @@
+"""Shared live runtime state exposed to extracted bot collaborators."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    import nio
+
+    from mindroom.config.main import Config
+    from mindroom.matrix.event_cache import EventCache
+    from mindroom.orchestrator import MultiAgentOrchestrator
+
+
+class BotRuntimeView(Protocol):
+    """Live mutable bot state that extracted collaborators may consult."""
+
+    @property
+    def client(self) -> nio.AsyncClient | None: ...  # noqa: D102
+
+    @property
+    def config(self) -> Config: ...  # noqa: D102
+
+    @property
+    def enable_streaming(self) -> bool: ...  # noqa: D102
+
+    @property
+    def orchestrator(self) -> MultiAgentOrchestrator | None: ...  # noqa: D102
+
+    @property
+    def event_cache(self) -> EventCache | None: ...  # noqa: D102
+
+
+@dataclass
+class BotRuntimeState:
+    """Concrete mutable runtime state shared by extracted collaborators."""
+
+    client: nio.AsyncClient | None
+    config: Config
+    enable_streaming: bool
+    orchestrator: MultiAgentOrchestrator | None
+    event_cache: EventCache | None
