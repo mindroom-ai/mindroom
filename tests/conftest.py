@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from aioresponses import aioresponses
 
+import mindroom.bot  # noqa: F401
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.client import ResolvedVisibleMessage

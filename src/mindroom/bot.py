@@ -153,6 +153,7 @@ from .agents import (
     create_agent,
     create_session_storage,
     get_agent_session,
+    get_rooms_for_entity,
     get_team_session,
     remove_run_by_event_id,
 )
@@ -1020,12 +1021,12 @@ class AgentBot:
 
     def _hook_message_sender(self) -> HookMessageSender | None:
         """Return the sender bound into hook contexts for this bot."""
+        if self.client is not None:
+            return self._hook_send_message
         if self.orchestrator is not None:
             sender = self.orchestrator._hook_message_sender()
             if sender is not None:
                 return sender
-        if self.agent_name == ROUTER_AGENT_NAME and self.client is not None:
-            return self._hook_send_message
         return None
 
     def _hook_room_state_querier(self) -> HookRoomStateQuerier | None:
@@ -1313,12 +1314,19 @@ class AgentBot:
             return
 
         matrix_user_id = self.agent_user.user_id or self.matrix_id.full_id
+        configured_rooms = tuple(get_rooms_for_entity(self.agent_name, self.config))
+        joined_room_ids = tuple(room_id for room_id in self.rooms if room_id.startswith("!"))
+        if event_name == EVENT_BOT_READY and self.client is not None:
+            joined_room_ids = tuple(
+                dict.fromkeys(room_id for room_id in (*self.rooms, *self.client.rooms) if room_id.startswith("!")),
+            )
         context = AgentLifecycleContext(
             **self._hook_base_kwargs(event_name, f"{event_name}:{self.agent_name}:{uuid4().hex}"),
             entity_name=self.agent_name,
             entity_type=self._entity_type(),
-            rooms=tuple(self.rooms),
+            rooms=configured_rooms,
             matrix_user_id=matrix_user_id,
+            joined_room_ids=joined_room_ids,
             stop_reason=stop_reason,
         )
         await emit(self.hook_registry, event_name, context)

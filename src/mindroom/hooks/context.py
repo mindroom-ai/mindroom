@@ -315,6 +315,7 @@ class AgentLifecycleContext(HookContext):
     entity_type: str
     rooms: tuple[str, ...]
     matrix_user_id: str
+    joined_room_ids: tuple[str, ...] = ()
     stop_reason: str | None = None
 
 
